@@ -107,6 +107,16 @@ describe("compaction trigger", () => {
     })).toEqual({inputBudget: 1_000_000, maxOutputTokens: undefined});
   });
 
+  it("honors deployment-provided model window overrides", () => {
+    expect(getModelTokenLimits({
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      apiToken: "",
+      contextWindow: 272_000,
+      outputLimit: 128_000,
+    })).toEqual({inputBudget: 144_000, maxOutputTokens: 128_000});
+  });
+
   // Workers AI rejects a request whose prompt and response cap together exceed the window, so a
   // Cloudflare model configured by hand needs the reservation the model table can't declare for it.
   it("reserves Workers AI output capacity for a model the registry doesn't list", () => {

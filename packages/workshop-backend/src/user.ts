@@ -7,6 +7,10 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig } from "./ai-gateway.js";
+import {
+  getDefaultTeamPiCodexModel, getTeamPiCodexModelList, isTeamPiCodexEligibleUser,
+  isTeamPiCodexMarkerConfig, resolveTeamPiCodexModel,
+} from "./team-pi-codex-models.js";
 import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
@@ -502,22 +506,41 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.profile.put(profile);
   }
 
+  #canUseTeamPiCodex(): boolean {
+    return isTeamPiCodexEligibleUser(
+      this.storage.profile.get().id,
+      this.storage.passwordHashHash.get() !== null,
+    );
+  }
+
+  #getUserConfiguredModel(id: string): UserAiModelRecord | undefined {
+    const model = this.storage.aiModels.get(id);
+    return model && !isTeamPiCodexMarkerConfig(model.config) ? model : undefined;
+  }
+
   async listModels(): Promise<AiChatAuthorInfo[]> {
     let result: AiChatAuthorInfo[] = [];
+    let reservedModelIds = new Set<string>();
+
+    if (this.#canUseTeamPiCodex()) {
+      for (let entry of getTeamPiCodexModelList(this.env)) {
+        result.push(entry);
+        reservedModelIds.add(entry.id);
+      }
+    }
 
     // When AI Gateway mode is active, include all suggested models for enabled providers.
     let gwConfig = getAiGatewayConfig(this.env);
-    let gwModelIds = new Set<string>();
     if (gwConfig) {
       for (let entry of gwConfig.getModelList()) {
         result.push(entry);
-        gwModelIds.add(entry.id);
+        reservedModelIds.add(entry.id);
       }
     }
 
     // Also include user-configured models, skipping any that duplicate a gateway model.
     for (let model of this.storage.aiModels.list()) {
-      if (!gwModelIds.has(model.profile.id)) {
+      if (!reservedModelIds.has(model.profile.id) && !isTeamPiCodexMarkerConfig(model.config)) {
         result.push(model.profile);
       }
     }
@@ -525,6 +548,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    if (isTeamPiCodexMarkerConfig(config)) {
+      throw new Error("Team PI Codex models are deployment-provided and cannot be added manually.");
+    }
     let gwConfig = getAiGatewayConfig(this.env);
     if (gwConfig && !gwConfig.providers.has(config.provider)) {
       throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
@@ -544,6 +570,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         }
       }
     }
+    const teamPiModel = resolveTeamPiCodexModel(this.env, id);
+    if (teamPiModel) {
+      throw new Error(`Cannot delete built-in model "${teamPiModel.profile.name}".`);
+    }
 
     this.storage.aiModels.delete(id);
   }
@@ -554,7 +584,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getQuickModel(): Promise<null | string> {
     let result = this.storage.quickModel.get();
-    if (result && this.storage.aiModels.get(result)) {
+    if (result && this.#getUserConfiguredModel(result)) {
       return result;
     } else {
       return null;
@@ -562,14 +592,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async getPreferredModel(): Promise<string | null> {
-    return this.storage.preferredModel.get();
+    const preferred = this.storage.preferredModel.get();
+    if (preferred && !preferred.startsWith("team-pi-codex/")) return preferred;
+    return (preferred && this.#canUseTeamPiCodex() && resolveTeamPiCodexModel(this.env, preferred)
+      ? preferred
+      : undefined) ??
+        (this.#canUseTeamPiCodex()
+          ? getDefaultTeamPiCodexModel(this.env, this.storage.profile.get().id)?.profile.id
+          : undefined) ?? null;
   }
 
   async setPreferredModel(id: string | null): Promise<void> {
     if (id !== null) {
       // Validate that the model exists in the user's configured models or as a gateway model.
       let gwConfig = getAiGatewayConfig(this.env);
-      let exists = !!this.storage.aiModels.get(id) || !!gwConfig?.resolveModel(id);
+      let exists = !!this.#getUserConfiguredModel(id) || !!gwConfig?.resolveModel(id) ||
+          (this.#canUseTeamPiCodex() &&
+           !!resolveTeamPiCodexModel(this.env, id));
       if (!exists) {
         throw new Error(`No such model: ${id}`);
       }
@@ -578,7 +617,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async isOnboardingCompleted(): Promise<boolean> {
-    return this.storage.onboardingCompleted.get();
+    return this.storage.onboardingCompleted.get() ||
+        (this.#canUseTeamPiCodex() &&
+         !!getDefaultTeamPiCodexModel(this.env, this.storage.profile.get().id));
   }
 
   async completeOnboarding(): Promise<void> {
@@ -674,8 +715,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (gwConfig) {
         result.aiModel = gwConfig.resolveModel(modelId);
       }
+      if (!result.aiModel && this.#canUseTeamPiCodex()) {
+        result.aiModel = resolveTeamPiCodexModel(this.env, modelId);
+      }
       if (!result.aiModel) {
-        result.aiModel = this.storage.aiModels.get(modelId);
+        result.aiModel = this.#getUserConfiguredModel(modelId);
       }
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
     }
@@ -687,10 +731,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     } else {
       let quickModelId = this.storage.quickModel.get();
       if (quickModelId) {
-        let quickModel = this.storage.aiModels.get(quickModelId);
+        let quickModel = this.#getUserConfiguredModel(quickModelId);
         if (quickModel) {
           result.quickModel = quickModel.config;
         }
+      }
+      if (this.#canUseTeamPiCodex()) {
+        result.quickModel ??=
+            getDefaultTeamPiCodexModel(this.env, result.profile.id)?.config;
       }
     }
     return result;

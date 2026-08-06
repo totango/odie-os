@@ -946,6 +946,13 @@ export type AiModelConfig = {
   // useful in order to use AI proxy products like Cloudflare's AI gateway, or even to use an
   // alternative provider that provides a compatible API.
   apiUrl?: string;
+
+  // Maximum total tokens accepted by this model. Deployment-provided compatible endpoints can
+  // override the provider catalog when they expose a model through a different transport.
+  contextWindow?: number;
+
+  // Maximum response tokens reserved from the context window and requested from the model.
+  outputLimit?: number;
 };
 
 // Workers AI adds the response cap to the prompt and rejects a request whose total exceeds the

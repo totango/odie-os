@@ -33,6 +33,7 @@ import { reportIssue } from "@gadgets/backend-utils/error-reporting";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
 import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
 import { completeAgentCatalogSnapshot, normalizeAgentCatalog } from "./agent-catalog";
+import { isTeamPiCodexMarkerConfig } from "./team-pi-codex-models";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } from "./sharing";
 import { AutoApprovalDrainer } from "./auto-approval";
@@ -1269,6 +1270,9 @@ class OverseerImpl implements AgentHooks {
       let user = this.users.get(this.users.idFromString(record.initiatorUserId));
       let userMeta = await user.getChatContext(record.modelId);
       aiModel = userMeta.aiModel;
+      if (record.callbackInitiated && aiModel && isTeamPiCodexMarkerConfig(aiModel.config)) {
+        aiModel = undefined;
+      }
     } catch (err) {
       this.logger.error("error resolving model while resuming agent", {
         event: "agent.resume.model.resolve.failed",
@@ -4199,6 +4203,9 @@ class OverseerImpl implements AgentHooks {
       if (!userMeta.aiModel) {
         throw new Error("No AI model configured for agent callback processing.");
       }
+      if (isTeamPiCodexMarkerConfig(userMeta.aiModel.config)) {
+        throw new Error("Team PI Codex models cannot process persistent agent callbacks.");
+      }
 
       // getChatContext() waits on the user's Durable Object. A user message may start an agent while
       // that call is pending, so wait for message preparation to finish and then re-read chat state.
@@ -6724,6 +6731,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let resolveUserId = creatorUserId ?? this.impl.ownerId;
     let user = this.impl.users.get(this.impl.users.idFromString(resolveUserId));
     let userMeta = await user.getChatContext(config.modelId);
+    if (userMeta.aiModel && isTeamPiCodexMarkerConfig(userMeta.aiModel.config)) {
+      throw new Error("Team PI Codex models cannot back persistent agent spawners.");
+    }
 
     let chatId = this.impl.nextChatId();
     let timestamp = this.impl.getChatTimestamp();
@@ -7461,6 +7471,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newAiModelGatekeeper(modelId: string): Promise<GatekeeperClient<any>> {
     let chatMeta = await this.clientUser.getChatContext(modelId);
+    if (isTeamPiCodexMarkerConfig(chatMeta.aiModel!.config)) {
+      throw new Error("Team PI Codex models cannot be bound to gadgets.");
+    }
     let props: LanguageModelGatekeeperProps = {
       displayName: chatMeta.aiModel!.profile.name,
       config: chatMeta.aiModel!.config,
@@ -7518,6 +7531,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (config.modelId) {
       let chatMeta = await this.clientUser.getChatContext(config.modelId);
       if (chatMeta.aiModel) {
+        if (isTeamPiCodexMarkerConfig(chatMeta.aiModel.config)) {
+          throw new Error("Team PI Codex models cannot back persistent agent spawners.");
+        }
         creationSpec.modelProvider = chatMeta.aiModel.config.provider;
         creationSpec.modelName = chatMeta.aiModel.config.model;
       }

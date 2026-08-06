@@ -6,11 +6,13 @@ import type {
 } from "@earendil-works/pi-ai";
 import { stream as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { stream as googleGenerativeAiStream } from "@earendil-works/pi-ai/api/google-generative-ai";
+import { stream as openaiCodexResponsesStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { stream as openaiCompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { stream as openaiResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { GOOGLE_MODELS } from "@earendil-works/pi-ai/providers/google.models";
+import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { ApprovalQueue, Gatekeeper, ResourceDescription, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
 import { LanguageModelBinding } from "./ai-model-binding";
@@ -20,6 +22,10 @@ import { AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LI
 import { AiGatewayConfig, getAiGatewayConfig, type AiGatewayLogRoute } from "./ai-gateway.js";
 import { completeText } from "./ai-invoke.js";
 import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
+import {
+  isTeamPiCodexConfig,
+  isTeamPiCodexMarkerConfig,
+} from "./team-pi-codex-models.js";
 
  // Routing to bill a user's own Cloudflare account for inference (BYOK path once the free tier is
  // exhausted). Defined here to avoid a backend->ai-gateway-billing type import cycle at runtime.
@@ -108,12 +114,21 @@ function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataCon
 // `providers/all`, which drags ~30 providers into the bundle).
 const API_STREAMS: Record<string, StreamFunction<Api, SimpleStreamOptions>> = {
   "anthropic-messages": anthropicMessagesStream as StreamFunction<Api, SimpleStreamOptions>,
+  "openai-codex-responses": openaiCodexResponsesStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-responses": openaiResponsesStream as StreamFunction<Api, SimpleStreamOptions>,
   "openai-completions": openaiCompletionsStream as StreamFunction<Api, SimpleStreamOptions>,
   "google-generative-ai": googleGenerativeAiStream as StreamFunction<Api, SimpleStreamOptions>,
 };
 
 const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+const TEAM_PI_CODEX_AUDIENCE = "team-pi-codex";
+const TEAM_PI_CODEX_KEY_ID = "odie-v1";
+const TEAM_PI_CODEX_USER_RE = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@totango\.com$/;
+const SYNTHETIC_CODEX_API_KEY =
+    "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." +
+    "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoib2RpZS10ZWFtLXBpLWNvZGV4In19." +
+    "synthetic";
 
 // Consult pi's builtin catalog for cost/compat metadata of a known model id. Unknown models are
 // fine (synthesized with zero cost). Import per-provider, not providers/all.
@@ -128,6 +143,10 @@ function catalogModel(provider: AiModelConfig["provider"], modelId: string): Mod
   }
 }
 
+function catalogCodexModel(modelId: string): Model<Api> | undefined {
+  return (OPENAI_CODEX_MODELS as Record<string, Model<Api>>)[modelId];
+}
+
 // Token limits for a synthesized model. SUGGESTED_MODELS remains authoritative (compaction
 // budgets in agent-compaction.ts are computed from it and must not change); pi's catalog fills
 // gaps for models we don't list, and unknown models get conservative defaults.
@@ -135,8 +154,8 @@ function modelTokenWindow(config: AiModelConfig, catalog: Model<Api> | undefined
     : { contextWindow: number, maxTokens: number } {
   const suggested = SUGGESTED_MODELS[config.provider]?.[config.model];
   return {
-    contextWindow: suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000,
-    maxTokens: suggested?.outputLimit ??
+    contextWindow: config.contextWindow ?? suggested?.contextWindow ?? catalog?.contextWindow ?? 128_000,
+    maxTokens: config.outputLimit ?? suggested?.outputLimit ??
         (config.provider === "cloudflare" ? WORKERS_AI_OUTPUT_LIMIT : undefined) ??
         catalog?.maxTokens ?? 4096,
   };
@@ -258,7 +277,69 @@ type HandleArgs = {
   gatewayMetadata?: GatewayMetadata;
   sessionAffinity?: string;
   aiGatewayLogRoute?: AiGatewayLogRoute;
+  fetch?: (downstream?: typeof fetch) => typeof fetch;
 };
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  return bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+}
+
+async function hmacSha256Base64Url(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
+  return bytesToBase64Url(new Uint8Array(signature));
+}
+
+function makeTeamPiCodexFetch(
+  initiator: AiChatAuthorInfo,
+  hmacSecret: string,
+  downstream?: typeof fetch,
+): typeof fetch {
+  const user = initiator.id.toLowerCase();
+  if (!TEAM_PI_CODEX_USER_RE.test(user)) {
+    throw new Error("Team PI Codex models require a @totango.com user email initiator.");
+  }
+  const innerFetch = downstream ?? globalThis.fetch;
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const bodyBytes = new Uint8Array(await request.clone().arrayBuffer());
+    const timestamp = Date.now().toString();
+    const bodySha256 = await sha256Hex(bodyBytes);
+    const sessionId = request.headers.get("session-id") ?? "";
+    const clientRequestId = request.headers.get("x-client-request-id") ?? "";
+    const canonical = [
+      TEAM_PI_CODEX_KEY_ID,
+      TEAM_PI_CODEX_AUDIENCE,
+      "POST",
+      "/api/odie/codex/responses",
+      timestamp,
+      user,
+      sessionId,
+      clientRequestId,
+      bodySha256,
+    ].join("\n");
+    const headers = new Headers(request.headers);
+    headers.delete("Authorization");
+    headers.delete("chatgpt-account-id");
+    headers.set("x-team-pi-odie-key-id", TEAM_PI_CODEX_KEY_ID);
+    headers.set("x-team-pi-odie-audience", TEAM_PI_CODEX_AUDIENCE);
+    headers.set("x-team-pi-odie-timestamp", timestamp);
+    headers.set("x-team-pi-odie-user", user);
+    headers.set("x-team-pi-odie-signature", `v1=${await hmacSha256Base64Url(hmacSecret, canonical)}`);
+    return innerFetch(new Request(request, { headers }));
+  }) as typeof fetch;
+}
 
 function makeHandle(args: HandleArgs): ModelHandle {
   const streamFn = API_STREAMS[args.model.api];
@@ -281,6 +362,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
   const apiExtras: Record<string, unknown> =
       args.model.api === "anthropic-messages"
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
+      args.model.api === "openai-codex-responses" ? { reasoningEffort: "medium", transport: "sse" } :
       args.model.api === "openai-responses" ? { reasoningEffort: "medium" } : {};
 
   const handle: ModelHandle = {
@@ -296,6 +378,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
             ? { "cf-aig-metadata": JSON.stringify(args.gatewayMetadata) }
             : {}),
       };
+      const fetch = args.fetch?.(options.fetch);
       const merged: SimpleStreamOptions = {
         // API defaults first, so an explicit per-call option can override them. `thinking: false`
         // replaces them with an explicit thinking-off request: for Anthropic pi sends
@@ -306,8 +389,10 @@ function makeHandle(args: HandleArgs): ModelHandle {
             ? apiExtras
             : args.model.api === "anthropic-messages" ? { thinkingEnabled: false } : {}),
         ...options,
+        ...(args.model.api === "openai-codex-responses" ? { transport: "sse" } : {}),
         ...(args.apiKey !== undefined ? { apiKey: args.apiKey } : {}),
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
+        ...(fetch ? { fetch } : {}),
         // Session affinity: pi only sends it when caching isn't "none" (fine for us).
         sessionId: options.sessionId ?? args.sessionAffinity,
         onResponse: async (response, responseModel) => {
@@ -342,6 +427,13 @@ function makeHandle(args: HandleArgs): ModelHandle {
 export function getModel(env: Cloudflare.Env, config: AiModelConfig,
                          initiator: AiChatAuthorInfo,
                          options: ModelRoutingOptions = {}): ModelHandle {
+  if (isTeamPiCodexMarkerConfig(config)) {
+    if (!isTeamPiCodexConfig(env, config)) {
+      throw new Error("Team PI Codex model is not available.");
+    }
+    return getModelViaTeamPiCodex(env, config, initiator, options.sessionAffinity);
+  }
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
@@ -359,6 +451,34 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
   }
 
   return getModelDirect(config, options.sessionAffinity);
+}
+
+function getModelViaTeamPiCodex(
+  env: Cloudflare.Env,
+  config: AiModelConfig,
+  initiator: AiChatAuthorInfo,
+  sessionAffinity?: string,
+): ModelHandle {
+  const catalog = catalogCodexModel(config.model);
+  const window = modelTokenWindow(config, catalog);
+  return makeHandle({
+    model: {
+      id: config.model,
+      name: catalog?.name ?? config.model,
+      api: "openai-codex-responses",
+      provider: "openai-codex",
+      baseUrl: env.TEAM_PI_CODEX_BASE_URL!,
+      reasoning: catalog?.reasoning ?? true,
+      input: catalog?.input ?? ["text", "image"],
+      cost: catalog?.cost ?? ZERO_COST,
+      ...window,
+      thinkingLevelMap: catalog?.thinkingLevelMap,
+      compat: catalog?.compat,
+    },
+    apiKey: SYNTHETIC_CODEX_API_KEY,
+    fetch: downstream => makeTeamPiCodexFetch(initiator, env.TEAM_PI_CODEX_HMAC_SECRET!, downstream),
+    sessionAffinity,
+  });
 }
 
 // Route inference through the user's own account (unified billing) via their account's default AI
@@ -632,6 +752,9 @@ export class LanguageModelGatekeeper
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>)
       : Promise<LanguageModelBinding> {
+    if (isTeamPiCodexMarkerConfig(this.ctx.props.config)) {
+      throw new Error("Team PI Codex models cannot be used through persistent bindings.");
+    }
     let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
       metadata: this.ctx.props.metadata,
     });

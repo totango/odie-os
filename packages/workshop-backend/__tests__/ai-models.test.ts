@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { getModel, type ModelHandle } from "../src/ai-models.js";
+import {
+  getDefaultTeamPiCodexModel, getTeamPiCodexModelList, isTeamPiCodexConfig,
+  isTeamPiCodexEligibleUser, isTeamPiCodexMarkerConfig, isTeamPiCodexUserId,
+  resolveTeamPiCodexModel,
+} from "../src/team-pi-codex-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
 // the returned handle's model descriptor (baseUrl/id/api) and log route, and request-level
@@ -12,6 +17,12 @@ const INITIATOR: AiChatAuthorInfo = {
   type: "user",
   id: "user-123",
   name: "User",
+};
+
+const TOTANGO_INITIATOR: AiChatAuthorInfo = {
+  type: "user",
+  id: "Builder@Totango.com",
+  name: "Builder",
 };
 
 const GADGET_INITIATOR: AiChatAuthorInfo = {
@@ -42,17 +53,52 @@ function env(overrides: Partial<Cloudflare.Env> = {}): Cloudflare.Env {
   } as Cloudflare.Env;
 }
 
-type CapturedRequest = { url: string; headers: Headers; body: string };
+type CapturedRequest = { url: string; headers: Headers; body: string; bodyBytes: Uint8Array };
 
 const capturedRequests: CapturedRequest[] = [];
 
 const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const request = new Request(input as RequestInfo, init);
-  capturedRequests.push({ url: request.url, headers: request.headers, body: await request.text() });
+  const bodyBytes = new Uint8Array(await request.arrayBuffer());
+  capturedRequests.push({
+    url: request.url,
+    headers: request.headers,
+    body: new TextDecoder().decode(bodyBytes),
+    bodyBytes,
+  });
   // A non-retryable client error: the provider SDK reports it, pi converts it into an
   // error-stop assistant message, and the request stays captured for assertions.
   return Response.json({ error: { type: "bad_request", message: "stubbed" } }, { status: 400 });
 }) as typeof fetch;
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+async function verifyTeamPiSignature(request: CapturedRequest, secret: string): Promise<void> {
+  const timestamp = request.headers.get("x-team-pi-odie-timestamp");
+  const user = request.headers.get("x-team-pi-odie-user");
+  expect(timestamp).toMatch(/^\d+$/);
+  expect(user).toBe("builder@totango.com");
+  const bodySha256 = bytesToHex(new Uint8Array(await crypto.subtle.digest("SHA-256", request.bodyBytes)));
+  const sessionId = request.headers.get("session-id") ?? "";
+  const clientRequestId = request.headers.get("x-client-request-id") ?? "";
+  const canonical = [
+    "odie-v1", "team-pi-codex", "POST", "/api/odie/codex/responses",
+    timestamp, user, sessionId, clientRequestId, bodySha256,
+  ].join("\n");
+  const key = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const signature = bytesToBase64Url(new Uint8Array(
+      await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(canonical))));
+  expect(request.headers.get("x-team-pi-odie-signature")).toBe(`v1=${signature}`);
+}
 
 // Runs one request through the handle with the fetch stub and returns what was sent.
 async function captureRequest(handle: ModelHandle): Promise<CapturedRequest> {
@@ -259,6 +305,96 @@ describe("getModel AI Gateway routing", () => {
       apiToken: "gateway-token",
     });
   });
+});
+
+describe("Team PI Codex routing", () => {
+  beforeEach(() => {
+    capturedRequests.length = 0;
+  });
+
+  const teamPiEnv = (overrides: Partial<Cloudflare.Env> = {}) => env({
+    TEAM_PI_CODEX_BASE_URL: "https://team-pi.example/proxy",
+    TEAM_PI_CODEX_HMAC_SECRET: "team-pi-secret",
+    CF_AI_GATEWAY: undefined,
+    ...overrides,
+  });
+
+  it("lists and resolves deployment-provided profile IDs only when fully configured", () => {
+    expect(getTeamPiCodexModelList(env({
+      TEAM_PI_CODEX_BASE_URL: "https://team-pi.example/proxy",
+      TEAM_PI_CODEX_HMAC_SECRET: undefined,
+    }))).toEqual([]);
+
+    const models = getTeamPiCodexModelList(teamPiEnv({
+      TEAM_PI_CODEX_MODELS: "gpt-5.6-sol,gpt-5.6-luna,gpt-5.6-sol",
+    }));
+    expect(models.map(model => model.id)).toEqual([
+      "team-pi-codex/gpt-5.6-sol",
+      "team-pi-codex/gpt-5.6-luna",
+    ]);
+
+    expect(resolveTeamPiCodexModel(teamPiEnv(), "team-pi-codex/gpt-5.6-sol"))
+        .toEqual(expect.objectContaining({
+          profile: expect.objectContaining({ id: "team-pi-codex/gpt-5.6-sol" }),
+          config: {
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            apiToken: "",
+            apiUrl: "internal:team-pi-codex",
+            contextWindow: 272000,
+            outputLimit: 128000,
+          },
+        }));
+    expect(isTeamPiCodexUserId("builder@totango.com")).toBe(true);
+    expect(isTeamPiCodexUserId("builder@example.com")).toBe(false);
+    expect(isTeamPiCodexEligibleUser("builder@totango.com", false)).toBe(true);
+    expect(isTeamPiCodexEligibleUser("builder@totango.com", true)).toBe(false);
+    expect(isTeamPiCodexEligibleUser("builder@example.com", false)).toBe(false);
+    expect(getDefaultTeamPiCodexModel(teamPiEnv(), "builder@totango.com")?.profile.id)
+        .toBe("team-pi-codex/gpt-5.6-sol");
+    expect(getDefaultTeamPiCodexModel(teamPiEnv(), "builder@example.com")).toBeUndefined();
+    expect(isTeamPiCodexConfig(teamPiEnv(), {
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      apiToken: "",
+      apiUrl: "https://team-pi.example/proxy",
+    })).toBe(false);
+    expect(isTeamPiCodexMarkerConfig({
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      apiToken: "",
+      apiUrl: "internal:team-pi-codex",
+    })).toBe(true);
+  });
+
+  it("routes resolved built-ins through Team PI Codex even when AI Gateway is enabled", async () => {
+    const record = resolveTeamPiCodexModel(env({
+      TEAM_PI_CODEX_BASE_URL: "https://team-pi.example/proxy",
+      TEAM_PI_CODEX_HMAC_SECRET: "team-pi-secret",
+    }), "team-pi-codex/gpt-5.6-sol")!;
+
+    const handle = getModel(env({
+      TEAM_PI_CODEX_BASE_URL: "https://team-pi.example/proxy",
+      TEAM_PI_CODEX_HMAC_SECRET: "team-pi-secret",
+    }), record.config, TOTANGO_INITIATOR, { sessionAffinity: "team-pi-session" });
+
+    expect(handle.model.api).toBe("openai-codex-responses");
+    expect(handle.model.provider).toBe("openai-codex");
+    expect(handle.model.id).toBe("gpt-5.6-sol");
+    expect(handle.model.baseUrl).toBe("https://team-pi.example/proxy");
+    expect(handle.aiGatewayLogRoute).toBeUndefined();
+
+    const request = await captureRequest(handle);
+    expect(request.url).toBe("https://team-pi.example/proxy/codex/responses");
+    expect(request.headers.get("accept")).toBe("text/event-stream");
+    expect(request.headers.get("authorization")).toBeNull();
+    expect(request.headers.get("chatgpt-account-id")).toBeNull();
+    expect(request.headers.get("x-team-pi-odie-key-id")).toBe("odie-v1");
+    expect(request.headers.get("x-team-pi-odie-audience")).toBe("team-pi-codex");
+    expect(request.headers.get("x-team-pi-odie-user")).toBe("builder@totango.com");
+    expect([...request.headers.values()]).not.toContain("team-pi-secret");
+    await verifyTeamPiSignature(request, "team-pi-secret");
+  }, 15000);
 });
 
 describe("getModel direct routing (no gateway)", () => {
