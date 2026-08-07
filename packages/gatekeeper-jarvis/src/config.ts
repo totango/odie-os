@@ -22,6 +22,12 @@ export const JARVIS_ALLOWED_TOOLS = [
   "jarvis_check_integration_health",
   "jarvis_get_investigation_status",
   "jarvis_get_support_answer_status",
+  // Live production lookups, routed by Jarvis to its own Grafana, Tempo, k8sgpt and read-only
+  // database query servers. These answer what is true now, where the knowledge tools above answer
+  // what somebody wrote down. Reads: the servers behind them expose queries, not mutations.
+  "jarvis_list_prod_tools",
+  "jarvis_describe_prod_tool",
+  "jarvis_call_prod_tool",
 ] as const;
 
 /** A JARVIS MCP tool that this gatekeeper may expose. */

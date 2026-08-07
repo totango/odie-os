@@ -47,6 +47,9 @@ describe("JARVIS allowlist", () => {
       "jarvis_check_integration_health",
       "jarvis_get_investigation_status",
       "jarvis_get_support_answer_status",
+      "jarvis_list_prod_tools",
+      "jarvis_describe_prod_tool",
+      "jarvis_call_prod_tool",
     ]);
     expect(isJarvisAllowedTool("create_skill")).toBe(false);
     expect(isJarvisAllowedTool("escalate_to_human")).toBe(false);
