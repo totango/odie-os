@@ -22,6 +22,13 @@ export const JARVIS_ALLOWED_TOOLS = [
   "jarvis_check_integration_health",
   "jarvis_get_investigation_status",
   "jarvis_get_support_answer_status",
+  // Live production lookups, routed by JARVIS to its own Grafana, Tempo, k8sgpt and database query
+  // servers. These answer what is true now, where the knowledge tools above answer what somebody
+  // wrote down. Those servers do also host tools that write -- filing an incident, editing a
+  // dashboard -- which is why the call tool is classified as an action below rather than a read.
+  "jarvis_list_prod_tools",
+  "jarvis_describe_prod_tool",
+  "jarvis_call_prod_tool",
 ] as const;
 
 /** A JARVIS MCP tool that this gatekeeper may expose. */
@@ -31,6 +38,12 @@ const ALLOWED_TOOL_SET = new Set<string>(JARVIS_ALLOWED_TOOLS);
 const MANUAL_ACTION_TOOL_SET = new Set<string>([
   "jarvis_answer_support_question",
   "jarvis_investigate_customer_issue",
+  // Running an arbitrary named tool against live production is not an observation, whatever the
+  // far side says about it. JARVIS refuses the writes it hosts, but this gatekeeper does not get to
+  // depend on that being true today or after the next tool ships there: the name and arguments are
+  // chosen by the agent, and the reachable surface still includes ad-hoc SQL against production
+  // databases. Listing and describing stay reads -- they disclose no data.
+  "jarvis_call_prod_tool",
 ]);
 
 /** Parsed deployment configuration for the JARVIS MCP endpoint. */
