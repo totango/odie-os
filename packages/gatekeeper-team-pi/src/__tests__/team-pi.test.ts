@@ -440,3 +440,20 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     });
   });
 });
+
+describe("Team PI rejection is always possible", () => {
+  it("records a rejection for an action this binding never knew about", () => {
+    // The Workshop asks the gatekeeper to reject before it records the rejection, so throwing here
+    // would leave an approval the user can never dismiss. One cannot fail to *not* do something.
+    const kv = new Kv();
+    expect(() => rejectPendingAction(kv as never, 7)).not.toThrow();
+    expect(kv.get("result:7")).toEqual({ status: "rejected" });
+  });
+
+  it("still refuses to reject an action that is already being applied", () => {
+    // This one must keep throwing: the write may already have reached Team PI.
+    const kv = new Kv();
+    kv.put("applying:1", { kind: "startConnection", provider: "gmail", claimedAt: Date.now() });
+    expect(() => rejectPendingAction(kv as never, 1)).toThrow(/already applying/);
+  });
+});

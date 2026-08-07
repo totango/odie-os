@@ -619,7 +619,11 @@ export function rejectPendingAction(kv: DurableObjectStorage["kv"], action: numb
   if (!kv.get<PendingAction>(pendingKey(action))) {
     const result = kv.get<TeamPiActionResult>(resultKey(action));
     if (result && result.status !== "pending") return;
-    throw new Error(`Unknown Team PI action: ${action}`);
+    // An action this binding has no record of. Refusing here would leave the Workshop holding an
+    // approval the user cannot dismiss, so record the rejection instead: one cannot fail to *not*
+    // do something, and a spurious rejected result is harmless where a wedged approval is not.
+    kv.put(resultKey(action), { status: "rejected" });
+    return;
   }
   kv.delete(pendingKey(action));
   kv.put(resultKey(action), { status: "rejected" });
