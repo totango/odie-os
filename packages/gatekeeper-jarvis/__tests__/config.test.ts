@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import type { ClassifiedTool } from "@gadgets/mcp-shared/tools";
 import {
+  applyJarvisToolPolicy,
   hasJarvisConfiguration,
   isJarvisAllowedTool,
   jarvisResource,
@@ -53,6 +55,41 @@ describe("JARVIS allowlist", () => {
     ]);
     expect(isJarvisAllowedTool("create_skill")).toBe(false);
     expect(isJarvisAllowedTool("escalate_to_human")).toBe(false);
+  });
+});
+
+describe("applyJarvisToolPolicy", () => {
+  function entry(name: string, annotations?: { readOnlyHint?: boolean }): ClassifiedTool {
+    return {
+      tool: { name, inputSchema: { type: "object" as const }, ...(annotations ? { annotations } : {}) },
+      mode: "read",
+      autoApprovable: true,
+      classifiedBy: "server-annotation",
+    };
+  }
+
+  it("drops anything outside the allowlist", () => {
+    expect(applyJarvisToolPolicy(entry("create_skill"))).toBeNull();
+  });
+
+  it("queues a production tool call for approval however the far side labels it", () => {
+    // The agent chooses the tool name and its arguments, and the reachable surface includes ad-hoc
+    // SQL against production databases. A read-only claim from JARVIS must not be able to turn that
+    // into an observation that runs with nobody asked.
+    for (const annotations of [undefined, { readOnlyHint: true }]) {
+      const policy = applyJarvisToolPolicy(entry("jarvis_call_prod_tool", annotations));
+      expect(policy?.mode).toBe("action");
+      expect(policy?.autoApprovable).toBe(false);
+      expect(policy?.classifiedBy).toBe("default");
+    }
+  });
+
+  it("leaves discovery as reads, since listing and describing disclose no production data", () => {
+    for (const name of ["jarvis_list_prod_tools", "jarvis_describe_prod_tool"]) {
+      const policy = applyJarvisToolPolicy(entry(name));
+      expect(policy?.mode).toBe("read");
+      expect(policy?.autoApprovable).toBe(false);
+    }
   });
 });
 
