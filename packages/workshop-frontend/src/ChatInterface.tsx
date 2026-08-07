@@ -100,6 +100,7 @@ import type { SelectableItem } from "./ResourcePicker";
 import GatekeeperModal from "./GatekeeperModal";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
 import { formatOf, FORMAT_ICONS } from "./components/format/formats";
+import { ChatComponents } from "./components/chat/ChatComponents";
 import { FormatMiniature } from "./components/format/FormatVisuals";
 import { formatIconDataUrl } from "./components/format/formatIconImage";
 import { locateMessageFormatRefs } from "./components/format/messageFormatRefs";
@@ -7131,6 +7132,15 @@ function ChatInterface({
                                   />
                                 </div>
                               )}
+
+                              {/* Interactive components the agent attached. Answering sends an
+                                  ordinary chat message, so this grants nothing the user could not
+                                  do by typing. */}
+                              <ChatComponents
+                                components={msg.components}
+                                onSend={message => { void handleSend(message); }}
+                                disabled={isAgentActive}
+                              />
 
                               {showActions && (
                                 <div className={`mt-0.5 -ml-1 flex items-center gap-1 transition-opacity duration-150 ease-out ${
