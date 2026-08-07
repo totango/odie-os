@@ -7,7 +7,7 @@
     "watch_dir": "src",
   },
   "compatibility_date": "2026-02-02",
-  "compatibility_flags": ["allow_irrevocable_stub_storage", "global_fetch_strictly_public", "nodejs_als"],
+  "compatibility_flags": ["allow_irrevocable_stub_storage", "enhanced_error_serialization", "global_fetch_strictly_public", "nodejs_als"],
   "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["TeamPiAccount", "TeamPiGatekeeper"] }

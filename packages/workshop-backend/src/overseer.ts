@@ -7738,7 +7738,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
 
-    await gatekeeper.rejectAction(action.action);
+    // Tell the gatekeeper, but never let its failure trap the user. Denial is the safe direction:
+    // the action is not applied either way, so a gatekeeper that is unreachable or has lost the
+    // record must not leave behind an approval nobody can dismiss and a suspended turn that can
+    // never end. (Approval is the opposite case -- a failure there leaves the action pending
+    // precisely because we cannot know whether it took effect.)
+    try {
+      await gatekeeper.rejectAction(action.action);
+    } catch (err) {
+      this.impl.logger.warn("gatekeeper refused a rejection; rejecting anyway", {
+        event: "action.reject.notify.failed", actionId: id, error: err,
+      });
+    }
 
     action.state = "rejected";
     action.appliedAt = new Date();
