@@ -1,4 +1,5 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { zstdDecompressSync } from "node:zlib";
 import { validateRpc } from "capnweb-validate";
 import type {
   AnthropicMessagesCompat, Api, AssistantMessageEventStream, Context, Model, ModelCost,
@@ -125,6 +126,8 @@ const ZERO_COST: ModelCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 
 const TEAM_PI_CODEX_AUDIENCE = "team-pi-codex";
 const TEAM_PI_CODEX_KEY_ID = "odie-v1";
 const TEAM_PI_CODEX_USER_RE = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@totango\.com$/;
+const TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES = 4 * 1024 * 1024;
+const TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES = 8 * 1024 * 1024;
 const SYNTHETIC_CODEX_API_KEY =
     "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." +
     "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoib2RpZS10ZWFtLXBpLWNvZGV4In19." +
@@ -301,7 +304,8 @@ async function hmacSha256Base64Url(secret: string, message: string): Promise<str
   return bytesToBase64Url(new Uint8Array(signature));
 }
 
-function makeTeamPiCodexFetch(
+/** Build the package-internal signed transport used for Team PI Codex requests. */
+export function makeTeamPiCodexFetch(
   initiator: AiChatAuthorInfo,
   hmacSecret: string,
   downstream?: typeof fetch,
@@ -311,13 +315,44 @@ function makeTeamPiCodexFetch(
     throw new Error("Team PI Codex models require a @totango.com user email initiator.");
   }
   const innerFetch = downstream ?? globalThis.fetch;
+  const clientRequestId = crypto.randomUUID();
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
-    const bodyBytes = new Uint8Array(await request.clone().arrayBuffer());
+    if (request.method !== "POST") throw new Error("Team PI Codex only supports POST requests.");
+    const contentEncoding = request.headers.get("Content-Encoding")?.trim().toLowerCase();
+    if (contentEncoding && contentEncoding !== "identity" && contentEncoding !== "zstd") {
+      throw new Error(`Unsupported Team PI Codex request encoding: ${contentEncoding}`);
+    }
+    const maxInputBytes = contentEncoding === "zstd"
+        ? TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES
+        : TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES;
+    const contentLength = request.headers.get("Content-Length");
+    if (contentLength !== null && Number(contentLength) > maxInputBytes) {
+      throw new Error(contentEncoding === "zstd"
+          ? "Team PI Codex compressed request body exceeds the 4 MiB limit."
+          : "Team PI Codex request body exceeds the 8 MiB decoded limit.");
+    }
+    let bodyBytes = new Uint8Array(await request.clone().arrayBuffer());
+    if (contentEncoding === "zstd") {
+      if (bodyBytes.byteLength > TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES) {
+        throw new Error("Team PI Codex compressed request body exceeds the 4 MiB limit.");
+      }
+      try {
+        bodyBytes = Uint8Array.from(zstdDecompressSync(bodyBytes, {
+          maxOutputLength: TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES,
+        }));
+      } catch (error) {
+        throw new Error("Team PI Codex request body is invalid or exceeds the 8 MiB decoded limit.", {
+          cause: error,
+        });
+      }
+    }
+    if (bodyBytes.byteLength > TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES) {
+      throw new Error("Team PI Codex request body exceeds the 8 MiB decoded limit.");
+    }
     const timestamp = Date.now().toString();
     const bodySha256 = await sha256Hex(bodyBytes);
     const sessionId = request.headers.get("session-id") ?? "";
-    const clientRequestId = request.headers.get("x-client-request-id") ?? "";
     const canonical = [
       TEAM_PI_CODEX_KEY_ID,
       TEAM_PI_CODEX_AUDIENCE,
@@ -332,12 +367,15 @@ function makeTeamPiCodexFetch(
     const headers = new Headers(request.headers);
     headers.delete("Authorization");
     headers.delete("chatgpt-account-id");
+    headers.delete("Content-Length");
+    headers.set("Content-Encoding", "identity");
+    headers.set("x-client-request-id", clientRequestId);
     headers.set("x-team-pi-odie-key-id", TEAM_PI_CODEX_KEY_ID);
     headers.set("x-team-pi-odie-audience", TEAM_PI_CODEX_AUDIENCE);
     headers.set("x-team-pi-odie-timestamp", timestamp);
     headers.set("x-team-pi-odie-user", user);
     headers.set("x-team-pi-odie-signature", `v1=${await hmacSha256Base64Url(hmacSecret, canonical)}`);
-    return innerFetch(new Request(request, { headers }));
+    return innerFetch(new Request(request, { method: "POST", headers, body: bodyBytes }));
   }) as typeof fetch;
 }
 

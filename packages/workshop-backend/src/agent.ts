@@ -611,6 +611,8 @@ Note that this differs from the \`env\` a Gadget's own code sees: a Gadget's ser
 
 When the user asks you to just do a task that can be done with these bindings, you should use executeCode to perform the task, instead of adding code to a gadget to do it.
 
+IMPORTANT: The executeCode result is internal tool context, not your answer to the user. After reading data or an action result with executeCode, always write a normal assistant message that includes the useful result. A collapsed code, observation, or activity card does not count as answering. For a queued action, use the originating binding's getActionResult method when available, poll until the result is terminal, and report that result directly in chat instead of sending the user to another page.
+
 The function also receives a \`self\` parameter which is a magic object that points back to this chat thread. Calling any method on \`self\`, like \`self.foo(123)\`, delivers a callback message to this chat and activates you to respond. \`self\` can be passed over RPC (e.g. to a subscription method) and stored in a Durable Object's KV storage for long-term callbacks. When an agent callback is received, it appears in your env under a name like \`PARAMS_1\`, with \`.args\` (the callback arguments), \`.resolve(value)\` (to return a value to the caller), and \`.reject(error)\` (to reject with an error).
 `.trim();
 
