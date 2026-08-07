@@ -6,6 +6,7 @@ import {
   Hexagon,
   House,
   MagnifyingGlass,
+  RocketLaunch,
   SidebarSimple,
   SquaresFour,
   Stack,
@@ -125,6 +126,12 @@ export default function Sidebar({
               to="/workspaces"
               label="Workspaces"
               icon={<SquaresFour size={14} weight="regular" />}
+              collapsed={collapsed}
+            />
+            <SidebarItem
+              to="/getting-started"
+              label="Getting started"
+              icon={<RocketLaunch size={14} weight="regular" />}
               collapsed={collapsed}
             />
             <SidebarItem

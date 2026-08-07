@@ -24,28 +24,35 @@ export type ApplyPendingActionFn = (
 
 export class AutoApprovalDrainer {
   // Per-gatekeeper single-flight state. Key present => a drain is running for that gatekeeper; the
-  // value is a "rerun" flag, set when another drain is requested while one is in flight, so work
-  // submitted during a drain isn't lost.
-  #draining = new Map<number, boolean>();
+  // state carries both a "rerun" flag and the active promise. Concurrent callers join that promise
+  // so completion means the requested rerun has actually drained, not merely been scheduled.
+  #draining = new Map<number, {rerun: boolean; promise: Promise<void>}>();
 
   constructor(
       private storage: AutoApprovalStorage,
       private applyPendingAction: ApplyPendingActionFn) {}
 
-  async drain(gatekeeperId: number): Promise<void> {
-    if (this.#draining.has(gatekeeperId)) {
-      this.#draining.set(gatekeeperId, true);  // ask the running drain to loop again
-      return;
+  drain(gatekeeperId: number): Promise<void> {
+    let active = this.#draining.get(gatekeeperId);
+    if (active) {
+      active.rerun = true;  // ask the running drain to loop again
+      return active.promise;
     }
-    this.#draining.set(gatekeeperId, false);
-    try {
-      do {
-        this.#draining.set(gatekeeperId, false);
-        await this.#drainOnce(gatekeeperId);
-      } while (this.#draining.get(gatekeeperId));
-    } finally {
-      this.#draining.delete(gatekeeperId);
-    }
+    let state = {rerun: false, promise: Promise.resolve()};
+    state.promise = (async () => {
+      try {
+        do {
+          state.rerun = false;
+          await this.#drainOnce(gatekeeperId);
+        } while (state.rerun);
+      } finally {
+        if (this.#draining.get(gatekeeperId) === state) {
+          this.#draining.delete(gatekeeperId);
+        }
+      }
+    })();
+    this.#draining.set(gatekeeperId, state);
+    return state.promise;
   }
 
   // Apply all currently-eligible pending actions of the gatekeeper, in ascending id order. Stops at

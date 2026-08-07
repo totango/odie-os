@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "gatekeeper-jarvis",
+  "main": ".wrangler/validate/src/index.ts",
+  "build": {
+    "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
+    "watch_dir": "src"
+  },
+  "compatibility_date": "2026-02-02",
+  // JarvisGatekeeper persists MCP transport session ids in SQLite-backed KV.
+  "compatibility_flags": ["allow_irrevocable_stub_storage", "global_fetch_strictly_public"],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["JarvisGatekeeper"]
+    }
+  ],
+  // Deployment configuration only. Do not commit real values here.
+  //
+  //   JARVIS_MCP_URL
+  //     Required HTTPS Streamable HTTP MCP endpoint for JARVIS.
+  //
+  //   JARVIS_MCP_TOKEN
+  //     Required bearer token secret for that endpoint.
+  //
+  //   JARVIS_TRUST_ANNOTATIONS
+  //     Set exactly to "true" to trust JARVIS MCP tool annotations for auto-approval. Defaults to BYO.
+  "vars": {
+    "JARVIS_TRUST_ANNOTATIONS": "true"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false }
+  }
+}

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { zstdCompressSync } from "node:zlib";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
-import { getModel, type ModelHandle } from "../src/ai-models.js";
+import { getModel, makeTeamPiCodexFetch, type ModelHandle } from "../src/ai-models.js";
 import {
   getDefaultTeamPiCodexModel, getTeamPiCodexModelList, isTeamPiCodexConfig,
   isTeamPiCodexEligibleUser, isTeamPiCodexMarkerConfig, isTeamPiCodexUserId,
@@ -109,6 +110,17 @@ async function captureRequest(handle: ModelHandle): Promise<CapturedRequest> {
   expect(message.stopReason).toBe("error");
   expect(capturedRequests.length).toBeGreaterThan(0);
   return capturedRequests[0];
+}
+
+function teamPiRequest(): Request {
+  return new Request("https://team-pi.example/api/odie/codex/responses", {
+    method: "POST",
+    headers: {
+      "session-id": "stable-session",
+      "x-client-request-id": "stable-session",
+    },
+    body: "{}",
+  });
 }
 
 describe("getModel AI Gateway routing", () => {
@@ -319,6 +331,11 @@ describe("Team PI Codex routing", () => {
     ...overrides,
   });
 
+  async function forwardTeamPiRequest(request: Request): Promise<CapturedRequest> {
+    await makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub)(request);
+    return capturedRequests[0];
+  }
+
   it("lists and resolves deployment-provided profile IDs only when fully configured", () => {
     expect(getTeamPiCodexModelList(env({
       TEAM_PI_CODEX_BASE_URL: "https://team-pi.example/proxy",
@@ -387,6 +404,8 @@ describe("Team PI Codex routing", () => {
     const request = await captureRequest(handle);
     expect(request.url).toBe("https://team-pi.example/proxy/codex/responses");
     expect(request.headers.get("accept")).toBe("text/event-stream");
+    expect(request.headers.get("content-encoding")).toBe("identity");
+    expect(JSON.parse(request.body)).toMatchObject({ model: "gpt-5.6-sol", stream: true });
     expect(request.headers.get("authorization")).toBeNull();
     expect(request.headers.get("chatgpt-account-id")).toBeNull();
     expect(request.headers.get("x-team-pi-odie-key-id")).toBe("odie-v1");
@@ -395,6 +414,86 @@ describe("Team PI Codex routing", () => {
     expect([...request.headers.values()]).not.toContain("team-pi-secret");
     await verifyTeamPiSignature(request, "team-pi-secret");
   }, 15000);
+
+  it("decodes zstd before signing and removes stale body headers", async () => {
+    const body = new TextEncoder().encode(JSON.stringify({ model: "gpt-5.6-sol", stream: true }));
+    const compressed = zstdCompressSync(body);
+    const request = await forwardTeamPiRequest(new Request(
+        "https://team-pi.example/api/odie/codex/responses", {
+          method: "POST",
+          headers: {
+            "Content-Encoding": "zstd",
+            "Content-Length": compressed.byteLength.toString(),
+            Authorization: "Bearer synthetic",
+            "chatgpt-account-id": "synthetic-account",
+            "session-id": "session-123",
+            "x-client-request-id": "request-123",
+          },
+          body: compressed,
+        }));
+
+    expect(request.bodyBytes).toEqual(body);
+    expect(request.headers.get("content-encoding")).toBe("identity");
+    expect(request.headers.get("content-length")).toBeNull();
+    expect(request.headers.get("authorization")).toBeNull();
+    expect(request.headers.get("chatgpt-account-id")).toBeNull();
+    expect(request.headers.get("x-client-request-id")).toMatch(/^[0-9a-f-]{36}$/);
+    expect(request.headers.get("x-client-request-id")).not.toBe("request-123");
+    await verifyTeamPiSignature(request, "team-pi-secret");
+  });
+
+  it("uses one replay ID per model invocation while preserving session affinity", async () => {
+    const firstInvocation = makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub);
+    await firstInvocation(teamPiRequest());
+    await firstInvocation(teamPiRequest());
+    const secondInvocation = makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub);
+    await secondInvocation(teamPiRequest());
+
+    const [firstAttempt, retryAttempt, nextInvocation] = capturedRequests;
+    expect(firstAttempt.headers.get("session-id")).toBe("stable-session");
+    expect(retryAttempt.headers.get("session-id")).toBe("stable-session");
+    expect(nextInvocation.headers.get("session-id")).toBe("stable-session");
+    expect(retryAttempt.headers.get("x-client-request-id"))
+        .toBe(firstAttempt.headers.get("x-client-request-id"));
+    expect(nextInvocation.headers.get("x-client-request-id"))
+        .not.toBe(firstAttempt.headers.get("x-client-request-id"));
+    await verifyTeamPiSignature(firstAttempt, "team-pi-secret");
+    await verifyTeamPiSignature(retryAttempt, "team-pi-secret");
+    await verifyTeamPiSignature(nextInvocation, "team-pi-secret");
+  });
+
+  it("rejects unsupported methods and content encodings", async () => {
+    const forward = makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub);
+    await expect(forward("https://team-pi.example/api/odie/codex/responses", { method: "GET" }))
+        .rejects.toThrow("Team PI Codex only supports POST requests.");
+    await expect(forward("https://team-pi.example/api/odie/codex/responses", {
+      method: "POST",
+      headers: { "Content-Encoding": "gzip" },
+      body: "{}",
+    })).rejects.toThrow("Unsupported Team PI Codex request encoding: gzip");
+    expect(capturedRequests).toHaveLength(0);
+  });
+
+  it("bounds compressed and decoded request bodies", async () => {
+    const forward = makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub);
+    await expect(forward("https://team-pi.example/api/odie/codex/responses", {
+      method: "POST",
+      headers: { "Content-Encoding": "zstd" },
+      body: new Uint8Array(4 * 1024 * 1024 + 1),
+    })).rejects.toThrow("compressed request body exceeds the 4 MiB limit");
+
+    const oversizedDecodedBody = new Uint8Array(8 * 1024 * 1024 + 1);
+    await expect(forward("https://team-pi.example/api/odie/codex/responses", {
+      method: "POST",
+      headers: { "Content-Encoding": "zstd" },
+      body: zstdCompressSync(oversizedDecodedBody),
+    })).rejects.toThrow("invalid or exceeds the 8 MiB decoded limit");
+    await expect(forward("https://team-pi.example/api/odie/codex/responses", {
+      method: "POST",
+      body: oversizedDecodedBody,
+    })).rejects.toThrow("request body exceeds the 8 MiB decoded limit");
+    expect(capturedRequests).toHaveLength(0);
+  });
 });
 
 describe("getModel direct routing (no gateway)", () => {

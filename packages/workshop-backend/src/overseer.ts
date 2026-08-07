@@ -7575,15 +7575,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     await this.impl.applyPendingAction(action, profile, false);
 
-    // If this was an awaited agent action, resume only after all awaited actions in the turn are
-    // approved. If applyPendingAction throws, the action stays pending and the turn stays suspended.
-    if (action.caller.from === "agent" && action.description.awaitDecision) {
-      await this.#maybeResumeAfterActionDecision(action.caller.chatId);
-    }
-
     // Clearing this manual gate may unblock later auto-eligible pending actions on the same
-    // gatekeeper, so cascade a drain (in-order) once this one is applied.
-    this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(action.gatekeeperId));
+    // gatekeeper, so cascade a drain (in-order) once this one is applied. An awaited turn resumes
+    // after that drain, otherwise a later auto-eligible action from the same turn could still be
+    // pending when the first resume check runs and leave the turn suspended forever.
+    let drain = this.impl.drainAutoApprovals(action.gatekeeperId);
+    if (action.caller.from === "agent" && action.description.awaitDecision) {
+      let chatId = action.caller.chatId;
+      this.impl.ctx.waitUntil((async () => {
+        try {
+          await drain;
+        } finally {
+          await this.#maybeResumeAfterActionDecision(chatId);
+        }
+      })());
+    } else {
+      this.impl.ctx.waitUntil(drain);
+    }
   }
 
   async listHooks(): Promise<BoundHookInfo[]> {
@@ -7694,12 +7702,18 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Persist one note for replay; raw action cards are not surfaced to the LLM. Concurrent
     // approvals could both pass the gate above and append duplicate notes (the DO input gate is
     // open across these awaits), but that's cosmetic — #resumeSuspendedAgent still starts one turn.
-    let titleList = awaited.map(r => `"${r.description.title}"`).join(", ");
+    let resultIds = awaited.map(r => r.action);
     let summary =
-        `The changes you submitted have been approved and applied: ${titleList}. ` +
-        `Reads now reflect them.`;
+        `The gatekeeper actions from this turn were approved and applied. Their gatekeeper-local ` +
+        `action result IDs, in the same chronological order as the original calls, are ` +
+        `${JSON.stringify(resultIds)}. Each ID is valid only on the same env binding/session that ` +
+        `returned its pending result. Continue this turn and put every useful result directly in ` +
+        `a normal assistant chat message. Use the originating binding's documented claim-check or ` +
+        `result API; if it exposes getActionResult(), poll that ID until terminal, otherwise verify ` +
+        `with its documented read API. A code, observation, or activity card is not the final ` +
+        `answer, and the user should not need to open another page to see the result.`;
     let author = await this.#getClientProfile();
-    this.impl.addChatMessages(chatId, author, [{type: "message", message: summary}]);
+    this.impl.addChatMessages(chatId, author, [{type: "agentNudge", text: summary}]);
 
     await this.#resumeSuspendedAgent(chatId);
   }
@@ -7752,8 +7766,24 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       actionKind,
       enabledBy: profile,
     });
-    // Apply the currently-visible pending action(s) with this tag right away.
-    this.impl.ctx.waitUntil(this.impl.drainAutoApprovals(gatekeeperId));
+    // Apply the currently-visible pending action(s) with this tag right away. Re-check every
+    // affected awaited turn after the joined drain; "always approve" is itself the decision that
+    // clears these manual gates, so no separate approveAction() call will resume them.
+    let chatIds = new Set<number>();
+    for (let record of this.impl.storage.actions.list()) {
+      if (record.gatekeeperId === gatekeeperId && record.type === "action" &&
+          record.state === "pending" && record.caller.from === "agent" &&
+          record.description.awaitDecision) {
+        chatIds.add(record.caller.chatId);
+      }
+    }
+    this.impl.ctx.waitUntil((async () => {
+      try {
+        await this.impl.drainAutoApprovals(gatekeeperId);
+      } finally {
+        for (let chatId of chatIds) await this.#maybeResumeAfterActionDecision(chatId);
+      }
+    })());
   }
 
   // Remove the auto-approval rule for `tag` on the given gatekeeper, so future matching actions

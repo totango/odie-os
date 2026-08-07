@@ -4,6 +4,7 @@ import {
   Blueprint,
   MagnifyingGlass,
   Plus,
+  RocketLaunch,
   SquaresFour,
 } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
@@ -248,10 +249,17 @@ export default function CommandPalette({
         run: () => navigate({ to: '/workspaces' }),
       },
       {
+        id: 'nav-getting-started',
+        label: 'Getting started',
+        hint: 'Guide',
+        icon: <RocketLaunch size={15} />,
+        run: () => navigate({ to: '/getting-started' }),
+      },
+      {
         id: 'nav-blueprints',
         label: 'Blueprints',
         icon: <Blueprint size={15} />,
-        run: () => navigate({ to: '/explore' }),
+        run: () => navigate({ to: '/blueprints' }),
       },
     ]
 

@@ -1,0 +1,103 @@
+import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
+import type { ClassifiedTool, ServerTrust } from "@gadgets/mcp-shared/tools";
+import { sameEndpoint } from "@gadgets/mcp-shared/scope";
+
+/** Stable vendor identifier for the deployment-configured JARVIS MCP gatekeeper. */
+export const VENDOR_ID = "jarvis";
+
+/** Stable server id used in generated types, binding names, and approval-scope tags. */
+export const JARVIS_SERVER_ID = "jarvis";
+
+/** Human-facing display name for the JARVIS singleton account and resource. */
+export const JARVIS_DISPLAY_NAME = "JARVIS";
+
+/** Fixed MCP tool allowlist exposed by the JARVIS ambient singleton. */
+export const JARVIS_ALLOWED_TOOLS = [
+  "query_knowledge",
+  "repo_knowledge",
+  "resolve_repo_group",
+  "lookup_incident",
+  "jarvis_answer_support_question",
+  "jarvis_investigate_customer_issue",
+  "jarvis_check_integration_health",
+  "jarvis_get_investigation_status",
+  "jarvis_get_support_answer_status",
+] as const;
+
+/** A JARVIS MCP tool that this gatekeeper may expose. */
+export type JarvisAllowedTool = typeof JARVIS_ALLOWED_TOOLS[number];
+
+const ALLOWED_TOOL_SET = new Set<string>(JARVIS_ALLOWED_TOOLS);
+const MANUAL_ACTION_TOOL_SET = new Set<string>([
+  "jarvis_answer_support_question",
+  "jarvis_investigate_customer_issue",
+]);
+
+/** Parsed deployment configuration for the JARVIS MCP endpoint. */
+export type JarvisConfig = {
+  /** HTTPS Streamable HTTP MCP endpoint configured by the deployment. */
+  endpoint: string;
+};
+
+/** Returns true when `toolName` is in the fixed production JARVIS MCP allowlist. */
+export function isJarvisAllowedTool(toolName: string): toolName is JarvisAllowedTool {
+  return ALLOWED_TOOL_SET.has(toolName);
+}
+
+/** Applies the gatekeeper-owned JARVIS read/action policy without trusting server annotations. */
+export function applyJarvisToolPolicy(entry: ClassifiedTool): ClassifiedTool | null {
+  if (!isJarvisAllowedTool(entry.tool.name)) return null;
+  const manualAction = MANUAL_ACTION_TOOL_SET.has(entry.tool.name);
+  return {
+    ...entry,
+    mode: manualAction ? "action" : "read",
+    autoApprovable: false,
+    classifiedBy: "default",
+  };
+}
+
+/** Reads and validates the deployment-configured JARVIS MCP endpoint. */
+export function readJarvisConfig(env: Env): JarvisConfig | null {
+  const raw = env.JARVIS_MCP_URL?.trim();
+  if (!raw) return null;
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "https:") return null;
+  if (url.username || url.password) return null;
+  url.hash = "";
+  return { endpoint: url.toString() };
+}
+
+/** Returns the current JARVIS annotation trust tier. Defaults to BYO unless explicitly enabled. */
+export function jarvisTrust(env: Env): ServerTrust {
+  return (env.JARVIS_TRUST_ANNOTATIONS ?? "").toLowerCase() === "true" ? "vetted" : "byo";
+}
+
+/** Returns the bearer token only for the deployment's current JARVIS endpoint. */
+export function jarvisTokenFor(env: Env, endpoint: string): string | null {
+  const config = readJarvisConfig(env);
+  if (!config || !sameEndpoint(config.endpoint, endpoint)) return null;
+  return env.JARVIS_MCP_TOKEN || null;
+}
+
+/** Returns true when both endpoint and bearer token configuration are present and usable. */
+export function hasJarvisConfiguration(env: Env): boolean {
+  const config = readJarvisConfig(env);
+  return config !== null && jarvisTokenFor(env, config.endpoint) !== null;
+}
+
+/** Describes the singleton JARVIS MCP resource exposed to the Workshop account surface. */
+export function jarvisResource(config: JarvisConfig): SupportedResource {
+  return {
+    urlPattern: config.endpoint,
+    title: JARVIS_DISPLAY_NAME,
+    description:
+      "Deployment-approved JARVIS knowledge, support, incident, and integration-health tools.",
+  };
+}

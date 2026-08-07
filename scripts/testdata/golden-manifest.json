@@ -443,6 +443,75 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/homeassistant"
       }
     },
+    "gatekeeper-jarvis": {
+      "bindings": [
+        {
+          "name": "JARVIS_MCP_URL",
+          "text": "$SECRET(JARVIS_MCP_URL)",
+          "type": "secret_text"
+        },
+        {
+          "name": "JARVIS_MCP_TOKEN",
+          "text": "$SECRET(JARVIS_MCP_TOKEN)",
+          "type": "secret_text"
+        }
+      ],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "global_fetch_strictly_public"
+      ],
+      "inputs": [
+        {
+          "kind": "secret",
+          "label": "JARVIS MCP HTTPS endpoint",
+          "name": "JARVIS_MCP_URL",
+          "setupSteps": [
+            "Enter the deployment-approved HTTPS Streamable HTTP MCP endpoint for JARVIS."
+          ]
+        },
+        {
+          "kind": "secret",
+          "label": "JARVIS MCP bearer token",
+          "name": "JARVIS_MCP_TOKEN",
+          "setupSteps": [
+            "Enter the bearer token issued for the JARVIS MCP endpoint."
+          ]
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "jarvis.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "JarvisGatekeeper"
+          ],
+          "tag": "v1"
+        }
+      ],
+      "modules": [
+        {
+          "name": "jarvis.js",
+          "r2Key": "blobs/modules/31b6c8b7274029107af70d404d60117e3f811d2a79e1b38d00c542e4c0b9a4c4",
+          "sha256": "31b6c8b7274029107af70d404d60117e3f811d2a79e1b38d00c542e4c0b9a4c4",
+          "size": 59,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "jarvis",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/jarvis",
+        "JARVIS_TRUST_ANNOTATIONS": "true"
+      }
+    },
     "gatekeeper-linear": {
       "bindings": [
         {
@@ -893,6 +962,102 @@
       "shortName": "supabase",
       "vars": {
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/supabase"
+      }
+    },
+    "gatekeeper-team-pi": {
+      "bindings": [
+        {
+          "name": "TEAM_PI_AUTH0_DOMAIN",
+          "text": "$SECRET(TEAM_PI_AUTH0_DOMAIN)",
+          "type": "secret_text"
+        },
+        {
+          "name": "TEAM_PI_AUTH0_CLIENT_ID",
+          "text": "$SECRET(TEAM_PI_AUTH0_CLIENT_ID)",
+          "type": "secret_text"
+        },
+        {
+          "name": "TEAM_PI_AUTH0_AUDIENCE",
+          "text": "$SECRET(TEAM_PI_AUTH0_AUDIENCE)",
+          "type": "secret_text"
+        },
+        {
+          "name": "TEAM_PI_BASE_URL",
+          "text": "$SECRET(TEAM_PI_BASE_URL)",
+          "type": "secret_text"
+        }
+      ],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "global_fetch_strictly_public",
+        "nodejs_als"
+      ],
+      "inputs": [
+        {
+          "kind": "secret",
+          "label": "Team PI Auth0 domain",
+          "name": "TEAM_PI_AUTH0_DOMAIN",
+          "setupSteps": [
+            "Enter the HTTPS Auth0 tenant domain used by Team PI device authorization."
+          ]
+        },
+        {
+          "kind": "secret",
+          "label": "Team PI Auth0 client ID",
+          "name": "TEAM_PI_AUTH0_CLIENT_ID",
+          "setupSteps": [
+            "Enter the public Auth0 device-flow client ID approved for Team PI."
+          ]
+        },
+        {
+          "kind": "secret",
+          "label": "Team PI Auth0 audience",
+          "name": "TEAM_PI_AUTH0_AUDIENCE",
+          "setupSteps": [
+            "Enter the Auth0 API audience expected by Team PI."
+          ]
+        },
+        {
+          "kind": "secret",
+          "label": "Team PI HTTPS endpoint",
+          "name": "TEAM_PI_BASE_URL",
+          "setupSteps": [
+            "Enter the deployment-approved Team PI HTTPS API origin."
+          ]
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "team-pi.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "TeamPiAccount",
+            "TeamPiGatekeeper"
+          ],
+          "tag": "v1"
+        }
+      ],
+      "modules": [
+        {
+          "name": "team-pi.js",
+          "r2Key": "blobs/modules/9be41349f34be0219e4cb93835b753922c9955abe5ab06ac1a8e1ca0990adb17",
+          "sha256": "9be41349f34be0219e4cb93835b753922c9955abe5ab06ac1a8e1ca0990adb17",
+          "size": 60,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "team-pi",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/team-pi"
       }
     },
     "gatekeeper-zoominfo": {

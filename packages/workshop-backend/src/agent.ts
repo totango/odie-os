@@ -15,6 +15,7 @@ import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
 import { webFetch as webFetchImpl, WebFetchEnv, formatWebFetchResult } from "./web-fetch";
 import { AgentCatalogSnapshot, formatAlwaysAvailableResourcesPrompt } from "./agent-catalog";
 import { formatInstanceInstructions } from "./admin-config";
+import { extractChatComponents } from "./chat-components";
 import type { AiGatewayLogRoute } from "./ai-gateway";
 import { AgentTurnError, completeText, httpStatusFromError, zeroUsage } from "./ai-invoke";
 import type { ModelHandle } from "./ai-models";
@@ -519,6 +520,30 @@ env.SOME_BINDING.registerGreeter(greeter);
 \`\`\`
 
 In Gadget code, the \`ctx\` object is passed to the \`DurableObject\` constructor and is automatically available as \`this.ctx\` within the class. When writing code for the \`executeCode\` tool call, the \`ctx\` object is passed as a parameter to your function. You can call \`ctx.restore()\` from either location, though usually it's best to call it as part of \`executeCode\` as usually registering hooks is something you do one time, not programmatically.
+
+# Interactive components
+
+Your chat messages can render a few interactive components: a choice list, a form, a table, or a chart. Use one when it genuinely beats prose -- offer a choice rather than asking the user to type one of several options, show a form when you need several specific values before you can act, use a table for more than about three rows of structured data, and a chart for a trend across labelled points. Most messages need none.
+
+Write your normal answer, then put the components in a single fenced block at the very end of the message, tagged \`odie-ui\`, holding either a JSON array of components or \`{"components": [...]}\`. The block is removed from your message before the user sees it, and the components are drawn in its place.
+
+\`\`\`odie-ui
+[{"type": "choice", "prompt": "Which environment?", "options": [{"label": "Production"}, {"label": "Staging"}]}]
+\`\`\`
+
+The shapes, where only the listed fields are understood:
+- \`{"type": "choice", "prompt": string, "options": [{"label": string, "value"?: string, "description"?: string}], "multiple"?: boolean}\` -- \`value\` is what gets sent if it differs from the label.
+- \`{"type": "form", "title": string, "fields": [{"name": string, "label": string, "kind": "text" | "textarea" | "number" | "boolean" | "select", "options"?: string[], "value"?: string, "required"?: boolean, "placeholder"?: string}], "submitLabel"?: string}\` -- a \`select\` field must carry \`options\`.
+- \`{"type": "table", "title"?: string, "columns": string[], "rows": string[][]}\`
+- \`{"type": "graph", "title"?: string, "plot": "line" | "bar", "labels": string[], "series": [{"name": string, "points": (number | null)[]}]}\` -- one point per label; use null for a gap.
+
+Three rules matter:
+
+Your prose must stand on its own. A client that does not draw components shows only your text, so never write a message whose whole content is "use the form below".
+
+A component cannot perform an action. Choosing an option or submitting a form simply sends the answer back to you as an ordinary user message, and you then act on it as you would on anything the user typed -- including asking for approval when the action needs it. Never present a component as if it were an approval prompt.
+
+Keep them small: at most 4 components in a message, 12 options or fields each, 50 table rows. Anything beyond that is dropped.
 `.trim();
 
 let SPAWNER_SYSTEM_PROMPT = `
@@ -610,6 +635,8 @@ The 'env' object contains this chat's named bindings:
 Note that this differs from the \`env\` a Gadget's own code sees: a Gadget's server.js sees only that Gadget's own bindings (listed in the system prompt's gadget list), which are wired up separately with \`setGadgetBinding\`. Your bindings and a Gadget's bindings may point at the same resource under the same or different names.
 
 When the user asks you to just do a task that can be done with these bindings, you should use executeCode to perform the task, instead of adding code to a gadget to do it.
+
+IMPORTANT: The executeCode result is internal tool context, not your answer to the user. After reading data or an action result with executeCode, always write a normal assistant message that includes the useful result. A collapsed code, observation, or activity card does not count as answering. For a queued action, use the originating binding's getActionResult method when available, poll until the result is terminal, and report that result directly in chat instead of sending the user to another page.
 
 The function also receives a \`self\` parameter which is a magic object that points back to this chat thread. Calling any method on \`self\`, like \`self.foo(123)\`, delivers a callback message to this chat and activates you to respond. \`self\` can be passed over RPC (e.g. to a subscription method) and stored in a Durable Object's KV storage for long-term callbacks. When an agent callback is received, it appears in your env under a name like \`PARAMS_1\`, with \`.args\` (the callback arguments), \`.resolve(value)\` (to return a value to the caller), and \`.reject(error)\` (to reject with an error).
 `.trim();
@@ -2928,11 +2955,19 @@ export async function runAgent(
         let msgs: AiChatMessageBodyWithModelData[] = [];
 
         {
+          // Components travel inside the message text (see extractChatComponents), so lift them
+          // out before the prose is persisted -- the user reads the answer and sees the components
+          // drawn, never the JSON that described them.
+          let extracted = extractChatComponents(
+              message.content.filter(block => block.type === "text")
+                  .map(block => block.text).join(""));
           let msg: AiChatMessageBodyWithModelData = {
             type: "message",
-            message: message.content.filter(block => block.type === "text")
-                .map(block => block.text).join(""),
+            message: extracted.message,
           };
+          if (extracted.components) {
+            msg.components = extracted.components;
+          }
           let reasoning = message.content
               .flatMap(block =>
                   block.type === "thinking" && !block.redacted ? [block.thinking] : [])

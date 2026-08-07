@@ -1797,6 +1797,16 @@ export type AiChatMessageBody = {
   // but the user should have the option to expand it.
   reasoning?: string;
 
+  // Interactive components the message renders inline, so an agent can offer a choice, collect
+  // field values, or show a table or chart instead of describing one in prose. See `ChatComponent`.
+  //
+  // These are authored by the model, so they are sanitized before storage and anything malformed is
+  // dropped. A component never carries authority: choosing an option or submitting a form sends an
+  // ordinary chat message, which the agent handles like any other, so an external write still
+  // reaches the user as a normal approval request. `message` must therefore stand on its own --
+  // a client that does not understand a component still shows the prose.
+  components?: ChatComponent[];
+
   // Messages from an AI agent can invoke tools.
   toolCalls?: AiToolCall[];
 
@@ -2193,6 +2203,129 @@ export type MessageFormatRef = {
   // Denormalized so an old message still displays after the format is renamed or un-promoted.
   noun: string;
   icon: OutputIcon;
+};
+
+// An interactive component an agent renders inline in a chat message. See
+// `AiChatMessageBody.components`.
+//
+// Like `MessageFormatRef` this is display data and carries no authority. A component is described,
+// never executed: the model chooses from this fixed vocabulary and the client draws it with trusted
+// code, so agent output cannot introduce markup or behaviour of its own. `choice` and `form` reply
+// by sending an ordinary chat message; nothing here can write to an external system without going
+// through the agent and its usual approval request.
+export type ChatComponent =
+    ChatChoiceComponent | ChatFormComponent | ChatTableComponent | ChatGraphComponent;
+
+// Offers the user a set of options to pick from.
+//
+// Choosing sends the option's `value` as an ordinary chat message, so the agent learns the answer
+// the same way it would if the user had typed it.
+export type ChatChoiceComponent = {
+  type: "choice";
+
+  // Question shown above the options.
+  prompt: string;
+
+  // The options, in display order.
+  options: ChatChoiceOption[];
+
+  // Whether more than one option may be chosen. Defaults to false.
+  multiple?: boolean;
+};
+
+// One option within a `ChatChoiceComponent`.
+export type ChatChoiceOption = {
+  // Text shown on the option.
+  label: string;
+
+  // Text sent as the user's reply when this option is chosen. Defaults to `label`.
+  value?: string;
+
+  // One line of explanation shown beneath the label.
+  description?: string;
+};
+
+// Collects a set of field values from the user.
+//
+// Submitting sends the values as an ordinary chat message. A form therefore proposes an edit; it
+// never performs one. When the agent goes on to act on the values, that action reaches the user as
+// the usual approval request, which is what lets a form safely gather arguments for a write.
+export type ChatFormComponent = {
+  type: "form";
+
+  // Title shown above the fields.
+  title: string;
+
+  // The fields, in display order.
+  fields: ChatFormField[];
+
+  // Label for the submit button. Defaults to "Submit".
+  submitLabel?: string;
+};
+
+// One field within a `ChatFormComponent`.
+export type ChatFormField = {
+  // Identifier reported alongside the value when the form is submitted.
+  name: string;
+
+  // Label shown with the input.
+  label: string;
+
+  // Which input to draw. A "select" field is ignored unless it also carries `options`.
+  kind: "text" | "textarea" | "number" | "boolean" | "select";
+
+  // Value the field starts with.
+  value?: string;
+
+  // The choices offered by a "select" field.
+  options?: string[];
+
+  // Whether the user must supply a value before submitting.
+  required?: boolean;
+
+  // Hint shown while the field is empty.
+  placeholder?: string;
+};
+
+// Presents rows of data. Read-only: a table has nothing to submit.
+export type ChatTableComponent = {
+  type: "table";
+
+  // Caption shown above the table.
+  title?: string;
+
+  // Column headers, in display order.
+  columns: string[];
+
+  // The rows. Each holds one cell per entry in `columns`; a short row is padded and a long one
+  // truncated, so a ragged table still draws.
+  rows: string[][];
+};
+
+// Plots one or more series against a shared set of labels. Read-only.
+export type ChatGraphComponent = {
+  type: "graph";
+
+  // Caption shown above the chart.
+  title?: string;
+
+  // How to draw the series.
+  plot: "line" | "bar";
+
+  // Labels along the x axis, shared by every series.
+  labels: string[];
+
+  // The series to plot.
+  series: ChatGraphSeries[];
+};
+
+// One series within a `ChatGraphComponent`.
+export type ChatGraphSeries = {
+  // Name shown in the legend.
+  name: string;
+
+  // One point per entry in `labels`. A null is a gap in the line rather than a zero.
+  points: (number | null)[];
 };
 
 // Capsules are resource references that are embedded inline in a chat message. The name comes
