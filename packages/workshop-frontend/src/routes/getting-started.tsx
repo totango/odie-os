@@ -210,6 +210,36 @@ function GatekeepersLink({ children }: { children: React.ReactNode }) {
   )
 }
 
+// A card in "Where everything lives" that names one surface and links to it, so the page answers
+// "where do I do this?" rather than only "is this configured?".
+function PlaceCard(
+  { icon, title, to, linkLabel, children }: {
+    icon: React.ReactNode
+    title: string
+    to?: '/workspaces' | '/gatekeepers' | '/outputs' | '/blueprints' | '/admin'
+    linkLabel?: string
+    children: React.ReactNode
+  },
+) {
+  return (
+    <div className="flex gap-3 rounded-xl border border-kumo-line bg-kumo-elevated p-4">
+      <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-brand">{icon}</div>
+      <div className="min-w-0">
+        <h3 className="text-[14px] font-semibold tracking-[-0.25px] text-kumo-default">{title}</h3>
+        <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">{children}</p>
+        {to && (
+          <span className="mt-3 block">
+            <Link to={to} className={INTERNAL_LINK_CLASS}>
+              {linkLabel ?? title}
+              <ArrowRight size={13} />
+            </Link>
+          </span>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function FlowStep({ icon, title, children }: { icon: React.ReactNode; title: string; children: React.ReactNode }) {
   return (
     <div className="flex gap-3 rounded-xl border border-kumo-line bg-kumo-elevated p-4">
@@ -381,6 +411,71 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
             </div>
           </Card>
         </div>
+
+        <section className="mt-8">
+          <Card>
+            <h2 className="text-lg font-semibold tracking-[-0.35px] text-kumo-default">Where everything lives</h2>
+            <p className="mt-2 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+              The parts of this deployment and where to reach them.
+            </p>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <PlaceCard icon={<Robot size={16} weight="bold" />} title="Workspaces" to="/workspaces" linkLabel="Open workspaces">
+                A workspace holds its conversations, anything the agent builds, and its own activity log.
+                Work stays inside the workspace it happened in, so a workspace is the unit you share.
+              </PlaceCard>
+              <PlaceCard icon={<Code size={16} weight="bold" />} title="Gadgets">
+                Ask the agent to build something and it appears in the pane beside the chat, with tabs for the
+                running app, its code, and its connections. Gadgets are real apps: they keep data and can be
+                given resources of their own.
+              </PlaceCard>
+              <PlaceCard icon={<Plugs size={16} weight="bold" />} title="Connectors" to="/gatekeepers" linkLabel="Open Gatekeepers">
+                Connect an account once and the agent can use it. Each connector decides what it exposes, and
+                only what you connect is reachable.
+              </PlaceCard>
+              <PlaceCard icon={<CheckCircle size={16} weight="bold" />} title="Outputs and blueprints" to="/outputs" linkLabel="Open outputs">
+                Finished documents and other standard formats collect here. Blueprints are reusable starting
+                points you can build a new workspace from.
+              </PlaceCard>
+              <PlaceCard icon={<ShieldCheck size={16} weight="bold" />} title="Activity and approvals">
+                Every read the agent makes is recorded, and anything that would change an external system waits
+                for you. The Activity button in a workspace lists whatever needs review.
+              </PlaceCard>
+              <PlaceCard icon={<Lightning size={16} weight="bold" />} title="Admin settings" to="/admin" linkLabel="Open admin">
+                Administrators set the deployment name and logo, standing instructions for the agent, and which
+                connectors are offered. Sign-in configuration deliberately lives outside this panel.
+              </PlaceCard>
+            </div>
+          </Card>
+        </section>
+
+        <section className="mt-8">
+          <Card>
+            <h2 className="text-lg font-semibold tracking-[-0.35px] text-kumo-default">How permission works</h2>
+            <p className="mt-2 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+              The agent can read a great deal on your behalf, but it cannot quietly change anything.
+            </p>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <FlowStep icon={<Detective size={16} weight="bold" />} title="Reads are recorded, not blocked">
+                Looking something up happens immediately and is written to the workspace activity log, so you can
+                always see what the agent saw.
+              </FlowStep>
+              <FlowStep icon={<ShieldCheck size={16} weight="bold" />} title="Changes wait for you">
+                Anything that writes to an outside system is described first and applied only after you approve it.
+                You can approve a kind of action once and let it run automatically afterwards; that choice is yours
+                to make and to withdraw.
+              </FlowStep>
+              <FlowStep icon={<Warning size={16} weight="bold" />} title="Private data locks a workspace">
+                Once a workspace reads someone&rsquo;s private data it stops being able to act, and it cannot be shared.
+                That is deliberate. Start a fresh workspace for work that needs to act.
+              </FlowStep>
+              <FlowStep icon={<CheckCircle size={16} weight="bold" />} title="Buttons and forms are just messages">
+                The agent may offer options, a form, a table, or a chart in the conversation. Answering one sends
+                your reply as an ordinary message; it never performs an action on its own, so a change still comes
+                back to you for approval.
+              </FlowStep>
+            </div>
+          </Card>
+        </section>
 
         <section className="mt-8 grid gap-4 lg:grid-cols-[1fr_1fr]">
           <Card>
