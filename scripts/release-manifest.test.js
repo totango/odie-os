@@ -157,6 +157,28 @@ test("worker entries carry the deploy contract", () => {
         namespace_id: "$KV_CONTEXT_COLLECTIONS_ID" });
   assert.deepEqual(context.inputs, []);
 
+  // Jarvis is configured with an operator-issued endpoint and bearer token rather than OAuth.
+  const jarvis = workers["gatekeeper-jarvis"];
+  assert.deepEqual(jarvis.inputs.map((i) => i.name), ["JARVIS_MCP_URL", "JARVIS_MCP_TOKEN"]);
+  assert.equal(jarvis.vars.JARVIS_TRUST_ANNOTATIONS, "true");
+
+  // Team PI uses a public Auth0 device client and per-user authorization, not a client secret.
+  const teamPi = workers["gatekeeper-team-pi"];
+  assert.deepEqual(teamPi.inputs.map((i) => i.name), [
+    "TEAM_PI_AUTH0_DOMAIN",
+    "TEAM_PI_AUTH0_CLIENT_ID",
+    "TEAM_PI_AUTH0_AUDIENCE",
+    "TEAM_PI_BASE_URL",
+  ]);
+  assert.ok(teamPi.inputs.every((input) => input.kind === "secret"));
+  for (const input of teamPi.inputs) {
+    assert.deepEqual(teamPi.bindings.find((binding) => binding.name === input.name), {
+      type: "secret_text",
+      name: input.name,
+      text: `$SECRET(${input.name})`,
+    });
+  }
+
   // Module blobs are content-addressed.
   for (const [name, entry] of Object.entries(workers)) {
     assert.ok(entry.modules.some((m) => m.name === entry.mainModule),
