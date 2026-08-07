@@ -297,11 +297,14 @@ live settings and verify every binding listed above. Keep existing environment v
 Do not deploy the repository's generic `packages/workshop-backend/wrangler.jsonc` directly to
 production because it does not describe the instance-specific resource IDs.
 
-The temporary production Wrangler configs remain at
-`packages/workshop-backend/wrangler.odie-os-production.jsonc`,
-`packages/router/wrangler.odie-os-production.jsonc`, and each new gatekeeper's
-`wrangler.production.jsonc`. Delete them after final deployment verification to avoid retaining
-instance-specific deployment state in the worktree.
+The production Wrangler configs used for this rollout are deliberately not in the repository, so the
+worktree carries no instance-specific deployment state. They were moved to
+`~/.config/odie-os/wrangler/` on the deploying machine, one file per package, named after the path
+they came from. They are kept rather than deleted because rebuilding them by hand risks omitting a
+binding — a backend deploy that silently drops KV, R2, Durable Object, browser, Workers AI, loader,
+or gatekeeper service bindings is far more damaging than a stale file. Copy the relevant file back
+into its package before deploying, verify every binding listed above against the live Worker, and
+remove it again afterwards.
 
 At handoff, the transport hardening, gatekeepers, Getting Started route, and approval-result changes
 are deployed but uncommitted. Commit or open a PR before treating the Git repository as the durable
