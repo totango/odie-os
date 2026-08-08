@@ -134,6 +134,29 @@ repository, incident, integration-health, and status tools are reads. Support-qu
 investigation tools always require manual approval; upstream MCP annotations cannot weaken that
 policy. The deployment bearer is stored only as the `JARVIS_MCP_TOKEN` Worker secret.
 
+Three tools reach live production rather than recorded knowledge: `jarvis_list_prod_tools`,
+`jarvis_describe_prod_tool`, and `jarvis_call_prod_tool`. Listing and describing are reads.
+**Calling is an action and waits for approval**, even though JARVIS declares the tool read-only —
+the agent chooses the tool name and the arguments, and the reachable surface includes ad-hoc SQL
+against the production databases, so the gatekeeper does not delegate that decision upstream. If the
+approval prompts prove too frequent in practice, removing `jarvis_call_prod_tool` from
+`MANUAL_ACTION_TOOL_SET` in `packages/gatekeeper-jarvis/src/config.ts` reverts it to a read.
+
+JARVIS refuses the tools those servers host that write — Grafana's `create_incident`,
+`update_dashboard`, `alerting_manage_rules` and four more, plus k8sgpt's `config`, `add-filters`
+and `remove-filters`. That policy lives in `odi-control-plane`, not here; this deployment does not
+depend on it being correct, which is why calling is approval-gated on this side.
+
+The database reads behind those tools are read-only by enforcement rather than by convention,
+verified 2026-08-07 rather than taken from the tool descriptions:
+
+- **postgres** connects as `mcp_readonly` with `transaction_read_only` on, against a read replica
+  (`pg_is_in_recovery()` true) — writes are impossible regardless of what a tool claims.
+- **clickhouse** connects as `mcp_readonly`, whose role holds exactly one grant:
+  `GRANT SELECT ON leviosa.* TO mcp_readonly_role`. SELECT only, and scoped to one database.
+- **redis** exposes only `get`, `ttl`, `type`, `hgetall` and `dbsize`; there is no
+  arbitrary-command tool.
+
 JARVIS tool helpers are generated with camel-case names. Call
 `JARVIS.jarvisInvestigateCustomerIssue(...)`, not the MCP wire name; snake_case names remain
 reachable only through `callTool("jarvis_investigate_customer_issue", ...)`.
@@ -161,8 +184,38 @@ recorded such an observation. Run `installSkill` or `startConnection` in a works
 yet performed an explicit Team PI read.
 
 A connected account's persisted gatekeeper capability is pinned to the Worker version present when
-the account was connected. After deploying a gatekeeper change that alters catalog or observation
-behavior, existing accounts must be disconnected and reconnected before they exercise the new code.
+the account was connected (the gatekeeper Workers set `allow_irrevocable_stub_storage`, so a stored
+stub keeps calling the version it was stored against). After deploying a gatekeeper change that
+alters catalog or observation behaviour, existing accounts must be disconnected and reconnected
+before they exercise the new code.
+
+Observed behaviour when that step is skipped, verified against the JARVIS gatekeeper on
+2026-08-07 after adding three tools:
+
+- Workspaces **created after** the deploy pick up the change with no action at all.
+- Workspaces **created before** it do not, and starting a new chat inside one does **not** help —
+  the stale record is per workspace, not per chat.
+- The failure is not a missing tool but an RPC error, e.g.
+  `TypeError: The RPC receiver does not implement the method "jarvisListProdTools"`, which reads
+  like a code bug rather than a stale capability.
+
+Reconnecting the account fixes the existing workspaces. For a gatekeeper the deployment has set to
+**enabled**, there is no Disconnect control — a forced ambient account is hidden from the Connectors
+page and from a workspace's "Create New Connection" dialog. The sequence is:
+
+1. Admin → Gatekeepers → set the vendor to **optional**. It then appears under Connected.
+2. Connectors → open it → Disconnect → confirm.
+3. Reconnect it from Available.
+4. Admin → Gatekeepers → set the vendor back to **enabled**.
+
+Do not use **disabled** for this: an existing account goes dormant rather than being replaced, so
+re-enabling reuses the same pinned capability and changes nothing, while the gatekeeper is
+unavailable to everyone in the meantime.
+
+The cost is real and worth stating: disconnecting makes the bindings frozen into pre-existing chats
+inert (`prepareChatBindings` freezes the ambient set per chat, and a since-disconnected gatekeeper
+stays in the frozen list but stops working). Those transcripts lose the gatekeeper entirely. New
+chats in every workspace get the current one.
 
 ## Source Locations
 
