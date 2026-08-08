@@ -213,13 +213,21 @@ export function describeCall(args: {
     rendered = `${rendered.slice(0, MAX_ARGUMENTS)}\n... (truncated)`;
   }
 
+  // For an action, `classifiedBy` is always "default" -- `classifyTool` only says
+  // "server-annotation" for reads -- so it cannot say why approval is needed. The tool's own
+  // annotation can. A gatekeeper may require approval for a tool the server does call read-only
+  // (JARVIS does exactly that for production tool calls), and telling that approver the tool was
+  // unannotated would be false, and false in the direction that makes the prompt look like a bug.
   const provenance = args.mode === "read"
     ? args.classifiedBy === "server-annotation"
       ? "The server declares this tool read-only, so it runs without approval. That claim comes " +
         "from the server itself."
       : "Treated as read-only by this deployment."
-    : "Treated as an action because the server did not declare it read-only. Nothing has been " +
-      "sent yet.";
+    : isDeclaredReadOnly(args.tool)
+      ? "This deployment requires approval for this tool even though the server declares it " +
+        "read-only. Nothing has been sent yet."
+      : "Treated as an action because the server did not declare it read-only. Nothing has been " +
+        "sent yet.";
 
   const description = [
     `**${plainInline(args.serverName)}** \u2192 ${codeSpan(args.tool.name)}`,

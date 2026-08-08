@@ -148,6 +148,26 @@ describe("describeCall", () => {
     expect(call("action", "default").description).toContain("Nothing has been sent yet.");
   });
 
+  // A gatekeeper may queue a tool the server does call read-only. Blaming the server for the prompt
+  // would be false, and false in the direction that makes a deliberate policy look like a bug.
+  it("does not blame the server when the deployment queued a read-only tool", () => {
+    const queuedReadOnly = describeCall({
+      serverName: "Acme",
+      endpoint: "https://acme.example/mcp",
+      tool: { ...tool(), annotations: { readOnlyHint: true } },
+      toolArgs: { id: 7 },
+      mode: "action",
+      classifiedBy: "default",
+    }).description;
+    expect(queuedReadOnly).not.toContain("did not declare it read-only");
+    expect(queuedReadOnly).toContain("even though the server declares it read-only");
+    expect(queuedReadOnly).toContain("Nothing has been sent yet.");
+  });
+
+  it("still names an unannotated tool as the reason when that is true", () => {
+    expect(call("action", "default").description).toContain("did not declare it read-only");
+  });
+
   it("survives arguments that cannot be serialized", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
