@@ -21,10 +21,21 @@ export function zeroUsage(): Usage {
 export class AgentTurnError extends Error {
   /** HTTP status of the failing request, when the handle observed a response for it. */
   readonly statusCode?: number;
+  /** Safe message to persist and show instead of raw provider text, when one is available. */
+  readonly userMessage?: string;
+  /** Machine-readable chat error code for failures with special client behavior. */
+  readonly code?: string;
 
-  constructor(message: string, statusCode?: number) {
+  constructor(message: string, statusCode?: number, teamPiCodex = false) {
     super(message);
     this.statusCode = statusCode;
+    if (teamPiCodex && /account_(?:stream|response_create)_cap|server_is_overloaded/i.test(message)) {
+      this.userMessage = "Team PI Codex is temporarily at capacity. Please retry in a moment.";
+      this.code = "transient_model_capacity";
+    } else if (teamPiCodex && /Team PI Codex (?:request timed out|stream stopped responding)/i.test(message)) {
+      this.userMessage = "Team PI Codex stopped responding before the request completed. Please retry.";
+      this.code = "transient_model_timeout";
+    }
   }
 }
 
@@ -38,8 +49,12 @@ export class AgentTurnError extends Error {
 export function httpStatusFromError(errorMessage: string, handle: ModelHandle)
     : number | undefined {
   const match = /^(\d{3})\b/.exec(errorMessage.trim());
-  if (match) return Number(match[1]);
-  return handle.lastResponse?.status;
+  if (match) {
+    const parsed = Number(match[1]);
+    return parsed >= 400 ? parsed : undefined;
+  }
+  const status = handle.lastResponse?.status;
+  return status !== undefined && status >= 400 ? status : undefined;
 }
 
 /**
@@ -72,7 +87,8 @@ export async function completeText(handle: ModelHandle, args: {
     // Surface a cancellation as the abort reason, like a directly-aborted request would.
     args.signal?.throwIfAborted();
     const errorMessage = message.errorMessage ?? "The model request failed.";
-    throw new AgentTurnError(errorMessage, httpStatusFromError(errorMessage, handle));
+    throw new AgentTurnError(
+        errorMessage, httpStatusFromError(errorMessage, handle), handle.teamPiCodex);
   }
   return message.content
       .filter(block => block.type === "text")

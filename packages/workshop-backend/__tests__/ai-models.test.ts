@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { zstdCompressSync } from "node:zlib";
 import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
 import { getModel, makeTeamPiCodexFetch, type ModelHandle } from "../src/ai-models.js";
+import { AgentTurnError, httpStatusFromError } from "../src/ai-invoke.js";
 import {
   getDefaultTeamPiCodexModel, getTeamPiCodexModelList, isTeamPiCodexConfig,
   isTeamPiCodexEligibleUser, isTeamPiCodexMarkerConfig, isTeamPiCodexUserId,
@@ -332,7 +333,9 @@ describe("Team PI Codex routing", () => {
   });
 
   async function forwardTeamPiRequest(request: Request): Promise<CapturedRequest> {
-    await makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub)(request);
+    const response = await makeTeamPiCodexFetch(
+        TOTANGO_INITIATOR, "team-pi-secret", fetchStub)(request);
+    await response.arrayBuffer();
     return capturedRequests[0];
   }
 
@@ -428,6 +431,8 @@ describe("Team PI Codex routing", () => {
             "chatgpt-account-id": "synthetic-account",
             "session-id": "session-123",
             "x-client-request-id": "request-123",
+            Cookie: "private=1",
+            "X-Forwarded-For": "203.0.113.1",
           },
           body: compressed,
         }));
@@ -437,6 +442,8 @@ describe("Team PI Codex routing", () => {
     expect(request.headers.get("content-length")).toBeNull();
     expect(request.headers.get("authorization")).toBeNull();
     expect(request.headers.get("chatgpt-account-id")).toBeNull();
+    expect(request.headers.get("cookie")).toBeNull();
+    expect(request.headers.get("x-forwarded-for")).toBeNull();
     expect(request.headers.get("x-client-request-id")).toMatch(/^[0-9a-f-]{36}$/);
     expect(request.headers.get("x-client-request-id")).not.toBe("request-123");
     await verifyTeamPiSignature(request, "team-pi-secret");
@@ -444,10 +451,10 @@ describe("Team PI Codex routing", () => {
 
   it("uses one replay ID per model invocation while preserving session affinity", async () => {
     const firstInvocation = makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub);
-    await firstInvocation(teamPiRequest());
-    await firstInvocation(teamPiRequest());
+    await (await firstInvocation(teamPiRequest())).arrayBuffer();
+    await (await firstInvocation(teamPiRequest())).arrayBuffer();
     const secondInvocation = makeTeamPiCodexFetch(TOTANGO_INITIATOR, "team-pi-secret", fetchStub);
-    await secondInvocation(teamPiRequest());
+    await (await secondInvocation(teamPiRequest())).arrayBuffer();
 
     const [firstAttempt, retryAttempt, nextInvocation] = capturedRequests;
     expect(firstAttempt.headers.get("session-id")).toBe("stable-session");
@@ -493,6 +500,126 @@ describe("Team PI Codex routing", () => {
       body: oversizedDecodedBody,
     })).rejects.toThrow("request body exceeds the 8 MiB decoded limit");
     expect(capturedRequests).toHaveLength(0);
+  });
+
+  it("aborts a Team PI request when its total budget expires", async () => {
+    const downstream = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+      });
+    }) as typeof fetch;
+    const forward = makeTeamPiCodexFetch(
+        TOTANGO_INITIATOR, "team-pi-secret", downstream,
+        { streamIdleMs: 1000, requestBudgetMs: 20 });
+
+    await expect(forward(teamPiRequest()))
+        .rejects.toThrow("Team PI Codex request timed out after 0.02 seconds.");
+  });
+
+  it("applies the total budget while reading the request body", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {},
+    });
+    const downstream = (async () => {
+      throw new Error("downstream fetch must not start");
+    }) as typeof fetch;
+    const forward = makeTeamPiCodexFetch(
+        TOTANGO_INITIATOR, "team-pi-secret", downstream,
+        { streamIdleMs: 1000, requestBudgetMs: 20 });
+    const request = new Request("https://team-pi.example/api/odie/codex/responses", {
+      method: "POST",
+      body,
+    });
+
+    await expect(forward(request))
+        .rejects.toThrow("Team PI Codex request timed out after 0.02 seconds.");
+  });
+
+  it("preserves caller cancellation instead of reporting a timeout", async () => {
+    let markDownstreamStarted: (() => void) | undefined;
+    const downstreamStarted = new Promise<void>(resolve => {
+      markDownstreamStarted = resolve;
+    });
+    const downstream = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      markDownstreamStarted?.();
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+      });
+    }) as typeof fetch;
+    const caller = new AbortController();
+    const forward = makeTeamPiCodexFetch(
+        TOTANGO_INITIATOR, "team-pi-secret", downstream,
+        { streamIdleMs: 1000, requestBudgetMs: 1000 });
+    const reason = new Error("user stopped the turn");
+    const response = forward(new Request(teamPiRequest(), { signal: caller.signal }));
+    await downstreamStarted;
+    caller.abort(reason);
+
+    await expect(response).rejects.toBe(reason);
+  });
+
+  it("cancels a stalled request body when the caller stops the turn", async () => {
+    let bodyCancelled = false;
+    const caller = new AbortController();
+    const request = new Request("https://team-pi.example/api/odie/codex/responses", {
+      method: "POST",
+      body: new ReadableStream<Uint8Array>({
+        cancel() {
+          bodyCancelled = true;
+        },
+      }),
+      signal: caller.signal,
+    });
+    const forward = makeTeamPiCodexFetch(
+        TOTANGO_INITIATOR, "team-pi-secret", undefined,
+        { streamIdleMs: 1000, requestBudgetMs: 1000 });
+    const reason = new Error("user stopped the turn");
+    const response = forward(request);
+    caller.abort(reason);
+
+    await expect(response).rejects.toBe(reason);
+    expect(bodyCancelled).toBe(true);
+  });
+
+  it("fails a Team PI response whose body stops producing bytes", async () => {
+    const downstream = (async () => new Response(new ReadableStream<Uint8Array>(), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    })) as typeof fetch;
+    const forward = makeTeamPiCodexFetch(
+        TOTANGO_INITIATOR, "team-pi-secret", downstream,
+        { streamIdleMs: 20, requestBudgetMs: 1000 });
+
+    const response = await forward(teamPiRequest());
+    await expect(response.body!.getReader().read())
+        .rejects.toThrow("Team PI Codex stream stopped responding for 0.02 seconds.");
+  });
+
+  it("does not classify a failed stream as HTTP 200", () => {
+    const handle = { lastResponse: { status: 200 } } as ModelHandle;
+    expect(httpStatusFromError("Upstream stream failed", handle)).toBeUndefined();
+    expect(httpStatusFromError("200 Upstream stream failed", handle)).toBeUndefined();
+    handle.lastResponse = { status: 503 };
+    expect(httpStatusFromError("Upstream stream failed", handle)).toBe(503);
+  });
+
+  it("gives Team PI capacity and timeout failures safe retryable messages", () => {
+    const capacity = new AgentTurnError(
+        "account_response_create_cap: upstream detail", 503, true);
+    expect(capacity.userMessage).toBe(
+        "Team PI Codex is temporarily at capacity. Please retry in a moment.");
+    expect(capacity.code).toBe("transient_model_capacity");
+
+    const timeout = new AgentTurnError(
+        "Team PI Codex stream stopped responding for 120 seconds.", undefined, true);
+    expect(timeout.userMessage).toBe(
+        "Team PI Codex stopped responding before the request completed. Please retry.");
+    expect(timeout.code).toBe("transient_model_timeout");
+
+    const otherProvider = new AgentTurnError("server_is_overloaded", 503);
+    expect(otherProvider.userMessage).toBeUndefined();
   });
 });
 

@@ -98,6 +98,9 @@ export type ModelHandle = {
   // right after the request they care about completes. Turns run requests sequentially, so this
   // is safe.
   lastResponse?: { status: number; aiGatewayLogId?: string };
+
+  /** True only for the deployment-provided Team PI Codex route. */
+  teamPiCodex?: true;
 };
 
 function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
@@ -128,6 +131,8 @@ const TEAM_PI_CODEX_KEY_ID = "odie-v1";
 const TEAM_PI_CODEX_USER_RE = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@totango\.com$/;
 const TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES = 4 * 1024 * 1024;
 const TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES = 8 * 1024 * 1024;
+const TEAM_PI_CODEX_STREAM_IDLE_TIMEOUT_MS = 120_000;
+const TEAM_PI_CODEX_REQUEST_BUDGET_MS = 300_000;
 const SYNTHETIC_CODEX_API_KEY =
     "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." +
     "eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoib2RpZS10ZWFtLXBpLWNvZGV4In19." +
@@ -280,6 +285,7 @@ type HandleArgs = {
   gatewayMetadata?: GatewayMetadata;
   sessionAffinity?: string;
   aiGatewayLogRoute?: AiGatewayLogRoute;
+  teamPiCodex?: true;
   fetch?: (downstream?: typeof fetch) => typeof fetch;
 };
 
@@ -304,11 +310,58 @@ async function hmacSha256Base64Url(secret: string, message: string): Promise<str
   return bytesToBase64Url(new Uint8Array(signature));
 }
 
+async function readBoundedBody(
+  request: Request,
+  maxBytes: number,
+  errorMessage: string,
+  signal: AbortSignal,
+)
+    : Promise<Uint8Array> {
+  const reader = request.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    signal.throwIfAborted();
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        void reader.cancel().catch(() => {});
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    let result: ReadableStreamReadResult<Uint8Array>;
+    try {
+      result = await Promise.race([reader.read(), aborted]);
+    } finally {
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+    const { done, value } = result;
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(errorMessage);
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
 /** Build the package-internal signed transport used for Team PI Codex requests. */
 export function makeTeamPiCodexFetch(
   initiator: AiChatAuthorInfo,
   hmacSecret: string,
   downstream?: typeof fetch,
+  timeouts: { streamIdleMs?: number; requestBudgetMs?: number } = {},
 ): typeof fetch {
   const user = initiator.id.toLowerCase();
   if (!TEAM_PI_CODEX_USER_RE.test(user)) {
@@ -318,64 +371,174 @@ export function makeTeamPiCodexFetch(
   const clientRequestId = crypto.randomUUID();
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
-    if (request.method !== "POST") throw new Error("Team PI Codex only supports POST requests.");
-    const contentEncoding = request.headers.get("Content-Encoding")?.trim().toLowerCase();
-    if (contentEncoding && contentEncoding !== "identity" && contentEncoding !== "zstd") {
-      throw new Error(`Unsupported Team PI Codex request encoding: ${contentEncoding}`);
-    }
-    const maxInputBytes = contentEncoding === "zstd"
-        ? TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES
-        : TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES;
-    const contentLength = request.headers.get("Content-Length");
-    if (contentLength !== null && Number(contentLength) > maxInputBytes) {
-      throw new Error(contentEncoding === "zstd"
-          ? "Team PI Codex compressed request body exceeds the 4 MiB limit."
-          : "Team PI Codex request body exceeds the 8 MiB decoded limit.");
-    }
-    let bodyBytes = new Uint8Array(await request.clone().arrayBuffer());
-    if (contentEncoding === "zstd") {
-      if (bodyBytes.byteLength > TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES) {
-        throw new Error("Team PI Codex compressed request body exceeds the 4 MiB limit.");
+    request.signal.throwIfAborted();
+    const streamIdleMs = timeouts.streamIdleMs ?? TEAM_PI_CODEX_STREAM_IDLE_TIMEOUT_MS;
+    const requestBudgetMs = timeouts.requestBudgetMs ?? TEAM_PI_CODEX_REQUEST_BUDGET_MS;
+    const networkController = new AbortController();
+    const bodyBudgetController = new AbortController();
+    let timeoutError: Error | undefined;
+    let abortRequest = (reason: unknown) => networkController.abort(reason);
+    const onCallerAbort = () => {
+      bodyBudgetController.abort(request.signal.reason);
+      abortRequest(request.signal.reason);
+    };
+    request.signal.addEventListener("abort", onCallerAbort, { once: true });
+    const requestTimer = setTimeout(() => {
+      timeoutError = new Error(
+          `Team PI Codex request timed out after ${requestBudgetMs / 1000} seconds.`);
+      bodyBudgetController.abort(timeoutError);
+      abortRequest(timeoutError);
+    }, requestBudgetMs);
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearIdleTimer = () => {
+      if (idleTimer === undefined) return;
+      clearTimeout(idleTimer);
+      idleTimer = undefined;
+    };
+    const cleanup = () => {
+      clearTimeout(requestTimer);
+      clearIdleTimer();
+      request.signal.removeEventListener("abort", onCallerAbort);
+    };
+
+    try {
+      if (request.method !== "POST") throw new Error("Team PI Codex only supports POST requests.");
+      const contentEncoding = request.headers.get("Content-Encoding")?.trim().toLowerCase();
+      if (contentEncoding && contentEncoding !== "identity" && contentEncoding !== "zstd") {
+        throw new Error(`Unsupported Team PI Codex request encoding: ${contentEncoding}`);
       }
-      try {
-        bodyBytes = Uint8Array.from(zstdDecompressSync(bodyBytes, {
-          maxOutputLength: TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES,
-        }));
-      } catch (error) {
-        throw new Error("Team PI Codex request body is invalid or exceeds the 8 MiB decoded limit.", {
-          cause: error,
-        });
+      const maxInputBytes = contentEncoding === "zstd"
+          ? TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES
+          : TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES;
+      const contentLength = request.headers.get("Content-Length");
+      if (contentLength !== null && Number(contentLength) > maxInputBytes) {
+        throw new Error(contentEncoding === "zstd"
+            ? "Team PI Codex compressed request body exceeds the 4 MiB limit."
+            : "Team PI Codex request body exceeds the 8 MiB decoded limit.");
       }
+      let bodyBytes = await readBoundedBody(
+          request, maxInputBytes,
+          contentEncoding === "zstd"
+            ? "Team PI Codex compressed request body exceeds the 4 MiB limit."
+            : "Team PI Codex request body exceeds the 8 MiB decoded limit.",
+          bodyBudgetController.signal);
+      networkController.signal.throwIfAborted();
+      if (contentEncoding === "zstd") {
+        if (bodyBytes.byteLength > TEAM_PI_CODEX_MAX_ENCODED_BODY_BYTES) {
+          throw new Error("Team PI Codex compressed request body exceeds the 4 MiB limit.");
+        }
+        try {
+          bodyBytes = Uint8Array.from(zstdDecompressSync(bodyBytes, {
+            maxOutputLength: TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES,
+          }));
+        } catch (error) {
+          throw new Error("Team PI Codex request body is invalid or exceeds the 8 MiB decoded limit.", {
+            cause: error,
+          });
+        }
+      }
+      if (bodyBytes.byteLength > TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES) {
+        throw new Error("Team PI Codex request body exceeds the 8 MiB decoded limit.");
+      }
+      const timestamp = Date.now().toString();
+      const bodySha256 = await sha256Hex(bodyBytes);
+      networkController.signal.throwIfAborted();
+      const sessionId = request.headers.get("session-id") ?? "";
+      const canonical = [
+        TEAM_PI_CODEX_KEY_ID,
+        TEAM_PI_CODEX_AUDIENCE,
+        "POST",
+        "/api/odie/codex/responses",
+        timestamp,
+        user,
+        sessionId,
+        clientRequestId,
+        bodySha256,
+      ].join("\n");
+      const headers = new Headers();
+      for (const name of ["Content-Type", "Accept", "OpenAI-Beta", "Originator", "session-id"]) {
+        const value = request.headers.get(name);
+        if (value !== null) headers.set(name, value);
+      }
+      headers.set("Content-Encoding", "identity");
+      headers.set("x-client-request-id", clientRequestId);
+      headers.set("x-team-pi-odie-key-id", TEAM_PI_CODEX_KEY_ID);
+      headers.set("x-team-pi-odie-audience", TEAM_PI_CODEX_AUDIENCE);
+      headers.set("x-team-pi-odie-timestamp", timestamp);
+      headers.set("x-team-pi-odie-user", user);
+      headers.set("x-team-pi-odie-signature", `v1=${await hmacSha256Base64Url(hmacSecret, canonical)}`);
+      networkController.signal.throwIfAborted();
+      const response = await innerFetch(new Request(request.url, {
+        method: "POST",
+        headers,
+        body: bodyBytes,
+        signal: networkController.signal,
+      }));
+      if (!response.body) {
+        cleanup();
+        return response;
+      }
+
+      const reader = response.body.getReader();
+      let settled = false;
+      let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+      const finish = () => {
+        if (settled) return false;
+        settled = true;
+        cleanup();
+        return true;
+      };
+      const fail = (error: unknown) => {
+        if (!finish()) return;
+        networkController.abort(error);
+        void reader.cancel().catch(() => {});
+        streamController?.error(error);
+      };
+      const resetIdleTimer = () => {
+        clearIdleTimer();
+        idleTimer = setTimeout(() => {
+          timeoutError = new Error(
+              `Team PI Codex stream stopped responding for ${streamIdleMs / 1000} seconds.`);
+          fail(timeoutError);
+        }, streamIdleMs);
+      };
+      abortRequest = fail;
+
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+        },
+        async pull(controller) {
+          try {
+            resetIdleTimer();
+            const result = await reader.read();
+            clearIdleTimer();
+            if (settled) return;
+            if (result.done) {
+              finish();
+              controller.close();
+              return;
+            }
+            controller.enqueue(result.value);
+          } catch (error) {
+            if (finish()) controller.error(timeoutError ?? error);
+          }
+        },
+        async cancel(reason) {
+          if (!finish()) return;
+          networkController.abort(reason);
+          await reader.cancel(reason);
+        },
+      });
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } catch (error) {
+      cleanup();
+      throw timeoutError ?? error;
     }
-    if (bodyBytes.byteLength > TEAM_PI_CODEX_MAX_DECODED_BODY_BYTES) {
-      throw new Error("Team PI Codex request body exceeds the 8 MiB decoded limit.");
-    }
-    const timestamp = Date.now().toString();
-    const bodySha256 = await sha256Hex(bodyBytes);
-    const sessionId = request.headers.get("session-id") ?? "";
-    const canonical = [
-      TEAM_PI_CODEX_KEY_ID,
-      TEAM_PI_CODEX_AUDIENCE,
-      "POST",
-      "/api/odie/codex/responses",
-      timestamp,
-      user,
-      sessionId,
-      clientRequestId,
-      bodySha256,
-    ].join("\n");
-    const headers = new Headers(request.headers);
-    headers.delete("Authorization");
-    headers.delete("chatgpt-account-id");
-    headers.delete("Content-Length");
-    headers.set("Content-Encoding", "identity");
-    headers.set("x-client-request-id", clientRequestId);
-    headers.set("x-team-pi-odie-key-id", TEAM_PI_CODEX_KEY_ID);
-    headers.set("x-team-pi-odie-audience", TEAM_PI_CODEX_AUDIENCE);
-    headers.set("x-team-pi-odie-timestamp", timestamp);
-    headers.set("x-team-pi-odie-user", user);
-    headers.set("x-team-pi-odie-signature", `v1=${await hmacSha256Base64Url(hmacSecret, canonical)}`);
-    return innerFetch(new Request(request, { method: "POST", headers, body: bodyBytes }));
   }) as typeof fetch;
 }
 
@@ -406,6 +569,7 @@ function makeHandle(args: HandleArgs): ModelHandle {
   const handle: ModelHandle = {
     model: args.model,
     aiGatewayLogRoute: args.aiGatewayLogRoute,
+    teamPiCodex: args.teamPiCodex,
     stream: (model, context, { thinking = true, ...options } = {}) => {
       // Never let a failed request read a previous request's response metadata.
       handle.lastResponse = undefined;
@@ -514,6 +678,7 @@ function getModelViaTeamPiCodex(
       compat: catalog?.compat,
     },
     apiKey: SYNTHETIC_CODEX_API_KEY,
+    teamPiCodex: true,
     fetch: downstream => makeTeamPiCodexFetch(initiator, env.TEAM_PI_CODEX_HMAC_SECRET!, downstream),
     sessionAffinity,
   });
