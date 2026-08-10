@@ -4020,7 +4020,7 @@ class OverseerImpl implements AgentHooks {
         });
       }
 
-      let errorMessage = stringifyError(err);
+      let errorMessage = apiError?.userMessage ?? stringifyError(err);
       if (apiError) {
         turnLogger.error("runAgent failed", {
           event: "agent.run.failed", statusCode: apiError.statusCode, error: err,
@@ -4035,7 +4035,7 @@ class OverseerImpl implements AgentHooks {
         durationMs: Date.now() - startedAt,
       });
 
-      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage);
+      this.postAgentErrorMessage(chatId, aiModel.profile, errorMessage, apiError?.code);
 
       // Reject any pending agent callback return promises.
       let error = err instanceof Error ? err : new Error(`${err}`);

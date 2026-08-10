@@ -336,6 +336,10 @@ Known upstream issues observed during verification, outside this deployment's co
   `codex-lb is temporarily overloaded`. Retry is safe only when the failure happened before an
   action was staged; after a staged or approved action, ask the agent to render the existing result
   instead of retrying, so the write is not duplicated.
+- Odie now bounds each Team PI model request to five minutes and fails a response stream after two
+  minutes without bytes. These failures produce a durable, user-visible transient error instead of
+  leaving the turn active indefinitely. Automatic replay remains disabled because a timeout after
+  upstream dispatch has an ambiguous outcome; the existing Retry action starts a new model turn.
 - A long-lived workspace returned `Required continuity owner is outside the eligible account policy`
   while fresh workspaces succeeded. Treat this as stale per-conversation affinity and start a new
   workspace rather than changing account policy.
@@ -404,7 +408,9 @@ a new model invocation must not.
 
 The signed Odie request passed Team PI authentication but no SSE data arrived before the relay idle
 deadline. Run a fresh signed relay smoke with a new request ID, then inspect Team PI, Jarvis, and
-codex-lb health. Do not retry with a previously claimed request ID when isolating the failure.
+codex-lb health. Odie applies the same two-minute no-byte bound to the response body and displays a
+retryable transient error when it fires. Do not retry with a previously claimed request ID when
+isolating the failure.
 
 ### Managed model is missing
 

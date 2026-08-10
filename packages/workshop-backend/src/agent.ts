@@ -3105,7 +3105,7 @@ export async function runAgent(
     // Other failures become an AgentTurnError carrying the failing request's HTTP status (when
     // it can be determined) for the overseer's triage.
     throw new AgentTurnError(
-        turnFailure.message, httpStatusFromError(turnFailure.message, handle));
+        turnFailure.message, httpStatusFromError(turnFailure.message, handle), handle.teamPiCodex);
   }
 
   // The turn ran, so there is no checkpoint to report.
