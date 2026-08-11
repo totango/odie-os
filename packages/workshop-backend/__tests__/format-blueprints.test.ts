@@ -254,6 +254,17 @@ describe("bundled featured starter blueprints", () => {
       let files = await readInstalledFiles(compressed);
 
       expect(metadata.version, entry.blueprintId).toBe(entry.revision);
+
+      // Both dates come from the sidecar's explicit `updatedAt`, so they agree exactly and are a
+      // canonical UTC instant. Asserting the invariant rather than one literal date matters because
+      // the documented workflow is to update `updatedAt` per starter as its archive changes -- a
+      // pinned literal would fail the moment somebody follows it for a single directory. The year
+      // check is what catches a regression to the old behaviour, which derived the date from
+      // `revision` and so produced 1970.
+      let created = metadata.created.toISOString();
+      expect(created, entry.blueprintId).toBe(metadata.lastUpdated.toISOString());
+      expect(created, entry.blueprintId).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(metadata.created.getUTCFullYear(), entry.blueprintId).toBeGreaterThan(2000);
       expect(files["README.md"], entry.blueprintId).toBeDefined();
       expect(files["client.js"], entry.blueprintId).toBeDefined();
       expect(files["server.js"], entry.blueprintId).toBeDefined();

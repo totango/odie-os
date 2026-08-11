@@ -52,7 +52,7 @@ function parseSidecar(name, raw, kind) {
     return value;
   };
 
-  let { blueprintId, title, description, output, author, revision, bindings, $comment, ...rest } = parsed;
+  let { blueprintId, title, description, output, author, revision, bindings, updatedAt, $comment, ...rest } = parsed;
   if (Object.keys(rest).length > 0) bad(`unknown keys: ${Object.keys(rest).join(", ")}`);
 
   if (!/^[a-zA-Z0-9._-]+$/.test(blueprintId ?? "")) {
@@ -86,11 +86,22 @@ function parseSidecar(name, raw, kind) {
   if (kind === "format" && bindings !== undefined) {
     bad("bindings is only allowed for bundled featured blueprints");
   }
+  if (kind === "format" && updatedAt !== undefined) {
+    bad("updatedAt is only allowed for bundled featured blueprints");
+  }
   if (kind === "featured" && bindings !== undefined) {
     let emptyArray = Array.isArray(bindings) && bindings.length === 0;
     let emptyObject = typeof bindings === "object" && bindings !== null &&
         !Array.isArray(bindings) && Object.keys(bindings).length === 0;
     if (!emptyArray && !emptyObject) bad("bindings must be omitted, an empty array, or an empty object");
+  }
+  let cleanUpdatedAt;
+  if (kind === "featured") {
+    if (typeof updatedAt !== "string" || Number.isNaN(Date.parse(updatedAt)) ||
+        new Date(updatedAt).toISOString() !== updatedAt) {
+      bad("updatedAt must be an ISO 8601 UTC timestamp");
+    }
+    cleanUpdatedAt = updatedAt;
   }
   if (typeof author !== "object" || author === null) bad("author is required");
   let { type: authorType, name: authorName, id: authorId, ...authorRest } = author;
@@ -110,6 +121,7 @@ function parseSidecar(name, raw, kind) {
       id: string(authorId, "author.id"),
     },
     revision,
+    ...(cleanUpdatedAt ? { updatedAt: cleanUpdatedAt } : {}),
   };
 }
 
@@ -187,7 +199,7 @@ async function packageFeaturedBlueprint(slug, dir) {
   }
   let update = Y.encodeStateAsUpdateV2(doc);
   let gzipContent = gzipSync(update, { mtime: 0 });
-  let archiveDate = new Date(entry.revision * 1000).toISOString();
+  let { updatedAt: archiveDate, ...bundledEntry } = entry;
   let metadata = {
     title: entry.title,
     description: entry.description,
@@ -197,7 +209,7 @@ async function packageFeaturedBlueprint(slug, dir) {
     lastUpdated: archiveDate,
     bindings: {},
   };
-  return { ...entry, archive: encodeArchive(metadata, gzipContent) };
+  return { ...bundledEntry, archive: encodeArchive(metadata, gzipContent) };
 }
 
 // An empty directory is a supported way to ship no formats, so it is a warning rather than an
