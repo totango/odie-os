@@ -459,6 +459,7 @@
       "compatibilityDate": "2026-02-02",
       "compatibilityFlags": [
         "allow_irrevocable_stub_storage",
+        "enhanced_error_serialization",
         "global_fetch_strictly_public"
       ],
       "inputs": [
@@ -990,6 +991,7 @@
       "compatibilityDate": "2026-02-02",
       "compatibilityFlags": [
         "allow_irrevocable_stub_storage",
+        "enhanced_error_serialization",
         "global_fetch_strictly_public",
         "nodejs_als"
       ],
