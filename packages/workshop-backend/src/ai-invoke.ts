@@ -32,7 +32,8 @@ export class AgentTurnError extends Error {
     if (teamPiCodex && /account_(?:stream|response_create)_cap|server_is_overloaded/i.test(message)) {
       this.userMessage = "Team PI Codex is temporarily at capacity. Please retry in a moment.";
       this.code = "transient_model_capacity";
-    } else if (teamPiCodex && /Team PI Codex (?:request timed out|stream stopped responding)/i.test(message)) {
+    } else if (teamPiCodex && (statusCode === 504 || statusCode === 524 ||
+        /Team PI Codex (?:request timed out|stream stopped responding)/i.test(message))) {
       this.userMessage = "Team PI Codex stopped responding before the request completed. Please retry.";
       this.code = "transient_model_timeout";
     }
@@ -48,7 +49,7 @@ export class AgentTurnError extends Error {
  */
 export function httpStatusFromError(errorMessage: string, handle: ModelHandle)
     : number | undefined {
-  const match = /^(\d{3})\b/.exec(errorMessage.trim());
+  const match = /^(?:error code:\s*)?(\d{3})\b/i.exec(errorMessage.trim());
   if (match) {
     const parsed = Number(match[1]);
     return parsed >= 400 ? parsed : undefined;

@@ -605,6 +605,11 @@ describe("Team PI Codex routing", () => {
     expect(httpStatusFromError("Upstream stream failed", handle)).toBe(503);
   });
 
+  it("extracts provider error-code status messages", () => {
+    const handle = {} as ModelHandle;
+    expect(httpStatusFromError("error code: 524", handle)).toBe(524);
+  });
+
   it("gives Team PI capacity and timeout failures safe retryable messages", () => {
     const capacity = new AgentTurnError(
         "account_response_create_cap: upstream detail", 503, true);
@@ -617,6 +622,13 @@ describe("Team PI Codex routing", () => {
     expect(timeout.userMessage).toBe(
         "Team PI Codex stopped responding before the request completed. Please retry.");
     expect(timeout.code).toBe("transient_model_timeout");
+
+    for (const status of [504, 524]) {
+      const proxyTimeout = new AgentTurnError(`error code: ${status}`, status, true);
+      expect(proxyTimeout.userMessage).toBe(
+          "Team PI Codex stopped responding before the request completed. Please retry.");
+      expect(proxyTimeout.code).toBe("transient_model_timeout");
+    }
 
     const otherProvider = new AgentTurnError("server_is_overloaded", 503);
     expect(otherProvider.userMessage).toBeUndefined();
