@@ -97,6 +97,10 @@ function parseSidecar(name, raw, kind) {
   }
   let cleanUpdatedAt;
   if (kind === "featured") {
+    // The landing page renders this with toLocaleDateString(), i.e. in the viewer's timezone, so a
+    // midnight-UTC value reads as the previous calendar day everywhere west of UTC. Prefer midday
+    // (T12:00:00.000Z), which resolves to the same date from UTC-11 through UTC+12. Deliberately not
+    // enforced: the skew is cosmetic, and only the exact-UTC form below is a correctness requirement.
     if (typeof updatedAt !== "string" || Number.isNaN(Date.parse(updatedAt)) ||
         new Date(updatedAt).toISOString() !== updatedAt) {
       bad("updatedAt must be an ISO 8601 UTC timestamp");

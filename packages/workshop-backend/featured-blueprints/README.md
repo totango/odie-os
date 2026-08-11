@@ -55,7 +55,7 @@ archive.
 | `description` | User-facing purpose, offline behavior, and optional-connection expectations. |
 | `author` | Ordinary blueprint author object. The current starters use the deployment author identity. |
 | `revision` | Positive integer and archive metadata version. Increment whenever archived source or metadata changes. |
-| `updatedAt` | Canonical ISO 8601 UTC timestamp, used for both archive `created` and `lastUpdated`. Update it with each revision; do not derive dates from the revision number. |
+| `updatedAt` | Canonical ISO 8601 UTC timestamp, used for both archive `created` and `lastUpdated`. Update it with each revision; do not derive dates from the revision number. Prefer midday (`T12:00:00.000Z`) over midnight: the landing page renders it in the viewer's local timezone, so `T00:00:00.000Z` displays a day early west of UTC. |
 | `bindings` | Omit or use an empty array/object. Non-empty values are rejected because current starter connections are optional, while blueprint binding metadata means required pre-creation setup. |
 
 `README.md`, `client.js`, and `server.js` are the three files copied into the Yjs code snapshot. The
@@ -211,6 +211,13 @@ only when those packages changed. After deployment:
   start,” not imply that the Gadget cannot use connections.
 - **Landing page shows 1969/1970:** the sidecar is missing or not using a valid `updatedAt`, or an old
   revision is still installed. Never synthesize dates from small revision integers.
+- **Landing page date is one day earlier than `updatedAt`:** expected for a midnight-UTC value viewed
+  west of UTC, since the page renders local time. Cosmetic; fix it in the data by moving the sidecar
+  to midday UTC, not by forcing UTC rendering — ordinary blueprints carry a real instant there, and
+  local time is the correct display for them.
+- **Landing page shows a stale version or date after deploying:** the browser tab predates the deploy.
+  Bundled starters install on the first authenticated `/api` traffic, and the served chunk is content
+  hashed, so confirm with the KV record plus the deployed asset before suspecting the installer.
 - **A source is read after Skip:** treat as a blocking privacy bug. Check both automatic page-load
   snapshot methods and explicit sync methods, then add an RPC-call-count regression.
 - **Generated output changes on a no-op rebuild:** check Yjs client IDs, ordering, gzip timestamps,
