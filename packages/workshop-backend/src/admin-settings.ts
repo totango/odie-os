@@ -11,8 +11,8 @@ import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.j
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import { UserDurableObject } from './user.js';
-import { formatBlueprintsManifestVersion, installFormatBlueprints } from './format-blueprints.js';
-import { FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
+import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints } from './format-blueprints.js';
+import { FEATURED_BLUEPRINTS, FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -34,6 +34,11 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // formatBlueprintsManifestVersion). Empty means none yet; a mismatch means the repo shipped
       // new or updated ones and they should be reinstalled.
       installedFormatBlueprints: "",
+
+      // Which set of bundled featured starter blueprints has been installed (see
+      // featuredBlueprintsManifestVersion). Separate from formats so starter changes never trigger
+      // format promotion.
+      installedFeaturedBlueprints: "",
 
       // Bundled blueprint ids that have already been offered for promotion into
       // AdminConfig.formats. Tracked separately from the install stamp so that promotion happens
@@ -73,7 +78,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
-  // Install the format blueprints bundled with this deployment, if that hasn't already happened
+  // Install the bundled blueprints shipped with this deployment, if that hasn't already happened
   // for this exact manifest. Idempotent and cheap: an up-to-date deployment does one string
   // comparison and returns.
   //
@@ -115,6 +120,28 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         event: "formats.install.complete",
         size: installed.length,
         failureCount: FORMAT_BLUEPRINTS.length - installed.length,
+      });
+    }
+
+    let featuredManifestVersion = featuredBlueprintsManifestVersion();
+    if (this.storage.installedFeaturedBlueprints.get() !== featuredManifestVersion) {
+      let installed = await installFeaturedBlueprints(this.env);
+      if (installed.length > 0) {
+        for (let publicInfo of installed) {
+          this.storage.featuredBlueprints.put(publicInfo);
+        }
+        await this.#writeFeaturedSnapshot();
+      }
+
+      let featuredComplete = installed.length === FEATURED_BLUEPRINTS.length;
+      complete &&= featuredComplete;
+      if (featuredComplete) {
+        this.storage.installedFeaturedBlueprints.put(featuredManifestVersion);
+      }
+      logger.info("installed bundled featured blueprints", {
+        event: "featured.install.complete",
+        size: installed.length,
+        failureCount: FEATURED_BLUEPRINTS.length - installed.length,
       });
     }
 

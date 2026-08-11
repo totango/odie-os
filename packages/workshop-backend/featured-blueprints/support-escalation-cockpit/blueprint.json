@@ -1,0 +1,12 @@
+{
+  "blueprintId": "starter.support-escalation-cockpit",
+  "title": "Support Escalation Cockpit",
+  "description": "A source-backed enterprise workbench for triaging support escalations, tracking customer impact, and coordinating cross-functional owners. Works fully offline with demo data, manual records, and CSV/JSON import; optional connectors can be wired later from the host Connections tab.",
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 1,
+  "bindings": {}
+}

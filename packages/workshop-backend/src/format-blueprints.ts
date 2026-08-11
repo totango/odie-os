@@ -11,7 +11,12 @@
 
 import { BlueprintMetadata, BlueprintPublicInfo } from "@gadgets/workshop-shared/api";
 import { BlueprintKvRecord, parseBlueprintArchive } from "./blueprint-archive.js";
-import { BundledFormatBlueprint, FORMAT_BLUEPRINTS } from "./generated/format-blueprints.js";
+import {
+  BundledFeaturedBlueprint,
+  BundledFormatBlueprint,
+  FEATURED_BLUEPRINTS,
+  FORMAT_BLUEPRINTS,
+} from "./generated/format-blueprints.js";
 import { fingerprint } from "./admin-config.js";
 import { createWorkshopLogger } from "./observability";
 
@@ -33,8 +38,18 @@ export function formatBlueprintsManifestVersion(): string {
       .join(",");
 }
 
+// Identifies the exact featured starter set installed into Explore. Kept separate from the format
+// fingerprint so starters never participate in format promotion or curation.
+export function featuredBlueprintsManifestVersion(): string {
+  return FEATURED_BLUEPRINTS
+      .map(e => `${e.blueprintId}@${e.revision}+` +
+          fingerprint(JSON.stringify([e.title, e.description, e.author])))
+      .toSorted()
+      .join(",");
+}
+
 // Install one bundled blueprint, returning its public info for the featured mirror.
-async function installOne(env: InstallEnv, entry: BundledFormatBlueprint)
+async function installOne(env: InstallEnv, entry: BundledFormatBlueprint | BundledFeaturedBlueprint)
     : Promise<BlueprintPublicInfo> {
   // Parse through the ordinary archive reader so a corrupt bundled file fails the same way an
   // uploaded one would, rather than producing a half-installed blueprint.
@@ -58,7 +73,7 @@ async function installOne(env: InstallEnv, entry: BundledFormatBlueprint)
     title: entry.title,
     description: entry.description,
     author: entry.author,
-    output: entry.output,
+    output: "output" in entry ? entry.output : undefined,
   };
 
   // Content first: a blueprint whose metadata exists but whose R2 object doesn't is broken, while
@@ -86,6 +101,26 @@ export async function installFormatBlueprints(env: InstallEnv): Promise<Blueprin
       // One bad archive must not deny the deployment the others.
       logger.error("failed to install format blueprint", {
         event: "formats.install.failed", blueprintId: entry.blueprintId, error: err,
+      });
+    }
+  }
+  return installed;
+}
+
+// Install every bundled featured starter blueprint. These are ordinary ownerless blueprints and are
+// mirrored to the deployment featured collection by AdminSettings, but are never promoted as output
+// formats.
+export async function installFeaturedBlueprints(env: InstallEnv): Promise<BlueprintPublicInfo[]> {
+  let installed: BlueprintPublicInfo[] = [];
+  for (let entry of FEATURED_BLUEPRINTS) {
+    try {
+      installed.push(await installOne(env, entry));
+      logger.info("installed featured blueprint", {
+        event: "featured.install.ok", blueprintId: entry.blueprintId,
+      });
+    } catch (err) {
+      logger.error("failed to install featured blueprint", {
+        event: "featured.install.failed", blueprintId: entry.blueprintId, error: err,
       });
     }
   }

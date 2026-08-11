@@ -1,0 +1,8 @@
+{
+  "blueprintId": "starter.developer-delivery-kit",
+  "title": "Developer Delivery Kit",
+  "description": "A GitHub-centered delivery workbench for repo health, PR review queues, release readiness, and linked delivery risks. Works fully offline with demo/manual/import workflows; optional connectors can enrich status only after users wire them from Connections.",
+  "author": { "type": "user", "name": "Cloudflare", "id": "agent@cloudflare.com" },
+  "revision": 1,
+  "bindings": []
+}

@@ -1,0 +1,8 @@
+{
+  "blueprintId": "starter.incident-investigation-board",
+  "title": "Incident Investigation Board",
+  "description": "A source-backed incident workbench for triage timelines, evidence, owners, and post-incident decisions. Runs fully offline with demo data and manual/imported records; optional connectors can enrich status when the user wires them from Connections.",
+  "author": { "type": "user", "name": "Cloudflare", "id": "agent@cloudflare.com" },
+  "revision": 1,
+  "bindings": []
+}

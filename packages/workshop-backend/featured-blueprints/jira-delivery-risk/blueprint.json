@@ -1,0 +1,12 @@
+{
+  "blueprintId": "starter.jira-delivery-risk",
+  "title": "Jira Delivery Risk Radar",
+  "description": "A source-backed enterprise workbench for tracking release risk, delivery blockers, and executive-ready mitigation plans. It is fully useful offline with demo data, manual risks, and JSON/CSV import; optional connectors can be wired from the host Connections tab.",
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 1,
+  "bindings": {}
+}
