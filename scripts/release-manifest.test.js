@@ -90,6 +90,7 @@ test("every $-token in binding templates and vars uses known placeholder syntax"
 test("worker entries carry the deploy contract", () => {
   const manifest = buildTestManifest();
   const { workers } = manifest;
+  assert.equal(manifest.manifestVersion, 2);
 
   // Core workers exist with the right kinds.
   assert.equal(workers["workshop-backend"].kind, "backend");
@@ -177,6 +178,57 @@ test("worker entries carry the deploy contract", () => {
       name: input.name,
       text: `$SECRET(${input.name})`,
     });
+  }
+
+  const sessions = workers["gatekeeper-sessions"];
+  assert.equal(sessions.installable, false);
+  assert.equal(sessions.internal, true);
+  assert.deepEqual(sessions.inputs.map((input) => input.name), [
+    "GITHUB_APP_ID",
+    "GITHUB_APP_INSTALLATION_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "TEAM_PI_CODEX_BASE_URL",
+    "TEAM_PI_CODEX_HMAC_SECRET",
+  ]);
+  assert.deepEqual(sessions.bindings.find((binding) => binding.name === "SESSION_SANDBOX"), {
+    type: "durable_object_namespace",
+    name: "SESSION_SANDBOX",
+    class_name: "CodingSessionSandbox",
+  });
+  assert.deepEqual(sessions.bindings.find((binding) => binding.name === "SESSION_POLICIES"), {
+    type: "durable_object_namespace",
+    name: "SESSION_POLICIES",
+    class_name: "CodingSessionPolicy",
+  });
+  assert.deepEqual(sessions.bindings.find((binding) => binding.name === "WORKSHOP_TOOLS"), {
+    type: "service",
+    name: "WORKSHOP_TOOLS",
+    service: "$WORKER_NAME(workshop-backend)",
+    entrypoint: "CodingSessionToolHostImpl",
+  });
+  assert.ok(!sessions.bindings.some((binding) => binding.class_name === "CodingSessionRegistry"));
+  assert.deepEqual(sessions.containers, [{
+    class_name: "CodingSessionSandbox",
+    image: "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+    instance_type: "standard-1",
+    max_instances: 20,
+  }]);
+
+  // Ambient gatekeepers are preinstalled on every core deploy; preinstalls must take no
+  // secret inputs (nobody is around to supply them). Both also declare an account-level agent
+  // singleton, so both are install-once.
+  assert.equal(context.preinstall, true);
+  assert.equal(context.singleton, true);
+  assert.equal(workers["gatekeeper-scheduler"].preinstall, true);
+  assert.equal(workers["gatekeeper-scheduler"].singleton, true);
+  assert.deepEqual(workers["gatekeeper-scheduler"].inputs, []);
+  assert.equal(google.preinstall, undefined);
+  assert.equal(google.singleton, undefined);
+  for (const [name, entry] of Object.entries(workers)) {
+    if (entry.preinstall) {
+      assert.ok(entry.installable, `${name}: preinstall requires installable`);
+      assert.deepEqual(entry.inputs, [], `${name}: preinstall requires no inputs`);
+    }
   }
 
   // Module blobs are content-addressed.

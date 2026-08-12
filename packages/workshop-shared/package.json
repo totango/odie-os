@@ -17,9 +17,17 @@
       "types": "./src/gatekeeper.ts",
       "import": "./src/gatekeeper.ts"
     },
+    "./github-gatekeeper": {
+      "types": "./src/github-gatekeeper.ts",
+      "import": "./src/github-gatekeeper.ts"
+    },
     "./cloudflare-gatekeeper": {
       "types": "./src/cloudflare-gatekeeper.ts",
       "import": "./src/cloudflare-gatekeeper.ts"
+    },
+    "./coding-sessions": {
+      "types": "./src/coding-sessions.ts",
+      "import": "./src/coding-sessions.ts"
     },
     "./limits": {
       "types": "./src/limits.ts",
@@ -28,6 +36,10 @@
     "./external-message-gateway": {
       "types": "./src/external-message-gateway.ts",
       "import": "./src/external-message-gateway.ts"
+    },
+    "./theme": {
+      "types": "./src/theme.ts",
+      "import": "./src/theme.ts"
     }
   },
   "scripts": {
@@ -37,7 +49,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@cloudflare/workers-types": "^4.20260702.1",
+    "@cloudflare/workers-types": "^5.20260722.1",
     "capnweb": "^0.8.0"
   },
   "devDependencies": {

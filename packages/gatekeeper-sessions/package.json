@@ -1,0 +1,29 @@
+{
+  "name": "@gadgets/gatekeeper-sessions",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "scripts": {
+    "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
+    "deploy": "wrangler deploy",
+    "build": "pnpm exec capnweb-validate build --out .wrangler/validate && tsc",
+    "types:check": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf dist .wrangler"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "0.3.7",
+    "@cloudflare/sandbox": "0.13.0-next.724.1",
+    "@gadgets/backend-utils": "workspace:*",
+    "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "^0.8.0",
+    "capnweb-validate": "0.2.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "@types/node": "26.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.115.0"
+  }
+}

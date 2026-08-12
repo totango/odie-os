@@ -20,14 +20,14 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "jsonc-parser";
 
-export const MANIFEST_VERSION = 1;
+export const MANIFEST_VERSION = 2;
 
 // wrangler.jsonc keys this generator understands. Anything else fails closed — a new config key
 // on a deployable worker needs an explicit decision about how customer instances get it.
 const HANDLED_CONFIG_KEYS = new Set([
   "$schema", "name", "main", "build", "compatibility_date", "compatibility_flags", "rules",
   "migrations", "observability", "kv_namespaces", "r2_buckets", "worker_loaders", "services",
-  "assets", "vars",
+  "assets", "vars", "containers", "durable_objects",
   // Browser Rendering (Gadget PDF exports). Unlike artifacts it is generally available, so it
   // passes through to customer instances as a placeholder-free binding, like the AI binding.
   "browser",
@@ -51,6 +51,21 @@ const NO_DEFAULT_CRED_INPUTS = new Set([
 // Not installable on customer instances: Email Routing needs a zone, which workers.dev-hosted
 // instances don't have. The bundle still ships in the release so the entry stays auditable.
 const NOT_INSTALLABLE = new Set(["gatekeeper-email"]);
+const INTERNAL_SERVICES = new Set(["gatekeeper-sessions"]);
+
+// Ambient gatekeepers the deploy service installs on every fresh core deploy, server-side with
+// no user interaction. Members must take no inputs of any kind (enforced below): a preinstall
+// has nobody to ask.
+const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
+
+// Gatekeepers that may be installed at most once per instance; the deploy service enforces this
+// at install time. The giveaway is the account declaring an agent singleton
+// (`AccountDescription.singleton` — context's `ContextLibrary`, scheduler's `ScheduleSession`):
+// the Workshop auto-provisions those accounts and folds the singleton into every workspace as an
+// ambient gatekeeper, so a second install would hand every user a duplicate ambient capsule.
+// Independent of PREINSTALL in principle; the two sets coincide today only because every ambient
+// gatekeeper we ship is also preinstalled.
+const SINGLETON = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
 
 export const DEFAULT_CRED_INPUTS = [
   {
@@ -113,7 +128,6 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
     throw new Error(`${pkgName} declares an artifacts binding; only gatekeeper-context's is ` +
         `known (and cut). Decide how customer instances should handle this one.`);
   }
-
   const bindings = [];
   const vars = {};
 
@@ -144,6 +158,15 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
       name: svc.binding,
       service: `$WORKER_NAME(${svc.service})`,
       ...(svc.entrypoint ? { entrypoint: svc.entrypoint } : {}),
+    });
+  }
+  for (const durableObject of config.durable_objects?.bindings ?? []) {
+    bindings.push({
+      type: "durable_object_namespace",
+      name: durableObject.name,
+      class_name: durableObject.class_name,
+      ...(durableObject.script_name ? { script_name: durableObject.script_name } : {}),
+      ...(durableObject.environment ? { environment: durableObject.environment } : {}),
     });
   }
 
@@ -192,8 +215,9 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
     gatekeeperBindingExpansion = { propsByPackage: {} };
   } else {
     vars.BASE_URL = `$PUBLIC_BASE_URL/gatekeeper/${shortName(pkgName)}`;
-    installable = !NOT_INSTALLABLE.has(pkgName);
-    if (installable) {
+    if (pkgName === "gatekeeper-sessions") vars.SESSION_ALLOWED_ORIGIN = "$PUBLIC_BASE_URL";
+    installable = !NOT_INSTALLABLE.has(pkgName) && !INTERNAL_SERVICES.has(pkgName);
+    if (!NOT_INSTALLABLE.has(pkgName)) {
       inputs = deployInputs ??
           (NO_DEFAULT_CRED_INPUTS.has(pkgName) ? [] : DEFAULT_CRED_INPUTS);
     } else {
@@ -205,12 +229,19 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
         bindings.push({ type: "secret_text", name: input.name, text: `$SECRET(${input.name})` });
       }
     }
+    if (PREINSTALL.has(pkgName) && inputs.length > 0) {
+      throw new Error(`${pkgName} is preinstalled but declares input(s); preinstalls run ` +
+          `with no user interaction, so this release would be broken`);
+    }
   }
 
   return {
     kind,
     ...(kind === "gatekeeper" ? { shortName: shortName(pkgName) } : {}),
     installable,
+    ...(INTERNAL_SERVICES.has(pkgName) ? { internal: true } : {}),
+    ...(PREINSTALL.has(pkgName) ? { preinstall: true } : {}),
+    ...(SINGLETON.has(pkgName) ? { singleton: true } : {}),
     mainModule,
     modules: modules.map(({ name, type, sha256, size }) => ({
       name, type, sha256, size, r2Key: moduleR2Key(sha256),
@@ -223,6 +254,7 @@ export function buildWorkerEntry({ pkgName, config, mainModule, modules, deployI
     bindings,
     vars,
     observability: config.observability ?? { enabled: false },
+    ...(config.containers ? { containers: config.containers } : {}),
     ...(gatekeeperBindingExpansion ? { gatekeeperBindingExpansion } : {}),
     ...(assetsConfig ? { assetsConfig } : {}),
     ...(inputs ? { inputs } : {}),

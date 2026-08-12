@@ -251,6 +251,74 @@ export interface ObserverConfigCallback extends RpcTarget {
   configure(needs: ObserverBindingNeed[]): Promise<ObserverAccountChoice[]>;
 }
 
+/** Builds the create/read helpers for a family of expected errors carrying stable
+ * machine-readable codes. The per-code messages double as the classification fallback for errors
+ * from older deployments that lost the code in transit, so changing one is a compatibility break. */
+function codedErrorFamily<Code extends string>(messages: Record<Code, string>) {
+  const codes = new Set<unknown>(Object.keys(messages));
+  return {
+    create: (code: Code): Error & { code: Code } =>
+        Object.assign(new Error(messages[code]), { code }),
+    getCode: (error: unknown): Code | undefined => {
+      const candidate = typeof error === "object" && error !== null && "code" in error
+          ? error.code : undefined;
+      return codes.has(candidate) ? candidate as Code : undefined;
+    },
+  };
+}
+
+/** Totango repositories that may be opened in a coding session. */
+export const CODING_SESSION_REPOSITORIES = [
+  "agentic",
+  "unison-integrations",
+  "leviosa-backend",
+  "zords",
+  "leviosa-ml-ops",
+  "jarvis",
+] as const;
+
+/** A Totango repository that may be opened in a coding session. */
+export type CodingSessionRepository = typeof CODING_SESSION_REPOSITORIES[number];
+
+/** Current lifecycle state of a coding session. */
+export type CodingSessionStatus = "starting" | "running" | "stopping" | "stopped" | "failed";
+
+/** User-visible metadata for a coding session. */
+export interface CodingSessionSummary {
+  /** Opaque session identifier. */
+  id: string;
+  /** User-supplied session title. */
+  title: string;
+  /** Repositories available inside the session workspace. */
+  repositories: CodingSessionRepository[];
+  /** Current lifecycle state. */
+  status: CodingSessionStatus;
+  /** When the session was created. */
+  createdAt: Date;
+  /** When the session was last used. */
+  lastActiveAt: Date;
+  /** Bounded failure message when startup or execution failed. */
+  error?: string;
+  /** When the session was archived, if it is hidden from the active session list. */
+  archivedAt?: Date;
+}
+
+/** Request to create a multi-repository coding session. */
+export interface CreateCodingSessionRequest {
+  /** User-visible session title. */
+  title: string;
+  /** Non-empty subset of `CODING_SESSION_REPOSITORIES`. */
+  repositories: CodingSessionRepository[];
+}
+
+/** Short-lived, single-use terminal attachment capability. */
+export interface CodingSessionAttachCapability {
+  /** Same-origin WebSocket URL accepted by the Sessions worker. */
+  url: string;
+  /** Time after which the URL must be rejected. */
+  expiresAt: Date;
+}
+
 /** Stable error codes attached to expected failures from `AuthenticatedApi.openGadget()`. */
 export const OPEN_GADGET_ERROR_CODES = {
   workspaceNotFound: "WORKSPACE_NOT_FOUND",
@@ -261,29 +329,40 @@ export const OPEN_GADGET_ERROR_CODES = {
 export type OpenGadgetErrorCode =
     typeof OPEN_GADGET_ERROR_CODES[keyof typeof OPEN_GADGET_ERROR_CODES];
 
-const OPEN_GADGET_ERROR_MESSAGES: Record<OpenGadgetErrorCode, string> = {
+const openGadgetErrors = codedErrorFamily<OpenGadgetErrorCode>({
   [OPEN_GADGET_ERROR_CODES.workspaceNotFound]: "Workspace not found.",
   [OPEN_GADGET_ERROR_CODES.workspaceAccessDenied]: "You don't have access to this workspace.",
-};
+});
 
 /** Creates an expected `openGadget()` error with a machine-readable code. */
-export function createOpenGadgetError(
-    code: OpenGadgetErrorCode): Error & { code: OpenGadgetErrorCode } {
-  return Object.assign(new Error(OPEN_GADGET_ERROR_MESSAGES[code]), { code });
-}
+export const createOpenGadgetError = openGadgetErrors.create;
 
 /** Reads the machine-readable code from an expected `openGadget()` error. */
-export function getOpenGadgetErrorCode(error: unknown): OpenGadgetErrorCode | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
+export const getOpenGadgetErrorCode = openGadgetErrors.getCode;
 
-  const candidate = "code" in error ? error.code : undefined;
-  return isOpenGadgetErrorCode(candidate) ? candidate : undefined;
-}
+/** Stable error codes attached to authentication failures. */
+export const AUTH_ERROR_CODES = {
+  invalidSessionToken: "INVALID_SESSION_TOKEN",
+  notAuthenticatedWithAccess: "NOT_AUTHENTICATED_WITH_ACCESS",
+} as const;
 
-function isOpenGadgetErrorCode(value: unknown): value is OpenGadgetErrorCode {
-  return value === OPEN_GADGET_ERROR_CODES.workspaceNotFound ||
-      value === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied;
-}
+/** An expected authentication failure code. */
+export type AuthErrorCode = typeof AUTH_ERROR_CODES[keyof typeof AUTH_ERROR_CODES];
+
+/** Messages for auth failures thrown without a surviving code; clients match these only as a
+ * classification fallback. */
+export const AUTH_ERROR_MESSAGES: Record<AuthErrorCode, string> = {
+  [AUTH_ERROR_CODES.invalidSessionToken]: "invalid session token",
+  [AUTH_ERROR_CODES.notAuthenticatedWithAccess]: "Not authenticated with Access.",
+};
+
+const authErrors = codedErrorFamily(AUTH_ERROR_MESSAGES);
+
+/** Creates an authentication failure with a machine-readable code. */
+export const createAuthError = authErrors.create;
+
+/** Reads the machine-readable code from an authentication failure. */
+export const getAuthErrorCode = authErrors.getCode;
 
 // Top-level API exposed to the user after they have authenticated.
 export interface AuthenticatedApi extends RpcTarget {
@@ -328,6 +407,30 @@ export interface AuthenticatedApi extends RpcTarget {
 
   // Resolve UI feature flags for the authenticated user.
   getUiFeatureFlags(): Promise<UiFeatureFlags>;
+
+  /** Lists coding sessions owned by this user after verifying a live GitHub connection. */
+  listCodingSessions(): Promise<CodingSessionSummary[]>;
+
+  /** Creates a coding session over a non-empty allowlisted repository set. */
+  createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary>;
+
+  /** Stops a coding session owned by this user. This operation is idempotent. */
+  stopCodingSession(sessionId: string): Promise<void>;
+
+  /** Stops and archives a coding session owned by this user. This operation is idempotent. */
+  archiveCodingSession(sessionId: string): Promise<void>;
+
+  /** Mints a short-lived, single-use capability for attaching to a session terminal. */
+  mintCodingSessionAttachCapability(sessionId: string): Promise<CodingSessionAttachCapability>;
+
+  /** Lists coding-session tool activity, optionally narrowed to one session. */
+  listCodingSessionActivity(sessionId?: string): Promise<import("./coding-sessions.js").CodingSessionActivity[]>;
+
+  /** Approves one pending coding-session tool action. */
+  approveCodingSessionAction(activityId: string): Promise<void>;
+
+  /** Rejects one pending coding-session tool action. */
+  rejectCodingSessionAction(activityId: string): Promise<void>;
 
   // Get the user's preferred model, chosen during onboarding. Returns null if the user has not
   // set a preference (or explicitly chose "No agent").

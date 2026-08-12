@@ -22,6 +22,10 @@ export default defineConfig(({ mode }) => {
         '/api/client-errors': `http://${backendHost}`,
         '/blueprint-screenshot': `http://${backendHost}`,
         '/api/site-logo': `http://${backendHost}`,
+        '/gatekeeper/sessions': {
+          target: `http://${backendHost}`,
+          ws: true,
+        },
       },
     },
     build: {

@@ -17,6 +17,7 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
 import {
   GitHubApi,
   GitHubApiError,
@@ -30,6 +31,7 @@ import {
   type GitHubPullRequestResponse,
   type GitHubPullRequestReviewCommentResponse,
 } from "./github-api";
+import { assertIssueSearchResultsInRepo, buildIssueSearchQuery } from "./github-search";
 import GITHUB_LOGO_SVG from "./github-logo.svg";
 import type {
   GitHubActor,
@@ -109,6 +111,11 @@ type Cached<T> = {
   value: T;
   etag?: string;
   generation: number;
+};
+
+type CachedIssueSearchResult = {
+  html_url: string;
+  summary: GitHubIssueSummary;
 };
 
 type GitHubDiscussionCommentEntry = Extract<GitHubDiscussionEntry, { kind: "comment" }>;
@@ -695,17 +702,6 @@ function pullComparator(
     }
     return delta * factor;
   };
-}
-
-function buildIssueSearchQuery(owner: string, repo: string, query: GitHubIssueSearch): string {
-  const parts = [query.text, `repo:${owner}/${repo}`, "is:issue"];
-  if (query.state && query.state !== "all") parts.push(`state:${query.state}`);
-  for (const label of query.labels ?? []) {
-    parts.push(`label:${JSON.stringify(label)}`);
-  }
-  if (query.author) parts.push(`author:${query.author}`);
-  if (query.assignee) parts.push(`assignee:${query.assignee}`);
-  return parts.filter(Boolean).join(" ");
 }
 
 function parseDiffSide(side?: "LEFT" | "RIGHT" | null): "old" | "new" {
@@ -1352,12 +1348,6 @@ type GitHubVerifierProps = {
   userObjectId: string;
 };
 
-// The non-standard method the GitHub gatekeeper calls on its own verifier (see addObserver). Not
-// part of the generic GatekeeperUserVerifier contract.
-export interface GitHubVerifierApi extends GatekeeperUserVerifier {
-  hasRepoAccess(owner: string, repo: string): Promise<boolean>;
-}
-
 @validateRpc()
 export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
     implements GitHubVerifierApi {
@@ -1371,6 +1361,20 @@ export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
     } catch (error) {
       // GitHub returns 404 for private repos the token cannot see (to avoid leaking existence), and
       // 403 in some org-policy cases — either way the observer lacks read access.
+      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async hasRepoWriteAccess(owner: string, repo: string): Promise<boolean> {
+    const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    const account = this.ctx.exports.UserAccount.get(id);
+    const api = new GitHubApi(async () => await account.getAccessToken());
+    try {
+      return (await api.getRepo(owner, repo)).permissions?.push === true;
+    } catch (error) {
       if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
         return false;
       }
@@ -2563,10 +2567,20 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     const owner = this.ctx.props.owner;
     const repo = this.ctx.props.repo;
     const searchQuery = buildIssueSearchQuery(owner, repo, query);
+    const assertSearchScope = (results: readonly Pick<GitHubIssueResponse, "html_url">[]) => {
+      try {
+        assertIssueSearchResultsInRepo(owner, repo, results);
+      } catch (error) {
+        logger.warn("GitHub issue search scope validation failed", {
+          event: "issue.search.scope.validation.failed", error,
+        });
+        throw error;
+      }
+    };
     return new StreamingCursor<GitHubIssueSummary>({
       fetchPage: async (page, perPage) => {
-        const cacheKey = this.#cacheKey("search-issues", stableKey(query), `p${page}`);
-        return await this.#loadCachedWithEtag<GitHubIssueSummary[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
+        const cacheKey = this.#cacheKey("search-issues-scoped-v1", stableKey(query), `p${page}`);
+        const results = await this.#loadCachedWithEtag<CachedIssueSearchResult[]>(cacheKey, LIST_CACHE_TTL_MS, async etag => {
           const raw = await this.#withApi(api =>
             api.searchIssuesConditional(searchQuery, page, perPage, remoteSort, remoteDirection, { ifNoneMatch: etag })
           );
@@ -2574,17 +2588,21 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
             return raw;
           }
 
+          assertSearchScope(raw.data.items);
           return {
             status: 200,
             headers: raw.headers,
-            data: raw.data.items
-              .filter(item => !item.pull_request)
-              .map(item => normalizeIssueSummary(owner, repo, item)),
+            data: raw.data.items.map(item => ({
+              html_url: item.html_url,
+              summary: normalizeIssueSummary(owner, repo, item),
+            })),
           };
         });
+        assertSearchScope(results);
+        return results.map(item => item.summary);
       },
       overlay: item => this.#overlayIssueLike(item, "issue", item.id),
-      filter: () => true,  // Remote search results are already filtered by GitHub's search API.
+      filter: () => true,  // Search scope was validated before results entered the cursor.
       comparator: compare,
       injectedItems: provisionals,
       pageSize,

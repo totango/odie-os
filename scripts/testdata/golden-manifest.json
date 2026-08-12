@@ -15,7 +15,7 @@
   },
   "commit": "0000000000000000000000000000000000000000",
   "createdAt": "2026-01-01T00:00:00.000Z",
-  "manifestVersion": 1,
+  "manifestVersion": 2,
   "releaseId": "r000000-fixture",
   "workers": {
     "gatekeeper-cloudflare": {
@@ -188,7 +188,9 @@
           "invocation_logs": false
         }
       },
+      "preinstall": true,
       "shortName": "context",
+      "singleton": true,
       "vars": {
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/context"
       }
@@ -767,9 +769,132 @@
           "invocation_logs": false
         }
       },
+      "preinstall": true,
       "shortName": "scheduler",
+      "singleton": true,
       "vars": {
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/scheduler"
+      }
+    },
+    "gatekeeper-sessions": {
+      "bindings": [
+        {
+          "entrypoint": "CodingSessionToolHostImpl",
+          "name": "WORKSHOP_TOOLS",
+          "service": "$WORKER_NAME(workshop-backend)",
+          "type": "service"
+        },
+        {
+          "class_name": "CodingSessionSandbox",
+          "name": "SESSION_SANDBOX",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "CodingSessionPolicy",
+          "name": "SESSION_POLICIES",
+          "type": "durable_object_namespace"
+        },
+        {
+          "name": "GITHUB_APP_ID",
+          "text": "$SECRET(GITHUB_APP_ID)",
+          "type": "secret_text"
+        },
+        {
+          "name": "GITHUB_APP_INSTALLATION_ID",
+          "text": "$SECRET(GITHUB_APP_INSTALLATION_ID)",
+          "type": "secret_text"
+        },
+        {
+          "name": "GITHUB_APP_PRIVATE_KEY",
+          "text": "$SECRET(GITHUB_APP_PRIVATE_KEY)",
+          "type": "secret_text"
+        },
+        {
+          "name": "TEAM_PI_CODEX_BASE_URL",
+          "text": "$SECRET(TEAM_PI_CODEX_BASE_URL)",
+          "type": "secret_text"
+        },
+        {
+          "name": "TEAM_PI_CODEX_HMAC_SECRET",
+          "text": "$SECRET(TEAM_PI_CODEX_HMAC_SECRET)",
+          "type": "secret_text"
+        }
+      ],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "nodejs_compat",
+        "allow_irrevocable_stub_storage",
+        "global_fetch_strictly_public"
+      ],
+      "containers": [
+        {
+          "class_name": "CodingSessionSandbox",
+          "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+          "instance_type": "standard-1",
+          "max_instances": 20
+        }
+      ],
+      "inputs": [
+        {
+          "kind": "secret",
+          "label": "Totango GitHub App ID",
+          "name": "GITHUB_APP_ID"
+        },
+        {
+          "kind": "secret",
+          "label": "Totango GitHub App installation ID",
+          "name": "GITHUB_APP_INSTALLATION_ID"
+        },
+        {
+          "kind": "secret",
+          "label": "Totango GitHub App PKCS#8 private key",
+          "name": "GITHUB_APP_PRIVATE_KEY"
+        },
+        {
+          "kind": "secret",
+          "label": "Team PI Codex relay URL",
+          "name": "TEAM_PI_CODEX_BASE_URL"
+        },
+        {
+          "kind": "secret",
+          "label": "Team PI Codex HMAC secret",
+          "name": "TEAM_PI_CODEX_HMAC_SECRET"
+        }
+      ],
+      "installable": false,
+      "internal": true,
+      "kind": "gatekeeper",
+      "mainModule": "sessions.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "CodingSessionSandbox",
+            "CodingSessionRegistry",
+            "CodingSessionPolicy"
+          ],
+          "tag": "v1"
+        }
+      ],
+      "modules": [
+        {
+          "name": "sessions.js",
+          "r2Key": "blobs/modules/afdc12735b4b8cdd0d3e9e373e26f513877e88c7d9fe4884c44851a6e8b8e20d",
+          "sha256": "afdc12735b4b8cdd0d3e9e373e26f513877e88c7d9fe4884c44851a6e8b8e20d",
+          "size": 61,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "sessions",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/sessions",
+        "SESSION_ALLOWED_ORIGIN": "$PUBLIC_BASE_URL"
       }
     },
     "gatekeeper-slack": {
@@ -1278,6 +1403,10 @@
         "head_sampling_rate": 1,
         "logs": {
           "invocation_logs": false
+        },
+        "traces": {
+          "enabled": true,
+          "head_sampling_rate": 0.5
         }
       },
       "vars": {

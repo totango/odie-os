@@ -1,6 +1,11 @@
-import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { RpcStub, RpcTarget } from "capnweb";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionSummary, type CreateCodingSessionRequest } from '@gadgets/workshop-shared/api';
+import type { CodingSessionOwner, CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
+import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
+import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { McpSessionBase } from "@gadgets/mcp-shared/session";
+import type { McpCallResult, McpToolInfo } from "@gadgets/mcp-shared/types";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -34,6 +39,7 @@ type ConnectedAccountRecord = {
   // (no OAuth flow), rather than the user connecting it. Such accounts are protected from manual
   // disconnect, since deleting one permanently destroys the user's data in that gatekeeper.
   autoProvisioned?: boolean;
+  codingSessionGeneration?: string;
 };
 
 // Metadata about an auto-provisioned account that provides an agent singleton and/or a management UI.
@@ -127,6 +133,44 @@ type OutputRecord = WorkspaceOutputEntry & {
   workspaceId: string;
 };
 
+type CodingSessionActionRecord = CodingSessionActivity & {
+  bindingId: string;
+  bindingGeneration: string;
+  gatekeeperActionId: number;
+};
+
+type CodingSessionMcpBinding = {
+  id: string;
+  generation: string;
+  vendorId: string;
+  resourceTitle: string;
+  facet: Fetcher<Gatekeeper<McpSessionBase>>;
+};
+
+class CodingSessionApprovalQueue extends RpcTarget implements ApprovalQueue {
+  constructor(
+    private readonly user: UserDurableObject,
+    private readonly sessionId: string,
+    private readonly binding: CodingSessionMcpBinding,
+  ) {
+    super();
+  }
+
+  authorizeObservation(description: ObservationDescription): Promise<void> {
+    this.user.recordCodingSessionObservation(this.sessionId, this.binding, description);
+    return Promise.resolve();
+  }
+
+  submitAction(action: number, description: ActionDescription): Promise<void> {
+    this.user.recordCodingSessionAction(this.sessionId, this.binding, action, description);
+    return Promise.resolve();
+  }
+
+  bindHook(): never {
+    throw new Error("Coding sessions cannot register persistent hooks.");
+  }
+}
+
 // AI Gateway billing state for the optional top-up flow: which Cloudflare account to bill and a
 // cached credit balance. The OAuth tokens themselves live in the connected Cloudflare *gatekeeper*
 // account (vendorId "cloudflare"); billing reads a usable token from there via getUsableAccessToken.
@@ -181,6 +225,12 @@ function makeUserStorage(storage: DurableObjectStorage) {
         primaryKey: record => `${record.workspaceId}:${record.workpieceId}`,
         nonUniqueIndexes: {
           byWorkspace(record: OutputRecord) { return record.workspaceId; },
+        },
+      }),
+      codingSessionActions: collection<CodingSessionActionRecord>()({
+        primaryKey: "id",
+        nonUniqueIndexes: {
+          bySession(record: CodingSessionActionRecord) { return record.sessionId; },
         },
       }),
     },
@@ -280,6 +330,7 @@ async function checkGatekeeperVendorFilter(
 export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   private storage: UserStorage;
   private vendors: Map<string, Service<GatekeeperVendor>>;
+  private sessionsService?: Service<CodingSessionsService>;
   private adminSettings: DurableObjectNamespace<AdminSettings>;
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
@@ -297,15 +348,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.adminSettings = this.ctx.exports.AdminSettings;
 
     this.vendors = buildGatekeeperVendorMap(env);
+    this.sessionsService = (env as unknown as Record<string, Service<CodingSessionsService>>)
+      .GATEKEEPER_SESSIONS;
   }
 
   async authenticate(token: string): Promise<void> {
-    let tokenBytes = Uint8Array.fromBase64(token);
+    let tokenBytes: Uint8Array;
+    try {
+      tokenBytes = Uint8Array.fromBase64(token);
+    } catch {
+      // A corrupt (non-Base64) token must classify as an auth failure like any other bad token,
+      // not surface as the decoder's SyntaxError.
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
+    }
     let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
     let tokenId = new Uint8Array(hash).toHex();
     let session = this.storage.sessions.get(tokenId);
     if (!session) {
-      throw new Error("invalid session token");
+      throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
   }
 
@@ -1211,6 +1271,297 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return false;
   }
 
+  async #codingSessionsAccess(repositories?: readonly string[]): Promise<{
+    owner: CodingSessionOwner;
+    service: Service<CodingSessionsService>;
+  }> {
+    let config = await readAdminConfig(this.env);
+    if (config.disabledGatekeepers.includes("github")) {
+      throw new Error("GitHub is disabled on this deployment.");
+    }
+    let service = this.sessionsService;
+    if (!service) throw new Error("Coding sessions are not installed on this deployment.");
+
+    for (let record of this.#connectedAccountRecords()) {
+      if (record.vendorId !== "github" || !areCredentialsValid(record)) continue;
+      let description = await record.account.describe();
+      if (repositories?.length) {
+        let verifier = await record.account.getVerifier() as unknown as Fetcher<GitHubVerifierApi>;
+        let access = await Promise.all(repositories.map(repository =>
+          verifier.hasRepoWriteAccess("totango", repository)));
+        if (access.some(allowed => !allowed)) {
+          throw new Error("Your GitHub account cannot push to every selected repository.");
+        }
+      }
+      let profile = await this.whoami();
+      return {
+        owner: {
+          userId: this.ctx.id.toString(),
+          email: profile.id,
+          githubLogin: description.uniqueName,
+        },
+        service,
+      };
+    }
+    throw new Error("Connect a valid GitHub account to use coding sessions.");
+  }
+
+  /** Lists coding sessions after enforcing a valid GitHub connection. */
+  async listCodingSessions(): Promise<CodingSessionSummary[]> {
+    let {owner, service} = await this.#codingSessionsAccess();
+    return service.listSessions(owner);
+  }
+
+  /** Creates a coding session after enforcing a valid GitHub connection. */
+  async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
+    let {owner, service} = await this.#codingSessionsAccess(request.repositories);
+    return service.createSession(owner, request);
+  }
+
+  /** Stops a coding session after enforcing a valid GitHub connection. */
+  async stopCodingSession(sessionId: string): Promise<void> {
+    let {owner, service} = await this.#codingSessionsAccess();
+    return service.stopSession(owner, sessionId);
+  }
+
+  /** Stops and archives a coding session after enforcing a valid GitHub connection. */
+  async archiveCodingSession(sessionId: string): Promise<void> {
+    let {owner, service} = await this.#codingSessionsAccess();
+    return service.archiveSession(owner, sessionId);
+  }
+
+  /** Mints a terminal attachment capability after enforcing a valid GitHub connection. */
+  async mintCodingSessionAttachCapability(sessionId: string): Promise<CodingSessionAttachCapability> {
+    let initial = await this.#codingSessionsAccess();
+    let session = (await initial.service.listSessions(initial.owner)).find(item => item.id === sessionId);
+    if (!session) throw new Error("Coding session was not found.");
+    let {owner, service} = await this.#codingSessionsAccess(session.repositories);
+    return service.mintAttachCapability(owner, sessionId);
+  }
+
+  /** Lists coding-session observations and actions newest first. */
+  listCodingSessionActivity(sessionId?: string): CodingSessionActivity[] {
+    const records = sessionId
+      ? [...this.storage.codingSessionActions.bySession.get(sessionId)]
+      : [...this.storage.codingSessionActions.list()];
+    return records.map(({
+      bindingId: _bindingId,
+      bindingGeneration: _bindingGeneration,
+      gatekeeperActionId: _actionId,
+      ...record
+    }) => record)
+      .toSorted((left, right) => right.createdAt.valueOf() - left.createdAt.valueOf());
+  }
+
+  /** Approves and applies one coding-session action exactly once. */
+  async approveCodingSessionAction(activityId: string): Promise<void> {
+    const record = this.#pendingCodingSessionAction(activityId);
+    this.storage.codingSessionActions.put({ ...record, state: "applying" });
+    const binding = await this.#codingSessionBinding(record.bindingId);
+    if (binding.generation !== record.bindingGeneration) {
+      this.storage.codingSessionActions.put({
+        ...record, state: "failed", error: "The connected account changed before approval.",
+      });
+      throw new Error("The connected account changed before this action was approved.");
+    }
+    try {
+      await binding.facet.applyAction(record.gatekeeperActionId);
+      this.storage.codingSessionActions.put({ ...record, state: "approved" });
+    } catch (error) {
+      this.storage.codingSessionActions.put({
+        ...record,
+        state: "failed",
+        error: error instanceof Error ? error.message.slice(0, 500) : "Tool action failed.",
+      });
+      throw error;
+    }
+  }
+
+  /** Rejects one coding-session action exactly once. */
+  async rejectCodingSessionAction(activityId: string): Promise<void> {
+    const record = this.#pendingCodingSessionAction(activityId);
+    const binding = await this.#codingSessionBinding(record.bindingId);
+    if (binding.generation !== record.bindingGeneration) {
+      throw new Error("The connected account changed before this action was rejected.");
+    }
+    await binding.facet.rejectAction(record.gatekeeperActionId);
+    this.storage.codingSessionActions.put({ ...record, state: "rejected" });
+  }
+
+  recordCodingSessionObservation(
+    sessionId: string,
+    binding: CodingSessionMcpBinding,
+    description: ObservationDescription,
+  ): void {
+    this.storage.codingSessionActions.put({
+      id: crypto.randomUUID(), sessionId, bindingId: binding.id,
+      bindingGeneration: binding.generation, gatekeeperActionId: -1,
+      vendorId: binding.vendorId, resourceTitle: binding.resourceTitle,
+      type: "observation", state: "approved", description, createdAt: new Date(),
+    });
+  }
+
+  recordCodingSessionAction(
+    sessionId: string,
+    binding: CodingSessionMcpBinding,
+    gatekeeperActionId: number,
+    description: ActionDescription,
+  ): void {
+    this.storage.codingSessionActions.put({
+      id: `${sessionId}:${binding.id}:${binding.generation}:${gatekeeperActionId}`,
+      sessionId, bindingId: binding.id, bindingGeneration: binding.generation, gatekeeperActionId,
+      vendorId: binding.vendorId, resourceTitle: binding.resourceTitle,
+      type: "action", state: "pending", description, createdAt: new Date(),
+    });
+  }
+
+  async listCodingSessionTools(sessionId: string): Promise<CodingSessionTool[]> {
+    await this.#assertCodingSessionAccess(sessionId);
+    const result: CodingSessionTool[] = [];
+    for (const binding of await this.#codingSessionBindings()) {
+      const session = await binding.facet.startSession(
+        new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+      try {
+        let tools: McpToolInfo[];
+        try {
+          tools = await session.listTools();
+        } catch {
+          continue;
+        }
+        for (const tool of tools) {
+          result.push({
+            name: this.#codingSessionToolName(binding.id, tool.name),
+            title: tool.title,
+            description: tool.description,
+            inputSchema: tool.inputSchema,
+          });
+        }
+      } finally {
+        session[Symbol.dispose]();
+      }
+    }
+    return result;
+  }
+
+  async callCodingSessionTool(
+    sessionId: string,
+    qualifiedName: string,
+    args?: Record<string, unknown>,
+  ): Promise<CodingSessionToolResult> {
+    await this.#assertCodingSessionAccess(sessionId);
+    const { binding, toolName } = await this.#resolveCodingSessionTool(qualifiedName);
+    const session = await binding.facet.startSession(
+      new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+    try {
+      return this.#codingSessionToolResult(await session.callTool(toolName, args));
+    } finally {
+      session[Symbol.dispose]();
+    }
+  }
+
+  async getCodingSessionActionResult(
+    sessionId: string,
+    qualifiedName: string,
+    actionId: number,
+  ): Promise<CodingSessionToolResult> {
+    await this.#assertCodingSessionAccess(sessionId);
+    const { binding } = await this.#resolveCodingSessionTool(qualifiedName);
+    const record = [...this.storage.codingSessionActions.bySession.get(sessionId)].find(candidate =>
+      candidate.bindingId === binding.id &&
+      candidate.bindingGeneration === binding.generation &&
+      candidate.gatekeeperActionId === actionId);
+    if (!record || record.state !== "approved") {
+      throw new Error("This Workshop action is not approved for this coding session.");
+    }
+    const session = await binding.facet.startSession(
+      new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+    try {
+      return this.#codingSessionToolResult(await session.getActionResult(actionId));
+    } finally {
+      session[Symbol.dispose]();
+    }
+  }
+
+  async #assertCodingSessionAccess(sessionId: string): Promise<void> {
+    const { owner, service } = await this.#codingSessionsAccess();
+    if (!(await service.listSessions(owner)).some(session => session.id === sessionId)) {
+      throw new Error("Coding session was not found.");
+    }
+  }
+
+  async #codingSessionBindings(): Promise<CodingSessionMcpBinding[]> {
+    await this.#ensureAutoProvisionedAccounts();
+    const config = await readAdminConfig(this.env);
+    const bindings: CodingSessionMcpBinding[] = [];
+    for (const record of this.#connectedAccountRecords()) {
+      if (!areCredentialsValid(record) || config.disabledGatekeepers.includes(record.vendorId)) continue;
+      if (record.autoProvisioned && ambientGatekeeperMode(config, record.vendorId) === "disabled") continue;
+      let cls: DurableObjectClass<Gatekeeper<any>> | null = null;
+      if (record.description.singleton) {
+        cls = await this.getSingletonGatekeeperClass(record.id);
+      } else if (record.vendorId === "mcp" && record.description.uniqueName) {
+        cls = (await record.account.getGatekeeperClassFor(record.description.uniqueName)).class;
+      }
+      if (!cls) continue;
+      const id = `${record.vendorId}-${record.id}`;
+      const generation = record.codingSessionGeneration ??= crypto.randomUUID();
+      this.storage.connectedAccounts.put(record);
+      const facet = this.ctx.facets.get<Gatekeeper<McpSessionBase>>(
+        `coding-session-${id}-${generation}`, () => ({ class: cls! }));
+      bindings.push({
+        id, generation,
+        vendorId: record.vendorId,
+        resourceTitle: record.description.displayName ?? record.vendorId,
+        facet,
+      });
+    }
+    return bindings;
+  }
+
+  async #codingSessionBinding(id: string): Promise<CodingSessionMcpBinding> {
+    const binding = (await this.#codingSessionBindings()).find(candidate => candidate.id === id);
+    if (!binding) throw new Error("This connected tool is no longer available.");
+    return binding;
+  }
+
+  async #resolveCodingSessionTool(qualifiedName: string) {
+    const separator = qualifiedName.indexOf("__");
+    if (separator < 1) throw new Error("Invalid Workshop MCP tool name.");
+    const binding = await this.#codingSessionBinding(qualifiedName.slice(0, separator));
+    return { binding, toolName: qualifiedName.slice(separator + 2) };
+  }
+
+  #codingSessionToolName(bindingId: string, toolName: string): string {
+    if (!/^[A-Za-z0-9_.:-]{1,96}$/.test(toolName)) {
+      throw new Error("A connected MCP server published an invalid tool name.");
+    }
+    return `${bindingId}__${toolName}`;
+  }
+
+  #codingSessionToolResult(result: McpCallResult): CodingSessionToolResult {
+    if (result.status === "ok") {
+      return {
+        content: result.content,
+        isError: result.isError,
+        structuredContent: result.structuredContent,
+      };
+    }
+    if (result.status === "pending") {
+      return {
+        content: [{ type: "text", text: result.message }],
+        pendingActionId: result.actionId,
+      };
+    }
+    return { content: [{ type: "text", text: result.message }], isError: true };
+  }
+
+  #pendingCodingSessionAction(id: string): CodingSessionActionRecord {
+    const record = this.storage.codingSessionActions.get(id);
+    if (!record || record.type !== "action") throw new Error("No such coding-session action.");
+    if (record.state !== "pending") throw new Error("This coding-session action is already resolved.");
+    return record;
+  }
+
   // Resolve every bound vendor that auto-provisions an account (VendorDescription.autoProvisionsAccount),
   // describing them in parallel and dropping any whose describe() fails. Shared discovery step for both
   // listing and auto-provisioning ambient gatekeepers; callers apply their own admin-mode filter.
@@ -1589,6 +1940,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         existing.description = description;
         existing.credentialExpiresAt = expiresAt;
         existing.credentialsExpired = false;
+        existing.codingSessionGeneration = crypto.randomUUID();
         this.storage.connectedAccounts.put(existing);
         return;
       }
@@ -1642,7 +1994,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       return;
     }
 
-    this.storage.connectedAccounts.put(record);
+    this.storage.connectedAccounts.put({ ...record, codingSessionGeneration: crypto.randomUUID() });
   }
 
   async markCredentialsExpired(accountId: number) {
@@ -1663,6 +2015,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     record.description = await record.account.describe();
     record.credentialsExpired = false;
     record.credentialExpiresAt = expiresAt;
+    record.codingSessionGeneration = crypto.randomUUID();
     this.storage.connectedAccounts.put(record);
   }
 
