@@ -1,7 +1,8 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionSummary, type CreateCodingSessionRequest } from '@gadgets/workshop-shared/api';
+import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -13,6 +14,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
+import type { CodingSessionToolHost, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -21,7 +23,7 @@ import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
-import { RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
 import { verifyCfAccessJwt } from "./access.js";
@@ -52,6 +54,30 @@ export { AdminSettings };
 
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
+
+/** Restart-safe owner capability used by the Sessions worker to serve Workshop MCP. */
+export class CodingSessionToolHostImpl
+  extends WorkerEntrypoint<Env, { userId: string }>
+  implements CodingSessionToolHost {
+  #user(): DurableObjectStub<UserDurableObject> {
+    const users = this.ctx.exports.UserDurableObject;
+    return wrapDoStubForTelemetry(users.get(users.idFromString(this.ctx.props.userId)));
+  }
+
+  listTools(sessionId: string) {
+    return this.#user().listCodingSessionTools(sessionId);
+  }
+
+  callTool(sessionId: string, name: string, args?: Record<string, unknown>)
+      : Promise<CodingSessionToolResult> {
+    return this.#user().callCodingSessionTool(sessionId, name, args);
+  }
+
+  getActionResult(sessionId: string, name: string, actionId: number)
+      : Promise<CodingSessionToolResult> {
+    return this.#user().getCodingSessionActionResult(sessionId, name, actionId);
+  }
+}
 
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
@@ -210,6 +236,38 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   getUiFeatureFlags(): Promise<UiFeatureFlags> {
     return resolveUiFeatureFlags(this.env, this.#userId.name!);
+  }
+
+  listCodingSessions(): Promise<CodingSessionSummary[]> {
+    return this.#user.listCodingSessions();
+  }
+
+  createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
+    return this.#user.createCodingSession(request);
+  }
+
+  stopCodingSession(sessionId: string): Promise<void> {
+    return this.#user.stopCodingSession(sessionId);
+  }
+
+  archiveCodingSession(sessionId: string): Promise<void> {
+    return this.#user.archiveCodingSession(sessionId);
+  }
+
+  mintCodingSessionAttachCapability(sessionId: string): Promise<CodingSessionAttachCapability> {
+    return this.#user.mintCodingSessionAttachCapability(sessionId);
+  }
+
+  listCodingSessionActivity(sessionId?: string): Promise<CodingSessionActivity[]> {
+    return this.#user.listCodingSessionActivity(sessionId);
+  }
+
+  approveCodingSessionAction(activityId: string): Promise<void> {
+    return this.#user.approveCodingSessionAction(activityId);
+  }
+
+  rejectCodingSessionAction(activityId: string): Promise<void> {
+    return this.#user.rejectCodingSessionAction(activityId);
   }
 
   async #openGadgetInternal(id: string, shareKey?: string,

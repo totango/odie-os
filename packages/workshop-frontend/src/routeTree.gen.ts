@@ -19,6 +19,7 @@ import { Route as GettingStartedRouteImport } from './routes/getting-started'
 import { Route as OutputsRouteImport } from './routes/outputs'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ProvidersRouteImport } from './routes/providers'
+import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
@@ -76,6 +77,11 @@ const ProvidersRoute = ProvidersRouteImport.update({
   path: '/providers',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SessionsRoute = SessionsRouteImport.update({
+  id: '/sessions',
+  path: '/sessions',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SignupRoute = SignupRouteImport.update({
   id: '/signup',
   path: '/signup',
@@ -118,6 +124,7 @@ export interface FileRoutesByFullPath {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
@@ -136,6 +143,7 @@ export interface FileRoutesByTo {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
@@ -155,6 +163,7 @@ export interface FileRoutesById {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
@@ -175,6 +184,7 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
+    | '/sessions'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
@@ -193,6 +203,7 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
+    | '/sessions'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
@@ -211,6 +222,7 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
+    | '/sessions'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
@@ -230,6 +242,7 @@ export interface RootRouteChildren {
   OutputsRoute: typeof OutputsRoute
   ProfileRoute: typeof ProfileRoute
   ProvidersRoute: typeof ProvidersRoute
+  SessionsRoute: typeof SessionsRoute
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
@@ -310,6 +323,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProvidersRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/sessions': {
+      id: '/sessions'
+      path: '/sessions'
+      fullPath: '/sessions'
+      preLoaderRoute: typeof SessionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/signup': {
       id: '/signup'
       path: '/signup'
@@ -366,6 +386,7 @@ const rootRouteChildren: RootRouteChildren = {
   OutputsRoute: OutputsRoute,
   ProfileRoute: ProfileRoute,
   ProvidersRoute: ProvidersRoute,
+  SessionsRoute: SessionsRoute,
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
   BlueprintIdRoute: BlueprintIdRoute,

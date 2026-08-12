@@ -17,6 +17,7 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
 import {
   GitHubApi,
   GitHubApiError,
@@ -1347,12 +1348,6 @@ type GitHubVerifierProps = {
   userObjectId: string;
 };
 
-// The non-standard method the GitHub gatekeeper calls on its own verifier (see addObserver). Not
-// part of the generic GatekeeperUserVerifier contract.
-export interface GitHubVerifierApi extends GatekeeperUserVerifier {
-  hasRepoAccess(owner: string, repo: string): Promise<boolean>;
-}
-
 @validateRpc()
 export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
     implements GitHubVerifierApi {
@@ -1366,6 +1361,20 @@ export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
     } catch (error) {
       // GitHub returns 404 for private repos the token cannot see (to avoid leaking existence), and
       // 403 in some org-policy cases — either way the observer lacks read access.
+      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async hasRepoWriteAccess(owner: string, repo: string): Promise<boolean> {
+    const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
+    const account = this.ctx.exports.UserAccount.get(id);
+    const api = new GitHubApi(async () => await account.getAccessToken());
+    try {
+      return (await api.getRepo(owner, repo)).permissions?.push === true;
+    } catch (error) {
       if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
         return false;
       }

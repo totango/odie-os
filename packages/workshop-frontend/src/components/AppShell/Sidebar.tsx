@@ -10,6 +10,7 @@ import {
   SidebarSimple,
   SquaresFour,
   Stack,
+  TerminalWindow,
 } from '@phosphor-icons/react'
 import { useSiteName } from '../../ServerConfigContext'
 import SiteLogo from '../SiteLogo'
@@ -22,6 +23,9 @@ import {
   SidebarWorkspacesLists,
 } from './SidebarWorkspaces'
 import SidebarUtilityStrip from './SidebarUtilityStrip'
+import { useGitHubConnection } from '../../hooks/useGitHubConnection'
+import { useAuthenticatedApi } from '../../AuthContext'
+import { useEffect, useState } from 'react'
 
 // The persistent left rail. Three pinned regions sandwich a single scrolling region of lists, so
 // the user can always reach Search, primary nav, and the bottom utility strip no matter how many
@@ -45,6 +49,21 @@ export default function Sidebar({
   // and is connected / enabled for everyone). Disabled or not-yet-connected ones aren't returned, so
   // they simply don't appear. The set is fully dynamic — no gatekeeper is hardcoded.
   const gatekeeperApps = useGatekeeperApps()
+  const github = useGitHubConnection()
+  const { authenticatedApi } = useAuthenticatedApi()
+  const [pendingSessionActions, setPendingSessionActions] = useState(0)
+  const showSessions = github.state === 'connected' || github.state === 'expired'
+
+  useEffect(() => {
+    if (!showSessions) return
+    let cancelled = false
+    const refresh = () => authenticatedApi.listCodingSessionActivity().then((activity) => {
+      if (!cancelled) setPendingSessionActions(activity.filter((entry) => entry.state === 'pending').length)
+    }).catch(() => {})
+    refresh()
+    const timer = window.setInterval(refresh, 10_000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [authenticatedApi, showSessions])
 
   return (
     <aside
@@ -128,6 +147,19 @@ export default function Sidebar({
               icon={<SquaresFour size={14} weight="regular" />}
               collapsed={collapsed}
             />
+            {showSessions && (
+              <SidebarItem
+                to="/sessions"
+                label="Sessions"
+                icon={<TerminalWindow size={14} weight="regular" />}
+                trailing={pendingSessionActions > 0 ? (
+                  <span className="rounded-full bg-kumo-brand px-1.5 text-[10px] leading-4 text-white">
+                    {pendingSessionActions}
+                  </span>
+                ) : undefined}
+                collapsed={collapsed}
+              />
+            )}
             <SidebarItem
               to="/getting-started"
               label="Getting started"

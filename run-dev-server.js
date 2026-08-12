@@ -198,6 +198,10 @@ const SHARED_GATEKEEPER_CREDS = {
 // `.dev.vars` is gitignored, so it cannot leave the machine. Secrets travel the same way
 // `CLIENT_SECRET` already does, via SHARED_GATEKEEPER_CREDS above.
 const PASSTHROUGH_GATEKEEPER_VARS = {
+  "gatekeeper-sessions": [
+    "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY",
+    "TEAM_PI_CODEX_BASE_URL", "TEAM_PI_CODEX_HMAC_SECRET", "SESSION_ALLOWED_ORIGIN",
+  ],
   "gatekeeper-mcp-portal": [
     "MCP_PORTAL_URL", "MCP_PORTAL_NAME", "MCP_PORTAL_AUTH", "MCP_PORTAL_TOKEN",
     "MCP_PORTAL_TRUST_ANNOTATIONS", "MCP_ALLOW_INSECURE",
@@ -211,6 +215,13 @@ for (const gk of gatekeepers) {
   config.build = { ...config.build, cwd: gk.dir };
   config.vars = config.vars || {};
   config.vars.BASE_URL = `http://${backendHost}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
+
+  if (process.env.PUBLIC_BASE_URL) {
+    config.vars = config.vars || {};
+    if (config.vars.BASE_URL === undefined) {
+      config.vars.BASE_URL = `${process.env.PUBLIC_BASE_URL}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
+    }
+  }
 
   const shared = SHARED_GATEKEEPER_CREDS[gk.name];
   if (shared && process.env[shared.id] && process.env[shared.secret]) {

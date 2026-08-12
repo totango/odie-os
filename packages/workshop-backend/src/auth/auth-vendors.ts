@@ -5,6 +5,10 @@
 
 import { GatekeeperVendor } from "@gadgets/workshop-shared/gatekeeper";
 
+// Internal Workers that use the /gatekeeper/<name> router prefix for an HTTP surface but are not
+// third-party connectors. Their bindings are resolved explicitly by the owning feature instead.
+const INTERNAL_SERVICE_BINDINGS = new Set(["GATEKEEPER_SESSIONS"]);
+
 export function gatekeeperBindingName(vendorId: string): string {
   return "GATEKEEPER_" + vendorId.toUpperCase();
 }
@@ -25,7 +29,7 @@ export function buildGatekeeperVendorMap(
 ): Map<string, Service<GatekeeperVendor>> {
   const vendors = new Map<string, Service<GatekeeperVendor>>();
   for (const bindingName in env) {
-    if (bindingName.startsWith("GATEKEEPER_")) {
+    if (bindingName.startsWith("GATEKEEPER_") && !INTERNAL_SERVICE_BINDINGS.has(bindingName)) {
       const vendorId = bindingName.slice("GATEKEEPER_".length).toLowerCase();
       vendors.set(vendorId, (env as unknown as Record<string, Service<GatekeeperVendor>>)[bindingName]);
     }

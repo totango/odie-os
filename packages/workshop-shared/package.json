@@ -17,9 +17,17 @@
       "types": "./src/gatekeeper.ts",
       "import": "./src/gatekeeper.ts"
     },
+    "./github-gatekeeper": {
+      "types": "./src/github-gatekeeper.ts",
+      "import": "./src/github-gatekeeper.ts"
+    },
     "./cloudflare-gatekeeper": {
       "types": "./src/cloudflare-gatekeeper.ts",
       "import": "./src/cloudflare-gatekeeper.ts"
+    },
+    "./coding-sessions": {
+      "types": "./src/coding-sessions.ts",
+      "import": "./src/coding-sessions.ts"
     },
     "./limits": {
       "types": "./src/limits.ts",

@@ -6,14 +6,17 @@ import {
   CheckCircle,
   Code,
   Detective,
+  GithubLogo,
   Lightning,
   Plugs,
   Robot,
   ShieldCheck,
+  TerminalWindow,
   Warning,
 } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
+import { refreshGatekeeperApps } from '../useGatekeeperApps'
 import type {
   AiChatAuthorInfo,
   ConnectedAccountsSubscriber,
@@ -258,15 +261,48 @@ export function GettingStartedPage() {
 }
 
 export function GettingStartedPageContent({ readiness }: { readiness: ReadinessState }) {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const [connectingVendor, setConnectingVendor] = useState<string>()
+  const [setupError, setSetupError] = useState<string>()
   const teamPiModels = readiness.models.filter(isTeamPiCodexModel)
   const singletonAccounts = readiness.accounts.filter((account) => account.accountDescription.singleton)
   const teamPiAccounts = readiness.accounts.filter(isTeamPiAccount)
-  const jarvisAccounts = readiness.accounts.filter(isJarvisAccount)
+  const jarvisAccounts = readiness.accounts.filter((account) => isJarvisAccount(account) && account.credentialsValid)
   const connectableVendors = [...readiness.vendors, ...readiness.addableGatekeepers]
   const teamPiVendors = connectableVendors.filter(isTeamPiVendor)
   const accountsReady = readiness.accountsLoaded && readiness.accounts.length > 0
   const modelReady = readiness.modelsLoaded && teamPiModels.length > 0
   const teamPiVendorReady = readiness.vendorsLoaded && teamPiVendors.length > 0
+  const githubAccounts = readiness.accounts.filter((account) => account.vendorId === 'github' && account.credentialsValid)
+  const portalAccounts = readiness.accounts.filter((account) =>
+    account.vendorId === 'mcp-portal' && account.credentialsValid)
+  const teamPiReady = teamPiAccounts.some((account) => account.credentialsValid)
+  const approvedWorkAppRouteReady = teamPiReady || portalAccounts.length > 0
+  const portalVendorId = connectableVendors.find((candidate) => candidate.id === 'mcp-portal')?.id
+  const workAppVendorId = teamPiVendors[0]?.id ?? portalVendorId
+  const setupChecks = [githubAccounts.length > 0, jarvisAccounts.length > 0, approvedWorkAppRouteReady, modelReady]
+  const completedSetupChecks = setupChecks.filter(Boolean).length
+
+  const vendor = (id: string) => connectableVendors.find((candidate) => candidate.id === id)
+  const addable = (id: string) => readiness.addableGatekeepers.find((candidate) => candidate.id === id)
+
+  const connectVendor = async (vendorId: string) => {
+    setConnectingVendor(vendorId)
+    setSetupError(undefined)
+    try {
+      if (addable(vendorId)) {
+        await authenticatedApi.provisionAmbientAccount(vendorId)
+        refreshGatekeeperApps(authenticatedApi)
+      } else {
+        const { url } = await authenticatedApi.connectAccount(vendorId)
+        window.open(url, '_blank', 'noopener,noreferrer')
+      }
+    } catch (error) {
+      setSetupError(error instanceof Error ? error.message : `Could not connect ${vendorId}.`)
+    } finally {
+      setConnectingVendor(undefined)
+    }
+  }
 
   return (
     <div className="min-h-full bg-kumo-base">
@@ -315,6 +351,92 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
             )}
           </Card>
         </header>
+
+        <Card className="mb-8 overflow-hidden !p-0">
+          <div className="grid gap-6 border-b border-kumo-line bg-kumo-elevated p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_280px] lg:items-center">
+            <div>
+              <div className="text-[11px] font-semibold uppercase tracking-[0.65px] text-kumo-brand">Developer setup</div>
+              <h2 className="mt-2 text-2xl font-semibold tracking-[-0.5px] text-kumo-default">Connect your engineering workbench</h2>
+              <p className="mt-2 max-w-2xl text-[13px] leading-5 text-kumo-subtle">
+                Connect source control, confirm the managed agent path, and choose an approved route to Jira and Zendesk. New OpenCode sessions inherit eligible JARVIS and MCP tools automatically.
+              </p>
+            </div>
+            <div className="rounded-xl border border-kumo-line bg-kumo-base p-4">
+              <div className="flex items-end justify-between gap-3">
+                <div><span className="text-3xl font-semibold text-kumo-default">{completedSetupChecks}</span><span className="text-sm text-kumo-subtle"> / {setupChecks.length}</span></div>
+                <StatusPill state={completedSetupChecks === setupChecks.length ? 'ready' : 'pending'}>
+                  {completedSetupChecks === setupChecks.length ? 'Ready to build' : 'Setup in progress'}
+                </StatusPill>
+              </div>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-kumo-fill">
+                <div className="h-full rounded-full bg-kumo-brand transition-[width]" style={{ width: `${completedSetupChecks / setupChecks.length * 100}%` }} />
+              </div>
+            </div>
+          </div>
+
+          {setupError && <div className="border-b border-kumo-danger/20 bg-kumo-danger-tint px-5 py-3 text-xs text-kumo-danger">{setupError}</div>}
+
+          <div className="grid divide-y divide-kumo-line lg:grid-cols-2 lg:divide-x lg:divide-y-0">
+            <div className="space-y-3 p-5 sm:p-6">
+              <DeveloperSetupStep
+                icon={<GithubLogo size={17} />}
+                title="Connect GitHub"
+                description="Required for private repository clone, push authorization, pull requests, and coding sessions."
+                ready={githubAccounts.length > 0}
+                available={!!vendor('github')}
+                actionLabel="Connect GitHub"
+                busy={connectingVendor === 'github'}
+                onAction={() => connectVendor('github')}
+              />
+              <DeveloperSetupStep
+                icon={<Code size={17} />}
+                title="Enable JARVIS"
+                description="Provides approved repository knowledge and mediated production investigation tools. Deployment admins control availability."
+                ready={jarvisAccounts.length > 0}
+                available={!!addable('jarvis')}
+                actionLabel="Enable JARVIS"
+                busy={connectingVendor === 'jarvis'}
+                onAction={() => connectVendor('jarvis')}
+              />
+              <DeveloperSetupStep
+                icon={<Robot size={17} />}
+                title="Confirm Team PI Codex"
+                description="The managed model used by OpenCode sessions; no personal model credential is copied into the sandbox."
+                ready={modelReady}
+                available={false}
+                actionLabel="Managed by admin"
+              />
+            </div>
+
+            <div className="space-y-3 p-5 sm:p-6">
+              <DeveloperSetupStep
+                icon={<Plugs size={17} />}
+                title="Route Jira and Zendesk"
+                description={approvedWorkAppRouteReady
+                  ? 'An approved Team PI or MCP Portal route is available. Finish Jira and Zendesk authorization inside that connector.'
+                  : 'Use Team PI when available, or the deployment-configured MCP Portal. User-pasted MCP endpoints do not count as an approved Jira or Zendesk route.'}
+                ready={approvedWorkAppRouteReady}
+                available={!!workAppVendorId}
+                actionLabel={teamPiVendors.length > 0 ? 'Connect Team PI' : 'Connect MCP Portal'}
+                busy={connectingVendor === workAppVendorId}
+                onAction={workAppVendorId ? () => connectVendor(workAppVendorId) : undefined}
+              />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Link to="/blueprint/$id" params={{ id: 'starter.developer-delivery-kit' }} className={`${INTERNAL_LINK_CLASS} !justify-between`}>
+                  <span><span className="block text-[11px] font-semibold uppercase tracking-wide text-kumo-brand">Starter</span>Developer Delivery Kit</span>
+                  <ArrowRight size={14} />
+                </Link>
+                <Link to="/sessions" className={`${INTERNAL_LINK_CLASS} !justify-between`}>
+                  <span><span className="block text-[11px] font-semibold uppercase tracking-wide text-kumo-brand">Code</span>Open a coding session</span>
+                  <TerminalWindow size={14} />
+                </Link>
+              </div>
+              <p className="rounded-lg bg-kumo-tint px-3 py-2 text-[11px] leading-4 text-kumo-subtle">
+                The Developer Delivery Kit is useful before every connector is ready. Add GitHub and work-app resources from its Connections tab when you want live data.
+              </p>
+            </div>
+          </div>
+        </Card>
 
         <div className="grid gap-4 lg:grid-cols-4">
           <Card className="lg:col-span-2">
@@ -512,6 +634,48 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
             </div>
           </Card>
         </section>
+      </div>
+    </div>
+  )
+}
+
+function DeveloperSetupStep({
+  icon,
+  title,
+  description,
+  ready,
+  available,
+  actionLabel,
+  busy = false,
+  onAction,
+}: {
+  icon: React.ReactNode
+  title: string
+  description: string
+  ready: boolean
+  available: boolean
+  actionLabel: string
+  busy?: boolean
+  onAction?: () => void
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3.5">
+      <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ${ready ? 'bg-kumo-success-tint text-kumo-success' : 'bg-kumo-fill text-kumo-brand'}`}>
+        {ready ? <CheckCircle size={17} weight="fill" /> : icon}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-[13px] font-semibold text-kumo-default">{title}</h3>
+          <StatusPill state={ready ? 'ready' : available ? 'pending' : 'warning'}>
+            {ready ? 'Ready' : available ? 'Available' : 'Admin required'}
+          </StatusPill>
+        </div>
+        <p className="mt-1 text-[12px] leading-[17px] text-kumo-subtle">{description}</p>
+        {!ready && available && onAction && (
+          <button type="button" onClick={onAction} disabled={busy} className="mt-2 text-[12px] font-medium text-kumo-link hover:underline disabled:opacity-50">
+            {busy ? 'Opening…' : actionLabel} <ArrowRight size={11} className="inline" />
+          </button>
+        )}
       </div>
     </div>
   )

@@ -1,0 +1,7 @@
+[
+  { "name": "GITHUB_APP_ID", "kind": "secret", "label": "Totango GitHub App ID" },
+  { "name": "GITHUB_APP_INSTALLATION_ID", "kind": "secret", "label": "Totango GitHub App installation ID" },
+  { "name": "GITHUB_APP_PRIVATE_KEY", "kind": "secret", "label": "Totango GitHub App PKCS#8 private key" },
+  { "name": "TEAM_PI_CODEX_BASE_URL", "kind": "secret", "label": "Team PI Codex relay URL" },
+  { "name": "TEAM_PI_CODEX_HMAC_SECRET", "kind": "secret", "label": "Team PI Codex HMAC secret" }
+]

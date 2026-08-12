@@ -54,6 +54,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   // without prop-drilling a close callback through the whole rail. No-op on desktop, where the
   // drawer is never open.
   const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const isSessions = pathname === '/sessions'
   useEffect(() => {
     setMobileOpen(false)
   }, [pathname])
@@ -102,7 +103,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         {/* Top bar. Same height as the sidebar's brand row (h-14) so they read as one continuous
             chrome strip across the top. Mostly empty — carries the mobile hamburger on the left,
             any admin TopBarNotice centered, and the reconnecting chip on the right. */}
-        <div className="relative flex h-14 shrink-0 items-center justify-between border-b border-kumo-line bg-kumo-base px-3">
+        <div className={`relative h-14 shrink-0 items-center justify-between border-b border-kumo-line bg-kumo-base px-3 ${isSessions ? 'flex md:hidden' : 'flex'}`}>
           <button
             type="button"
             onClick={() => setMobileOpen((o) => !o)}
@@ -122,7 +123,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         {/* Routed content. Flat enterprise canvas — no texture. */}
-        <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
+        <main className={`min-h-0 flex-1 ${isSessions ? 'overflow-hidden' : 'overflow-y-auto'}`}>{children}</main>
       </div>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

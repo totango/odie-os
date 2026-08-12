@@ -19,6 +19,8 @@ const testState = vi.hoisted(() => ({
       },
     ]),
     listAddableGatekeepers: vi.fn<() => Promise<GatekeeperVendorInfo[]>>(async () => []),
+    connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://connect.example.test' })),
+    provisionAmbientAccount: vi.fn<(vendorId: string) => Promise<void>>(async () => {}),
     subscribeConnectedAccounts: vi.fn<(subscriber: ConnectedAccountsSubscriber, filter: { includeForcedAutoProvisionedAccounts: boolean }) => Promise<{ [Symbol.dispose](): void }>>(),
   },
   subscriber: undefined as ConnectedAccountsSubscriber | undefined,
@@ -151,7 +153,70 @@ describe('Getting started', () => {
     expect(container.textContent).toContain('JARVIS is an ambient binding')
     expect(container.textContent).toContain('Never connect Odie directly to raw production MCP')
     expect(container.textContent).toContain('Install or start-connection operations must remain approval-gated')
+    expect(container.textContent).toContain('Developer setup')
+    expect(container.textContent).toContain('Connect GitHub')
+    expect(container.textContent).toContain('Route Jira and Zendesk')
+    expect(container.textContent).toContain('Developer Delivery Kit')
+    expect(container.textContent).toContain('Open a coding session')
     expect([...container.querySelectorAll('a')].some((link) => link.getAttribute('href') === '/gatekeepers')).toBe(true)
+  })
+
+  it('shows actionable developer setup without claiming unavailable integrations are connected', async () => {
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => root!.render(
+      <GettingStartedPageContent
+        readiness={{
+          models: [],
+          accounts: [],
+          vendors: [
+            { id: 'github', description: { displayName: 'GitHub', url: 'https://github.test' }, supportedResources: [] },
+            { id: 'mcp', description: { displayName: 'MCP Server', url: 'https://mcp.test' }, supportedResources: [] },
+          ],
+          addableGatekeepers: [],
+          modelsLoaded: true,
+          accountsLoaded: true,
+          vendorsLoaded: true,
+          loadError: false,
+        }}
+      />,
+    ))
+
+    expect(container.textContent).toContain('0 / 4')
+    expect(container.textContent).toContain('User-pasted MCP endpoints do not count')
+    expect(container.textContent).toContain('Admin required')
+    expect(container.textContent).not.toContain('Ready to build')
+  })
+
+  it('does not count an expired JARVIS account as ready', async () => {
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => root!.render(
+      <GettingStartedPageContent readiness={{
+        models: [{ type: 'agent', id: 'team-pi-codex/gpt-5.6-sol', name: 'Managed' }],
+        accounts: [{
+          id: 9,
+          accountDescription: { displayName: 'JARVIS', avatar: { url: '' }, singleton: { tsType: 'JarvisSession' } },
+          vendorDescription: { displayName: 'JARVIS', url: 'https://jarvis.test' },
+          vendorId: 'jarvis',
+          supportedResources: [],
+          credentialsValid: false,
+        }],
+        vendors: [],
+        addableGatekeepers: [],
+        modelsLoaded: true,
+        accountsLoaded: true,
+        vendorsLoaded: true,
+        loadError: false,
+      }} />,
+    ))
+
+    expect(container.textContent).toContain('1 / 4')
+    expect(container.textContent).not.toContain('Ready to build')
   })
 
   it('does not treat an unrelated connectable vendor as TEAM_PI readiness', async () => {

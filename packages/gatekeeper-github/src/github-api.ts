@@ -25,6 +25,13 @@ export type GitHubRepoResponse = {
   visibility?: "public" | "private" | "internal";
   private?: boolean;
   owner: GitHubSimpleUser;
+  permissions?: {
+    admin?: boolean;
+    maintain?: boolean;
+    push?: boolean;
+    triage?: boolean;
+    pull?: boolean;
+  };
 };
 
 export type GitHubIssueResponse = {
