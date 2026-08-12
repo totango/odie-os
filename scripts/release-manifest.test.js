@@ -203,7 +203,7 @@ test("worker entries carry the deploy contract", () => {
   assert.ok(!sessions.bindings.some((binding) => binding.class_name === "CodingSessionRegistry"));
   assert.deepEqual(sessions.containers, [{
     class_name: "CodingSessionSandbox",
-    image: "./Dockerfile",
+    image: "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
     instance_type: "standard-1",
     max_instances: 20,
   }]);
