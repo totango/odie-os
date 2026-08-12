@@ -14,7 +14,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
-import type { CodingSessionToolHost, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
+import type { CodingSessionOwner, CodingSessionToolHost, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -57,25 +57,27 @@ export { UserDurableObject, GatekeeperConnectCallbackImpl };
 
 /** Restart-safe owner capability used by the Sessions worker to serve Workshop MCP. */
 export class CodingSessionToolHostImpl
-  extends WorkerEntrypoint<Env, { userId: string }>
+  extends WorkerEntrypoint<Env>
   implements CodingSessionToolHost {
-  #user(): DurableObjectStub<UserDurableObject> {
+  #user(owner: CodingSessionOwner): DurableObjectStub<UserDurableObject> {
     const users = this.ctx.exports.UserDurableObject;
-    return wrapDoStubForTelemetry(users.get(users.idFromString(this.ctx.props.userId)));
+    return wrapDoStubForTelemetry(users.get(users.idFromString(owner.userId)));
   }
 
-  listTools(sessionId: string) {
-    return this.#user().listCodingSessionTools(sessionId);
+  listTools(owner: CodingSessionOwner, sessionId: string) {
+    return this.#user(owner).listCodingSessionTools(sessionId);
   }
 
-  callTool(sessionId: string, name: string, args?: Record<string, unknown>)
+  callTool(owner: CodingSessionOwner, sessionId: string, name: string,
+      args?: Record<string, unknown>)
       : Promise<CodingSessionToolResult> {
-    return this.#user().callCodingSessionTool(sessionId, name, args);
+    return this.#user(owner).callCodingSessionTool(sessionId, name, args);
   }
 
-  getActionResult(sessionId: string, name: string, actionId: number)
+  getActionResult(owner: CodingSessionOwner, sessionId: string, name: string,
+      actionId: number)
       : Promise<CodingSessionToolResult> {
-    return this.#user().getCodingSessionActionResult(sessionId, name, actionId);
+    return this.#user(owner).getCodingSessionActionResult(sessionId, name, actionId);
   }
 }
 

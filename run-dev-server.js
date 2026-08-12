@@ -213,15 +213,18 @@ for (const gk of gatekeepers) {
   const srcPath = join(gk.dir, "wrangler.jsonc");
   const config = parse(readFileSync(srcPath, "utf8"));
   config.build = { ...config.build, cwd: gk.dir };
-  config.vars = config.vars || {};
-  config.vars.BASE_URL = `http://${backendHost}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
-
-  if (process.env.PUBLIC_BASE_URL) {
-    config.vars = config.vars || {};
-    if (config.vars.BASE_URL === undefined) {
-      config.vars.BASE_URL = `${process.env.PUBLIC_BASE_URL}/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
-    }
+  if (gk.name === "gatekeeper-sessions") {
+    config.services = [{
+      binding: "WORKSHOP_TOOLS",
+      service: "workshop-backend",
+      entrypoint: "CodingSessionToolHostImpl",
+    }];
   }
+  config.vars = config.vars || {};
+  const gatekeeperPath = `/gatekeeper/${gk.name.slice("gatekeeper-".length)}`;
+  config.vars.BASE_URL = process.env.PUBLIC_BASE_URL
+    ? `${process.env.PUBLIC_BASE_URL.replace(/\/$/, "")}${gatekeeperPath}`
+    : `http://${backendHost}${gatekeeperPath}`;
 
   const shared = SHARED_GATEKEEPER_CREDS[gk.name];
   if (shared && process.env[shared.id] && process.env[shared.secret]) {

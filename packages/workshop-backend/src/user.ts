@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionSummary, type CreateCodingSessionRequest } from '@gadgets/workshop-shared/api';
 import type { CodingSessionOwner, CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
-import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolHost, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
+import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { McpSessionBase } from "@gadgets/mcp-shared/session";
@@ -1315,14 +1315,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Creates a coding session after enforcing a valid GitHub connection. */
   async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
     let {owner, service} = await this.#codingSessionsAccess(request.repositories);
-    const exports = (this.ctx as DurableObjectState & {
-      exports: {
-        CodingSessionToolHostImpl(options: { props: { userId: string } }): Fetcher<CodingSessionToolHost>;
-      };
-    }).exports;
-    return service.createSession(owner, request, exports.CodingSessionToolHostImpl({
-      props: { userId: this.ctx.id.toString() },
-    }));
+    return service.createSession(owner, request);
   }
 
   /** Stops a coding session after enforcing a valid GitHub connection. */
@@ -1423,6 +1416,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listCodingSessionTools(sessionId: string): Promise<CodingSessionTool[]> {
+    await this.#assertCodingSessionAccess(sessionId);
     const result: CodingSessionTool[] = [];
     for (const binding of await this.#codingSessionBindings()) {
       const session = await binding.facet.startSession(
@@ -1454,6 +1448,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     qualifiedName: string,
     args?: Record<string, unknown>,
   ): Promise<CodingSessionToolResult> {
+    await this.#assertCodingSessionAccess(sessionId);
     const { binding, toolName } = await this.#resolveCodingSessionTool(qualifiedName);
     const session = await binding.facet.startSession(
       new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
@@ -1469,6 +1464,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     qualifiedName: string,
     actionId: number,
   ): Promise<CodingSessionToolResult> {
+    await this.#assertCodingSessionAccess(sessionId);
     const { binding } = await this.#resolveCodingSessionTool(qualifiedName);
     const record = [...this.storage.codingSessionActions.bySession.get(sessionId)].find(candidate =>
       candidate.bindingId === binding.id &&
@@ -1483,6 +1479,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       return this.#codingSessionToolResult(await session.getActionResult(actionId));
     } finally {
       session[Symbol.dispose]();
+    }
+  }
+
+  async #assertCodingSessionAccess(sessionId: string): Promise<void> {
+    const { owner, service } = await this.#codingSessionsAccess();
+    if (!(await service.listSessions(owner)).some(session => session.id === sessionId)) {
+      throw new Error("Coding session was not found.");
     }
   }
 

@@ -66,10 +66,11 @@ export interface CodingSessionActivity {
 /** Narrow owner-bound capability used by the Sessions worker to serve Workshop MCP. */
 export interface CodingSessionToolHost extends WorkerEntrypoint {
   /** Lists the current user's eligible connected MCP tools. */
-  listTools(sessionId: string): Promise<CodingSessionTool[]>;
+  listTools(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionTool[]>;
 
   /** Calls one namespaced tool through its existing gatekeeper approval policy. */
   callTool(
+    owner: CodingSessionOwner,
     sessionId: string,
     name: string,
     args?: Record<string, unknown>,
@@ -77,6 +78,7 @@ export interface CodingSessionToolHost extends WorkerEntrypoint {
 
   /** Collects the result of an approval-gated MCP action. */
   getActionResult(
+    owner: CodingSessionOwner,
     sessionId: string,
     name: string,
     actionId: number,
@@ -92,7 +94,6 @@ export interface CodingSessionsService extends WorkerEntrypoint {
   createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
-    toolHost: Fetcher<CodingSessionToolHost>,
   ): Promise<CodingSessionSummary>;
 
   /** Stops a session after verifying ownership. */

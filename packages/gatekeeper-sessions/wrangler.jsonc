@@ -22,6 +22,13 @@
       { "name": "SESSION_POLICIES", "class_name": "CodingSessionPolicy" }
     ]
   },
+  "services": [
+    {
+      "binding": "WORKSHOP_TOOLS",
+      "service": "workshop-backend",
+      "entrypoint": "CodingSessionToolHostImpl"
+    }
+  ],
   "migrations": [
     {
       "tag": "v1",

@@ -779,6 +779,12 @@
     "gatekeeper-sessions": {
       "bindings": [
         {
+          "entrypoint": "CodingSessionToolHostImpl",
+          "name": "WORKSHOP_TOOLS",
+          "service": "$WORKER_NAME(workshop-backend)",
+          "type": "service"
+        },
+        {
           "class_name": "CodingSessionSandbox",
           "name": "SESSION_SANDBOX",
           "type": "durable_object_namespace"

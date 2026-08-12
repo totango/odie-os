@@ -200,6 +200,12 @@ test("worker entries carry the deploy contract", () => {
     name: "SESSION_POLICIES",
     class_name: "CodingSessionPolicy",
   });
+  assert.deepEqual(sessions.bindings.find((binding) => binding.name === "WORKSHOP_TOOLS"), {
+    type: "service",
+    name: "WORKSHOP_TOOLS",
+    service: "$WORKER_NAME(workshop-backend)",
+    entrypoint: "CodingSessionToolHostImpl",
+  });
   assert.ok(!sessions.bindings.some((binding) => binding.class_name === "CodingSessionRegistry"));
   assert.deepEqual(sessions.containers, [{
     class_name: "CodingSessionSandbox",

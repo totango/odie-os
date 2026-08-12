@@ -40,6 +40,7 @@ const logger = createLogger<SessionsLogFields>({ component: "gatekeeper.sessions
 interface Env {
   SESSION_SANDBOX: DurableObjectNamespace<CodingSessionSandbox>;
   SESSION_POLICIES: DurableObjectNamespace<CodingSessionPolicy>;
+  WORKSHOP_TOOLS: Service<CodingSessionToolHost>;
   BASE_URL?: string;
   SESSION_ALLOWED_ORIGIN?: string;
   GITHUB_APP_ID?: string;
@@ -64,7 +65,6 @@ type SessionPolicy = {
   sessionId: string;
   owner: CodingSessionOwner;
   repositories: CodingSessionRepository[];
-  toolHost: Fetcher<CodingSessionToolHost>;
 };
 
 /** Isolated Linux environment used by one coding session. */
@@ -246,8 +246,8 @@ export class CodingSessionPolicy extends DurableObject<Env> {
         });
       }
       if (message.method === "tools/list") {
-        const tools = await policy.toolHost.listTools(
-          policy.sessionId) as unknown as CodingSessionTool[];
+        const tools = await this.env.WORKSHOP_TOOLS.listTools(
+          policy.owner, policy.sessionId) as unknown as CodingSessionTool[];
         return mcpResult(message.id, {
           tools: [
             ...tools.map(tool => ({
@@ -286,11 +286,12 @@ export class CodingSessionPolicy extends DurableObject<Env> {
           if (typeof args?.tool !== "string" || !Number.isInteger(args.actionId)) {
             return mcpError(message.id, -32602, "tool and actionId are required");
           }
-          result = await policy.toolHost.getActionResult(
-            policy.sessionId, args.tool, args.actionId as number) as unknown as CodingSessionToolResult;
+          result = await this.env.WORKSHOP_TOOLS.getActionResult(
+            policy.owner, policy.sessionId, args.tool,
+            args.actionId as number) as unknown as CodingSessionToolResult;
         } else {
-          result = await policy.toolHost.callTool(
-            policy.sessionId, params.name,
+          result = await this.env.WORKSHOP_TOOLS.callTool(
+            policy.owner, policy.sessionId, params.name,
             params.arguments as Record<string, unknown> | undefined) as unknown as CodingSessionToolResult;
         }
         if (result.pendingActionId !== undefined) {
@@ -360,7 +361,6 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   async createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
-    toolHost: Fetcher<CodingSessionToolHost>,
   ): Promise<CodingSessionSummary> {
     const repositories = validateRepositories(request.repositories);
     if ([...this.#records()].filter(record =>
@@ -385,9 +385,9 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     };
     this.#put(record);
     const policy = policyFor(this.env, id);
-    await policy.configure({ sessionId: id, owner, repositories, toolHost });
 
     try {
+      await policy.configure({ sessionId: id, owner, repositories });
       const sandbox = getSandbox(this.env.SESSION_SANDBOX, id);
       const token = await policy.getInstallationToken();
       await sandbox.configureGitHubAuth(token);
@@ -487,9 +487,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
-    toolHost: Fetcher<CodingSessionToolHost>,
   ): Promise<CodingSessionSummary> {
-    return registryFor(this.ctx, owner.userId).createSession(owner, request, toolHost);
+    return registryFor(this.ctx, owner.userId).createSession(owner, request);
   }
 
   /** Stops a session for the supplied authenticated owner. */
