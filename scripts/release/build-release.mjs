@@ -46,20 +46,20 @@ function run(command, argv, options = {}) {
 }
 
 function gitCommit() {
-  return process.env.CI_COMMIT_SHA
+  return process.env.GITHUB_SHA
+      || process.env.CI_COMMIT_SHA
       || execFileSync("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" }).trim();
 }
 
 function defaultReleaseId(commit) {
-  // CI: GitLab pipeline IID + short SHA. Local: timestamped dev release, unique per build so
+  // CI: GitHub workflow run number + short SHA. Local: timestamped dev release, unique per build so
   // every upload stays immutable in R2. "Latest" is decided by the deploy service from upload
   // time, and the commit is in the manifest's `commit` field. Kept short: worker version tags
   // (`gd:<id>:<fp8>`) have a hard 25-char cap downstream.
   //
-  // CI_PIPELINE_IID (per-project, monotonic), NOT CI_PIPELINE_ID (instance-global): run numbers
-  // are compared by promote-release.mjs's supersededBy() guard, so they must form one monotonic
-  // sequence from a single publisher.
-  const runNumber = process.env.CI_PIPELINE_IID;
+  // GITHUB_RUN_NUMBER is monotonic per workflow. Run numbers are compared by
+  // promote-release.mjs's supersededBy() guard, so releases must have one workflow publisher.
+  const runNumber = process.env.GITHUB_RUN_NUMBER ?? process.env.CI_PIPELINE_IID;
   if (runNumber) return `r${runNumber.padStart(6, "0")}-${commit.slice(0, 7)}`;
   return `dev-${Math.floor(Date.now() / 1000).toString(36)}`;
 }
