@@ -49,11 +49,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build workspace
-        env:
-          VITE_CF_ACCESS_MODE: "true"
         run: pnpm build
 
-      - name: Build deployment artifact
+      - name: Build Access-mode deployment artifact
         run: node scripts/build-production-deploy.mjs --out production-deploy
 
       - name: Upload deployment artifact

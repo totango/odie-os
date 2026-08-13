@@ -9,6 +9,7 @@ import { parse } from "jsonc-parser";
 import { collectModules } from "./release/hash-lib.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const FRONTEND_DIR = join(ROOT, "packages", "workshop-frontend");
 const FRONTEND_DIST = join(ROOT, "packages", "workshop-frontend", "dist");
 const WORKERS = [
   "gatekeeper-context",
@@ -41,6 +42,14 @@ function runWrangler(packageDir, configPath, outDir) {
   ], { cwd: packageDir, stdio: "inherit" });
 }
 
+function buildFrontend() {
+  execFileSync("pnpm", ["run", "build"], {
+    cwd: FRONTEND_DIR,
+    env: { ...process.env, VITE_CF_ACCESS_MODE: "true" },
+    stdio: "inherit",
+  });
+}
+
 function validateOutputDir(outputDir) {
   const allowedRoots = [ROOT, resolve(tmpdir())];
   if (outputDir === ROOT || outputDir === resolve(homedir()) || outputDir === resolve("/")) {
@@ -66,6 +75,7 @@ function main() {
   validateOutputDir(outputDir);
   rmSync(outputDir, { recursive: true, force: true });
   mkdirSync(outputDir, { recursive: true });
+  buildFrontend();
 
   for (const packageName of WORKERS) {
     const packageDir = join(ROOT, "packages", packageName);

@@ -11,7 +11,8 @@ authority is held by the protected `production` GitHub environment.
    production workflow for that exact commit.
 3. A credential-free job builds deploy-ready Worker bundles and Access-mode frontend assets, strips
    custom build commands from their upload configs, and stores the result as an immutable workflow
-   artifact.
+   artifact. The artifact builder performs its own frontend build with Cloudflare Access mode enabled
+   immediately before packaging, so it cannot reuse a default-mode `dist` directory.
 4. Before entering the production approval queue, the workflow verifies that the commit is still the
    current `main` tip. Manual dispatches must also find a successful push-triggered CI run for that
    exact commit.
