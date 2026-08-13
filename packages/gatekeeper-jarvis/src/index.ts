@@ -2,7 +2,7 @@
 // endpoint. It deliberately exposes only a fixed read/support allowlist and relies on
 // @gadgets/mcp-shared for MCP cataloging, tool classification, sessions, and action handling.
 
-import { WorkerEntrypoint, type RpcStub } from "cloudflare:workers";
+import { RpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import { boundAgentCatalog, type AccountDescription, type AgentCatalog, type AgentCatalogRequest, type AppUiContext, type AvatarImage, type Gatekeeper, type GatekeeperConnectCallback, type GatekeeperConnectOptions, type GatekeeperUiFrame, type GatekeeperUser, type GatekeeperUserVerifier, type GatekeeperVendor as GatekeeperVendorIface, type ObservationAuthorizer, type ResourceDescription, type SupportedResource, type VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
@@ -15,6 +15,12 @@ import { endpointTag, formatToolScope, type ToolScope } from "@gadgets/mcp-share
 import type { ConnectionAccount, McpConnection } from "@gadgets/mcp-shared/connection";
 import type { ServerTrust } from "@gadgets/mcp-shared/tools";
 import { hostOf } from "@gadgets/mcp-shared/util";
+import APP_HTML from "./generated/app.txt";
+import {
+  JarvisPolicy,
+  JarvisPolicyApi,
+  type JarvisToolPolicy,
+} from "./policy.js";
 import {
   applyJarvisToolPolicy,
   isJarvisAllowedTool,
@@ -54,6 +60,11 @@ export type JarvisAccountProps = {
 type JarvisGatekeeperProps = JarvisAccountProps & {
   endpoint: string;
   scope: ToolScope;
+  // Optional only for facets minted before deployment-admin policy existed.
+  chatScope?: ToolScope;
+  codeScope?: ToolScope;
+  policyRevision?: number;
+  policyKey?: string;
 };
 
 type StoredConnectionState = {
@@ -68,8 +79,23 @@ type ExportContext<Props> = ExecutionContext<Props> & {
     JarvisGatekeeper: (options: { props: JarvisGatekeeperProps }) =>
       DurableObjectClass<Gatekeeper<unknown>>;
     JarvisVerifier: (options: object) => Fetcher<GatekeeperUserVerifier>;
+    JarvisPolicy: DurableObjectNamespace<JarvisPolicy>;
   };
 };
+
+function policyObject(context: ExportContext<unknown>): DurableObjectStub<JarvisPolicy> {
+  return context.exports.JarvisPolicy.getByName("global");
+}
+
+function policyKey(endpoint: string, policy: JarvisToolPolicy): string {
+  return [
+    "v2",
+    endpointTag(endpoint),
+    policy.revision,
+    policy.chat.tools?.join(",") ?? "*",
+    policy.code.tools?.join(",") ?? "*",
+  ].join(":");
+}
 
 /** Connection account stored inside a JARVIS facet Durable Object. */
 export class JarvisConnectionAccount implements ConnectionAccount {
@@ -139,34 +165,61 @@ export class JarvisAccount
       avatar: JARVIS_ICON,
     };
     if (config && jarvisTokenFor(this.env, config.endpoint)) {
+      const policy = await policyObject(this.ctx as ExportContext<unknown>).get();
+      const union = JARVIS_ALLOWED_TOOLS.filter(name =>
+        policy.chat.tools?.includes(name) || policy.code.tools?.includes(name));
       description.singleton = {
         tsType: sessionTypeName(
           JARVIS_SERVER_ID,
-          jarvisSingletonResourceUrl(config.endpoint),
+          jarvisSingletonResourceUrl(config.endpoint, { tools: union }),
         ),
+        revisionedAuthority: true,
       };
+      description.providesUi = { title: "JARVIS", icon: JARVIS_ICON };
     }
     return description;
   }
 
   /** Returns the owner-scoped JARVIS singleton gatekeeper class. */
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<unknown>>> {
+    return (await this.getSingletonGatekeeperAuthority()).class;
+  }
+
+  /** Returns the facet class minted from the current deployment-global immutable policy snapshot. */
+  async getSingletonGatekeeperAuthority(): Promise<{
+    key: string;
+    class: DurableObjectClass<Gatekeeper<unknown>>;
+  }> {
     const config = readJarvisConfig(this.env);
     if (!config) throw new Error("This deployment has no valid HTTPS JARVIS_MCP_URL configured.");
     if (!jarvisTokenFor(this.env, config.endpoint)) {
       throw new Error("This deployment has no JARVIS_MCP_TOKEN configured for JARVIS.");
     }
+    const policy = await policyObject(this.ctx as ExportContext<unknown>).get();
+    const union = JARVIS_ALLOWED_TOOLS.filter(name =>
+      policy.chat.tools?.includes(name) || policy.code.tools?.includes(name));
     const props: JarvisGatekeeperProps = {
       accountId: this.ctx.props.accountId,
       endpoint: config.endpoint,
-      scope: { tools: [...JARVIS_ALLOWED_TOOLS] },
+      // One facet generates a union interface for both callers. startSession selects a surface-local
+      // host and strictly filters runtime list/call access to the corresponding frozen scope.
+      scope: { tools: union },
+      chatScope: policy.chat,
+      codeScope: policy.code,
+      policyRevision: policy.revision,
+      policyKey: policyKey(config.endpoint, policy),
     };
-    return (this.ctx as ExportContext<JarvisAccountProps>).exports.JarvisGatekeeper({ props });
+    return {
+      key: props.policyKey!,
+      class: (this.ctx as ExportContext<JarvisAccountProps>).exports.JarvisGatekeeper({ props }),
+    };
   }
 
-  /** JARVIS has no management UI. */
-  startAppUi(_context: AppUiContext): Promise<GatekeeperUiFrame> {
-    throw new Error("JARVIS does not provide a management UI.");
+  /** Opens the deployment policy UI with update authority only for current administrators. */
+  async startAppUi(context: AppUiContext): Promise<GatekeeperUiFrame> {
+    const api = new JarvisPolicyApi(
+      policyObject(this.ctx as ExportContext<unknown>), context.isAdmin);
+    return { iframeHtml: APP_HTML, ui: new RpcStub(api) };
   }
 
   /** JARVIS exposes no user-grantable URL resources. */
@@ -245,6 +298,14 @@ export class JarvisGatekeeper
     return JARVIS_DISPLAY_NAME;
   }
 
+  protected sessionScope(surface: "chat" | "code"): ToolScope {
+    const { chatScope, codeScope, scope } = this.ctx.props;
+    if ((chatScope === undefined) !== (codeScope === undefined)) {
+      throw new Error("This JARVIS facet has an invalid partial surface policy.");
+    }
+    return (surface === "code" ? codeScope : chatScope) ?? scope;
+  }
+
   protected account(): ConnectionAccount {
     return this.#account ??= new JarvisConnectionAccount(
       this.env, this.ctx.storage, this.ctx.props.endpoint);
@@ -264,20 +325,33 @@ export class JarvisGatekeeper
 
   /** Describes the JARVIS singleton binding. */
   async describe(): Promise<ResourceDescription> {
-    const tools = await this.tools();
-    const reads = tools.filter(entry => entry.mode === "read").length;
+    const allTools = await this.tools();
+    const chatAllowed = new Set((this.ctx.props.chatScope ?? this.ctx.props.scope).tools ?? []);
+    const codeAllowed = new Set((this.ctx.props.codeScope ?? this.ctx.props.scope).tools ?? []);
+    const chatTools = allTools.filter(entry => chatAllowed.has(entry.tool.name));
+    const codeTools = allTools.filter(entry => codeAllowed.has(entry.tool.name));
+    const chatReads = chatTools.filter(entry => entry.mode === "read").length;
+    const codeReads = codeTools.filter(entry => entry.mode === "read").length;
+    const scopeSummary = chatAllowed.size === codeAllowed.size &&
+        [...chatAllowed].every(name => codeAllowed.has(name))
+      ? `${chatTools.length} approved JARVIS MCP tools (${chatReads} read-only, ` +
+        `${chatTools.length - chatReads} requiring approval)`
+      : `Chat: ${chatTools.length} tools (${chatReads} read-only); code: ${codeTools.length} tools ` +
+        `(${codeReads} read-only)`;
     return {
       url: this.resourceUrl,
       title: JARVIS_DISPLAY_NAME,
       snippet:
-        `${tools.length} approved JARVIS MCP tools (${reads} read-only, ` +
-        `${tools.length - reads} requiring approval). Escalation and skill-creation tools are not exposed.`,
+        `${scopeSummary}. Escalation and skill-creation tools are not exposed.`,
       suggestedBindingName: JARVIS_DISPLAY_NAME,
       tsType: sessionTypeName(JARVIS_SERVER_ID, this.resourceUrl),
     };
   }
 
-  /** Generates the JARVIS session TypeScript interface from the current allowlisted MCP catalog. */
+  /**
+   * Generates the union TypeScript interface needed by chat and code surfaces.
+   * Runtime sessions still enforce their frozen surface-specific scope before every list/call.
+   */
   async getTypeScriptTypes(): Promise<string> {
     return generateSessionTypes({
       baseTypes: MCP_BASE_TYPES,
@@ -295,7 +369,9 @@ export class JarvisGatekeeper
     request: AgentCatalogRequest,
     authorizer: RpcStub<ObservationAuthorizer>,
   ): Promise<AgentCatalog> {
+    const allowed = new Set((this.ctx.props.chatScope ?? this.ctx.props.scope).tools ?? []);
     const entries = (await this.tools())
+      .filter(entry => allowed.has(entry.tool.name))
       .filter(entry => isJarvisAllowedTool(entry.tool.name))
       .map(entry => ({
         id: entry.tool.name,
@@ -370,9 +446,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 /** Builds the singleton JARVIS resource URL discriminator used for generated session types. */
-export function jarvisSingletonResourceUrl(endpoint = "https://jarvis.invalid/mcp"): string {
-  return formatToolScope(endpoint, { tools: [...JARVIS_ALLOWED_TOOLS] });
+export function jarvisSingletonResourceUrl(
+  endpoint = "https://jarvis.invalid/mcp",
+  scope: ToolScope = { tools: [...JARVIS_ALLOWED_TOOLS] },
+): string {
+  return formatToolScope(endpoint, scope);
 }
+
+export { JarvisPolicy, JarvisPolicyApi } from "./policy.js";
 
 export default {
   /** Health-check endpoint for direct HTTP requests to the worker. */

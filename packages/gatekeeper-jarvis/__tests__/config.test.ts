@@ -11,6 +11,10 @@ import {
   JARVIS_ALLOWED_TOOLS,
 } from "../src/config.js";
 import deployInputs from "../deploy-inputs.json";
+import {
+  defaultJarvisToolPolicy,
+  normalizeJarvisToolPolicy,
+} from "../src/policy.js";
 
 function env(overrides: Record<string, string> = {}): Env {
   return overrides as unknown as Env;
@@ -55,6 +59,40 @@ describe("JARVIS allowlist", () => {
     ]);
     expect(isJarvisAllowedTool("create_skill")).toBe(false);
     expect(isJarvisAllowedTool("escalate_to_human")).toBe(false);
+  });
+});
+
+describe("JARVIS tool policy", () => {
+  it("defaults both surfaces to the full current allowlist", () => {
+    const policy = defaultJarvisToolPolicy();
+    expect(policy).toEqual({
+      revision: 1,
+      chat: { tools: [...JARVIS_ALLOWED_TOOLS] },
+      code: { tools: [...JARVIS_ALLOWED_TOOLS] },
+      syncCode: true,
+    });
+  });
+
+  it("normalizes order and mirrors chat when synchronized", () => {
+    expect(normalizeJarvisToolPolicy({
+      chatTools: ["repo_knowledge", "query_knowledge", "repo_knowledge"],
+      syncCode: true,
+      codeTools: ["lookup_incident"],
+    }, 7)).toEqual({
+      revision: 7,
+      chat: { tools: ["query_knowledge", "repo_knowledge"] },
+      code: { tools: ["query_knowledge", "repo_knowledge"] },
+      syncCode: true,
+    });
+  });
+
+  it("keeps separate code scope and rejects names outside the fixed allowlist", () => {
+    expect(normalizeJarvisToolPolicy({
+      chatTools: ["query_knowledge"], syncCode: false, codeTools: ["lookup_incident"],
+    }, 2).code.tools).toEqual(["lookup_incident"]);
+    expect(() => normalizeJarvisToolPolicy({
+      chatTools: ["create_skill"], syncCode: true,
+    }, 2)).toThrow(/not allowed/);
   });
 });
 

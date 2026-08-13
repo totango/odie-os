@@ -1030,6 +1030,7 @@ class OverseerImpl implements AgentHooks {
   #autoApprovalDrainer: AutoApprovalDrainer;
 
   #preparingChatMessages = new Map<number, Promise<void>>();
+  #ensuringAmbientCapsules?: Promise<void>;
 
   // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
   // while any agent runs) and to let `alarm()` wait for all agents to finish.
@@ -4342,7 +4343,12 @@ class OverseerImpl implements AgentHooks {
   //
   // The session is reached through the owner's stored connected account, not by asserting the owner's
   // identity to the vendor — so the capability is the account the user actually holds.
-  async ensureAmbientCapsules(): Promise<void> {
+  ensureAmbientCapsules(): Promise<void> {
+    return this.#ensuringAmbientCapsules ??=
+      this.#ensureAmbientCapsules().finally(() => { this.#ensuringAmbientCapsules = undefined; });
+  }
+
+  async #ensureAmbientCapsules(): Promise<void> {
     if (!this.ownerId) return;
     let ownerDo = this.#ownerUserDo();
     // listProvidedAccounts ensures the owner's auto-provisioned singleton accounts exist first, so this
@@ -4355,13 +4361,18 @@ class OverseerImpl implements AgentHooks {
     // (an optional account removed and re-added with a new accountId), the record is stale and would
     // point the capsule at a deleted account — so remove it. Snapshot the list since we mutate it.
     let currentAccountId = new Map(accounts.map(account => [account.vendorId, account.accountId]));
+    let currentAuthority = new Map(accounts.map(account => [account.vendorId, account.authorityKey]));
     let bound = new Set<string>();
     // Snapshot before iterating, since removeGatekeeper() mutates the collection.
     let existingGatekeepers = Array.from(this.storage.gatekeepers.list());
     for (let gk of existingGatekeepers) {
       if (gk.creationSpec?.type !== "ambient") continue;
       if (currentAccountId.get(gk.creationSpec.vendorId) === gk.creationSpec.accountId) {
-        bound.add(gk.creationSpec.vendorId);
+        if (currentAuthority.get(gk.creationSpec.vendorId) === gk.creationSpec.authorityKey) {
+          bound.add(gk.creationSpec.vendorId);
+        }
+        // Older authority revisions stay installed: frozen chats and existing gadget bindings may
+        // still name their immutable facet IDs. Only a disconnected/replaced account is stale.
       } else {
         this.removeGatekeeper(gk.id);
       }
@@ -4381,13 +4392,14 @@ class OverseerImpl implements AgentHooks {
       // Best-effort and isolated per account: a single failing account (e.g. its
       // getSingletonGatekeeperClass throws) must not block the others or the rest of open().
       try {
-        let cls = await ownerDo.getSingletonGatekeeperClass(account.accountId);
+        let cls = await ownerDo.getSingletonGatekeeperClass(account.accountId, account.authorityKey);
         if (!cls) return;
         // Provision as an unnamed record: it reaches the agent through each chat's env (named at
         // seed time from the gatekeeper's suggested binding name), not as any gadget's binding.
         await this.addGatekeeper(
             cls,
-            {type: "ambient", vendorId: account.vendorId, accountId: account.accountId});
+            {type: "ambient", vendorId: account.vendorId, accountId: account.accountId,
+              authorityKey: account.authorityKey});
       } catch (err) {
         this.logger.error("failed to provision ambient capsule", {
           event: "ambient.capsule.provision.failed",
@@ -4560,11 +4572,20 @@ class OverseerImpl implements AgentHooks {
     let dirty = false;
 
     if (context.alwaysAvailableCapsuleIds === undefined) {
+      // Policy-backed singleton revisions are installed asynchronously on ordinary workspace opens.
+      // Wait at this one-time seeding boundary so a new chat cannot freeze the previous revision.
+      await this.ensureAmbientCapsules();
       // Freeze the ambient set + order on first use. Ordered by gatekeeper id (immutable) for
       // determinism. New singletons the owner gains only appear in chats started afterwards; a
       // since-disconnected one stays in the frozen list but becomes inert.
+      let currentAmbient = new Map<string, string | undefined>(
+        (await this.#ownerUserDo().listProvidedAccounts())
+          .filter(account => account.description.singleton)
+          .map(account => [account.vendorId, account.authorityKey]));
       context.alwaysAvailableCapsuleIds = [...this.storage.gatekeepers.list()]
-          .filter(gk => gk.creationSpec?.type === "ambient")
+          .filter(gk => gk.creationSpec?.type === "ambient" &&
+            currentAmbient.has(gk.creationSpec.vendorId) &&
+            currentAmbient.get(gk.creationSpec.vendorId) === gk.creationSpec.authorityKey)
           .map(gk => gk.id)
           .toSorted((a, b) => a - b);
       dirty = true;
@@ -9531,6 +9552,10 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
 
   authorizeObservation(description: ObservationDescription): Promise<void> {
     return this.impl.authorizeObservation(this.gatekeeperId, description, this.caller);
+  }
+
+  getSessionSurface(): Promise<"chat" | "code"> {
+    return Promise.resolve(this.caller.from === "gadget" ? "code" : "chat");
   }
 
   submitAction(action: number, description: ActionDescription): Promise<void> {

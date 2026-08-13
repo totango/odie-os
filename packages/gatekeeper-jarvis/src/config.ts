@@ -1,6 +1,8 @@
 import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import type { ClassifiedTool, ServerTrust } from "@gadgets/mcp-shared/tools";
 import { sameEndpoint } from "@gadgets/mcp-shared/scope";
+import { JARVIS_ALLOWED_TOOLS, type JarvisAllowedTool } from "./policy-types.js";
+export { JARVIS_ALLOWED_TOOLS, type JarvisAllowedTool } from "./policy-types.js";
 
 /** Stable vendor identifier for the deployment-configured JARVIS MCP gatekeeper. */
 export const VENDOR_ID = "jarvis";
@@ -10,29 +12,6 @@ export const JARVIS_SERVER_ID = "jarvis";
 
 /** Human-facing display name for the JARVIS singleton account and resource. */
 export const JARVIS_DISPLAY_NAME = "JARVIS";
-
-/** Fixed MCP tool allowlist exposed by the JARVIS ambient singleton. */
-export const JARVIS_ALLOWED_TOOLS = [
-  "query_knowledge",
-  "repo_knowledge",
-  "resolve_repo_group",
-  "lookup_incident",
-  "jarvis_answer_support_question",
-  "jarvis_investigate_customer_issue",
-  "jarvis_check_integration_health",
-  "jarvis_get_investigation_status",
-  "jarvis_get_support_answer_status",
-  // Live production lookups, routed by JARVIS to its own Grafana, Tempo, k8sgpt and database query
-  // servers. These answer what is true now, where the knowledge tools above answer what somebody
-  // wrote down. Those servers do also host tools that write -- filing an incident, editing a
-  // dashboard -- which is why the call tool is classified as an action below rather than a read.
-  "jarvis_list_prod_tools",
-  "jarvis_describe_prod_tool",
-  "jarvis_call_prod_tool",
-] as const;
-
-/** A JARVIS MCP tool that this gatekeeper may expose. */
-export type JarvisAllowedTool = typeof JARVIS_ALLOWED_TOOLS[number];
 
 const ALLOWED_TOOL_SET = new Set<string>(JARVIS_ALLOWED_TOOLS);
 const MANUAL_ACTION_TOOL_SET = new Set<string>([

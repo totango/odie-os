@@ -50,6 +50,7 @@ export type ProvidedAccountInfo = {
   accountId: number;
   vendorId: string;
   description: AccountDescription;   // carries `singleton` / `providesUi` declarations
+  authorityKey?: string;
 };
 
 // The singleton/UI methods (createAccount on GatekeeperVendor; getSingletonGatekeeperClass /
@@ -62,7 +63,8 @@ export type ProvidedAccountInfo = {
 // shape keeps the methods' declared return types (e.g. createAccount's Fetcher<GatekeeperUser>)
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
-type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
+type SingletonAccountStub = Required<Pick<GatekeeperUser,
+  "getSingletonGatekeeperClass" | "getSingletonGatekeeperAuthority" | "startAppUi">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -161,6 +163,10 @@ class CodingSessionApprovalQueue extends RpcTarget implements ApprovalQueue {
   authorizeObservation(description: ObservationDescription): Promise<void> {
     this.user.recordCodingSessionObservation(this.sessionId, this.binding, description);
     return Promise.resolve();
+  }
+
+  getSessionSurface(): Promise<"code"> {
+    return Promise.resolve("code");
   }
 
   submitAction(action: number, description: ActionDescription): Promise<void> {
@@ -1755,11 +1761,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
+      // Auto-provisioned provider declarations may evolve after an account was persisted (for
+      // example a singleton adding revisioned authority). Refresh them at this cold boundary without
+      // adding remote calls for ordinary connected accounts.
+      if (rec.autoProvisioned) {
+        rec.description = await rec.account.describe();
+        this.storage.connectedAccounts.put(rec);
+      }
       if (!rec.description.singleton && !rec.description.providesUi) continue;
       // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
       // or management UI. (Its data is preserved, so re-enabling restores it.)
       if (rec.autoProvisioned && ambientGatekeeperMode(config, rec.vendorId) === "disabled") continue;
-      result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
+      let authorityKey: string | undefined;
+      if (rec.description.singleton?.revisionedAuthority) {
+        authorityKey = (await (rec.account as unknown as SingletonAccountStub)
+          .getSingletonGatekeeperAuthority()).key;
+      }
+      result.push({ accountId: rec.id, vendorId: rec.vendorId,
+        description: rec.description, authorityKey });
     }
     return result;
   }
@@ -1768,13 +1787,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // this gatekeeper into the owner's gadgets (as a Facet) like any other gatekeeper, so the session
   // and catalog run gadget-side in the gatekeeper's own worker — no further round-trips through this
   // DO. The account capability stays encapsulated here; only the class reference crosses out.
-  async getSingletonGatekeeperClass(accountId: number)
+  async getSingletonGatekeeperClass(accountId: number, authorityKey?: string)
       : Promise<DurableObjectClass<Gatekeeper<any>> | null> {
     let record = this.storage.connectedAccounts.get(accountId);
     // Present only when description.singleton is set; gate on that, then call through the derived
     // SingletonAccountStub view (see its definition for why the cast is needed).
     if (!record?.description.singleton) return null;
-    return (record.account as unknown as SingletonAccountStub).getSingletonGatekeeperClass();
+    let account = record.account as unknown as SingletonAccountStub;
+    if (record.description.singleton.revisionedAuthority) {
+      let authority = await account.getSingletonGatekeeperAuthority();
+      if (authorityKey !== undefined && authority.key !== authorityKey) return null;
+      return authority.class;
+    }
+    return account.getSingletonGatekeeperClass();
   }
 
   // Open the full-page management UI for an account that declares one. `context.isAdmin` is supplied

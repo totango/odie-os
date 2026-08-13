@@ -8,7 +8,8 @@ import {
   JarvisSession,
   jarvisSingletonResourceUrl,
 } from "../src/index.js";
-import { applyJarvisToolPolicy } from "../src/config.js";
+import { applyJarvisToolPolicy, JARVIS_ALLOWED_TOOLS } from "../src/config.js";
+import { JarvisPolicyApi } from "../src/policy.js";
 
 class FakeKv {
   readonly values = new Map<string, unknown>();
@@ -168,11 +169,63 @@ describe("JarvisSession", () => {
   });
 });
 
+describe("Jarvis policy administration", () => {
+  const input = { chatTools: ["query_knowledge"], syncCode: true };
+
+  it("rejects non-admin reads and updates", async () => {
+    let updated = false;
+    const policy = {
+      get: () => ({ revision: 1, chat: { tools: [] }, code: { tools: [] }, syncCode: true }),
+      update: () => { updated = true; return policy.get(); },
+    };
+    const api = new JarvisPolicyApi(policy, false);
+    await expect(api.get()).rejects.toThrow(/administrator/);
+    await expect(api.update(input)).rejects.toThrow(/administrator/);
+    expect(updated).toBe(false);
+  });
+
+  it("allows admin updates", async () => {
+    const api = new JarvisPolicyApi({
+      get: () => ({ revision: 1, chat: { tools: [] }, code: { tools: [] }, syncCode: true }),
+      update: () => ({ revision: 2, chat: { tools: ["query_knowledge"] },
+        code: { tools: ["query_knowledge"] }, syncCode: true }),
+    }, true);
+    await expect(api.update(input)).resolves.toMatchObject({ revision: 2 });
+  });
+});
+
+describe("JarvisGatekeeper runtime scope", () => {
+  it("selects chat vs code scope and refuses tools outside the selected frozen scope", async () => {
+    const queryTool = applyJarvisToolPolicy(classifyTool({ name: "query_knowledge" }, "vetted"))!;
+    const repoTool = applyJarvisToolPolicy(classifyTool({ name: "repo_knowledge" }, "vetted"))!;
+    const gatekeeper = Object.create(JarvisGatekeeper.prototype) as JarvisGatekeeper;
+    Object.defineProperty(gatekeeper, "ctx", { value: { props: {
+      endpoint: "https://jarvis.example.com/mcp",
+      scope: { tools: ["query_knowledge", "repo_knowledge"] },
+      chatScope: { tools: ["query_knowledge"] },
+      codeScope: { tools: ["repo_knowledge"] },
+    } } });
+    (gatekeeper as unknown as { tools(): Promise<unknown[]> }).tools = async () => [queryTool, repoTool];
+    (gatekeeper as unknown as { call(): never }).call = () => { throw new Error("not reached"); };
+    const queue = {
+      getSessionSurface: async () => "code" as const,
+      authorizeObservation: async () => {}, submitAction: async () => {},
+      dup() { return this; }, [Symbol.dispose]() {},
+    } as never;
+    const session = await gatekeeper.startSession(queue);
+    await expect(session.callTool("query_knowledge")).rejects.toThrow(/grants only/);
+    expect((await session.listTools()).map(tool => tool.name)).toEqual(["repo_knowledge"]);
+  });
+});
+
 describe("JarvisGatekeeper catalog", () => {
   it("bounds catalog entries and authorizes the observation before returning", async () => {
     const gatekeeper = Object.create(JarvisGatekeeper.prototype) as JarvisGatekeeper & {
       tools(): Promise<Array<{ tool: { name: string; title?: string; description?: string }; mode: string }>>;
     };
+    Object.defineProperty(gatekeeper, "ctx", { value: { props: {
+      chatScope: { tools: ["query_knowledge"] },
+    } } });
     (gatekeeper as unknown as { tools(): Promise<unknown[]> }).tools = async () => [
       { tool: { name: "query_knowledge", title: "Query", description: "Search knowledge\nmore" }, mode: "read" },
       { tool: { name: "create_skill", title: "Create skill", description: "Forbidden" }, mode: "write" },
@@ -189,6 +242,9 @@ describe("JarvisGatekeeper catalog", () => {
 
   it("authorizes even an empty catalog observation", async () => {
     const gatekeeper = Object.create(JarvisGatekeeper.prototype) as JarvisGatekeeper;
+    Object.defineProperty(gatekeeper, "ctx", { value: { props: {
+      chatScope: { tools: [...JARVIS_ALLOWED_TOOLS] },
+    } } });
     (gatekeeper as unknown as { tools(): Promise<unknown[]> }).tools = async () => [
       { tool: { name: "create_skill", title: "Create skill", description: "Forbidden" }, mode: "action" },
     ];

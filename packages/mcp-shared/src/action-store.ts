@@ -16,6 +16,7 @@ type ActionRow = {
   id: number;
   tool_name: string;
   args_json: string;
+  surface: "chat" | "code" | null;
   state: StoredAction["state"];
   submitted_at: number;
   claimed_at: number | null;
@@ -29,6 +30,7 @@ function fromRow(row: ActionRow): StoredAction {
     id: row.id,
     toolName: row.tool_name,
     args: JSON.parse(row.args_json) as Record<string, unknown>,
+    surface: row.surface ?? undefined,
     state: row.state,
     submittedAt: row.submitted_at,
     claimedAt: row.claimed_at ?? undefined,
@@ -55,6 +57,7 @@ export class ActionStore {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tool_name TEXT NOT NULL,
       args_json TEXT NOT NULL CHECK (json_valid(args_json) AND json_type(args_json) = 'object'),
+      surface TEXT CHECK (surface IS NULL OR surface IN ('chat', 'code')),
       state TEXT NOT NULL CHECK (state IN ('pending', 'applying', 'applied', 'rejected', 'failed')),
       submitted_at INTEGER NOT NULL,
       claimed_at INTEGER,
@@ -62,6 +65,12 @@ export class ActionStore {
       result_json TEXT CHECK (result_json IS NULL OR json_valid(result_json)),
       error TEXT
     ) STRICT`);
+    const columns = sql.exec<{ name: string }>(
+      "SELECT name FROM pragma_table_info('mcp_actions')").toArray();
+    if (!columns.some(column => column.name === "surface")) {
+      sql.exec("ALTER TABLE mcp_actions ADD COLUMN surface TEXT " +
+        "CHECK (surface IS NULL OR surface IN ('chat', 'code'))");
+    }
     // A fresh store means a fresh Durable Object activation. Any persisted claim belonged to an
     // interrupted prior activation and must never be replayed because the write may have landed.
     sql.exec(
@@ -91,7 +100,11 @@ export class ActionStore {
     );
   }
 
-  stage(toolName: string, args: Record<string, unknown>): StoredAction {
+  stage(
+    toolName: string,
+    args: Record<string, unknown>,
+    surface: "chat" | "code" = "chat",
+  ): StoredAction {
     let argsJson: string;
     let storedArgs: Record<string, unknown>;
     try {
@@ -116,11 +129,11 @@ export class ActionStore {
 
     const submittedAt = Date.now();
     const { id } = this.#sql.exec<{ id: number }>(
-      `INSERT INTO mcp_actions (tool_name, args_json, state, submitted_at)
-       VALUES (?, ?, 'pending', ?) RETURNING id`,
-      toolName, argsJson, submittedAt,
+      `INSERT INTO mcp_actions (tool_name, args_json, surface, state, submitted_at)
+       VALUES (?, ?, ?, 'pending', ?) RETURNING id`,
+      toolName, argsJson, surface, submittedAt,
     ).one();
-    return { id, toolName, args: storedArgs, state: "pending", submittedAt };
+    return { id, toolName, args: storedArgs, surface, state: "pending", submittedAt };
   }
 
   discard(id: number): void {

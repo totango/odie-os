@@ -5,9 +5,11 @@
   "main": "./src/index.ts",
   "scripts": {
     "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
-    "deploy": "wrangler deploy",
-    "build": "tsc",
-    "types:check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "deploy": "pnpm run build:app && wrangler deploy",
+    "build:app": "node build-app.mjs",
+    "typecheck:app": "tsc -p tsconfig.app.json && tsc -p tsconfig.vite.json",
+    "build": "pnpm run typecheck:app && pnpm run build:app && tsc",
+    "types:check": "pnpm run typecheck:app && pnpm run build:app && tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },
@@ -15,11 +17,23 @@
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/mcp-shared": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
+    "capnweb": "^0.8.0",
     "capnweb-validate": "0.2.1"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260702.1",
+    "@cloudflare/kumo": "^2.9.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.1.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vite-plugin-singlefile": "^2.3.3",
     "vitest": "^3.2.4",
     "wrangler": "^4.92.0"
   }

@@ -9,8 +9,12 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/index");
-		durableNamespaces: "JarvisGatekeeper";
+		durableNamespaces: "JarvisGatekeeper" | "JarvisPolicy";
 	}
 	interface Env extends __BaseEnv_Env {}
 }
 interface Env extends __BaseEnv_Env {}
+declare module "*.txt" {
+	const value: string;
+	export default value;
+}
