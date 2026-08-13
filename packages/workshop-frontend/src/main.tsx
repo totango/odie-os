@@ -1,10 +1,10 @@
-import { StrictMode, useState, useEffect } from 'react'
+import { StrictMode, useCallback, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from '@tanstack/react-router'
 import { RpcStub, newWebSocketRpcSession } from 'capnweb'
 import { PublicApi, ServerConfig } from '@gadgets/workshop-shared/api'
 import { RpcContext } from './RpcContext'
-import { ServerConfigContext, ServerConfigErrorContext } from './ServerConfigContext'
+import { ServerConfigContext, ServerConfigErrorContext, ServerConfigUpdateContext } from './ServerConfigContext'
 import { ThemeProvider } from './ThemeContext'
 import { createRouter } from './router'
 import AnnouncementBanner from './components/AnnouncementBanner'
@@ -128,6 +128,9 @@ function AppWithConnection() {
   });
   const [serverConfig, setServerConfig] = useState<ServerConfig | null>(null);
   const [serverConfigError, setServerConfigError] = useState(false);
+  const updateServerConfig = useCallback((update: Partial<ServerConfig>) => {
+    setServerConfig((current) => current ? { ...current, ...update } : current);
+  }, []);
 
   useEffect(() => {
     let cb = () => setRpcState({ stub: currentStub, connectionLost: isConnectionLost });
@@ -160,16 +163,18 @@ function AppWithConnection() {
 
   useEffect(() => {
     return applySiteFavicon(serverConfig?.siteLogo?.url);
-  }, [serverConfig]);
+  }, [serverConfig?.siteLogo?.url]);
 
   return (
     <ThemeProvider>
       <RpcContext.Provider value={rpcState}>
         <ServerConfigErrorContext.Provider value={serverConfigError}>
-          <ServerConfigContext.Provider value={serverConfig}>
-            <AnnouncementBanner />
-            <RouterProvider router={router} />
-          </ServerConfigContext.Provider>
+          <ServerConfigUpdateContext.Provider value={updateServerConfig}>
+            <ServerConfigContext.Provider value={serverConfig}>
+              <AnnouncementBanner />
+              <RouterProvider router={router} />
+            </ServerConfigContext.Provider>
+          </ServerConfigUpdateContext.Provider>
         </ServerConfigErrorContext.Provider>
       </RpcContext.Provider>
     </ThemeProvider>

@@ -3,6 +3,7 @@ import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import { classifyTool } from "@gadgets/mcp-shared/tools";
 import {
   GatekeeperVendor,
+  JarvisAccount,
   JarvisConnectionAccount,
   JarvisGatekeeper,
   JarvisSession,
@@ -53,6 +54,32 @@ describe("JarvisConnectionAccount", () => {
     }), fakeStorage(), "https://old.example.com/mcp");
     await expect(account.getConnection("https://old.example.com/mcp"))
       .rejects.toThrow(/bearer token/);
+  });
+});
+
+describe("JarvisAccount", () => {
+  it("describes the management UI with the dotted title and monochrome robot icon", async () => {
+    const account = Object.create(JarvisAccount.prototype) as JarvisAccount;
+    Object.defineProperty(account, "env", {
+      value: env({
+        JARVIS_MCP_URL: "https://jarvis.example.com/mcp",
+        JARVIS_MCP_TOKEN: "secret-token",
+      }),
+    });
+    Object.defineProperty(account, "ctx", {
+      value: { exports: { JarvisPolicy: { getByName: () => ({ get: async () => ({
+        revision: 1,
+        chat: { tools: ["query_knowledge"] },
+        code: { tools: [] },
+        syncCode: true,
+      }) }) } } },
+    });
+
+    const description = await account.describe();
+    expect(description.providesUi?.title).toBe("J.A.R.V.I.S");
+    expect(description.providesUi?.icon?.url).toMatch(/^data:image\/svg\+xml,/);
+    expect(decodeURIComponent(description.providesUi?.icon?.url.split(",")[1] ?? ""))
+      .toContain("<svg");
   });
 });
 
