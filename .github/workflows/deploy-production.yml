@@ -135,13 +135,15 @@ jobs:
             shift
             present="$(wrangler secret list --name "$worker" --format json | jq -r '.[].name')"
             for secret in "$@"; do
-              printf '%s\n' "$present" | grep --fixed-strings --line-regexp --quiet "$secret"
+              if ! printf '%s\n' "$present" | grep --fixed-strings --line-regexp --quiet "$secret"; then
+                echo "Missing required Worker secret $worker:$secret" >&2
+                return 1
+              fi
             done
           }
           require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN
           require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET
-          require_secrets odie-os-gk-team-pi CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-backend CF_AI_GATEWAY_API_TOKEN TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET TEAM_PI_CODEX_MODELS
 
       - name: Deploy prebuilt workers
