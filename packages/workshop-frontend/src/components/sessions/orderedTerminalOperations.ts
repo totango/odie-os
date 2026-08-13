@@ -65,3 +65,61 @@ export function enqueueTerminalWriteFrame(
     queue.enqueue((done) => { write(chunk, done) })
   }
 }
+
+/** Coalesces adjacent WebSocket frames while preserving ordering around control operations. */
+export class TerminalWriteBatcher {
+  private readonly chunks: Uint8Array[] = []
+  private byteLength = 0
+  private scheduled: number | undefined
+
+  constructor(
+    private readonly queue: OrderedTerminalOperationQueue,
+    private readonly write: (chunk: Uint8Array, done: () => void) => void,
+    private readonly schedule: (flush: () => void) => number,
+    private readonly cancelScheduled: (handle: number) => void,
+  ) {}
+
+  /** Add output to the current browser-frame batch. */
+  push(bytes: Uint8Array): void {
+    this.chunks.push(bytes)
+    this.byteLength += bytes.byteLength
+    if (this.byteLength >= MAX_TERMINAL_WRITE_CHUNK_BYTES) {
+      this.flush()
+    } else if (this.scheduled === undefined) {
+      this.scheduled = this.schedule(() => {
+        this.scheduled = undefined
+        this.flush()
+      })
+    }
+  }
+
+  /** Enqueue pending output immediately, before a following protocol operation. */
+  flush(): void {
+    if (this.scheduled !== undefined) {
+      this.cancelScheduled(this.scheduled)
+      this.scheduled = undefined
+    }
+    if (this.chunks.length === 0) return
+
+    let bytes = this.chunks[0]
+    if (this.chunks.length > 1) {
+      bytes = new Uint8Array(this.byteLength)
+      let offset = 0
+      for (const chunk of this.chunks) {
+        bytes.set(chunk, offset)
+        offset += chunk.byteLength
+      }
+    }
+    this.chunks.length = 0
+    this.byteLength = 0
+    enqueueTerminalWriteFrame(this.queue, bytes, this.write)
+  }
+
+  /** Discard output that has not yet been enqueued. */
+  cancel(): void {
+    if (this.scheduled !== undefined) this.cancelScheduled(this.scheduled)
+    this.scheduled = undefined
+    this.chunks.length = 0
+    this.byteLength = 0
+  }
+}
