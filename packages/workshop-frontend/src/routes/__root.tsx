@@ -14,6 +14,7 @@ import AppShell from '../components/AppShell/AppShell'
 import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
+import { SessionsProvider } from '../components/sessions/SessionsContext'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -176,9 +177,11 @@ function AuthenticatedShell({
           <Outlet />
         </main>
       ) : (
-        <AppShell>
-          <Outlet />
-        </AppShell>
+        <SessionsProvider>
+          <AppShell>
+            <Outlet />
+          </AppShell>
+        </SessionsProvider>
       )}
     </>
   )

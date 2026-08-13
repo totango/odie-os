@@ -1,4 +1,4 @@
-import { Link } from '@tanstack/react-router'
+import { Link, useRouterState } from '@tanstack/react-router'
 import {
   Blueprint,
   BookOpen,
@@ -26,6 +26,7 @@ import SidebarUtilityStrip from './SidebarUtilityStrip'
 import { useGitHubConnection } from '../../hooks/useGitHubConnection'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useEffect, useState } from 'react'
+import SessionsSidebar from '../sessions/SessionsSidebar'
 
 // The persistent left rail. Three pinned regions sandwich a single scrolling region of lists, so
 // the user can always reach Search, primary nav, and the bottom utility strip no matter how many
@@ -52,7 +53,9 @@ export default function Sidebar({
   const github = useGitHubConnection()
   const { authenticatedApi } = useAuthenticatedApi()
   const [pendingSessionActions, setPendingSessionActions] = useState(0)
-  const showSessions = github.state === 'connected' || github.state === 'expired'
+  const showSessions = github.state === 'connected'
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const isCodeMode = pathname === '/sessions'
 
   useEffect(() => {
     if (!showSessions) return
@@ -130,6 +133,36 @@ export default function Sidebar({
         </button>
       )}
 
+      <div className={collapsed ? 'flex shrink-0 justify-center px-2 py-2' : 'shrink-0 border-b border-kumo-line px-3 py-3'}>
+        {collapsed ? (
+          <div className="flex flex-col gap-1">
+            <Link to="/" aria-label="Chat" title="Chat" className={`flex h-9 w-9 items-center justify-center rounded-lg ${!isCodeMode ? 'bg-kumo-fill text-kumo-brand' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
+              <House size={15} />
+            </Link>
+            {showSessions && (
+              <Link to="/sessions" aria-label="Code" title="Code" className={`flex h-9 w-9 items-center justify-center rounded-lg ${isCodeMode ? 'bg-kumo-fill text-kumo-brand' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
+                <TerminalWindow size={15} />
+              </Link>
+            )}
+          </div>
+        ) : (
+          <div className={`grid ${showSessions ? 'grid-cols-2' : 'grid-cols-1'} rounded-xl border border-kumo-line bg-kumo-base p-1 shadow-sm`} role="group" aria-label="Workspace mode">
+            <Link to="/" className={`flex h-9 items-center justify-center gap-2 rounded-lg text-[13px] font-medium transition-colors ${!isCodeMode ? 'bg-kumo-contrast text-kumo-inverse shadow-sm' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
+              <House size={14} /> Chat
+            </Link>
+            {showSessions && (
+              <Link to="/sessions" className={`flex h-9 items-center justify-center gap-2 rounded-lg text-[13px] font-medium transition-colors ${isCodeMode ? 'bg-kumo-contrast text-kumo-inverse shadow-sm' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
+                <TerminalWindow size={14} /> Code
+                {pendingSessionActions > 0 && <span className="rounded-full bg-kumo-brand px-1.5 text-[10px] leading-4 text-white">{pendingSessionActions}</span>}
+              </Link>
+            )}
+          </div>
+        )}
+      </div>
+
+      {isCodeMode && showSessions ? (
+        <SessionsSidebar collapsed={collapsed} />
+      ) : (
       <SidebarWorkspacesProvider>
         {/* Pinned top stack. shrink-0 keeps it from squishing when the lists below grow. */}
         <div className="flex shrink-0 flex-col gap-3 pt-3">
@@ -147,19 +180,6 @@ export default function Sidebar({
               icon={<SquaresFour size={14} weight="regular" />}
               collapsed={collapsed}
             />
-            {showSessions && (
-              <SidebarItem
-                to="/sessions"
-                label="Sessions"
-                icon={<TerminalWindow size={14} weight="regular" />}
-                trailing={pendingSessionActions > 0 ? (
-                  <span className="rounded-full bg-kumo-brand px-1.5 text-[10px] leading-4 text-white">
-                    {pendingSessionActions}
-                  </span>
-                ) : undefined}
-                collapsed={collapsed}
-              />
-            )}
             <SidebarItem
               to="/getting-started"
               label="Getting started"
@@ -235,6 +255,7 @@ export default function Sidebar({
           <SidebarWorkspacesLists collapsed={collapsed} />
         </div>
       </SidebarWorkspacesProvider>
+      )}
 
       <SidebarUtilityStrip collapsed={collapsed} />
     </aside>

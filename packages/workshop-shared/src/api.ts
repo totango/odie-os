@@ -267,7 +267,7 @@ function codedErrorFamily<Code extends string>(messages: Record<Code, string>) {
   };
 }
 
-/** Totango repositories that may be opened in a coding session. */
+/** Suggested Totango repository sets shown as Coding Session shortcuts. */
 export const CODING_SESSION_REPOSITORIES = [
   "agentic",
   "unison-integrations",
@@ -277,8 +277,22 @@ export const CODING_SESSION_REPOSITORIES = [
   "jarvis",
 ] as const;
 
-/** A Totango repository that may be opened in a coding session. */
-export type CodingSessionRepository = typeof CODING_SESSION_REPOSITORIES[number];
+/** A validated Totango repository name that may be opened in a coding session. */
+export type CodingSessionRepository = string;
+
+/** Search result describing a Totango repository the connected user can push to. */
+export interface CodingSessionRepositoryOption {
+  /** Repository name without the Totango organization prefix. */
+  repository: string;
+  /** Display label, normally `totango/<repository>`. */
+  title: string;
+  /** Repository description from GitHub, if one is available. */
+  description?: string;
+  /** Whether GitHub reports the repository as private. */
+  private: boolean;
+  /** When GitHub last updated the repository metadata, if reported. */
+  updatedAt?: Date;
+}
 
 /** Current lifecycle state of a coding session. */
 export type CodingSessionStatus = "starting" | "running" | "stopping" | "stopped" | "failed";
@@ -307,9 +321,33 @@ export interface CodingSessionSummary {
 export interface CreateCodingSessionRequest {
   /** User-visible session title. */
   title: string;
-  /** Non-empty subset of `CODING_SESSION_REPOSITORIES`. */
+  /** Non-empty set of validated repository names selected from the connected GitHub account. */
   repositories: CodingSessionRepository[];
 }
+
+/** One account-scoped OpenCode skill materialized into a coding session. */
+export interface OpenCodeSkillDefinition {
+  /** OpenCode skill directory name. Must be lowercase kebab-case and at most 64 characters. */
+  name: string;
+  /** Short human-readable skill summary shown to OpenCode. */
+  description: string;
+  /** Markdown instructions written to the skill's SKILL.md body. */
+  instructions: string;
+}
+
+/** Account-scoped OpenCode plugins and skills applied privately to new coding sessions. */
+export interface OpenCodeUserCustomization {
+  /** NPM package names, optionally suffixed with an exact or semver version, loaded as OpenCode plugins. */
+  plugins: string[];
+  /** User-defined OpenCode skills available in new coding sessions. */
+  skills: OpenCodeSkillDefinition[];
+}
+
+/** Empty OpenCode customization used for accounts that have not configured OpenCode. */
+export const EMPTY_OPENCODE_USER_CUSTOMIZATION: OpenCodeUserCustomization = {
+  plugins: [],
+  skills: [],
+};
 
 /** Short-lived, single-use terminal attachment capability. */
 export interface CodingSessionAttachCapability {
@@ -318,6 +356,9 @@ export interface CodingSessionAttachCapability {
   /** Time after which the URL must be rejected. */
   expiresAt: Date;
 }
+
+/** Terminal process exposed by an owned running coding session. */
+export type CodingSessionTerminalKind = "opencode" | "shell";
 
 /** Stable error codes attached to expected failures from `AuthenticatedApi.openGadget()`. */
 export const OPEN_GADGET_ERROR_CODES = {
@@ -411,17 +452,32 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Lists coding sessions owned by this user after verifying a live GitHub connection. */
   listCodingSessions(): Promise<CodingSessionSummary[]>;
 
-  /** Creates a coding session over a non-empty allowlisted repository set. */
+  /** Searches Totango repositories the connected GitHub user can push to for Coding Sessions. */
+  listCodingSessionRepositoryOptions(query?: string): Promise<CodingSessionRepositoryOption[]>;
+
+  /** Creates a coding session over a non-empty authorized repository set. */
   createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary>;
+
+  /** Reads account-scoped OpenCode plugins and skills applied to newly-created coding sessions. */
+  getOpenCodeCustomization(): Promise<OpenCodeUserCustomization>;
+
+  /** Replaces account-scoped OpenCode plugins and skills after server-side validation. */
+  setOpenCodeCustomization(customization: OpenCodeUserCustomization): Promise<void>;
 
   /** Stops a coding session owned by this user. This operation is idempotent. */
   stopCodingSession(sessionId: string): Promise<void>;
+
+  /** Destroys and rebuilds a running coding session from its selected repositories. */
+  restartCodingSession(sessionId: string): Promise<CodingSessionSummary>;
 
   /** Stops and archives a coding session owned by this user. This operation is idempotent. */
   archiveCodingSession(sessionId: string): Promise<void>;
 
   /** Mints a short-lived, single-use capability for attaching to a session terminal. */
-  mintCodingSessionAttachCapability(sessionId: string): Promise<CodingSessionAttachCapability>;
+  mintCodingSessionAttachCapability(
+    sessionId: string,
+    terminal?: CodingSessionTerminalKind,
+  ): Promise<CodingSessionAttachCapability>;
 
   /** Lists coding-session tool activity, optionally narrowed to one session. */
   listCodingSessionActivity(sessionId?: string): Promise<import("./coding-sessions.js").CodingSessionActivity[]>;

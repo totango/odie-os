@@ -1,7 +1,4 @@
-import {
-  CODING_SESSION_REPOSITORIES,
-  type CodingSessionRepository,
-} from "@gadgets/workshop-shared/api";
+import type { CodingSessionRepository } from "@gadgets/workshop-shared/api";
 import { isCodingSessionRepository } from "@gadgets/workshop-shared/coding-sessions";
 
 const GITHUB_ORIGIN = "https://github.com";
@@ -13,10 +10,10 @@ export function validateRepositories(values: CodingSessionRepository[]): CodingS
   if (repositories.length !== values.length || repositories.some(value => !isCodingSessionRepository(value))) {
     throw new Error("Coding session repository set is invalid.");
   }
-  return CODING_SESSION_REPOSITORIES.filter(repository => repositories.includes(repository));
+  return repositories.toSorted();
 }
 
-/** Extracts the canonical Totango repository from an allowed Git smart-HTTP URL. */
+/** Extracts a canonical Totango repository from an allowed Git smart-HTTP URL. */
 export function gitRepositoryFromUrl(url: URL): CodingSessionRepository | null {
   if (url.origin !== GITHUB_ORIGIN || url.username || url.password) return null;
   const match = /^\/totango\/([a-z0-9-]+)\.git(?:\/(?:info\/refs|git-upload-pack|git-receive-pack))?$/.exec(

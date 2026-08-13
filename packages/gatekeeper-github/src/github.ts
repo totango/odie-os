@@ -18,6 +18,7 @@ import {
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
+import type { CodingSessionRepositoryOption } from "@gadgets/workshop-shared/api";
 import {
   GitHubApi,
   GitHubApiError,
@@ -273,6 +274,7 @@ const VIEWER_CACHE_TTL_MS = 5 * 60 * 1000;
 const DISCUSSION_SYNC_OVERLAP_MS = 5 * 1000;
 const DISCUSSION_SYNC_BAIL_LIMIT = 500;
 const MAX_REPLY_TARGET_HOPS = 50;
+const VERIFIER_REPOSITORY_PAGE_SIZE = 100;
 
 const GITHUB_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(GITHUB_LOGO_SVG)}`;
 
@@ -395,6 +397,21 @@ function repoRef(owner: string, repo: string): GitHubRepoRef {
     name: repo,
     fullName: `${owner}/${repo}`,
     url: canonicalRepoUrl(owner, repo),
+  };
+}
+
+function normalizeRepositoryOption(
+  owner: string,
+  response: { name: string; full_name: string; description?: string | null; private?: boolean; updated_at?: string },
+): CodingSessionRepositoryOption | null {
+  const [responseOwner, repository] = response.full_name.split("/");
+  if (!repository || responseOwner.toLowerCase() !== owner.toLowerCase()) return null;
+  return {
+    repository,
+    title: response.full_name,
+    description: response.description ?? undefined,
+    private: response.private === true,
+    updatedAt: response.updated_at ? new Date(response.updated_at) : undefined,
   };
 }
 
@@ -1351,35 +1368,103 @@ type GitHubVerifierProps = {
 @validateRpc()
 export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
     implements GitHubVerifierApi {
-  async hasRepoAccess(owner: string, repo: string): Promise<boolean> {
+  async #withApi<T>(fn: (api: GitHubApi) => Promise<T>): Promise<T> {
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     const account = this.ctx.exports.UserAccount.get(id);
     const api = new GitHubApi(async () => await account.getAccessToken());
     try {
-      await api.getRepo(owner, repo);
-      return true;
+      return await fn(api);
     } catch (error) {
-      // GitHub returns 404 for private repos the token cannot see (to avoid leaking existence), and
-      // 403 in some org-policy cases — either way the observer lacks read access.
-      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
-        return false;
+      if (error instanceof GitHubApiError && error.isAuthError) {
+        await account.noteCredentialsExpired();
+        throw new Error("GitHub credentials have expired or been revoked. Please reconnect the account.", { cause: error });
       }
       throw error;
     }
   }
 
-  async hasRepoWriteAccess(owner: string, repo: string): Promise<boolean> {
-    const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
-    const account = this.ctx.exports.UserAccount.get(id);
-    const api = new GitHubApi(async () => await account.getAccessToken());
-    try {
-      return (await api.getRepo(owner, repo)).permissions?.push === true;
-    } catch (error) {
-      if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
-        return false;
+  async hasRepoAccess(owner: string, repo: string): Promise<boolean> {
+    return await this.#withApi(async api => {
+      try {
+        await api.getRepo(owner, repo);
+        return true;
+      } catch (error) {
+        // GitHub returns 404 for private repos the token cannot see (to avoid leaking existence), and
+        // 403 in some org-policy cases — either way the observer lacks read access.
+        if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
+          return false;
+        }
+        throw error;
       }
-      throw error;
+    });
+  }
+
+  async hasRepoWriteAccess(owner: string, repo: string): Promise<boolean> {
+    return await this.#withApi(async api => {
+      try {
+        return (await api.getRepo(owner, repo)).permissions?.push === true;
+      } catch (error) {
+        if (error instanceof GitHubApiError && (error.status === 404 || error.status === 403)) {
+          return false;
+        }
+        throw error;
+      }
+    });
+  }
+
+  async listReposWithWriteAccess(owner: string, limit: number): Promise<CodingSessionRepositoryOption[]> {
+    return await this.#withApi(async api => this.#filterPushableRepos(owner, limit, page => api.listRepos({
+      affiliation: "owner,collaborator,organization_member",
+      sort: "updated",
+      direction: "desc",
+      per_page: VERIFIER_REPOSITORY_PAGE_SIZE,
+      page,
+    })));
+  }
+
+  async searchReposWithWriteAccess(owner: string, query: string, limit: number): Promise<CodingSessionRepositoryOption[]> {
+    const trimmed = query.trim();
+    if (!trimmed) return this.listReposWithWriteAccess(owner, limit);
+    return await this.#withApi(async api => {
+      const boundedLimit = Math.max(0, Math.min(Math.trunc(limit), VERIFIER_REPOSITORY_PAGE_SIZE));
+      if (boundedLimit === 0) return [];
+      const matches = await api.searchRepos({
+        q: `${trimmed} org:${owner} fork:true`,
+        per_page: boundedLimit,
+        page: 1,
+        sort: "updated",
+        order: "desc",
+      });
+      const verified = await Promise.all(matches.map(async match => {
+        const option = normalizeRepositoryOption(owner, match);
+        if (!option) return null;
+        const repository = await api.getRepo(owner, option.repository);
+        return repository.permissions?.push === true ? normalizeRepositoryOption(owner, repository) : null;
+      }));
+      return verified.filter(option => option !== null);
+    });
+  }
+
+  async #filterPushableRepos(
+    owner: string,
+    limit: number,
+    fetchPage: (page: number) => Promise<Array<Awaited<ReturnType<GitHubApi["getRepo"]>>>>,
+  ): Promise<CodingSessionRepositoryOption[]> {
+    const boundedLimit = Math.max(0, Math.min(Math.trunc(limit), VERIFIER_REPOSITORY_PAGE_SIZE));
+    if (boundedLimit === 0) return [];
+    const results: CodingSessionRepositoryOption[] = [];
+    for (let page = 1; results.length < boundedLimit; page++) {
+      const repos = await fetchPage(page);
+      if (repos.length === 0) break;
+      for (const repo of repos) {
+        if (repo.permissions?.push !== true) continue;
+        const option = normalizeRepositoryOption(owner, repo);
+        if (option) results.push(option);
+        if (results.length >= boundedLimit) break;
+      }
+      if (repos.length < VERIFIER_REPOSITORY_PAGE_SIZE) break;
     }
+    return results;
   }
 }
 

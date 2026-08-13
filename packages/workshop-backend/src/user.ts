@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionSummary, type CreateCodingSessionRequest } from '@gadgets/workshop-shared/api';
-import type { CodingSessionOwner, CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type OpenCodeUserCustomization } from '@gadgets/workshop-shared/api';
+import { validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
@@ -27,6 +27,8 @@ const logger = createWorkshopLogger("workshop.user");
 // How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
 // listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
 const OUTPUTS_BACKFILL_PAGE = 16;
+const CODING_SESSION_REPOSITORY_OWNER = "totango";
+const CODING_SESSION_REPOSITORY_OPTION_LIMIT = 50;
 
 type ConnectedAccountRecord = {
   id: number;
@@ -248,6 +250,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       quickModel: <string | null>null,
       preferredModel: <string | null>null,
       onboardingCompleted: false,
+      openCodeCustomization: EMPTY_OPENCODE_USER_CUSTOMIZATION,
 
       // Set once the user's pre-existing workspaces have been asked to populate the outputs index
       // (see #backfillOutputs()). Workspaces created since push on their own.
@@ -1288,7 +1291,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (repositories?.length) {
         let verifier = await record.account.getVerifier() as unknown as Fetcher<GitHubVerifierApi>;
         let access = await Promise.all(repositories.map(repository =>
-          verifier.hasRepoWriteAccess("totango", repository)));
+          verifier.hasRepoWriteAccess(CODING_SESSION_REPOSITORY_OWNER, repository)));
         if (access.some(allowed => !allowed)) {
           throw new Error("Your GitHub account cannot push to every selected repository.");
         }
@@ -1306,37 +1309,93 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     throw new Error("Connect a valid GitHub account to use coding sessions.");
   }
 
+  async #githubVerifierForCodingSessions(): Promise<Fetcher<GitHubVerifierApi>> {
+    let config = await readAdminConfig(this.env);
+    if (config.disabledGatekeepers.includes("github")) {
+      throw new Error("GitHub is disabled on this deployment.");
+    }
+    for (let record of this.#connectedAccountRecords()) {
+      if (record.vendorId !== "github" || !areCredentialsValid(record)) continue;
+      return await record.account.getVerifier() as unknown as Fetcher<GitHubVerifierApi>;
+    }
+    throw new Error("Connect a valid GitHub account to use coding sessions.");
+  }
+
+  async #codingSessionsOwner(): Promise<{
+    owner: CodingSessionOwner;
+    service: Service<CodingSessionsService>;
+  }> {
+    const service = this.sessionsService;
+    if (!service) throw new Error("Coding sessions are not installed on this deployment.");
+    const profile = await this.whoami();
+    return { owner: { userId: this.ctx.id.toString(), email: profile.id }, service };
+  }
+
   /** Lists coding sessions after enforcing a valid GitHub connection. */
   async listCodingSessions(): Promise<CodingSessionSummary[]> {
     let {owner, service} = await this.#codingSessionsAccess();
     return service.listSessions(owner);
   }
 
+  /** Lists Totango repositories the connected GitHub account can push to. */
+  async listCodingSessionRepositoryOptions(query?: string): Promise<CodingSessionRepositoryOption[]> {
+    const verifier = await this.#githubVerifierForCodingSessions();
+    const trimmed = (query ?? "").trim();
+    if (trimmed) {
+      return verifier.searchReposWithWriteAccess(
+        CODING_SESSION_REPOSITORY_OWNER, trimmed, CODING_SESSION_REPOSITORY_OPTION_LIMIT);
+    }
+    return verifier.listReposWithWriteAccess(
+      CODING_SESSION_REPOSITORY_OWNER, CODING_SESSION_REPOSITORY_OPTION_LIMIT);
+  }
+
   /** Creates a coding session after enforcing a valid GitHub connection. */
   async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
     let {owner, service} = await this.#codingSessionsAccess(request.repositories);
-    return service.createSession(owner, request);
+    return service.createSession(owner, request, this.storage.openCodeCustomization.get());
   }
 
-  /** Stops a coding session after enforcing a valid GitHub connection. */
+  /** Reads the OpenCode customization persisted for this account. */
+  getOpenCodeCustomization(): OpenCodeUserCustomization {
+    return this.storage.openCodeCustomization.get();
+  }
+
+  /** Replaces this account's OpenCode customization after validating bounded plugin and skill data. */
+  setOpenCodeCustomization(customization: OpenCodeUserCustomization): void {
+    this.storage.openCodeCustomization.put(validateOpenCodeCustomization(customization));
+  }
+
+  /** Stops an owned coding session even if its GitHub connection has expired. */
   async stopCodingSession(sessionId: string): Promise<void> {
-    let {owner, service} = await this.#codingSessionsAccess();
+    let {owner, service} = await this.#codingSessionsOwner();
     return service.stopSession(owner, sessionId);
   }
 
-  /** Stops and archives a coding session after enforcing a valid GitHub connection. */
-  async archiveCodingSession(sessionId: string): Promise<void> {
-    let {owner, service} = await this.#codingSessionsAccess();
-    return service.archiveSession(owner, sessionId);
-  }
-
-  /** Mints a terminal attachment capability after enforcing a valid GitHub connection. */
-  async mintCodingSessionAttachCapability(sessionId: string): Promise<CodingSessionAttachCapability> {
+  /** Rebuilds an owned coding session after rechecking repository access. */
+  async restartCodingSession(sessionId: string): Promise<CodingSessionSummary> {
     let initial = await this.#codingSessionsAccess();
     let session = (await initial.service.listSessions(initial.owner)).find(item => item.id === sessionId);
     if (!session) throw new Error("Coding session was not found.");
     let {owner, service} = await this.#codingSessionsAccess(session.repositories);
-    return service.mintAttachCapability(owner, sessionId);
+    return service.restartSession(owner, sessionId, this.storage.openCodeCustomization.get());
+  }
+
+  /** Stops and archives an owned coding session even if its GitHub connection has expired. */
+  async archiveCodingSession(sessionId: string): Promise<void> {
+    let {owner, service} = await this.#codingSessionsOwner();
+    return service.archiveSession(owner, sessionId);
+  }
+
+  /** Mints a terminal attachment capability after enforcing a valid GitHub connection. */
+  async mintCodingSessionAttachCapability(
+    sessionId: string,
+    terminal?: CodingSessionTerminalKind,
+  ): Promise<CodingSessionAttachCapability> {
+    let initial = await this.#codingSessionsAccess();
+    let session = (await initial.service.listSessions(initial.owner)).find(item => item.id === sessionId);
+    if (!session) throw new Error("Coding session was not found.");
+    let {owner, service} = await this.#codingSessionsAccess(session.repositories);
+    return service.mintAttachCapability(owner, sessionId, terminal);
   }
 
   /** Lists coding-session observations and actions newest first. */
@@ -1484,8 +1543,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async #assertCodingSessionAccess(sessionId: string): Promise<void> {
     const { owner, service } = await this.#codingSessionsAccess();
-    if (!(await service.listSessions(owner)).some(session => session.id === sessionId)) {
-      throw new Error("Coding session was not found.");
+    if (!(await service.listSessions(owner)).some(session =>
+      session.id === sessionId && session.status === "running" && !session.archivedAt)) {
+      throw new Error("Coding session is not running.");
     }
   }
 

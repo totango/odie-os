@@ -6,10 +6,10 @@ describe("coding session repository policy", () => {
     expect(validateRepositories(["zords", "agentic"])).toEqual(["agentic", "zords"]);
   });
 
-  it("rejects empty, duplicate, and unknown repository sets", () => {
+  it("rejects empty, duplicate, and malformed repository sets", () => {
     expect(() => validateRepositories([])).toThrow("Select at least one")
     expect(() => validateRepositories(["agentic", "agentic"])).toThrow("invalid")
-    expect(() => validateRepositories(["unknown" as "agentic"])).toThrow("invalid")
+    expect(() => validateRepositories(["../unknown"])).toThrow("invalid")
   });
 
   it.each([
@@ -24,7 +24,7 @@ describe("coding session repository policy", () => {
     "http://github.com/totango/agentic.git",
     "https://github.com.evil.test/totango/agentic.git",
     "https://github.com@evil.test/totango/agentic.git",
-    "https://github.com/totango/not-allowed.git",
+    "https://github.com/totango/not allowed.git",
     "https://github.com/totango/agentic",
     "https://github.com/totango/agentic.git/releases",
     "https://github.com:444/totango/agentic.git",

@@ -6,7 +6,7 @@
 // The copy is all-or-nothing (manifest-last protocol: the deploy service scans only releases/),
 // but NOT isolated: the newer-release guard below is check-then-act, so concurrent promotions
 // could still interleave between its LIST and the copy. The caller must serialize runs of this
-// script — gadgets-internal's CI runs it in a resource group — and the guard then catches the
+// script — the GitHub release workflow uses a concurrency group — and the guard then catches the
 // remaining hazard, a promote that starts after a newer release has already published.
 //
 // Exit-0 guards (benign races must not fail the pipeline):
