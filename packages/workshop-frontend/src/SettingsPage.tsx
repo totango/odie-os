@@ -1,10 +1,10 @@
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect, useRef } from 'react'
-import { AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import type { AiChatAuthorInfo, OpenCodeSkillDefinition, OpenCodeUserCustomization } from '@gadgets/workshop-shared/api'
 import { hashPassword } from './passwordHash'
 import { CF_ACCESS_MODE } from './useAuth'
-import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash } from '@phosphor-icons/react'
+import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash, Plus, Trash } from '@phosphor-icons/react'
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
@@ -19,6 +19,31 @@ const ICON_BTN =
   'press grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default'
 const INPUT =
   'h-9 w-full rounded-lg border border-kumo-line bg-kumo-base px-3 text-[14px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15'
+const TEXTAREA =
+  'w-full rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15'
+
+const EMPTY_OPENCODE_CUSTOMIZATION: OpenCodeUserCustomization = {
+  plugins: [],
+  skills: [],
+}
+
+const NPM_PACKAGE_NAME_REGEX = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:@\S+)?$/
+
+function normalizeOpenCodeCustomization(pluginPackageLines: string, skills: OpenCodeSkillDefinition[]): OpenCodeUserCustomization {
+  return {
+    plugins: pluginPackageLines
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+    skills: skills
+      .map((skill) => ({
+        name: skill.name.trim(),
+        description: skill.description.trim(),
+        instructions: skill.instructions.trim(),
+      }))
+      .filter((skill) => skill.name || skill.description || skill.instructions),
+  }
+}
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -115,6 +140,13 @@ export default function SettingsPage() {
   // Whether this account has a password (false for OAuth-created accounts). Null while loading.
   const [hasPassword, setHasPassword] = useState<boolean | null>(null)
 
+  // OpenCode customization state
+  const [openCodePlugins, setOpenCodePlugins] = useState('')
+  const [openCodeSkills, setOpenCodeSkills] = useState<OpenCodeSkillDefinition[]>([])
+  const [openCodeLoading, setOpenCodeLoading] = useState(true)
+  const [openCodeSaving, setOpenCodeSaving] = useState(false)
+  const [openCodeError, setOpenCodeError] = useState<string | null>(null)
+
   const avatarUrl = useAvatar(authenticatedApi, userInfo?.id)
 
   // Determine whether to show the change-password section.
@@ -125,6 +157,34 @@ export default function SettingsPage() {
       .catch(() => {})
     return () => { cancelled = true }
   }, [authenticatedApi])
+
+  // Fetch account-scoped OpenCode customization.
+  useEffect(() => {
+    let cancelled = false
+    const fetchOpenCodeCustomization = async () => {
+      setOpenCodeLoading(true)
+      setOpenCodeError(null)
+      try {
+        const customization = await authenticatedApi.getOpenCodeCustomization()
+        if (cancelled) return
+        setOpenCodePlugins((customization.plugins ?? []).join('\n'))
+        setOpenCodeSkills(customization.skills ?? [])
+      } catch (error) {
+        console.error('Failed to fetch OpenCode customization:', error)
+        if (!cancelled) {
+          setOpenCodeError('Failed to load OpenCode settings')
+          setOpenCodePlugins(EMPTY_OPENCODE_CUSTOMIZATION.plugins.join('\n'))
+          setOpenCodeSkills(EMPTY_OPENCODE_CUSTOMIZATION.skills)
+          toasts.add({ title: 'Failed to load OpenCode settings', variant: 'error' })
+        }
+      } finally {
+        if (!cancelled) setOpenCodeLoading(false)
+      }
+    }
+
+    fetchOpenCodeCustomization()
+    return () => { cancelled = true }
+  }, [authenticatedApi, toasts])
 
   // Fetch user info
   useEffect(() => {
@@ -232,6 +292,58 @@ export default function SettingsPage() {
       setPasswordError(errorMessage)
     } finally {
       setPasswordLoading(false)
+    }
+  }
+
+  const updateOpenCodeSkill = (index: number, patch: Partial<OpenCodeSkillDefinition>) => {
+    setOpenCodeSkills((previous) => previous.map((skill, skillIndex) => skillIndex === index ? { ...skill, ...patch } : skill))
+  }
+
+  const addOpenCodeSkill = () => {
+    setOpenCodeSkills((previous) => [...previous, { name: '', description: '', instructions: '' }])
+  }
+
+  const removeOpenCodeSkill = (index: number) => {
+    setOpenCodeSkills((previous) => previous.filter((_, skillIndex) => skillIndex !== index))
+  }
+
+  const handleSaveOpenCodeCustomization = async () => {
+    const customization = normalizeOpenCodeCustomization(openCodePlugins, openCodeSkills)
+    const invalidPackage = customization.plugins.find((pluginPackage) => !NPM_PACKAGE_NAME_REGEX.test(pluginPackage))
+    if (invalidPackage) {
+      toasts.add({ title: `Invalid npm package name: ${invalidPackage}`, variant: 'error' })
+      return
+    }
+
+    const incompleteSkill = customization.skills.find((skill) => !skill.name || !skill.description || !skill.instructions)
+    if (incompleteSkill) {
+      toasts.add({ title: 'Each OpenCode skill needs a name, description, and instructions', variant: 'error' })
+      return
+    }
+
+    const skillNames = new Set<string>()
+    const duplicateSkill = customization.skills.find((skill) => {
+      const normalizedName = skill.name.toLowerCase()
+      if (skillNames.has(normalizedName)) return true
+      skillNames.add(normalizedName)
+      return false
+    })
+    if (duplicateSkill) {
+      toasts.add({ title: `Duplicate OpenCode skill name: ${duplicateSkill.name}`, variant: 'error' })
+      return
+    }
+
+    setOpenCodeSaving(true)
+    try {
+      await authenticatedApi.setOpenCodeCustomization(customization)
+      setOpenCodePlugins(customization.plugins.join('\n'))
+      setOpenCodeSkills(customization.skills)
+      toasts.add({ title: 'OpenCode settings saved', variant: 'success' })
+    } catch (error) {
+      console.error('Failed to save OpenCode customization:', error)
+      toasts.add({ title: 'Failed to save OpenCode settings', variant: 'error' })
+    } finally {
+      setOpenCodeSaving(false)
     }
   }
 
@@ -379,6 +491,97 @@ export default function SettingsPage() {
 
         {/* Usage & billing — only when the Cloudflare limits flow is enabled server-side */}
         <UsageSettings />
+
+        {/* OpenCode */}
+        <section className="flex flex-col gap-3">
+          <SectionLabel>OpenCode</SectionLabel>
+          <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
+            <div className="flex flex-col gap-5">
+              <div>
+                <h3 className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">Code session customization</h3>
+                <p className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
+                  These account settings apply only to your future Code sessions. Existing or running sessions keep their current OpenCode setup.
+                </p>
+              </div>
+
+              {openCodeLoading ? (
+                <p className="text-[13px] tracking-[-0.25px] text-kumo-subtle">Loading OpenCode settings…</p>
+              ) : (
+                <>
+                  {openCodeError && (
+                    <div className="rounded-lg border border-kumo-danger bg-kumo-danger-tint px-3 py-2 text-[13px] text-kumo-danger">
+                      {openCodeError}
+                    </div>
+                  )}
+
+                  <div>
+                    <FieldLabel>npm plugin packages</FieldLabel>
+                    <textarea
+                      value={openCodePlugins}
+                      onChange={(event) => setOpenCodePlugins(event.target.value)}
+                      placeholder="@example/opencode-plugin\nopencode-plugin-tools"
+                      rows={4}
+                      className={`mt-1.5 font-mono ${TEXTAREA}`}
+                      aria-describedby="opencode-plugin-help"
+                    />
+                    <p id="opencode-plugin-help" className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
+                      Enter one npm package name per line. Plugins are trusted executable code with access to repositories in your sessions. Install only packages you trust.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <FieldLabel>Skills</FieldLabel>
+                      <p className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">Reusable OpenCode guidance available to future sessions.</p>
+                    </div>
+                    <button type="button" onClick={addOpenCodeSkill} className={`${PRIMARY_BTN} h-8 px-3`}>
+                      <Plus size={14} weight="bold" /> Add skill
+                    </button>
+                  </div>
+
+                  {openCodeSkills.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-kumo-line bg-kumo-tint/30 px-4 py-5 text-center text-[13px] text-kumo-subtle">
+                      No custom skills yet.
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-3">
+                      {openCodeSkills.map((skill, index) => (
+                        <div key={index} className="rounded-lg border border-kumo-line bg-kumo-tint/20 p-4">
+                          <div className="flex items-start gap-3">
+                            <div className="grid flex-1 gap-3 sm:grid-cols-2">
+                              <label>
+                                <FieldLabel>Name</FieldLabel>
+                                <input value={skill.name} onChange={(event) => updateOpenCodeSkill(index, { name: event.target.value })} className={`mt-1.5 ${INPUT}`} placeholder="review-code" />
+                              </label>
+                              <label>
+                                <FieldLabel>Description</FieldLabel>
+                                <input value={skill.description} onChange={(event) => updateOpenCodeSkill(index, { description: event.target.value })} className={`mt-1.5 ${INPUT}`} placeholder="When to use this skill" />
+                              </label>
+                            </div>
+                            <button type="button" onClick={() => removeOpenCodeSkill(index)} aria-label={`Remove OpenCode skill ${skill.name || index + 1}`} className={ICON_BTN}>
+                              <Trash size={14} />
+                            </button>
+                          </div>
+                          <label className="mt-3 block">
+                            <FieldLabel>Instructions</FieldLabel>
+                            <textarea value={skill.instructions} onChange={(event) => updateOpenCodeSkill(index, { instructions: event.target.value })} rows={5} className={`mt-1.5 ${TEXTAREA}`} placeholder="Detailed instructions OpenCode should follow when this skill is used…" />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="flex justify-end pt-1">
+                    <button type="button" onClick={handleSaveOpenCodeCustomization} disabled={openCodeSaving} className={PRIMARY_BTN}>
+                      <Check size={15} weight="bold" />
+                      {openCodeSaving ? 'Saving…' : 'Save OpenCode settings'}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </section>
 
         {/* Security — only for password accounts (hidden under CF Access or gatekeeper sign-in) */}
         {!CF_ACCESS_MODE && hasPassword === true && (

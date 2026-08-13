@@ -8,7 +8,9 @@ import {
   type CodingSessionAttachCapability,
   type CodingSessionRepository,
   type CodingSessionSummary,
+  type CodingSessionTerminalKind,
   type CreateCodingSessionRequest,
+  type OpenCodeUserCustomization,
 } from "@gadgets/workshop-shared/api";
 import {
   type CodingSessionOwner,
@@ -28,11 +30,14 @@ const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
 const GITHUB_API_ORIGIN = "https://api.github.com";
 const WORKSHOP_MCP_HOST = "workshop-mcp.internal";
+const OPENCODE_CONFIG_DIR = "/workspace/.odie-opencode";
 
 type SessionsLogFields = {
   sessionId?: string;
   userId?: string;
   repositoryCount?: number;
+  mcpMethod?: string;
+  status?: number;
 };
 
 const logger = createLogger<SessionsLogFields>({ component: "gatekeeper.sessions" });
@@ -53,6 +58,7 @@ interface Env {
 type SessionRecord = CodingSessionSummary & {
   sandboxId: string;
   terminalId?: string;
+  shellTerminalId?: string;
 };
 
 type AttachTicket = {
@@ -212,7 +218,15 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     headers.set("x-team-pi-odie-timestamp", timestamp);
     headers.set("x-team-pi-odie-user", user);
     headers.set("x-team-pi-odie-signature", `v1=${await hmacBase64Url(secret, canonical)}`);
-    return fetch(expected, { method: "POST", headers, body, redirect: "manual" });
+    const response = await fetch(expected, { method: "POST", headers, body, redirect: "manual" });
+    if (!response.ok) {
+      logger.warn("Team PI Codex request rejected", {
+        event: "coding.session.codex.rejected",
+        sessionId: policy.sessionId,
+        status: response.status,
+      });
+    }
+    return response;
   }
 
   /** Terminates the session-scoped Workshop MCP protocol without exposing account credentials. */
@@ -306,6 +320,12 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       }
       return mcpError(message.id, -32601, "Method not found");
     } catch (error) {
+      logger.warn("Workshop MCP request failed", {
+        event: "coding.session.mcp.failed",
+        sessionId: policy.sessionId,
+        mcpMethod: message.method.slice(0, 128),
+        error,
+      });
       return mcpError(message.id, -32603, boundedError(error));
     }
   }
@@ -351,9 +371,16 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 
 /** Per-user registry for coding-session lifecycle and terminal metadata. */
 export class CodingSessionRegistry extends DurableObject<Env> {
+  readonly #shellTerminalCreations = new Map<string, Promise<string>>();
+
   /** Lists this user's sessions newest first. */
   listSessions(): CodingSessionSummary[] {
-    return [...this.#records()].map(({ sandboxId: _sandboxId, terminalId: _terminalId, ...summary }) => summary)
+    return [...this.#records()].map(({
+      sandboxId: _sandboxId,
+      terminalId: _terminalId,
+      shellTerminalId: _shellTerminalId,
+      ...summary
+    }) => summary)
       .toSorted((a, b) => b.createdAt.valueOf() - a.createdAt.valueOf());
   }
 
@@ -361,6 +388,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   async createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
+    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
     const repositories = validateRepositories(request.repositories);
     if ([...this.#records()].filter(record =>
@@ -387,24 +415,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     const policy = policyFor(this.env, id);
 
     try {
-      await policy.configure({ sessionId: id, owner, repositories });
-      const sandbox = getSandbox(this.env.SESSION_SANDBOX, id);
-      const token = await policy.getInstallationToken();
-      await sandbox.configureGitHubAuth(token);
-      await sandbox.destroy();
-      for (const repository of repositories) {
-        await sandbox.checkoutRepository(repository);
-      }
-      const terminal = await sandbox.createTerminal({
-        command: ["/bin/bash", "-lc", `cd /workspace/${repositories[0]} && exec opencode`],
-        cwd: `/workspace/${repositories[0]}`,
-        env: opencodeEnvironment(this.env),
-        cols: 120,
-        rows: 40,
-        bufferSize: 1024 * 1024,
-      });
-      record = { ...record, status: "running", terminalId: terminal.id, lastActiveAt: new Date() };
-      this.#put(record);
+      record = await this.#start(record, owner, customization);
       logger.info("coding session started", {
         event: "coding.session.started",
         sessionId: id,
@@ -421,13 +432,69 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return publicSummary(record);
   }
 
+  /** Destroys and rebuilds one session from its authorized repositories. */
+  async restartSession(
+    sessionId: string,
+    owner: CodingSessionOwner,
+    customization: OpenCodeUserCustomization,
+  ): Promise<CodingSessionSummary> {
+    const record = this.#get(sessionId);
+    if (!record || record.archivedAt) throw new Error("Coding session was not found.");
+    if (record.status === "starting" || record.status === "stopping") {
+      throw new Error("Coding session is already changing state.");
+    }
+    const stopping: SessionRecord = {
+      ...record,
+      status: "stopping",
+      error: undefined,
+      terminalId: undefined,
+      shellTerminalId: undefined,
+      lastActiveAt: new Date(),
+    };
+    this.#put(stopping);
+    let operation = stopping;
+    try {
+      await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).destroy();
+      let current = this.#get(sessionId);
+      if (current?.sandboxId !== record.sandboxId || current.status !== "stopping") {
+        throw new Error("Coding session restart was cancelled.");
+      }
+      const starting: SessionRecord = {
+        ...stopping,
+        status: "starting",
+        sandboxId: crypto.randomUUID(),
+        lastActiveAt: new Date(),
+      };
+      this.#put(starting);
+      operation = starting;
+      return publicSummary(await this.#start(starting, owner, customization));
+    } catch (error) {
+      const current = this.#get(sessionId);
+      if (current?.sandboxId !== operation.sandboxId || current.status !== operation.status) {
+        return publicSummary(current ?? operation);
+      }
+      const failed = { ...operation, status: "failed" as const, error: boundedError(error), lastActiveAt: new Date() };
+      this.#put(failed);
+      logger.error("coding session failed to restart", {
+        event: "coding.session.restart.failed", sessionId, userId: owner.userId, error,
+      });
+      return publicSummary(failed);
+    }
+  }
+
   /** Stops and destroys a session owned by this registry. */
   async stopSession(sessionId: string): Promise<void> {
     const record = this.#get(sessionId);
     if (!record || record.status === "stopped") return;
     this.#put({ ...record, status: "stopping", lastActiveAt: new Date() });
     await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).destroy();
-    this.#put({ ...record, status: "stopped", terminalId: undefined, lastActiveAt: new Date() });
+    this.#put({
+      ...record,
+      status: "stopped",
+      terminalId: undefined,
+      shellTerminalId: undefined,
+      lastActiveAt: new Date(),
+    });
   }
 
   /** Stops and hides a session from the default session list. */
@@ -436,23 +503,74 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (!record || record.archivedAt) return;
     if (record.status !== "stopped") await this.stopSession(sessionId);
     const stopped = this.#get(sessionId) ?? record;
-    this.#put({ ...stopped, status: "stopped", terminalId: undefined, archivedAt: new Date(), lastActiveAt: new Date() });
+    this.#put({
+      ...stopped,
+      status: "stopped",
+      terminalId: undefined,
+      shellTerminalId: undefined,
+      archivedAt: new Date(),
+      lastActiveAt: new Date(),
+    });
   }
 
   /** Mints one single-use terminal attachment URL. */
-  async mintAttachCapability(sessionId: string): Promise<CodingSessionAttachCapability> {
+  async mintAttachCapability(
+    sessionId: string,
+    terminal: CodingSessionTerminalKind = "opencode",
+  ): Promise<CodingSessionAttachCapability> {
     const record = this.#get(sessionId);
     if (!record || record.status !== "running" || !record.terminalId) {
       throw new Error("Coding session is not running.");
     }
+    if (terminal !== "opencode" && terminal !== "shell") throw new Error("Invalid terminal type.");
+    let terminalId = record.terminalId;
+    if (terminal === "shell") {
+      const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
+      let shell = record.shellTerminalId ? await sandbox.getTerminal(record.shellTerminalId) : undefined;
+      if (!shell) {
+        let creation = this.#shellTerminalCreations.get(sessionId);
+        if (!creation) {
+          creation = sandbox.createTerminal({
+            command: ["/bin/bash", "-l"],
+            cwd: `/workspace/${record.repositories[0]}`,
+            cols: 120,
+            rows: 40,
+            bufferSize: 1024 * 1024,
+          }).then(created => created.id);
+          this.#shellTerminalCreations.set(sessionId, creation);
+        }
+        try {
+          terminalId = await creation;
+        } finally {
+          if (this.#shellTerminalCreations.get(sessionId) === creation) {
+            this.#shellTerminalCreations.delete(sessionId);
+          }
+        }
+      } else {
+        terminalId = shell.id;
+      }
+    }
+    const current = this.#get(sessionId);
+    if (!current || current.status !== "running" || !current.terminalId) {
+      throw new Error("Coding session is not running.");
+    }
+    const updated = terminal === "shell" ? { ...current, shellTerminalId: terminalId } : current;
     const token = randomToken();
     const expiresAt = new Date(Date.now() + ATTACH_TTL_MS);
     await (await ticketFor(this.env, token)).storeTicket({
       sandboxId: record.sandboxId,
-      terminalId: record.terminalId,
+      terminalId,
       expiresAt: expiresAt.valueOf(),
     });
-    this.#put({ ...record, lastActiveAt: new Date() });
+    const latest = this.#get(sessionId);
+    if (!latest || latest.status !== "running" || !latest.terminalId) {
+      throw new Error("Coding session is not running.");
+    }
+    this.#put({
+      ...latest,
+      ...(terminal === "shell" ? { shellTerminalId: updated.shellTerminalId } : {}),
+      lastActiveAt: new Date(),
+    });
     const baseUrl = this.env.BASE_URL?.replace(/\/$/, "") ?? "/gatekeeper/sessions";
     return { url: `${baseUrl}/attach/${token}`, expiresAt };
   }
@@ -467,6 +585,37 @@ export class CodingSessionRegistry extends DurableObject<Env> {
 
   #put(record: SessionRecord): void {
     this.ctx.storage.kv.put(`session:${record.id}`, record);
+  }
+
+  async #start(
+    record: SessionRecord,
+    owner: CodingSessionOwner,
+    customization: OpenCodeUserCustomization,
+  ): Promise<SessionRecord> {
+    const policy = policyFor(this.env, record.sandboxId);
+    await policy.configure({ sessionId: record.id, owner, repositories: record.repositories });
+    const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
+    await sandbox.destroy();
+    const token = await policy.getInstallationToken();
+    await sandbox.configureGitHubAuth(token);
+    for (const repository of record.repositories) await sandbox.checkoutRepository(repository);
+    await materializeOpenCodeCustomization(sandbox, customization);
+    const terminal = await sandbox.createTerminal({
+      command: ["/bin/bash", "-lc", `cd /workspace/${record.repositories[0]} && exec opencode`],
+      cwd: `/workspace/${record.repositories[0]}`,
+      env: opencodeEnvironment(this.env, customization),
+      cols: 120,
+      rows: 40,
+      bufferSize: 1024 * 1024,
+    });
+    const current = this.#get(record.id);
+    if (!current || current.sandboxId !== record.sandboxId || current.status !== "starting") {
+      await sandbox.destroy();
+      throw new Error("Coding session startup was cancelled.");
+    }
+    const running = { ...record, status: "running" as const, terminalId: terminal.id, lastActiveAt: new Date() };
+    this.#put(running);
+    return running;
   }
 }
 
@@ -487,13 +636,23 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
+    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
-    return registryFor(this.ctx, owner.userId).createSession(owner, request);
+    return registryFor(this.ctx, owner.userId).createSession(owner, request, customization);
   }
 
   /** Stops a session for the supplied authenticated owner. */
   stopSession(owner: CodingSessionOwner, sessionId: string): Promise<void> {
     return registryFor(this.ctx, owner.userId).stopSession(sessionId);
+  }
+
+  /** Rebuilds a session for the supplied authenticated owner. */
+  restartSession(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    customization: OpenCodeUserCustomization,
+  ): Promise<CodingSessionSummary> {
+    return registryFor(this.ctx, owner.userId).restartSession(sessionId, owner, customization);
   }
 
   /** Stops and archives a session for the supplied authenticated owner. */
@@ -502,8 +661,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   }
 
   /** Mints a terminal capability for the supplied authenticated owner. */
-  mintAttachCapability(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionAttachCapability> {
-    return registryFor(this.ctx, owner.userId).mintAttachCapability(sessionId);
+  mintAttachCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    terminal?: CodingSessionTerminalKind,
+  ): Promise<CodingSessionAttachCapability> {
+    return registryFor(this.ctx, owner.userId).mintAttachCapability(sessionId, terminal);
   }
 }
 
@@ -545,25 +708,44 @@ async function ticketFor(env: Env, token: string): Promise<DurableObjectStub<Cod
 }
 
 function publicSummary(record: SessionRecord): CodingSessionSummary {
-  const { sandboxId: _sandboxId, terminalId: _terminalId, ...summary } = record;
+  const {
+    sandboxId: _sandboxId,
+    terminalId: _terminalId,
+    shellTerminalId: _shellTerminalId,
+    ...summary
+  } = record;
   return summary;
 }
 
-function opencodeEnvironment(env: Env): Record<string, string> {
+function opencodeEnvironment(env: Env, customization: OpenCodeUserCustomization): Record<string, string> {
   const baseUrl = env.TEAM_PI_CODEX_BASE_URL;
   if (!baseUrl) return {};
   return {
     OPENCODE_DISABLE_AUTOUPDATE: "true",
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+    OPENCODE_CONFIG_DIR,
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
       $schema: "https://opencode.ai/config.json",
       model: "openai/gpt-5.6-sol",
       small_model: "openai/gpt-5.6-sol",
       share: "disabled",
+      enabled_providers: ["openai"],
       provider: {
         openai: {
-          options: { baseURL: new URL("codex", ensureTrailingSlash(baseUrl)).toString(), apiKey: "synthetic" },
-          whitelist: ["gpt-5.6-sol"],
+          name: "Team PI Codex",
+          options: {
+            baseURL: new URL("codex", ensureTrailingSlash(baseUrl)).toString(),
+            apiKey: "synthetic",
+          },
+          models: {
+            "gpt-5.6-sol": {
+              name: "GPT 5.6 Sol",
+              reasoning: true,
+              temperature: false,
+              tool_call: true,
+              limit: { context: 1_050_000, output: 128_000 },
+            },
+          },
         },
       },
       mcp: {
@@ -572,11 +754,36 @@ function opencodeEnvironment(env: Env): Record<string, string> {
           url: `https://${WORKSHOP_MCP_HOST}/mcp`,
           oauth: false,
           enabled: true,
-          timeout: 15_000,
+          timeout: 2_000,
         },
       },
+      plugin: customization.plugins,
     }),
   };
+}
+
+async function materializeOpenCodeCustomization(
+  sandbox: {
+    mkdir(path: string, options?: { recursive?: boolean }): Promise<unknown>;
+    writeFile(path: string, content: string): Promise<unknown>;
+  },
+  customization: OpenCodeUserCustomization,
+): Promise<void> {
+  await sandbox.mkdir(`${OPENCODE_CONFIG_DIR}/skills`, { recursive: true });
+  for (const skill of customization.skills) {
+    const skillDir = `${OPENCODE_CONFIG_DIR}/skills/${skill.name}`;
+    await sandbox.mkdir(skillDir, { recursive: true });
+    await sandbox.writeFile(`${skillDir}/SKILL.md`, openCodeSkillMarkdown(skill));
+  }
+}
+
+function openCodeSkillMarkdown(skill: OpenCodeUserCustomization["skills"][number]): string {
+  return `---\nname: ${yamlDoubleQuote(skill.name)}\ndescription: ${yamlDoubleQuote(skill.description)}\n---\n\n${skill.instructions}\n`;
+}
+
+function yamlDoubleQuote(value: string): string {
+  return JSON.stringify(value).replace(/\\u([0-9a-fA-F]{4})/g, (_match, hex: string) =>
+    `\\x${hex.slice(2)}`);
 }
 
 function mcpResult(id: unknown, result: unknown): Response {
@@ -651,8 +858,46 @@ function base64UrlJson(value: unknown): string {
 }
 
 function pemBytes(value: string): ArrayBuffer {
-  const base64 = value.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g, "");
-  return base64ToBytes(base64).buffer;
+  const pkcs1 = value.includes("-----BEGIN RSA PRIVATE KEY-----");
+  const base64 = value.replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----|-----END (?:RSA )?PRIVATE KEY-----|\s/g, "");
+  const bytes = base64ToBytes(base64);
+  const result = pkcs1 ? wrapPkcs1AsPkcs8(bytes) : bytes;
+  return result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength) as ArrayBuffer;
+}
+
+function wrapPkcs1AsPkcs8(pkcs1: Uint8Array): Uint8Array {
+  const version = Uint8Array.of(0x02, 0x01, 0x00);
+  const rsaAlgorithm = Uint8Array.of(
+    0x30, 0x0d,
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
+    0x05, 0x00,
+  );
+  return derSequence(version, rsaAlgorithm, derValue(0x04, pkcs1));
+}
+
+function derSequence(...values: Uint8Array[]): Uint8Array {
+  return derValue(0x30, concatBytes(...values));
+}
+
+function derValue(tag: number, value: Uint8Array): Uint8Array {
+  return concatBytes(Uint8Array.of(tag), derLength(value.length), value);
+}
+
+function derLength(length: number): Uint8Array {
+  if (length < 0x80) return Uint8Array.of(length);
+  const bytes: number[] = [];
+  for (let remaining = length; remaining > 0; remaining >>>= 8) bytes.unshift(remaining & 0xff);
+  return Uint8Array.of(0x80 | bytes.length, ...bytes);
+}
+
+function concatBytes(...values: Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(values.reduce((total, value) => total + value.length, 0));
+  let offset = 0;
+  for (const value of values) {
+    result.set(value, offset);
+    offset += value.length;
+  }
+  return result;
 }
 
 function bytesToBase64Url(value: Uint8Array): string {

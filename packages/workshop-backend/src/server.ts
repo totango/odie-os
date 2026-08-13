@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionSummary, type CreateCodingSessionRequest } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type OpenCodeUserCustomization } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -244,20 +244,39 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.listCodingSessions();
   }
 
+  listCodingSessionRepositoryOptions(query?: string): Promise<CodingSessionRepositoryOption[]> {
+    return this.#user.listCodingSessionRepositoryOptions(query);
+  }
+
   createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
     return this.#user.createCodingSession(request);
+  }
+
+  getOpenCodeCustomization(): Promise<OpenCodeUserCustomization> {
+    return this.#user.getOpenCodeCustomization();
+  }
+
+  setOpenCodeCustomization(customization: OpenCodeUserCustomization): Promise<void> {
+    return this.#user.setOpenCodeCustomization(customization);
   }
 
   stopCodingSession(sessionId: string): Promise<void> {
     return this.#user.stopCodingSession(sessionId);
   }
 
+  restartCodingSession(sessionId: string): Promise<CodingSessionSummary> {
+    return this.#user.restartCodingSession(sessionId);
+  }
+
   archiveCodingSession(sessionId: string): Promise<void> {
     return this.#user.archiveCodingSession(sessionId);
   }
 
-  mintCodingSessionAttachCapability(sessionId: string): Promise<CodingSessionAttachCapability> {
-    return this.#user.mintCodingSessionAttachCapability(sessionId);
+  mintCodingSessionAttachCapability(
+    sessionId: string,
+    terminal?: CodingSessionTerminalKind,
+  ): Promise<CodingSessionAttachCapability> {
+    return this.#user.mintCodingSessionAttachCapability(sessionId, terminal);
   }
 
   listCodingSessionActivity(sessionId?: string): Promise<CodingSessionActivity[]> {

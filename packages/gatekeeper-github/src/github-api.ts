@@ -15,6 +15,7 @@ export type GitHubLabelResponse = {
   name: string;
   color?: string;
   description?: string | null;
+  updated_at?: string;
 };
 
 export type GitHubRepoResponse = {
