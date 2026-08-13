@@ -412,7 +412,6 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       sandboxId: id,
     };
     this.#put(record);
-    const policy = policyFor(this.env, id);
 
     try {
       record = await this.#start(record, owner, customization);
