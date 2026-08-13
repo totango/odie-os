@@ -118,6 +118,7 @@ describe("sanitizeChatComponents", () => {
 // what surrounds it and unforgiving about what it accepts.
 describe("extractChatComponents", () => {
   const block = (body: string) => "```odie-ui\n" + body + "\n```";
+  const jsonBlock = (body: string) => "```odie-ui JSON\n" + body + "\n```";
 
   it("lifts the block out and leaves the prose behind", () => {
     let result = extractChatComponents(
@@ -132,6 +133,34 @@ describe("extractChatComponents", () => {
       block('{"components":[{"type":"table","columns":["A"],"rows":[["1"]]}]}'));
     expect(result.components).toHaveLength(1);
     expect(result.message).toBe("");
+  });
+
+  it("accepts an odie-ui JSON fence with one bare form component object", () => {
+    let result = extractChatComponents(
+      "Please fill this out.\n\n" + jsonBlock(JSON.stringify({
+        type: "form",
+        title: "Customer intake",
+        submitLabel: "Submit",
+        fields: [
+          { name: "name", label: "Name", kind: "text", required: true },
+          { name: "notes", label: "Notes", kind: "textarea" },
+        ],
+      })));
+    expect(result.message).toBe("Please fill this out.");
+    expect(result.components).toEqual([{
+      type: "form",
+      title: "Customer intake",
+      submitLabel: "Submit",
+      fields: [
+        { name: "name", label: "Name", kind: "text", required: true, value: undefined, options: undefined, placeholder: undefined },
+        { name: "notes", label: "Notes", kind: "textarea", required: false, value: undefined, options: undefined, placeholder: undefined },
+      ],
+    }]);
+  });
+
+  it("does not accept arbitrary odie-ui fence suffixes", () => {
+    let message = "Answer.\n\n```odie-ui yaml\n[{\"type\":\"choice\",\"prompt\":\"x\",\"options\":[{\"label\":\"a\"}]}]\n```";
+    expect(extractChatComponents(message)).toEqual({message});
   });
 
   it("leaves a message with no block untouched", () => {

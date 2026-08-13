@@ -13,6 +13,11 @@ export const JARVIS_SERVER_ID = "jarvis";
 /** Human-facing display name for the JARVIS singleton account and resource. */
 export const JARVIS_DISPLAY_NAME = "JARVIS";
 
+/** Monochrome robot icon for the JARVIS management app sidebar entry. */
+export const JARVIS_UI_ICON = {
+  url: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cpath fill='currentColor' d='M200 48h-56V32a16 16 0 0 0-32 0v16H56a32 32 0 0 0-32 32v96a32 32 0 0 0 32 32h144a32 32 0 0 0 32-32V80a32 32 0 0 0-32-32ZM88 144a24 24 0 1 1 24-24 24 24 0 0 1-24 24Zm80 0a24 24 0 1 1 24-24 24 24 0 0 1-24 24Zm-72 32h64a8 8 0 0 1 0 16H96a8 8 0 0 1 0-16Z'/%3E%3C/svg%3E",
+};
+
 const ALLOWED_TOOL_SET = new Set<string>(JARVIS_ALLOWED_TOOLS);
 const MANUAL_ACTION_TOOL_SET = new Set<string>([
   "jarvis_answer_support_question",

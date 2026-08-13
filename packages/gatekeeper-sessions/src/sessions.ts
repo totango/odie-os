@@ -20,6 +20,7 @@ import {
   type CodingSessionsService,
 } from "@gadgets/workshop-shared/coding-sessions";
 import type { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { WORKSHOP_MCP_HOST, validateWorkshopMcpRequestTarget } from "./mcp-policy.js";
 import { validateRepositories } from "./policy.js";
 
 export { ContainerProxy };
@@ -29,7 +30,6 @@ const MAX_SESSIONS_PER_USER = 5;
 const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
 const GITHUB_API_ORIGIN = "https://api.github.com";
-const WORKSHOP_MCP_HOST = "workshop-mcp.internal";
 const OPENCODE_CONFIG_DIR = "/workspace/.odie-opencode";
 
 type SessionsLogFields = {
@@ -231,10 +231,8 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 
   /** Terminates the session-scoped Workshop MCP protocol without exposing account credentials. */
   async handleWorkshopMcpRequest(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (request.method !== "POST" || url.hostname !== WORKSHOP_MCP_HOST || url.pathname !== "/mcp") {
-      return new Response("Workshop MCP request is not allowed.", { status: 403 });
-    }
+    const rejectedTarget = validateWorkshopMcpRequestTarget(request);
+    if (rejectedTarget) return rejectedTarget;
     if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
       return new Response("Workshop MCP requires JSON.", { status: 415 });
     }

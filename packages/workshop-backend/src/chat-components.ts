@@ -178,7 +178,7 @@ function isChatFormFieldKind(kind: unknown): kind is ChatFormField["kind"] {
 const COMPONENT_FENCE = "odie-ui";
 
 // Matches one fenced component block, with or without a trailing newline before the closing fence.
-const COMPONENT_BLOCK = new RegExp("^[ \\t]*```" + COMPONENT_FENCE + "[ \\t]*\\r?\\n" +
+const COMPONENT_BLOCK = new RegExp("^[ \\t]*```" + COMPONENT_FENCE + "(?:[ \\t]+[jJ][sS][oO][nN])?[ \\t]*\\r?\\n" +
     "([\\s\\S]*?)\\r?\\n?[ \\t]*```[ \\t]*$", "m");
 
 // Lifts an agent's component block out of its prose.
@@ -203,10 +203,12 @@ export function extractChatComponents(message: string)
     return {message};
   }
 
-  // Accept either a bare array or {components: [...]}, since both are natural things to write.
+  // Accept a bare array, {components: [...]}, or a single bare component object.
   let candidates = Array.isArray(parsed)
       ? parsed
-      : (parsed as {components?: unknown})?.components;
+      : Array.isArray((parsed as {components?: unknown})?.components)
+        ? (parsed as {components: unknown[]}).components
+        : [parsed];
   let components = sanitizeChatComponents(candidates as ChatComponent[] | undefined);
   if (!components) return {message};
 

@@ -31,6 +31,7 @@ import {
   JARVIS_ALLOWED_TOOLS,
   JARVIS_DISPLAY_NAME,
   JARVIS_SERVER_ID,
+  JARVIS_UI_ICON,
   VENDOR_ID,
 } from "./config.js";
 
@@ -175,7 +176,7 @@ export class JarvisAccount
         ),
         revisionedAuthority: true,
       };
-      description.providesUi = { title: "JARVIS", icon: JARVIS_ICON };
+      description.providesUi = { title: "J.A.R.V.I.S", icon: JARVIS_UI_ICON };
     }
     return description;
   }

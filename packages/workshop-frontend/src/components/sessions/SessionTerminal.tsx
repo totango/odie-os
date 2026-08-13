@@ -6,6 +6,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useTheme } from '../../ThemeContext'
 import { WorkshopButton } from '../WorkshopControls'
 import type { CodingSessionTerminalKind } from '@gadgets/workshop-shared/api'
+import { enqueueTerminalWriteFrame, OrderedTerminalOperationQueue } from './orderedTerminalOperations'
 
 type PendingChunk = { byteLength: number }
 
@@ -39,12 +40,11 @@ export default function SessionTerminal({
     let cancelled = false
     let socket: WebSocket | undefined
     let pendingChunk: PendingChunk | undefined
-    let outputFrame: number | undefined
     let resizeFrame: number | undefined
     let lastSize = ''
-    let receivedOutput = false
-    let outputChunks: Uint8Array[] = []
-    let outputBytes = 0
+    let visibleOutputDetected = false
+    const inputEncoder = new TextEncoder()
+    const terminalOperations = new OrderedTerminalOperationQueue()
     const terminal = new Terminal({
       cursorBlink: true,
       convertEol: true,
@@ -60,10 +60,10 @@ export default function SessionTerminal({
     terminalRef.current = terminal
     fit.fit()
 
-    const sendSize = () => {
+    const sendSize = (force = false) => {
       fit.fit()
       const size = `${terminal.cols}x${terminal.rows}`
-      if (size === lastSize || socket?.readyState !== WebSocket.OPEN) return
+      if ((!force && size === lastSize) || socket?.readyState !== WebSocket.OPEN) return
       lastSize = size
       socket.send(JSON.stringify({ type: 'resize', cols: terminal.cols, rows: terminal.rows }))
     }
@@ -78,37 +78,19 @@ export default function SessionTerminal({
 
     const input = terminal.onData((data) => {
       if (socket?.readyState !== WebSocket.OPEN) return
-      socket.send(new TextEncoder().encode(data))
+      socket.send(inputEncoder.encode(data))
     })
 
-    const flushOutput = () => {
-      outputFrame = undefined
-      if (!outputBytes) return
-      const bytes = new Uint8Array(outputBytes)
-      let offset = 0
-      for (const chunk of outputChunks) {
-        bytes.set(chunk, offset)
-        offset += chunk.byteLength
-      }
-      outputChunks = []
-      outputBytes = 0
+    const writeOutput = (bytes: Uint8Array, done: () => void) => {
       terminal.write(bytes, () => {
-        if (terminalKind === 'opencode' && !receivedOutput && terminalHasVisibleContent(terminal)) {
-          receivedOutput = true
+        if (!cancelled && terminalKind === 'opencode' && !visibleOutputDetected && terminalHasVisibleContent(terminal)) {
+          visibleOutputDetected = true
           window.requestAnimationFrame(() => {
             if (!cancelled) setInteractive(true)
           })
         }
+        done()
       })
-    }
-
-    const discardOutput = () => {
-      if (outputFrame !== undefined) {
-        window.cancelAnimationFrame(outputFrame)
-        outputFrame = undefined
-      }
-      outputChunks = []
-      outputBytes = 0
     }
 
     authenticatedApi.mintCodingSessionAttachCapability(sessionId, terminalKind).then((capability) => {
@@ -131,10 +113,8 @@ export default function SessionTerminal({
             socket?.close()
             return
           }
-          outputChunks.push(bytes)
-          outputBytes += bytes.byteLength
-          if (outputFrame === undefined) outputFrame = window.requestAnimationFrame(flushOutput)
-          if (!receivedOutput) {
+          enqueueTerminalWriteFrame(terminalOperations, bytes, writeOutput)
+          if (!visibleOutputDetected) {
             setState('connected')
           }
           pendingChunk = undefined
@@ -156,6 +136,7 @@ export default function SessionTerminal({
           if (message.type === 'ready') {
             setState('connected')
             if (terminalKind === 'shell') setInteractive(true)
+            sendSize(true)
             terminal.focus()
           } else if (message.type === 'chunk' && typeof message.byteLength === 'number') {
             if (pendingChunk || !Number.isSafeInteger(message.byteLength) || message.byteLength < 0) {
@@ -165,8 +146,10 @@ export default function SessionTerminal({
             }
             pendingChunk = { byteLength: message.byteLength }
           } else if (message.type === 'truncated') {
-            discardOutput()
-            terminal.clear()
+            terminalOperations.enqueue((done) => {
+              if (!cancelled) terminal.clear()
+              done()
+            })
           } else if (message.type === 'error') {
             setError(message.message ?? 'Terminal error.')
           } else if (message.type === 'exit') {
@@ -191,8 +174,8 @@ export default function SessionTerminal({
 
     return () => {
       cancelled = true
+      terminalOperations.cancel()
       resizeObserver.disconnect()
-      if (outputFrame !== undefined) window.cancelAnimationFrame(outputFrame)
       if (resizeFrame !== undefined) window.cancelAnimationFrame(resizeFrame)
       input.dispose()
       socket?.close()

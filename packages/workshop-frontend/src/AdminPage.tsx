@@ -9,6 +9,7 @@ import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
+import { useServerConfigUpdater } from './ServerConfigContext'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -33,6 +34,7 @@ const BANNER_SWATCH: Record<BannerColor, string> = {
 export default function AdminPage() {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
+  const updateServerConfig = useServerConfigUpdater()
   useDocumentTitle('Admin')
 
   // The admin capability (minted once via getAdminApi; null until loaded / for non-admins). Wrapped
@@ -89,10 +91,12 @@ export default function AdminPage() {
 
   // Populate all editor state from a freshly-fetched settings view.
   const applySettings = (view: Awaited<ReturnType<RpcStub<AdminApi>['getSettings']>>) => {
+    const siteLogo = view.siteLogo ? { url: cacheBustSiteLogoUrl(view.siteLogo.url) } : undefined
     setSignupsEnabled(view.signupsEnabled)
     setSavedSiteName(view.siteName)
     setSiteNameDraft(view.siteName)
-    setSiteLogoUrl(view.siteLogo?.url ?? null)
+    setSiteLogoUrl(siteLogo?.url ?? null)
+    updateServerConfig({ siteName: view.siteName, siteLogo })
     setResourceVendors(view.resourceVendors)
     setSavedInstructions(view.instanceInstructions)
     setInstructionsDraft(view.instanceInstructions)
@@ -300,6 +304,7 @@ export default function AdminPage() {
     try {
       await admin.api.setSiteName(siteNameDraft)
       setSavedSiteName(siteNameDraft)
+      updateServerConfig({ siteName: siteNameDraft })
       toasts.add({ title: 'Site name saved', variant: 'success' })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save site name'
@@ -318,7 +323,9 @@ export default function AdminPage() {
     try {
       const data = await prepareSiteLogo(file)
       const logo = await admin.api.setSiteLogo(data)
-      setSiteLogoUrl(logo ? cacheBustSiteLogoUrl(logo.url) : null)
+      const siteLogo = logo ? { url: cacheBustSiteLogoUrl(logo.url) } : undefined
+      setSiteLogoUrl(siteLogo?.url ?? null)
+      updateServerConfig({ siteLogo })
       toasts.add({ title: 'Logo saved', variant: 'success' })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save logo'
@@ -334,6 +341,7 @@ export default function AdminPage() {
     try {
       await admin.api.setSiteLogo(null)
       setSiteLogoUrl(null)
+      updateServerConfig({ siteLogo: undefined })
       toasts.add({ title: 'Default logo restored', variant: 'success' })
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to remove logo'
