@@ -1,16 +1,15 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
-  Blueprint,
   BookOpen,
   Compass,
   Hexagon,
   House,
   MagnifyingGlass,
-  RocketLaunch,
   SidebarSimple,
   SquaresFour,
   Stack,
   TerminalWindow,
+  WarningCircle,
 } from '@phosphor-icons/react'
 import { useSiteName } from '../../ServerConfigContext'
 import SiteLogo from '../SiteLogo'
@@ -54,6 +53,7 @@ export default function Sidebar({
   const { authenticatedApi } = useAuthenticatedApi()
   const [pendingSessionActions, setPendingSessionActions] = useState(0)
   const showSessions = github.state === 'connected'
+  const codeNeedsSetup = github.state === 'missing' || github.state === 'expired'
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const isCodeMode = pathname === '/sessions'
 
@@ -139,29 +139,38 @@ export default function Sidebar({
             <Link to="/" aria-label="Chat" title="Chat" className={`flex h-9 w-9 items-center justify-center rounded-lg ${!isCodeMode ? 'bg-kumo-fill text-kumo-brand' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
               <House size={15} />
             </Link>
-            {showSessions && (
-              <Link to="/sessions" aria-label="Code" title="Code" className={`flex h-9 w-9 items-center justify-center rounded-lg ${isCodeMode ? 'bg-kumo-fill text-kumo-brand' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
+            <Link
+              to="/sessions"
+              aria-label={codeNeedsSetup ? 'Code setup required' : 'Code'}
+              title={codeNeedsSetup ? 'Code needs a GitHub connection' : 'Code'}
+              className={`relative flex h-9 w-9 items-center justify-center rounded-lg ${isCodeMode ? 'bg-kumo-fill text-kumo-brand' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}
+            >
                 <TerminalWindow size={15} />
-              </Link>
-            )}
+              {codeNeedsSetup && <WarningCircle size={10} weight="fill" className="absolute right-1 top-1 text-kumo-warning" aria-hidden />}
+            </Link>
           </div>
         ) : (
-          <div className={`grid ${showSessions ? 'grid-cols-2' : 'grid-cols-1'} rounded-xl border border-kumo-line bg-kumo-base p-1 shadow-sm`} role="group" aria-label="Workspace mode">
+          <div className="grid grid-cols-2 rounded-xl border border-kumo-line bg-kumo-base p-1 shadow-sm" role="group" aria-label="Workspace mode">
             <Link to="/" className={`flex h-9 items-center justify-center gap-2 rounded-lg text-[13px] font-medium transition-colors ${!isCodeMode ? 'bg-kumo-contrast text-kumo-inverse shadow-sm' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
               <House size={14} /> Chat
             </Link>
-            {showSessions && (
-              <Link to="/sessions" className={`flex h-9 items-center justify-center gap-2 rounded-lg text-[13px] font-medium transition-colors ${isCodeMode ? 'bg-kumo-contrast text-kumo-inverse shadow-sm' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}>
+            <Link
+              to="/sessions"
+              title={codeNeedsSetup ? 'Code needs a GitHub connection' : 'Code'}
+              className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-[13px] font-medium transition-colors ${isCodeMode ? 'bg-kumo-contrast text-kumo-inverse shadow-sm' : 'text-kumo-subtle hover:bg-kumo-tint hover:text-kumo-default'}`}
+            >
                 <TerminalWindow size={14} /> Code
+                {codeNeedsSetup && <WarningCircle size={12} weight="fill" className="text-kumo-warning" aria-label="setup required" />}
                 {pendingSessionActions > 0 && <span className="rounded-full bg-kumo-brand px-1.5 text-[10px] leading-4 text-white">{pendingSessionActions}</span>}
-              </Link>
-            )}
+            </Link>
           </div>
         )}
       </div>
 
       {isCodeMode && showSessions ? (
         <SessionsSidebar collapsed={collapsed} />
+      ) : isCodeMode ? (
+        <CodeSetupSidebarState collapsed={collapsed} state={github.state} />
       ) : (
       <SidebarWorkspacesProvider>
         {/* Pinned top stack. shrink-0 keeps it from squishing when the lists below grow. */}
@@ -170,31 +179,19 @@ export default function Sidebar({
           <nav className="flex flex-col gap-0.5 px-2">
             <SidebarItem
               to="/"
-              label="Home"
+              label="Ask"
               icon={<House size={14} weight="regular" />}
               collapsed={collapsed}
             />
             <SidebarItem
               to="/workspaces"
-              label="Workspaces"
+              label="History"
               icon={<SquaresFour size={14} weight="regular" />}
               collapsed={collapsed}
             />
             <SidebarItem
-              to="/getting-started"
-              label="Getting started"
-              icon={<RocketLaunch size={14} weight="regular" />}
-              collapsed={collapsed}
-            />
-            <SidebarItem
-              to="/blueprints"
-              label="Blueprints"
-              icon={<Blueprint size={14} weight="regular" />}
-              collapsed={collapsed}
-            />
-            <SidebarItem
               to="/outputs"
-              label="Outputs"
+              label="Created"
               icon={<Stack size={14} weight="regular" />}
               collapsed={collapsed}
             />
@@ -239,7 +236,7 @@ export default function Sidebar({
             })}
             <SidebarItem
               to="/explore"
-              label="Explore"
+              label="Library"
               icon={<Compass size={14} weight="regular" />}
               collapsed={collapsed}
             />
@@ -259,5 +256,28 @@ export default function Sidebar({
 
       <SidebarUtilityStrip collapsed={collapsed} />
     </aside>
+  )
+}
+
+function CodeSetupSidebarState({ collapsed, state }: { collapsed: boolean; state: string }) {
+  if (collapsed) {
+    return <div className="min-h-0 flex-1" aria-label="Code setup required" />
+  }
+  return (
+    <div className="min-h-0 flex-1 px-3 py-4">
+      <div className="rounded-xl border border-kumo-line bg-kumo-base p-3 text-xs leading-5 text-kumo-subtle">
+        <div className="flex items-center gap-2 font-medium text-kumo-default">
+          <WarningCircle size={14} weight="fill" className="text-kumo-warning" />
+          {state === 'loading' ? 'Checking Code access' : 'Code setup required'}
+        </div>
+        <p className="mt-1">
+          {state === 'loading'
+            ? 'Checking your GitHub connection.'
+            : state === 'expired'
+              ? 'Reconnect GitHub to start code sessions.'
+              : 'Connect GitHub to start code sessions.'}
+        </p>
+      </div>
+    </div>
   )
 }

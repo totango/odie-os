@@ -165,7 +165,7 @@ function formatHeaderCost(cost: number) {
 function rightTabs(output?: BlueprintOutput): { value: RightTab; label: string }[] {
   return [
     { value: 'app', label: formatOf(output).noun },
-    { value: 'code', label: 'Code' },
+    { value: 'code', label: 'Files' },
     { value: 'connections', label: 'Connections' },
   ]
 }
