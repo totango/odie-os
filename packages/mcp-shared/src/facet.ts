@@ -116,6 +116,18 @@ export abstract class McpFacetBase<
     return this.#toolsPromise;
   }
 
+  /** Selects the immutable tool scope for one trusted runtime surface. */
+  protected sessionScope(_surface: "chat" | "code"): ToolScope {
+    return this.scope;
+  }
+
+  /** Returns the catalog visible through one session scope. */
+  protected async sessionTools(scope: ToolScope): Promise<ClassifiedTool[]> {
+    if (scope.tools === undefined) return this.tools();
+    const allowed = new Set(scope.tools);
+    return (await this.tools()).filter(entry => allowed.has(entry.tool.name));
+  }
+
   /** Returns action kinds that this facet's current catalog permits auto-approving. */
   async getAutoApprovableActions(): Promise<ActionKind[]> {
     return (await this.tools())
@@ -125,15 +137,35 @@ export abstract class McpFacetBase<
 
   /** Starts a session with generated per-tool methods when the catalog is available. */
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<Session> {
+    const surface = await approvalQueue.getSessionSurface();
+    const scope = this.sessionScope(surface);
     let SessionClass = this.sessionClass;
+    let tools: ClassifiedTool[] | undefined;
     try {
-      SessionClass = installToolMethods(SessionClass, await this.tools());
+      tools = await this.sessionTools(scope);
+      SessionClass = installToolMethods(SessionClass, tools);
     } catch (err) {
       this.log.warn("starting session without per-tool methods", {
         event: "session.tool-methods.unavailable", error: err,
       });
     }
-    return new SessionClass(this, approvalQueue.dup());
+    // Do not hand the session the full facet host: this surface-local object exposes only the
+    // frozen scope/catalog while retaining the existing call and approval mechanics.
+    const host: McpSessionHost = {
+      serverName: this.serverName,
+      endpoint: this.endpoint,
+      scope,
+      tools: tools ? async () => tools : () => this.sessionTools(scope),
+      call: (fn, options) => this.call(fn, options),
+      actionKindFor: toolName => this.actionKindFor(toolName),
+      stageAction: (toolName, args) => this.stageAction(toolName, args, surface),
+      discardStagedAction: id => this.discardStagedAction(id),
+      lookupAction: id => {
+        const action = this.lookupAction(id);
+        return action?.surface === surface ? action : undefined;
+      },
+    };
+    return new SessionClass(host, approvalQueue.dup());
   }
 
   /** Refuses observers so MCP bindings can only be opened by their owner. */
@@ -145,8 +177,12 @@ export abstract class McpFacetBase<
   async removeObserver(_id: string): Promise<void> {}
 
   /** Stages an MCP action for approval. */
-  stageAction(toolName: string, args: Record<string, unknown>): StoredAction {
-    return this.#actions().stage(toolName, args);
+  stageAction(
+    toolName: string,
+    args: Record<string, unknown>,
+    surface: "chat" | "code" = "chat",
+  ): StoredAction {
+    return this.#actions().stage(toolName, args, surface);
   }
 
   /** Discards an action whose approval submission failed. */

@@ -8,10 +8,12 @@
   },
   "compatibility_date": "2026-02-02",
   "compatibility_flags": ["allow_irrevocable_stub_storage", "enhanced_error_serialization", "global_fetch_strictly_public"],
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
   "workers_dev": false,
   "preview_urls": false,
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["JarvisGatekeeper"] }
+    { "tag": "v1", "new_sqlite_classes": ["JarvisGatekeeper"] },
+    { "tag": "v2", "new_sqlite_classes": ["JarvisPolicy"] }
   ],
   "vars": {
     "JARVIS_MCP_URL": "https://jarvis.unison.totango.com/api/jarvis/mcp",

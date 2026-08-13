@@ -44,6 +44,7 @@ function facet() {
 }
 
 const queue = {
+  getSessionSurface: async () => "chat" as const,
   dup() { return this; },
   authorizeObservation() {},
 };

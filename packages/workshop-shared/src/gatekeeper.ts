@@ -152,7 +152,12 @@ export type AccountDescription = {
   // GatekeeperUser.getSingletonGatekeeperClass) that the Workshop installs into the owner's gadgets
   // and whose session it auto-provides as an unnamed capsule. `tsType` names the session's interface
   // as returned by the gatekeeper's getTypeScriptTypes().
-  singleton?: { tsType: string };
+  singleton?: {
+    tsType: string;
+
+    /** Indicates that this singleton exposes a revision-keyed immutable authority capability. */
+    revisionedAuthority?: true;
+  };
 
   // If set, this account has a full-page management UI (see GatekeeperUser.startAppUi). The Workshop
   // surfaces it as a nav entry / page using this title.
@@ -567,6 +572,17 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   // singleton (e.g. the account id and sharing domain).
   getSingletonGatekeeperClass?(): Promise<DurableObjectClass<Gatekeeper<any>>>;
 
+  /**
+   * Returns the current immutable singleton authority revision and its facet class.
+   *
+   * Accounts set `singleton.revisionedAuthority` before the Workshop calls this method. A changed
+   * key causes the Workshop to mint a new ambient facet while retaining facets for older keys.
+   */
+  getSingletonGatekeeperAuthority?(): Promise<{
+    key: string;
+    class: DurableObjectClass<Gatekeeper<any>>;
+  }>;
+
   // The account's full-page management UI (iframe HTML + ui capability). `context.isAdmin` is passed
   // fresh per open (not baked into the account) so admin-gated features reflect current status.
   startAppUi?(context: AppUiContext): Promise<GatekeeperUiFrame>;
@@ -798,6 +814,9 @@ export interface SlashCommandProvider extends RpcTarget {
 // actually required, the gatekeeper must still submit all actions and wait for apply() to be
 // called before applying them.
 export interface ApprovalQueue extends ObservationAuthorizer {
+  /** Identifies whether this session was opened for persistent gadget code or an agent/chat caller. */
+  getSessionSurface(): Promise<"chat" | "code">;
+
   // TODO: Method to indicate that the gadget tried to perform an action that the gatekeeper itself
   //   hasn't been authorized to do (e.g. the user hasn't authorized the right OAuth scopes). The
   //   system should direct the user to the right UI to authorize the action.

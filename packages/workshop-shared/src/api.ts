@@ -2805,6 +2805,8 @@ export type GatekeeperCreationSpec = {
   type: "ambient";
   vendorId: string;        // the singleton gatekeeper's id (GATEKEEPER_<ID> suffix, lowercased)
   accountId: number;       // the owner's connected-account id for this singleton (in their user DO)
+  /** Immutable singleton authority revision, absent for legacy non-revisioned singleton accounts. */
+  authorityKey?: string;
 };
 
 // User-provided metadata controlling how a gatekeeper binding should appear in blueprints.

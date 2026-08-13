@@ -20,6 +20,9 @@ export type StoredAction = {
   id: number;
   toolName: string;
   args: Record<string, unknown>;
+  // Runtime surface that staged this action. Absent only on records written before surface-scoped
+  // JARVIS permissions existed; those records fail closed when a session tries to read the result.
+  surface?: "chat" | "code";
   // `applying` is the window between an approval arriving and the call returning. It exists so a
   // second `applyAction` for the same id cannot find the record still `pending` and call the tool a
   // second time; see `ActionStore.apply`.
@@ -156,6 +159,10 @@ export class McpSessionBase extends RpcTarget {
     const host = this.#host;
     const stored = host.lookupAction(actionId);
     if (!stored) throw new Error(`No MCP action with id ${actionId}.`);
+    const tools = await host.tools();
+    if (!tools.some(entry => entry.tool.name === stored.toolName)) {
+      throw new Error("This binding does not grant access to that MCP action.");
+    }
 
     switch (stored.state) {
       case "pending":
