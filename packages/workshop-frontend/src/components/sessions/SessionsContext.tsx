@@ -57,6 +57,31 @@ type SessionsContextValue = {
   reconnect: (accountId: number) => Promise<void>
 }
 
+type GitHubAccountConnector = {
+  connectAccount: (vendorId: 'github') => Promise<{ url: string }>
+  reconnectAccount: (accountId: number) => Promise<{ url: string }>
+}
+
+export async function openGitHubAccountPopup(
+  authenticatedApi: GitHubAccountConnector,
+  request: { kind: 'connect' } | { kind: 'reconnect'; accountId: number },
+): Promise<void> {
+  const popup = window.open('', '_blank')
+  if (!popup) {
+    throw new Error(`Allow pop-ups to ${request.kind === 'connect' ? 'connect' : 'reconnect'} GitHub, then try again.`)
+  }
+  popup.opener = null
+  try {
+    const { url } = request.kind === 'connect'
+      ? await authenticatedApi.connectAccount('github')
+      : await authenticatedApi.reconnectAccount(request.accountId)
+    popup.location.replace(url)
+  } catch (caught) {
+    popup.close()
+    throw caught
+  }
+}
+
 const SessionsContext = createContext<SessionsContextValue | null>(null)
 
 export function SessionsProvider({ children }: { children: ReactNode }) {
@@ -123,13 +148,11 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
   }, [authenticatedApi, github.state, repositorySearch])
 
   const connect = useCallback(async () => {
-    const { url } = await authenticatedApi.connectAccount('github')
-    window.open(url, '_blank', 'noopener,noreferrer')
+    await openGitHubAccountPopup(authenticatedApi, { kind: 'connect' })
   }, [authenticatedApi])
 
   const reconnect = useCallback(async (accountId: number) => {
-    const { url } = await authenticatedApi.reconnectAccount(accountId)
-    window.open(url, '_blank', 'noopener,noreferrer')
+    await openGitHubAccountPopup(authenticatedApi, { kind: 'reconnect', accountId })
   }, [authenticatedApi])
 
   const create = useCallback(async () => {

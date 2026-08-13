@@ -550,7 +550,7 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
                 running app, its code, and its connections. Gadgets are real apps: they keep data and can be
                 given resources of their own.
               </PlaceCard>
-              <PlaceCard icon={<Plugs size={16} weight="bold" />} title="Connectors" to="/gatekeepers" linkLabel="Open Gatekeepers">
+              <PlaceCard icon={<Plugs size={16} weight="bold" />} title="Connectors" to="/gatekeepers" linkLabel="Open Connections">
                 Connect an account once and the agent can use it. Each connector decides what it exposes, and
                 only what you connect is reachable.
               </PlaceCard>
@@ -624,12 +624,12 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
               <FlowStep icon={<ShieldCheck size={16} weight="bold" />} title="JARVIS not available">
                 Do not substitute raw production MCP. Use Gatekeepers to check connected or forced accounts,
                 then ask an admin for the approved JARVIS binding.
-                <span className="mt-3 block"><GatekeepersLink>Open Gatekeepers</GatekeepersLink></span>
+                <span className="mt-3 block"><GatekeepersLink>Open Connections</GatekeepersLink></span>
               </FlowStep>
               <FlowStep icon={<Plugs size={16} weight="bold" />} title="TEAM_PI action blocked">
                 Reads should work through the binding. Installs and start-connection actions are intentionally
                 approval-gated; approve only after reviewing the proposed scope.
-                <span className="mt-3 block"><GatekeepersLink>Open Gatekeepers</GatekeepersLink></span>
+                <span className="mt-3 block"><GatekeepersLink>Open Connections</GatekeepersLink></span>
               </FlowStep>
             </div>
           </Card>

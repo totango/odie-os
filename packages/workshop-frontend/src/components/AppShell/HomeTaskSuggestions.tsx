@@ -1,10 +1,8 @@
-import { useMemo } from 'react'
 import {
-  AppWindow,
-  ChartLineUp,
-  FileText,
-  Lightning,
-  Presentation,
+  Bug,
+  GitBranch,
+  Headset,
+  Ticket,
   type Icon,
 } from '@phosphor-icons/react'
 
@@ -23,44 +21,36 @@ type TaskSuggestion = {
 // first move isn't "pick a file type". The formats themselves are in the composer's `+` menu.
 const SUGGESTIONS: TaskSuggestion[] = [
   {
-    id: 'one-on-one',
-    label: 'Write a 1:1 pre-read',
-    description: 'A doc with a snapshot, things to inspect, and one ask',
-    icon: FileText,
+    id: 'ask-codebase',
+    label: 'Ask about the codebase',
+    description: 'Understand architecture, flows, or a tricky module',
+    icon: GitBranch,
     prompt:
-      'Create a document to prepare for my next 1:1 with a direct report: a current snapshot, a coaching frame, things to inspect, carryover items from last time, and one clear ask.',
+      'Help me understand this codebase. Start by explaining the main architecture, important packages, and where I should look for a feature or behavior I describe next.',
   },
   {
-    id: 'team-meeting',
-    label: 'Build a team meeting deck',
-    description: 'Slides with progress, risks, and what needs a decision',
-    icon: Presentation,
+    id: 'investigate-bug',
+    label: 'Investigate a bug',
+    description: 'Trace likely causes and propose a safe fix plan',
+    icon: Bug,
     prompt:
-      'Create a slide deck for my next team meeting: where things stand, what shipped, risks and blockers, and the decisions I need from the room. Ask me what the team is working on first.',
+      'Investigate a bug in the codebase. Ask me for the symptom or error, then trace likely causes, identify the files involved, and propose a small safe fix plan before changing anything.',
   },
   {
-    id: 'insights',
-    label: 'Find insights in my data',
-    description: 'Turn a spreadsheet or CSV into trends and recommendations',
-    icon: ChartLineUp,
+    id: 'jira-from-zendesk',
+    label: 'Create Jira from Zendesk',
+    description: 'Turn support context into an actionable engineering ticket',
+    icon: Ticket,
     prompt:
-      'Turn a dataset I will share (a spreadsheet, CSV, or pasted table) into a narrative analysis: key trends, anomalies, the "so what", and concrete recommendations.',
+      'Create a Jira ticket from a Zendesk conversation. Summarize the customer problem, expected vs actual behavior, reproduction details, affected account or plan if available, and acceptance criteria.',
   },
   {
-    id: 'workflow',
-    label: 'Automate a workflow',
-    description: 'Trigger an agent when a new email arrives',
-    icon: Lightning,
+    id: 'customer-impact',
+    label: 'Summarize customer impact',
+    description: 'Distill incidents, tickets, or notes into impact and next steps',
+    icon: Headset,
     prompt:
-      'Create an agent workflow that runs automatically when a new email arrives: read the message, decide what to do, and take action or draft a reply. Ask me which inbox to watch and what it should handle.',
-  },
-  {
-    id: 'app',
-    label: 'Build a quick tool',
-    description: 'A small interactive app, calculator, or dashboard',
-    icon: AppWindow,
-    prompt:
-      'Build a small interactive tool I can use right here — a calculator, dashboard, or explorer. Ask me what it should do, then create it.',
+      'Summarize customer impact from the material I provide. Pull out affected customers, severity, timeline, current status, open risks, and the clearest next actions.',
   },
 ]
 
@@ -99,35 +89,18 @@ function SuggestionRow({
   )
 }
 
-// How many of the suggestions above to show at once. The list is longer than the page should be:
-// four rows is inspiration, seven is a menu to read. Which three appear is chosen per visit, so the
-// ones below the fold still get seen -- and so Home doesn't look like it only does one thing.
-const VISIBLE_SUGGESTIONS = 3
-
-function pickSuggestions(): TaskSuggestion[] {
-  let shuffled = [...SUGGESTIONS]
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    let j = Math.floor(Math.random() * (i + 1))
-    ;[shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]]
-  }
-  return shuffled.slice(0, VISIBLE_SUGGESTIONS)
-}
-
 export default function HomeTaskSuggestions({
   onPick,
 }: {
   onPick: (prompt: string) => void
 }) {
-  // Chosen once per mount: re-rolling on every render would shuffle the list under the pointer.
-  const visible = useMemo(pickSuggestions, [])
-
   return (
     <section aria-label="Example tasks" className="flex flex-col gap-1">
       <h3 className="px-1 pb-1 text-[12px] font-medium uppercase tracking-[0.06em] text-kumo-inactive">
         Get started
       </h3>
-      <ul className="flex flex-col gap-0.5">
-        {visible.map((suggestion) => (
+      <ul className="grid gap-0.5 sm:grid-cols-2 sm:gap-x-2">
+        {SUGGESTIONS.map((suggestion) => (
           <SuggestionRow
             key={suggestion.id}
             icon={<suggestion.icon size={16} />}
