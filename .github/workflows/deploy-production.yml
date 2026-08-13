@@ -1,0 +1,183 @@
+name: Deploy production
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22.14.0"
+  DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+jobs:
+  build:
+    name: Build deployment artifact
+    if: >-
+      github.repository == 'totango/odie-os' &&
+      ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+       (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out tested commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Build Access-mode deployment artifact
+        run: node scripts/build-production-deploy.mjs --out production-deploy
+
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: production-deploy/
+          if-no-files-found: error
+          retention-days: 7
+
+  current:
+    name: Verify current main
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify commit is still current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          main_sha="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            | jq --raw-output '.object.sha')"
+          test "$main_sha" = "$DEPLOY_SHA"
+
+      - name: Verify manual dispatch passed CI
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${DEPLOY_SHA}&event=push&status=completed&per_page=20" \
+            | jq --raw-output '[.workflow_runs[] | select(.head_branch == "main")][0].conclusion // ""')"
+          test "$conclusion" = "success"
+
+  deploy:
+    name: Deploy production
+    needs: [build, current]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: production-cloudflare-deploy
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://odie-os.odie-os.workers.dev/
+    steps:
+      - name: Download deployment artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+          path: production-deploy
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Wrangler
+        run: npm install --global wrangler@4.119.0
+
+      - name: Verify deployment credentials
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_API_TOKEN"
+
+      - name: Verify required Worker secrets
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          require_secrets() {
+            worker="$1"
+            shift
+            present="$(wrangler secret list --name "$worker" --format json | jq -r '.[].name')"
+            for secret in "$@"; do
+              printf '%s\n' "$present" | grep --fixed-strings --line-regexp --quiet "$secret"
+            done
+          }
+          require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
+          require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN
+          require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET
+          require_secrets odie-os-gk-team-pi CLIENT_ID CLIENT_SECRET
+          require_secrets odie-os-backend CF_AI_GATEWAY_API_TOKEN TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET TEAM_PI_CODEX_MODELS
+
+      - name: Deploy prebuilt workers
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          WRANGLER_OUTPUT_FILE_DIRECTORY: ${{ github.workspace }}/deploy-receipts
+        working-directory: production-deploy
+        run: |
+          main_sha="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/git/ref/heads/main" \
+            | jq --raw-output '.object.sha')"
+          test "$main_sha" = "$DEPLOY_SHA"
+          message="GitHub Actions $DEPLOY_SHA"
+          wrangler deploy --no-bundle --config gatekeeper-context/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-github/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-jarvis/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-scheduler/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-team-pi/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-sessions/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config workshop-backend/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config router/wrangler.json --message "$message"
+
+      - name: Verify Cloudflare Access boundary
+        run: |
+          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://odie-os.odie-os.workers.dev/)"
+          test "$status" = "302"
+
+      - name: Store deployment receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: production-deploy-${{ github.run_number }}-${{ github.run_attempt }}
+          path: deploy-receipts/
+          if-no-files-found: warn
+          retention-days: 30

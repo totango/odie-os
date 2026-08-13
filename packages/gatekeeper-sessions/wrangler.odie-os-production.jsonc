@@ -1,0 +1,49 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "odie-os-gk-sessions",
+  "main": ".wrangler/validate/src/worker.ts",
+  "build": {
+    "command": "pnpm exec capnweb-validate build --out .wrangler/validate",
+    "watch_dir": "src"
+  },
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": ["nodejs_compat", "allow_irrevocable_stub_storage", "global_fetch_strictly_public"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "BASE_URL": "https://odie-os.odie-os.workers.dev/gatekeeper/sessions",
+    "SESSION_ALLOWED_ORIGIN": "https://odie-os.odie-os.workers.dev"
+  },
+  "containers": [
+    {
+      "class_name": "CodingSessionSandbox",
+      "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+      "instance_type": "standard-1",
+      "max_instances": 20
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_SANDBOX", "class_name": "CodingSessionSandbox" },
+      { "name": "SESSION_POLICIES", "class_name": "CodingSessionPolicy" }
+    ]
+  },
+  "services": [
+    {
+      "binding": "WORKSHOP_TOOLS",
+      "service": "odie-os-backend",
+      "entrypoint": "CodingSessionToolHostImpl"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CodingSessionSandbox", "CodingSessionRegistry", "CodingSessionPolicy"]
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false }
+  }
+}
