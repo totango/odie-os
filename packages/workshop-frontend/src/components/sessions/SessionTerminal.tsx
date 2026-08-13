@@ -6,7 +6,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useTheme } from '../../ThemeContext'
 import { WorkshopButton } from '../WorkshopControls'
 import type { CodingSessionTerminalKind } from '@gadgets/workshop-shared/api'
-import { enqueueTerminalWriteFrame, OrderedTerminalOperationQueue } from './orderedTerminalOperations'
+import { OrderedTerminalOperationQueue, TerminalWriteBatcher } from './orderedTerminalOperations'
 
 type PendingChunk = { byteLength: number }
 
@@ -92,6 +92,12 @@ export default function SessionTerminal({
         done()
       })
     }
+    const outputBatcher = new TerminalWriteBatcher(
+      terminalOperations,
+      writeOutput,
+      (flush) => window.requestAnimationFrame(flush),
+      (handle) => window.cancelAnimationFrame(handle),
+    )
 
     authenticatedApi.mintCodingSessionAttachCapability(sessionId, terminalKind).then((capability) => {
       if (cancelled) return
@@ -113,7 +119,7 @@ export default function SessionTerminal({
             socket?.close()
             return
           }
-          enqueueTerminalWriteFrame(terminalOperations, bytes, writeOutput)
+          outputBatcher.push(bytes)
           if (!visibleOutputDetected) {
             setState('connected')
           }
@@ -146,6 +152,7 @@ export default function SessionTerminal({
             }
             pendingChunk = { byteLength: message.byteLength }
           } else if (message.type === 'truncated') {
+            outputBatcher.flush()
             terminalOperations.enqueue((done) => {
               if (!cancelled) terminal.clear()
               done()
@@ -174,6 +181,7 @@ export default function SessionTerminal({
 
     return () => {
       cancelled = true
+      outputBatcher.cancel()
       terminalOperations.cancel()
       resizeObserver.disconnect()
       if (resizeFrame !== undefined) window.cancelAnimationFrame(resizeFrame)
