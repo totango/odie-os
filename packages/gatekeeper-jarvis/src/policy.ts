@@ -8,10 +8,42 @@ import {
 } from "./policy-types.js";
 export type { JarvisToolPolicy, JarvisToolPolicyInput } from "./policy-types.js";
 
-/** Returns the default policy, preserving the historical full allowlist on both surfaces. */
+const HISTORICAL_V1_TOOLS = [
+  "query_knowledge",
+  "repo_knowledge",
+  "resolve_repo_group",
+  "lookup_incident",
+  "jarvis_answer_support_question",
+  "jarvis_investigate_customer_issue",
+  "jarvis_check_integration_health",
+  "jarvis_get_investigation_status",
+  "jarvis_get_support_answer_status",
+  "jarvis_list_prod_tools",
+  "jarvis_describe_prod_tool",
+  "jarvis_call_prod_tool",
+] as const;
+
+/** Returns the default policy with live repository lookup removed from the chat surface. */
 export function defaultJarvisToolPolicy(): JarvisToolPolicy {
   const tools = [...JARVIS_ALLOWED_TOOLS];
-  return { revision: 1, chat: { tools }, code: { tools: [...tools] }, syncCode: true };
+  return {
+    revision: 3,
+    chat: { tools: tools.filter(tool => tool !== "repo_knowledge") },
+    code: { tools },
+    syncCode: false,
+  };
+}
+
+/** Upgrades only the original untouched default, preserving every administrator-authored policy. */
+export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): JarvisToolPolicy {
+  const historicalTools = [...HISTORICAL_V1_TOOLS];
+  const untouchedV1 = policy.revision === 1 && policy.syncCode === true &&
+    sameTools(policy.chat.tools, historicalTools) && sameTools(policy.code.tools, historicalTools);
+  const untouchedV2 = policy.revision === 2 && policy.syncCode === false &&
+    sameTools(policy.chat.tools, historicalTools.filter(tool => tool !== "repo_knowledge")) &&
+    sameTools(policy.code.tools, historicalTools);
+  const untouched = untouchedV1 || untouchedV2;
+  return untouched ? defaultJarvisToolPolicy() : policy;
 }
 
 /** Normalizes policy input to the fixed JARVIS allowlist and deterministic allowlist order. */
@@ -45,13 +77,17 @@ function normalizeTools(tools: string[]): JarvisAllowedTool[] {
   return JARVIS_ALLOWED_TOOLS.filter(name => selected.has(name));
 }
 
+function sameTools(actual: readonly string[] | undefined, expected: readonly string[]): boolean {
+  return actual?.length === expected.length && actual.every((tool, index) => tool === expected[index]);
+}
+
 /** Deployment-global Durable Object storing the current JARVIS policy. */
 export class JarvisPolicy extends DurableObject<Env> {
-  /** Reads the current policy, initializing the historical default when absent. */
+  /** Reads the policy, initializing or upgrading only the untouched deployment default. */
   get(): JarvisToolPolicy {
     const stored = this.ctx.storage.kv.get<JarvisToolPolicy>("policy");
-    if (stored) return stored;
-    const policy = defaultJarvisToolPolicy();
+    const policy = stored ? upgradeDefaultJarvisToolPolicy(stored) : defaultJarvisToolPolicy();
+    if (stored === policy) return policy;
     this.ctx.storage.kv.put("policy", policy);
     return policy;
   }

@@ -1566,7 +1566,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (record.description.singleton) {
         cls = await this.getSingletonGatekeeperClass(record.id);
       } else if (record.vendorId === "mcp" && record.description.uniqueName) {
-        cls = (await record.account.getGatekeeperClassFor(record.description.uniqueName)).class;
+        cls = (await this.getGatekeeperClassFor(record.id, record.description.uniqueName)).class;
       }
       if (!cls) continue;
       const id = `${record.vendorId}-${record.id}`;
@@ -1761,6 +1761,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
+      if (config.disabledGatekeepers.includes(rec.vendorId)) continue;
       // Auto-provisioned provider declarations may evolve after an account was persisted (for
       // example a singleton adding revisioned authority). Refresh them at this cold boundary without
       // adding remote calls for ordinary connected accounts.
@@ -1793,6 +1794,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // Present only when description.singleton is set; gate on that, then call through the derived
     // SingletonAccountStub view (see its definition for why the cast is needed).
     if (!record?.description.singleton) return null;
+    if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(record.vendorId)) return null;
     let account = record.account as unknown as SingletonAccountStub;
     if (record.description.singleton.revisionedAuthority) {
       let authority = await account.getSingletonGatekeeperAuthority();
@@ -1813,6 +1815,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    let config = await readAdminConfig(this.env);
+    let vendorId = record.vendorId.toLowerCase();
+    if (config.disabledGatekeepers.includes(vendorId) ||
+        resourceUrlPatterns.some(pattern => isResourceDisabled(config, vendorId, pattern))) {
+      throw new Error("This connection is disabled on this deployment by an administrator.");
+    }
     return record.account.ensureResources(resourceUrlPatterns);
   }
 
@@ -1983,6 +1991,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async reconnectAccount(accountId: number): Promise<{url: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(
+        record.vendorId.toLowerCase())) {
+      throw new Error("This connection is disabled on this deployment by an administrator.");
+    }
     return record.account.reconnect();
   }
 
@@ -1991,6 +2003,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    let config = await readAdminConfig(this.env);
+    let vendorId = record.vendorId.toLowerCase();
+    if (config.disabledGatekeepers.includes(vendorId) ||
+        isResourceDisabled(config, vendorId, resourceUrlPattern)) {
+      throw new Error("This connection is disabled on this deployment by an administrator.");
+    }
     return record.account.startResourceConfigurator(resourceUrlPattern);
   }
 

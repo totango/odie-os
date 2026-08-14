@@ -739,6 +739,48 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/notion"
       }
     },
+    "gatekeeper-odie-kg": {
+      "bindings": [],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "global_fetch_strictly_public"
+      ],
+      "inputs": [],
+      "installable": false,
+      "kind": "gatekeeper",
+      "mainModule": "odie-kg.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "OdieKgAccount",
+            "OdieKgGatekeeper"
+          ],
+          "tag": "v1"
+        }
+      ],
+      "modules": [
+        {
+          "name": "odie-kg.js",
+          "r2Key": "blobs/modules/5e40f3949c94d8b7541a76a8c07c51c2c2fc042463e50f052d03bd919647b77b",
+          "sha256": "5e40f3949c94d8b7541a76a8c07c51c2c2fc042463e50f052d03bd919647b77b",
+          "size": 60,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "odie-kg",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/odie-kg",
+        "MCP_ALLOW_INSECURE": "false"
+      }
+    },
     "gatekeeper-scheduler": {
       "bindings": [],
       "compatibilityDate": "2026-02-02",
@@ -879,6 +921,12 @@
             "CodingSessionPolicy"
           ],
           "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": [
+            "GitHubOrganizationGatekeeper"
+          ],
+          "tag": "v2"
         }
       ],
       "modules": [

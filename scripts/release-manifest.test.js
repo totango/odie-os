@@ -163,6 +163,13 @@ test("worker entries carry the deploy contract", () => {
   assert.deepEqual(jarvis.inputs.map((i) => i.name), ["JARVIS_MCP_URL", "JARVIS_MCP_TOKEN"]);
   assert.equal(jarvis.vars.JARVIS_TRUST_ANNOTATIONS, "true");
 
+  // Totango KG ships for the hosted Odie instance only; generic customer releases cannot install
+  // a connector whose OAuth resource is tied to Totango's Agentic/Zords tenant boundary.
+  const odieKg = workers["gatekeeper-odie-kg"];
+  assert.equal(odieKg.installable, false);
+  assert.deepEqual(odieKg.inputs, []);
+  assert.equal(odieKg.vars.ODIE_KG_MCP_URL, undefined);
+
   // Team PI uses a public Auth0 device client and per-user authorization, not a client secret.
   const teamPi = workers["gatekeeper-team-pi"];
   assert.deepEqual(teamPi.inputs.map((i) => i.name), [

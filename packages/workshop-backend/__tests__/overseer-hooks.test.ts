@@ -55,6 +55,17 @@ describe("OverseerDurableObject.startHook", () => {
     await expect(overseer.startHook(1)).rejects.toThrow("Gatekeeper is disabled.");
   });
 
+  it("rejects delivery for an administratively disabled resource type", async () => {
+    let config = {
+      ...DEFAULT_ADMIN_CONFIG,
+      disabledResources: {email: ["https://*"]},
+    };
+    let overseer = makeOverseer(
+        async () => serializeAdminConfig(config), {enabled: true, vendorId: "email"}, "email");
+
+    await expect(overseer.startHook(1)).rejects.toThrow("Gatekeeper is disabled.");
+  });
+
   it("rejects delivery for an administratively disabled ambient vendor", async () => {
     let config = {
       ...DEFAULT_ADMIN_CONFIG,
@@ -96,7 +107,10 @@ describe("OverseerDurableObject.startHook", () => {
   });
 });
 
-async function makeTargetOverseer(gadgetId?: number) {
+async function makeTargetOverseer(
+    gadgetId?: number,
+    config = DEFAULT_ADMIN_CONFIG,
+    gatekeeperVendorId?: string) {
   let controllerEnable = vi.fn(async (_initiator: object, _target: object) => {});
   let record = {
     id: 4,
@@ -111,6 +125,7 @@ async function makeTargetOverseer(gadgetId?: number) {
   let overseer = {
     open: OverseerDurableObject.prototype.open,
     impl: {
+      env: {BLUEPRINTS: {get: async () => serializeAdminConfig(config)}},
       ownerId: "user-id",
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
@@ -130,6 +145,16 @@ async function makeTargetOverseer(gadgetId?: number) {
         prohibitAllSharing: {get: () => false},
         boundHooks: {get: () => record, put: vi.fn()},
         actions: {get: () => undefined, put: vi.fn()},
+        gatekeepers: {
+          get: () => gatekeeperVendorId && ({
+            creationSpec: {
+              type: "gatekeeper",
+              vendorId: gatekeeperVendorId,
+              resourceUrl: "https://example.com",
+              typeUrlPattern: "https://*",
+            },
+          }),
+        },
       },
     },
   } satisfies Pick<OverseerDurableObject, "open"> & {impl: object};
@@ -155,6 +180,16 @@ describe("hook target", () => {
     await client.enableHook(4);
 
     expect(controllerEnable.mock.calls[0][1]).toEqual({workspaceId: "workspace-id"});
+  });
+
+  it("does not enable a hook for an administratively disabled resource type", async () => {
+    let {client, controllerEnable} = await makeTargetOverseer(
+        17,
+        {...DEFAULT_ADMIN_CONFIG, disabledResources: {email: ["https://*"]}},
+        "email");
+
+    await expect(client.enableHook(4)).rejects.toThrow("Gatekeeper is disabled.");
+    expect(controllerEnable).not.toHaveBeenCalled();
   });
 
 });

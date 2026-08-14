@@ -166,6 +166,11 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     return null;
   }
 
+  /** Optional least-privilege OAuth scope for a deployment-owned MCP resource. */
+  protected oauthScope(_server: ConnectedServer): string | undefined {
+    return undefined;
+  }
+
   // Relaxes host and scheme checks for local development against an MCP server on localhost.
   protected fetchOptions(): FetchOptions {
     return fetchOptions(this.env);
@@ -501,6 +506,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
         result = await auth(this.oauthProvider(server, generation, url => { redirectUrl = url; }), {
           serverUrl: server.endpoint,
           resourceMetadataUrl: resourceMetadataUrl ? new URL(resourceMetadataUrl) : undefined,
+          scope: this.oauthScope(server),
           fetchFn: sdkFetch(this.fetchOptions()),
         });
       } catch (err) {

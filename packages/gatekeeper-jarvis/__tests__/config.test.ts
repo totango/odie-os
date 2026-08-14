@@ -14,6 +14,7 @@ import deployInputs from "../deploy-inputs.json";
 import {
   defaultJarvisToolPolicy,
   normalizeJarvisToolPolicy,
+  upgradeDefaultJarvisToolPolicy,
 } from "../src/policy.js";
 
 function env(overrides: Record<string, string> = {}): Env {
@@ -48,6 +49,11 @@ describe("JARVIS allowlist", () => {
       "repo_knowledge",
       "resolve_repo_group",
       "lookup_incident",
+      "repo_graph_search",
+      "repo_graph_get_node",
+      "repo_graph_neighbors",
+      "repo_graph_traverse",
+      "repo_graph_status",
       "jarvis_answer_support_question",
       "jarvis_investigate_customer_issue",
       "jarvis_check_integration_health",
@@ -63,14 +69,43 @@ describe("JARVIS allowlist", () => {
 });
 
 describe("JARVIS tool policy", () => {
-  it("defaults both surfaces to the full current allowlist", () => {
+  it("defaults chat away from repo knowledge while retaining the explicit code scope", () => {
     const policy = defaultJarvisToolPolicy();
     expect(policy).toEqual({
-      revision: 1,
-      chat: { tools: [...JARVIS_ALLOWED_TOOLS] },
+      revision: 3,
+      chat: { tools: JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge") },
       code: { tools: [...JARVIS_ALLOWED_TOOLS] },
-      syncCode: true,
+      syncCode: false,
     });
+  });
+
+  it("upgrades only the original untouched default", () => {
+    const historicalTools = [
+      "query_knowledge", "repo_knowledge", "resolve_repo_group", "lookup_incident",
+      "jarvis_answer_support_question", "jarvis_investigate_customer_issue",
+      "jarvis_check_integration_health", "jarvis_get_investigation_status",
+      "jarvis_get_support_answer_status", "jarvis_list_prod_tools",
+      "jarvis_describe_prod_tool", "jarvis_call_prod_tool",
+    ];
+    const historical = {
+      revision: 1,
+      chat: { tools: historicalTools },
+      code: { tools: [...historicalTools] },
+      syncCode: true,
+    };
+    expect(upgradeDefaultJarvisToolPolicy(historical).chat.tools).not.toContain("repo_knowledge");
+    expect(upgradeDefaultJarvisToolPolicy(historical).chat.tools).toContain("repo_graph_search");
+
+    const priorDefault = {
+      revision: 2,
+      chat: { tools: historicalTools.filter(tool => tool !== "repo_knowledge") },
+      code: { tools: [...historicalTools] },
+      syncCode: false,
+    };
+    expect(upgradeDefaultJarvisToolPolicy(priorDefault).revision).toBe(3);
+
+    const customized = { ...historical, revision: 2 };
+    expect(upgradeDefaultJarvisToolPolicy(customized)).toBe(customized);
   });
 
   it("normalizes order and mirrors chat when synchronized", () => {

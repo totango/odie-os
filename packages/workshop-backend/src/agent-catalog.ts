@@ -90,9 +90,12 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
   return `The following resources are always available as bindings in your env for use with the ` +
     `executeCode tool (you don't need to request them):\n${lines.join("\n")}\n` +
     `When one is relevant, use describeBinding with the binding's name to learn its API before ` +
-    `using it. For account or customer questions, prefer an available internal knowledge or ` +
-    `account-data resource, then other relevant internal resources, before using public web ` +
-    `sources; say when an answer had to fall back to the public web. If a Gadget's persistent ` +
+    `using it. For customer, account, CSM, product-usage, or internal business questions, prefer ` +
+    `the Totango Knowledge Graph resource when available, then other relevant internal resources, ` +
+    `before using public web sources; say when an answer had to fall back to the public web. For ` +
+    `engineering questions about the configured ODI repositories, prefer JARVIS repo_graph tools ` +
+    `for indexed topology and relationships, then use the Totango GitHub source resource to verify ` +
+    `current implementation details or when the graph is missing or stale. If a Gadget's persistent ` +
     `code needs one, wire it into that gadget with ` +
     `setGadgetBinding.`;
 }

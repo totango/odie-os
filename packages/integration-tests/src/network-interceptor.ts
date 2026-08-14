@@ -16,7 +16,8 @@
  * comes into existence once the Worker has started making it.
  */
 export type Handler =
-    (url: URL, method: string, headers: Headers) => Response | null | Promise<Response | null>;
+    (url: URL, method: string, headers: Headers, request: Request) =>
+      Response | null | Promise<Response | null>;
 
 export class NetworkInterceptor {
   readonly #handlers: readonly Handler[];
@@ -50,11 +51,12 @@ export class NetworkInterceptor {
       // this point `input` is never forwarded anywhere, so disturbing it costs nothing. The
       // toUpperCase() stays: Request normalises only the methods the fetch spec lists, so `patch`
       // would otherwise reach handlers lowercased.
-      const { method: rawMethod, headers } = new Request(input, init);
+      const request = new Request(input, init);
+      const { method: rawMethod, headers } = request;
       const method = rawMethod.toUpperCase();
 
       for (const handler of this.#handlers) {
-        const response = await handler(url, method, headers);
+        const response = await handler(url, method, headers, request.clone());
         if (response) return response;
       }
 

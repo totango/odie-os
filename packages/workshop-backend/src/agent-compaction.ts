@@ -1,4 +1,10 @@
-import {SUGGESTED_MODELS, WORKERS_AI_OUTPUT_LIMIT, type AiChatMessage, type AiModelConfig}
+import {
+  SUGGESTED_MODELS,
+  WORKERS_AI_OUTPUT_LIMIT,
+  type AiChatMessage,
+  type AiModelConfig,
+  type WorkpieceId,
+}
   from "@gadgets/workshop-shared/api";
 import type {Api, Message, Model} from "@earendil-works/pi-ai";
 import * as Y from "yjs";
@@ -271,10 +277,12 @@ export function protectRetainedReverts(
 export function buildCompactionState(
     messages: AiChatMessage[], compactedTo: number,
     initialBindings: [string, ChatBindingEntry][],
-    previous: CompactionCheckpoint | undefined)
+    previous: CompactionCheckpoint | undefined,
+    blockedWorkpieceIds: ReadonlySet<WorkpieceId> = new Set())
     : Omit<CompactionCheckpoint, "chatId" | "compactedTo" | "summary"> {
   let compacted = messages.filter(message => message.sequence < compactedTo);
-  let chatBindings = new Map(previous?.chatBindings ?? initialBindings);
+  let chatBindings = new Map((previous?.chatBindings ?? initialBindings).filter(([, entry]) =>
+    entry.type !== "workpiece" || !blockedWorkpieceIds.has(entry.id)));
   let callbackNameCounter = 0;
   let nextChangeId = previous?.nextChangeId ?? 0;
   let observedCodeVersion = previous?.observedCodeVersion;
@@ -282,7 +290,8 @@ export function buildCompactionState(
   for (let message of compacted) {
     if (message.type === "message") {
       for (let capsule of message.capsules ?? []) {
-        if (capsule.bindingName !== undefined && !chatBindings.has(capsule.bindingName)) {
+        if (!blockedWorkpieceIds.has(capsule.gatekeeperId) &&
+            capsule.bindingName !== undefined && !chatBindings.has(capsule.bindingName)) {
           chatBindings.set(capsule.bindingName, {type: "workpiece", id: capsule.gatekeeperId});
         }
       }
@@ -301,7 +310,8 @@ export function buildCompactionState(
       chatBindings.set(name, {type: "value", messageSequence: message.sequence});
     } else if (message.type === "connectionRequest" && message.state === "accepted" &&
                message.gatekeeperId !== undefined && message.bindingName !== undefined) {
-      if (!chatBindings.has(message.bindingName)) {
+      if (!blockedWorkpieceIds.has(message.gatekeeperId) &&
+          !chatBindings.has(message.bindingName)) {
         chatBindings.set(message.bindingName, {type: "workpiece", id: message.gatekeeperId});
       }
     } else if (message.type === "changes") {
