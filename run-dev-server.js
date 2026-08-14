@@ -200,6 +200,7 @@ const SHARED_GATEKEEPER_CREDS = {
 const PASSTHROUGH_GATEKEEPER_VARS = {
   "gatekeeper-sessions": [
     "GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID", "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_APP_PRIVATE_KEY_B64",
     "TEAM_PI_CODEX_BASE_URL", "TEAM_PI_CODEX_HMAC_SECRET", "SESSION_ALLOWED_ORIGIN",
   ],
   "gatekeeper-mcp-portal": [
@@ -290,6 +291,13 @@ for (const gk of gatekeepers) {
       binding.props = { sharingDomain: "dev" };
     }
     config.services.push(binding);
+    if (gk.name === "gatekeeper-sessions") {
+      config.services.push({
+        binding: "GATEKEEPER_GITHUB_ORG",
+        service: gk.name,
+        entrypoint: "GitHubOrganizationVendor",
+      });
+    }
   }
 
   if (useWorkersAi) {

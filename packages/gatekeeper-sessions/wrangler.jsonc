@@ -8,6 +8,7 @@
   },
   "compatibility_date": "2026-02-02",
   "compatibility_flags": ["nodejs_compat", "allow_irrevocable_stub_storage", "global_fetch_strictly_public"],
+  "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
   "containers": [
     {
       "class_name": "CodingSessionSandbox",
@@ -33,6 +34,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["CodingSessionSandbox", "CodingSessionRegistry", "CodingSessionPolicy"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["GitHubOrganizationGatekeeper"]
     }
   ],
   "observability": {

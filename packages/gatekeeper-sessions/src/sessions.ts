@@ -20,6 +20,11 @@ import {
   type CodingSessionsService,
 } from "@gadgets/workshop-shared/coding-sessions";
 import type { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import {
+  mintGitHubCodingSessionToken,
+  type GitHubAppEnv,
+  type GitHubInstallationToken,
+} from "./github-app.js";
 import { WORKSHOP_MCP_HOST, validateWorkshopMcpRequestTarget } from "./mcp-policy.js";
 import { validateRepositories } from "./policy.js";
 
@@ -29,7 +34,6 @@ const ATTACH_TTL_MS = 60_000;
 const MAX_SESSIONS_PER_USER = 5;
 const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
-const GITHUB_API_ORIGIN = "https://api.github.com";
 const OPENCODE_CONFIG_DIR = "/workspace/.odie-opencode";
 
 type SessionsLogFields = {
@@ -42,15 +46,12 @@ type SessionsLogFields = {
 
 const logger = createLogger<SessionsLogFields>({ component: "gatekeeper.sessions" });
 
-interface Env {
+interface Env extends GitHubAppEnv {
   SESSION_SANDBOX: DurableObjectNamespace<CodingSessionSandbox>;
   SESSION_POLICIES: DurableObjectNamespace<CodingSessionPolicy>;
   WORKSHOP_TOOLS: Service<CodingSessionToolHost>;
   BASE_URL?: string;
   SESSION_ALLOWED_ORIGIN?: string;
-  GITHUB_APP_ID?: string;
-  GITHUB_APP_INSTALLATION_ID?: string;
-  GITHUB_APP_PRIVATE_KEY?: string;
   TEAM_PI_CODEX_BASE_URL?: string;
   TEAM_PI_CODEX_HMAC_SECRET?: string;
 }
@@ -335,34 +336,10 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   }
 
   async #installationToken(repositories: CodingSessionRepository[]): Promise<string> {
-    const cached = this.ctx.storage.kv.get<{ token: string; expiresAt: number }>("githubToken");
+    const cached = this.ctx.storage.kv.get<GitHubInstallationToken>("githubToken");
     if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
-
-    const appId = required(this.env.GITHUB_APP_ID, "GITHUB_APP_ID");
-    const installationId = required(this.env.GITHUB_APP_INSTALLATION_ID, "GITHUB_APP_INSTALLATION_ID");
-    const jwt = await githubAppJwt(appId, required(this.env.GITHUB_APP_PRIVATE_KEY,
-      "GITHUB_APP_PRIVATE_KEY"));
-    const response = await fetch(`${GITHUB_API_ORIGIN}/app/installations/${installationId}/access_tokens`, {
-      method: "POST",
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${jwt}`,
-        "content-type": "application/json",
-        "user-agent": "odie-os-coding-sessions",
-        "x-github-api-version": "2022-11-28",
-      },
-      body: JSON.stringify({
-        repositories,
-        permissions: { contents: "write", metadata: "read" },
-      }),
-    });
-    if (!response.ok) throw new Error(`GitHub installation token failed (${response.status}).`);
-    const result = await response.json() as { token?: string; expires_at?: string };
-    if (!result.token || !result.expires_at) throw new Error("GitHub returned an invalid installation token.");
-    this.ctx.storage.kv.put("githubToken", {
-      token: result.token,
-      expiresAt: new Date(result.expires_at).valueOf(),
-    });
+    const result = await mintGitHubCodingSessionToken(this.env, repositories);
+    this.ctx.storage.kv.put("githubToken", result);
     return result.token;
   }
 }
@@ -839,73 +816,10 @@ async function hmacBase64Url(secret: string, value: string): Promise<string> {
   return bytesToBase64Url(new Uint8Array(signature));
 }
 
-async function githubAppJwt(appId: string, privateKeyPem: string): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  const header = base64UrlJson({ alg: "RS256", typ: "JWT" });
-  const payload = base64UrlJson({ iat: now - 60, exp: now + 9 * 60, iss: appId });
-  const input = `${header}.${payload}`;
-  const key = await crypto.subtle.importKey("pkcs8", pemBytes(privateKeyPem),
-    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
-  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(input));
-  return `${input}.${bytesToBase64Url(new Uint8Array(signature))}`;
-}
-
-function base64UrlJson(value: unknown): string {
-  return bytesToBase64Url(new TextEncoder().encode(JSON.stringify(value)));
-}
-
-function pemBytes(value: string): ArrayBuffer {
-  const pkcs1 = value.includes("-----BEGIN RSA PRIVATE KEY-----");
-  const base64 = value.replace(/-----BEGIN (?:RSA )?PRIVATE KEY-----|-----END (?:RSA )?PRIVATE KEY-----|\s/g, "");
-  const bytes = base64ToBytes(base64);
-  const result = pkcs1 ? wrapPkcs1AsPkcs8(bytes) : bytes;
-  return result.buffer.slice(result.byteOffset, result.byteOffset + result.byteLength) as ArrayBuffer;
-}
-
-function wrapPkcs1AsPkcs8(pkcs1: Uint8Array): Uint8Array {
-  const version = Uint8Array.of(0x02, 0x01, 0x00);
-  const rsaAlgorithm = Uint8Array.of(
-    0x30, 0x0d,
-    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
-    0x05, 0x00,
-  );
-  return derSequence(version, rsaAlgorithm, derValue(0x04, pkcs1));
-}
-
-function derSequence(...values: Uint8Array[]): Uint8Array {
-  return derValue(0x30, concatBytes(...values));
-}
-
-function derValue(tag: number, value: Uint8Array): Uint8Array {
-  return concatBytes(Uint8Array.of(tag), derLength(value.length), value);
-}
-
-function derLength(length: number): Uint8Array {
-  if (length < 0x80) return Uint8Array.of(length);
-  const bytes: number[] = [];
-  for (let remaining = length; remaining > 0; remaining >>>= 8) bytes.unshift(remaining & 0xff);
-  return Uint8Array.of(0x80 | bytes.length, ...bytes);
-}
-
-function concatBytes(...values: Uint8Array[]): Uint8Array {
-  const result = new Uint8Array(values.reduce((total, value) => total + value.length, 0));
-  let offset = 0;
-  for (const value of values) {
-    result.set(value, offset);
-    offset += value.length;
-  }
-  return result;
-}
-
 function bytesToBase64Url(value: Uint8Array): string {
   let binary = "";
   for (const byte of value) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function base64ToBytes(value: string): Uint8Array<ArrayBuffer> {
-  const binary = atob(value);
-  return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
 function bytesToHex(value: Uint8Array): string {
