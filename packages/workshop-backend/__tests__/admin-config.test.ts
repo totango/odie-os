@@ -10,10 +10,19 @@ describe("parseAdminConfig", () => {
 
     expect(config.signupsEnabled).toBe(false);
     expect(config.siteName).toBe("acme");
+    expect(config.enabledHubs).toEqual(["ops", "revenue", "support"]);
     expect(config.formats).toEqual([]);
     for (let key of Object.keys(DEFAULT_ADMIN_CONFIG)) {
       expect(config[key as keyof typeof config], key).toBeDefined();
     }
+  });
+
+  it("keeps only valid unique hubs and rejects an empty stored selection", () => {
+    expect(parseAdminConfig(JSON.stringify({
+      enabledHubs: ["support", "unknown", "support", "ops"],
+    })).enabledHubs).toEqual(["ops", "support"]);
+    expect(parseAdminConfig('{"enabledHubs":[]}').enabledHubs)
+        .toEqual(["ops", "revenue", "support"]);
   });
 
   it("drops malformed format entries rather than the whole list", () => {

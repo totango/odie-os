@@ -24,6 +24,7 @@ const BASE_CONFIG: ServerConfig = {
   banner: '',
   bannerColor: 'neutral',
   accentColor: '',
+  enabledHubs: ['ops', 'revenue', 'support'],
 }
 
 describe('ServerConfigContext updater', () => {

@@ -7,6 +7,9 @@ import { useConnectionLost } from '../../RpcContext'
 import Sidebar from './Sidebar'
 import CommandPalette from './CommandPalette'
 import { OPEN_COMMAND_PALETTE_EVENT } from './commandPaletteBus'
+import HubSwitcher from './HubSwitcher'
+import { HubProvider } from '../../HubContext'
+import { useEnabledHubs } from '../../ServerConfigContext'
 
 const STORAGE_KEY_COLLAPSED = 'gadgets:sidebar-collapsed'
 
@@ -31,6 +34,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const connectionLost = useConnectionLost()
+  const enabledHubs = useEnabledHubs()
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -78,6 +82,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
+    <HubProvider enabledHubs={enabledHubs}>
     <div className="flex h-screen min-h-screen w-screen overflow-hidden bg-kumo-base">
       {/* Desktop sidebar — hidden on mobile in favor of the drawer. */}
       <div className="hidden md:flex">
@@ -112,6 +117,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           >
             {mobileOpen ? <X size={16} /> : <List size={16} />}
           </button>
+          <HubSwitcher />
           <TopBarNotice />
           {/* `ml-auto` rather than the container's `justify-between`: on desktop the hamburger is
               hidden, leaving this the only in-flow child, which `justify-between` would park on the
@@ -128,5 +134,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
+    </HubProvider>
   )
 }
