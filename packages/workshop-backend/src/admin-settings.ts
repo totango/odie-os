@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, DeploymentHubId, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isDeploymentHubId, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -6,7 +6,7 @@ import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
-import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, normalizeEnabledHubs, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
@@ -286,7 +286,8 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // is missing that field entirely, so reads must backfill from the defaults or the first
   // deployment to upgrade hits `undefined` on it.
   #config(): AdminConfig {
-    return { ...DEFAULT_ADMIN_CONFIG, ...this.storage.adminConfig.get() };
+    let config = { ...DEFAULT_ADMIN_CONFIG, ...this.storage.adminConfig.get() };
+    return { ...config, enabledHubs: normalizeEnabledHubs(config.enabledHubs) };
   }
 
   getAdminConfig(): AdminConfig {
@@ -336,6 +337,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       announcement: config.announcement,
       banner: config.banner,
       accentColor: config.accentColor,
+      enabledHubs: config.enabledHubs,
       resourceVendors: await this.#listResourceConfig(config, adminUserId),
       formats: await this.#listFormatConfig(config),
     };
@@ -449,6 +451,15 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       if (enabled) disabled.delete(urlPattern); else disabled.add(urlPattern);
       if (disabled.size === 0) delete map[vendorId]; else map[vendorId] = [...disabled];
       return { ...config, disabledResources: map };
+    });
+  }
+
+  async setHubEnabled(hubId: DeploymentHubId, enabled: boolean): Promise<void> {
+    await this.#mutateAdminConfig(config => {
+      let hubs = new Set(normalizeEnabledHubs(config.enabledHubs));
+      if (enabled) hubs.add(hubId); else hubs.delete(hubId);
+      if (hubs.size === 0) throw new Error("At least one hub must stay enabled.");
+      return { ...config, enabledHubs: normalizeEnabledHubs([...hubs]) };
     });
   }
 
@@ -645,6 +656,13 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
       throw new Error(`Invalid accent color: ${color}`);
     }
     await this.admin.updateAdminConfig({ accentColor: color });
+  }
+
+  setHubEnabled(hubId: DeploymentHubId, enabled: boolean): Promise<void> {
+    if (!isDeploymentHubId(hubId)) {
+      throw new Error(`Invalid hub id: ${hubId}`);
+    }
+    return this.admin.setHubEnabled(hubId, enabled);
   }
 
   isBlueprintFeatured(blueprintId: string): Promise<boolean | null> {

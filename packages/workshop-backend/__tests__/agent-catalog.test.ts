@@ -80,6 +80,8 @@ describe("normalizeAgentCatalog", () => {
     // A resource with no catalog gets just its env line, nothing inlined.
     expect(message).toContain("- Empty: `env.EMPTY`");
     expect(message).not.toContain("- Empty: `env.EMPTY`\n{");
+    expect(message).toContain("For account or customer questions, prefer an available internal knowledge");
+    expect(message).toContain("say when an answer had to fall back to the public web");
   });
 });
 
@@ -143,5 +145,4 @@ describe("completeAgentCatalogSnapshot", () => {
     });
   });
 });
-
 

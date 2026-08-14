@@ -8,7 +8,7 @@
 // changed by a compromised admin session. Everything here is enabled by default; the admin UI opts
 // things *out*.
 
-import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isOutputIcon } from "@gadgets/workshop-shared/api";
+import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, DEPLOYMENT_HUB_IDS, DeploymentHubId, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isDeploymentHubId, isOutputIcon } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { ADMIN_CONFIG_KEY, BlueprintKvEnv, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive.js";
 
@@ -30,6 +30,8 @@ export type AdminConfig = {
   banner: BannerConfig;
   // Accent (brand) color hex, or "" for the default theme.
   accentColor: string;
+  // Hubs offered to all users. Selection is a client preference, not an authorization boundary.
+  enabledHubs: DeploymentHubId[];
   // Disabled gatekeeper resources: vendorId -> disabled resource urlPatterns.
   disabledResources: Record<string, string[]>;
   // Fully-disabled gatekeeper vendor ids.
@@ -73,6 +75,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   announcement: "",
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
+  enabledHubs: [...DEPLOYMENT_HUB_IDS],
   disabledResources: {},
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
@@ -247,6 +250,13 @@ function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
+/** Returns a unique, valid, non-empty enabled-hub list for stored deployment configuration. */
+export function normalizeEnabledHubs(value: unknown): DeploymentHubId[] {
+  if (!Array.isArray(value)) return [...DEPLOYMENT_HUB_IDS];
+  let hubs = new Set(value.filter(isDeploymentHubId));
+  return hubs.size > 0 ? DEPLOYMENT_HUB_IDS.filter(hub => hubs.has(hub)) : [...DEPLOYMENT_HUB_IDS];
+}
+
 export function parseAdminConfig(raw: string | null): AdminConfig {
   if (!raw) return { ...DEFAULT_ADMIN_CONFIG };
   try {
@@ -275,6 +285,7 @@ export function parseAdminConfig(raw: string | null): AdminConfig {
         color: isBannerColor(p.banner?.color) ? p.banner!.color : DEFAULT_BANNER_COLOR,
       },
       accentColor: typeof p.accentColor === "string" ? p.accentColor : "",
+      enabledHubs: normalizeEnabledHubs(p.enabledHubs),
       disabledResources,
       disabledGatekeepers: strings(p.disabledGatekeepers).map(v => v.toLowerCase()),
       ambientGatekeeperModes,

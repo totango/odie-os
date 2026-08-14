@@ -22,6 +22,7 @@ import {
 import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
 import { composerDraftStorageKey } from "../composerDraft";
+import { HUB_DETAILS, useHub } from "../HubContext";
 
 type HomeSearch = { prompt?: string };
 
@@ -40,7 +41,9 @@ function HomePage() {
 }
 
 export function HomePageContent({ prompt }: HomeSearch) {
-  useDocumentTitle("Home");
+  const { hub } = useHub();
+  const hubDetails = HUB_DETAILS[hub];
+  useDocumentTitle(hubDetails.label);
 
   const { authenticatedApi, currentUser } = useAuthenticatedApi();
   const navigate = useNavigate();
@@ -173,10 +176,10 @@ export function HomePageContent({ prompt }: HomeSearch) {
         {/* Hero */}
         <header className="text-center">
           <h1 className="text-3xl font-semibold tracking-tight leading-tight text-kumo-default sm:text-4xl">
-            What do you need to know or do?
+            {hubDetails.heading}
           </h1>
           <p className="mx-auto mt-3 max-w-md text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-            Ask about your codebase, investigate an issue, or turn customer context into actionable work.
+            {hubDetails.description}
           </p>
         </header>
 
@@ -202,6 +205,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
 
         {/* A few example work tasks to spark ideas. Picking one seeds the composer above. */}
         <HomeTaskSuggestions
+          hub={hub}
           onPick={(suggestion) =>
             setSeed((prev) => ({ text: suggestion, nonce: (prev?.nonce ?? 0) + 1 }))
           }

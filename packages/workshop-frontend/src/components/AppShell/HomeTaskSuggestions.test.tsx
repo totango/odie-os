@@ -18,11 +18,11 @@ describe('HomeTaskSuggestions', () => {
     vi.clearAllMocks()
   })
 
-  async function render(onPick = vi.fn<(prompt: string) => void>()) {
+  async function render(onPick = vi.fn<(prompt: string) => void>(), hub: 'ops' | 'revenue' | 'support' = 'ops') {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
-    await act(async () => root!.render(<HomeTaskSuggestions onPick={onPick} />))
+    await act(async () => root!.render(<HomeTaskSuggestions hub={hub} onPick={onPick} />))
     return { container, onPick }
   }
 
@@ -47,5 +47,12 @@ describe('HomeTaskSuggestions', () => {
 
     expect(onPick).toHaveBeenCalledOnce()
     expect(onPick.mock.calls[0]?.[0]).toContain('Investigate a bug in the codebase')
+  })
+
+  it('offers internal account research in the revenue hub', async () => {
+    const { container: rendered } = await render(undefined, 'revenue')
+
+    expect(rendered.textContent).toContain('Build an account brief')
+    expect(rendered.textContent).toContain('Prepare for a customer call')
   })
 })

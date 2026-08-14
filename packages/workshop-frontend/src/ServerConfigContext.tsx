@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import { ServerConfig, AuthVendorInfo, resolveSiteName } from '@gadgets/workshop-shared/api'
+import { ServerConfig, AuthVendorInfo, DEPLOYMENT_HUB_IDS, type DeploymentHubId, resolveSiteName } from '@gadgets/workshop-shared/api'
 
 export type ServerConfigUpdate = Partial<ServerConfig>
 
@@ -38,4 +38,9 @@ export function useAuthVendors(): AuthVendorInfo[] {
 // Convenience: whether the Cloudflare limits / top-up flow is enabled.
 export function useCloudflareLimitsEnabled(): boolean {
   return useContext(ServerConfigContext)?.cloudflareLimitsEnabled ?? false
+}
+
+// Convenience: the globally curated hubs, with launch defaults while config is loading.
+export function useEnabledHubs(): DeploymentHubId[] {
+  return useContext(ServerConfigContext)?.enabledHubs ?? [...DEPLOYMENT_HUB_IDS]
 }

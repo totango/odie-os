@@ -844,6 +844,20 @@ export const MAX_SITE_LOGO_BYTES = 256 * 1024;
 /** Maximum width or height of an admin-uploaded site logo in pixels. */
 export const MAX_SITE_LOGO_DIMENSION = 512;
 
+/** Deployment hubs that an administrator can offer and a user can select. */
+export const DEPLOYMENT_HUB_IDS = ["ops", "revenue", "support"] as const;
+
+/** Identifier for a configurable deployment hub. */
+export type DeploymentHubId = typeof DEPLOYMENT_HUB_IDS[number];
+
+/** Hub selected when a user has no available stored preference. */
+export const DEFAULT_DEPLOYMENT_HUB_ID: DeploymentHubId = "ops";
+
+/** Returns whether a value is a configurable deployment hub identifier. */
+export function isDeploymentHubId(value: unknown): value is DeploymentHubId {
+  return typeof value === "string" && DEPLOYMENT_HUB_IDS.includes(value as DeploymentHubId);
+}
+
 // All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI.
 export type AdminSettingsView = {
   // Whether new account signups are allowed.
@@ -860,6 +874,8 @@ export type AdminSettingsView = {
   banner: BannerConfig;
   // Accent color hex, or "" for the default theme.
   accentColor: string;
+  /** Hubs offered to every user. Finance is a static coming-soon surface and is not configurable. */
+  enabledHubs: DeploymentHubId[];
   // Every bound gatekeeper and its resource types, with enabled state (not hidden when disabled).
   resourceVendors: AdminResourceVendor[];
   // The blueprints promoted as standard output formats, in menu order (including disabled ones).
@@ -948,6 +964,9 @@ export interface AdminApi {
   // Set the deployment accent color (hex, e.g. "#3b82f6"). Pass "" to reset to the default theme.
   // Rejects an invalid hex color.
   setAccentColor(color: string): Promise<void>;
+
+  /** Enable or disable a hub for every user. At least one configurable hub must remain enabled. */
+  setHubEnabled(hubId: DeploymentHubId, enabled: boolean): Promise<void>;
 
   // Returns whether the blueprint is featured on the deployment. Returns null when the blueprint
   // can't be featured (e.g. it isn't a listable blueprint).
@@ -1041,6 +1060,9 @@ export type ServerConfig = {
   // Deployment accent (brand) color as a hex string, or "" to use the default theme. The client
   // overrides the brand CSS variables with this (and derived shades) at runtime.
   accentColor: string;
+
+  /** Hubs offered to every user. Users choose among these locally; Ops is the initial preference. */
+  enabledHubs: DeploymentHubId[];
 };
 
 // Usage + Cloudflare-connection status for the optional limits flow. Returned by

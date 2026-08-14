@@ -1,15 +1,16 @@
 import { useState, useEffect, useRef, type ChangeEvent } from 'react'
 import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
-import { Hexagon, ShieldWarning, UserPlus } from '@phosphor-icons/react'
+import { Hexagon, ShieldWarning, SquaresFour, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, DEPLOYMENT_HUB_IDS, type DeploymentHubId, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import { useServerConfigUpdater } from './ServerConfigContext'
+import { HUB_DETAILS } from './HubContext'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -87,6 +88,10 @@ export default function AdminPage() {
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
 
+  // Deployment-wide navigation curation. This is not an authorization boundary.
+  const [enabledHubs, setEnabledHubs] = useState<DeploymentHubId[]>([])
+  const [hubBusy, setHubBusy] = useState<DeploymentHubId | null>(null)
+
   const resourceKey = (vendorId: string, urlPattern: string) => `${vendorId}\u0000${urlPattern}`
 
   // Populate all editor state from a freshly-fetched settings view.
@@ -108,6 +113,8 @@ export default function AdminPage() {
     setSavedAccent(view.accentColor)
     setAccentDraft(view.accentColor)
     setFormats(view.formats)
+    setEnabledHubs(view.enabledHubs)
+    updateServerConfig({ enabledHubs: view.enabledHubs })
   }
 
   // Mint the admin capability once (the access check happens server-side) and load settings.
@@ -230,6 +237,23 @@ export default function AdminPage() {
         next.delete(key)
         return next
       })
+    }
+  }
+
+  const handleHubToggle = async (hubId: DeploymentHubId, enabled: boolean) => {
+    if (!admin) return
+    setHubBusy(hubId)
+    try {
+      await admin.api.setHubEnabled(hubId, enabled)
+      const next = DEPLOYMENT_HUB_IDS.filter((id) =>
+        id === hubId ? enabled : enabledHubs.includes(id))
+      setEnabledHubs(next)
+      updateServerConfig({ enabledHubs: next })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to update hub'
+      toasts.add({ title: message, variant: 'error' })
+    } finally {
+      setHubBusy(null)
     }
   }
 
@@ -409,11 +433,61 @@ export default function AdminPage() {
         onValueChange={setActiveTab}
         tabs={[
           { value: 'general', label: 'General' },
+          { value: 'hubs', label: 'Hubs' },
           { value: 'gatekeepers', label: 'Gatekeepers' },
           { value: 'formats', label: 'Formats' },
           { value: 'access', label: 'Access' },
         ]}
       />
+
+      {activeTab === 'hubs' && (
+        <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">
+          <div className="flex items-start gap-4">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-kumo-tint">
+              <SquaresFour size={18} className="text-kumo-subtle" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-kumo-strong">Workspace hubs</h2>
+              <p className="mt-0.5 text-sm text-kumo-subtle">
+                Choose which curated work surfaces all users can switch between. Hubs organize the
+                experience; they do not grant or revoke access to underlying data.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 divide-y divide-kumo-line rounded-xl border border-kumo-line">
+            {DEPLOYMENT_HUB_IDS.map((hubId) => {
+              const enabled = enabledHubs.includes(hubId)
+              const lastEnabled = enabled && enabledHubs.length === 1
+              return (
+                <div key={hubId} className="flex items-center gap-4 px-4 py-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium text-kumo-default">{HUB_DETAILS[hubId].label}</p>
+                    <p className="mt-0.5 text-xs text-kumo-subtle">{HUB_DETAILS[hubId].description}</p>
+                  </div>
+                  <Switch
+                    aria-label={`${enabled ? 'Disable' : 'Enable'} ${HUB_DETAILS[hubId].label} hub`}
+                    checked={enabled}
+                    disabled={hubBusy !== null || lastEnabled}
+                    onCheckedChange={(next) => handleHubToggle(hubId, next)}
+                  />
+                </div>
+              )
+            })}
+            <div className="flex items-center gap-4 px-4 py-3 opacity-60">
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-kumo-default">Finance</p>
+                <p className="mt-0.5 text-xs text-kumo-subtle">
+                  Coming soon after server-enforced Finance entitlements are available.
+                </p>
+              </div>
+              <span className="rounded-full border border-kumo-line bg-kumo-tint px-2 py-1 text-[11px] font-medium text-kumo-subtle">
+                Coming soon
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Standard output formats */}
       {activeTab === 'formats' && admin && (
