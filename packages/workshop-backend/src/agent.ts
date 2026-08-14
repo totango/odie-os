@@ -85,6 +85,14 @@ export type SeedBindingInfo = {
   catalog?: AgentCatalog | null;
 };
 
+// Turn-start bindings plus gatekeeper targets blocked by current deployment policy. The blocked set
+// is applied while replaying historical resource messages so stale accepted/pasted resources cannot
+// re-enter the env after an administrator disables their vendor.
+export type PreparedChatBindings = {
+  bindings: SeedBindingInfo[];
+  blockedGatekeeperIds: WorkpieceId[];
+};
+
 // One entry of the chat's binding map: what a name in the agent's executeCode `env` resolves to.
 // Either a workpiece (a gadget or gatekeeper -- the overseer distinguishes at env-build time) or
 // the value arguments of an agent callback.
@@ -273,7 +281,7 @@ export interface AgentHooks {
   // in-memory copy of the chat log, which is both scanned and stamped in place -- storage reads
   // return fresh deserialized objects, so stamping a separately-listed copy would leave the
   // caller's replay blind to the new names until the next turn.
-  prepareChatBindings(chatId: number, chatMessages: AiChatMessage[]): Promise<SeedBindingInfo[]>;
+  prepareChatBindings(chatId: number, chatMessages: AiChatMessage[]): Promise<PreparedChatBindings>;
 
   executeCodeMode(chatId: number, code: string,
                    initiator: AiChatAuthorInfo, initiatorModelId: string,
@@ -1384,7 +1392,14 @@ export async function runAgent(
   // chokepoint that stamps binding names onto persisted messages that lack them, which the replay
   // below relies on). The seed is frozen per chat, so the prompt content derived from it stays in
   // the cacheable prefix; chat-local bindings accumulate on top during replay.
-  let seedBindings = await hooks.prepareChatBindings(chatId, chatMessages);
+  let preparedBindings = await hooks.prepareChatBindings(chatId, chatMessages);
+  let seedBindings = preparedBindings.bindings;
+  let blockedGatekeeperIds = new Set(preparedBindings.blockedGatekeeperIds);
+  for (let [name, entry] of chatBindings) {
+    if (entry.type === "workpiece" && blockedGatekeeperIds.has(entry.id)) {
+      chatBindings.delete(name);
+    }
+  }
   for (let seed of seedBindings) {
     if (!chatBindings.has(seed.name)) {
       chatBindings.set(seed.name, {type: "workpiece", id: seed.target});
@@ -1433,13 +1448,14 @@ export async function runAgent(
           let pos = 0;
           for (let capsule of srcCaps) {
             let name = capsule.bindingName;
-            if (name !== undefined && !chatBindings.has(name)) {
+            let blocked = blockedGatekeeperIds.has(capsule.gatekeeperId);
+            if (!blocked && name !== undefined && !chatBindings.has(name)) {
               chatBindings.set(name, {type: "workpiece", id: capsule.gatekeeperId});
             }
             parts.push(content.slice(pos, capsule.position));
             // A missing name should be impossible (the chokepoint stamps before replay), but
             // never let it break the whole turn: degrade to a plain title.
-            parts.push(name !== undefined
+            parts.push(!blocked && name !== undefined
                 ? `[${capsule.description.title}](env.${name})`
                 : `[${capsule.description.title}]`);
             pos = capsule.position + capsule.length;
@@ -1918,7 +1934,8 @@ export async function runAgent(
             claimedNames.add(msg.bindingName);
           }
         } else if (msg.state === "accepted") {
-          if (msg.gatekeeperId !== undefined && msg.bindingName !== undefined) {
+          if (msg.gatekeeperId !== undefined && msg.bindingName !== undefined &&
+              !blockedGatekeeperIds.has(msg.gatekeeperId)) {
             // The accepted resource enters the chat's env under the name recorded on the request
             // (chosen by the agent, or stamped lazily for requests made before agents named their
             // own).
@@ -2291,7 +2308,8 @@ export async function runAgent(
                 seed.name,
                 {type: "workpiece", id: seed.target},
               ]),
-              checkpoint),
+              checkpoint,
+              blockedGatekeeperIds),
         };
       } catch (error) {
         // Compaction triggers below the limit, so the turn's own prompt still fits and a failed

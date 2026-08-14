@@ -80,8 +80,11 @@ describe("normalizeAgentCatalog", () => {
     // A resource with no catalog gets just its env line, nothing inlined.
     expect(message).toContain("- Empty: `env.EMPTY`");
     expect(message).not.toContain("- Empty: `env.EMPTY`\n{");
-    expect(message).toContain("For account or customer questions, prefer an available internal knowledge");
+    expect(message).toContain("For customer, account, CSM, product-usage, or internal business questions");
+    expect(message).toContain("prefer the Totango Knowledge Graph resource when available");
     expect(message).toContain("say when an answer had to fall back to the public web");
+    expect(message).toContain("engineering questions");
+    expect(message).toContain("prefer JARVIS repo_graph tools");
   });
 });
 
@@ -145,4 +148,3 @@ describe("completeAgentCatalogSnapshot", () => {
     });
   });
 });
-

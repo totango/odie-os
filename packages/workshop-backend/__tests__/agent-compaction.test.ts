@@ -395,6 +395,19 @@ describe("compaction checkpoint state", () => {
     expect(next.nextChangeId).toBe(2);
   });
 
+  it("does not carry a deployment-disabled gatekeeper binding into a new checkpoint", () => {
+    let previous = {
+      chatId: 1, compactedTo: 1, summary: "earlier",
+      ...buildState([], 0),
+      chatBindings: [["TOTANGO_KG", {type: "workpiece" as const, id: 9}]] as
+        [string, ChatBindingEntry][],
+    };
+    let next = buildCompactionState([], 1, initialBindings, previous, new Set([9]));
+    expect(next.chatBindings).not.toContainEqual([
+      "TOTANGO_KG", {type: "workpiece", id: 9},
+    ]);
+  });
+
   // A merge in the new span must accept the carried-forward prefix too, not just this span's own
   // batches, since the prefix sits below every sequence here.
   it("accepts a carried-forward prefix when a later merge covers it", () => {

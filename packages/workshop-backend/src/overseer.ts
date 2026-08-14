@@ -20,8 +20,8 @@ import {
   getAiGatewayLogCost,
   type AiGatewayLogRoute,
 } from "./ai-gateway";
-import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type AiChatMessageBodyWithModelData, type CompactionCheckpoint, type StoredAssistantMessage } from "./agent";
-import { deploymentOutputForBlueprint, FormatOffer, listFormatOffers, readAdminConfig } from "./admin-config";
+import { AgentGadgetInfo, AgentHooks, AiChatAgentContext, ChatBindingEntry, SeedBindingInfo, runAgent, makeStorableArgs, summarizeArgs, type AiChatMessageBodyWithModelData, type CompactionCheckpoint, type PreparedChatBindings, type StoredAssistantMessage } from "./agent";
+import { deploymentOutputForBlueprint, FormatOffer, isResourceDisabled, listFormatOffers, readAdminConfig, type AdminConfig } from "./admin-config";
 import { foldProposedChanges, isCompactionTurn, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
@@ -200,6 +200,16 @@ type GatekeeperRecord = {
 function gatekeeperVendorId(record: GatekeeperRecord | undefined): string | undefined {
   let spec = record?.creationSpec;
   return spec && "vendorId" in spec ? spec.vendorId.toLowerCase() : undefined;
+}
+
+function isGatekeeperDisabled(
+    config: AdminConfig, record: GatekeeperRecord | undefined,
+    vendorId = gatekeeperVendorId(record)): boolean {
+  if (!vendorId) return false;
+  if (config.disabledGatekeepers.includes(vendorId) ||
+      ambientGatekeeperMode(config, vendorId) === "disabled") return true;
+  return record?.creationSpec?.type === "gatekeeper" &&
+      isResourceDisabled(config, vendorId, record.creationSpec.typeUrlPattern);
 }
 
 // A binding edge from one gadget to a target workpiece (today always a gatekeeper), stored in
@@ -2495,6 +2505,10 @@ class OverseerImpl implements AgentHooks {
   // was applied automatically. For an auto-approval, `resolvedBy` is the user who enabled the rule.
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
+    if (isGatekeeperDisabled(
+        await readAdminConfig(this.env), this.storage.gatekeepers.get(record.gatekeeperId))) {
+      throw new Error("Gatekeeper is disabled.");
+    }
     let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
     await gatekeeper.applyAction(record.action);
     record.state = "approved";
@@ -2594,7 +2608,7 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Open the session behind a binding loopback.
-  startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+  async startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
     switch (target.type) {
       case "gadget": {
         if (caller.from === "agent") {
@@ -2605,6 +2619,11 @@ class OverseerImpl implements AgentHooks {
       }
 
       case "gatekeeper": {
+        let record = this.storage.gatekeepers.get(target.id);
+        let config = await readAdminConfig(this.env);
+        if (isGatekeeperDisabled(config, record)) {
+          throw new Error("Gatekeeper is disabled.");
+        }
         let client = new GatekeeperClientImpl<any>(
             this, target.id, this.getGatekeeperFacet(target.id), caller);
         return client.openSession();
@@ -3329,6 +3348,9 @@ class OverseerImpl implements AgentHooks {
       let {gatekeeperId} = message.id;
       let record = this.storage.gatekeepers.get(gatekeeperId);
       if (!record?.hasSlashCommands) throw new Error("Slash command provider is not available.");
+      if (isGatekeeperDisabled(await readAdminConfig(this.env), record)) {
+        throw new Error("Slash command provider is disabled.");
+      }
       // Display-only, and from the browser, so a bad value is dropped rather than refused.
       message = {...message, commandPosition: sanitizeCommandPosition(message)};
       using authorizer = new NativeRpcStub<ObservationAuthorizer>(
@@ -4567,7 +4589,7 @@ class OverseerImpl implements AgentHooks {
   //     so history replay always sees named resources. Stamped = permanent; a crash before
   //     stamping just means naming reruns next turn.
   async prepareChatBindings(chatId: number, chatMessages: AiChatMessage[])
-      : Promise<SeedBindingInfo[]> {
+      : Promise<PreparedChatBindings> {
     let context = this.getChatAgentContext(chatId);
     let dirty = false;
 
@@ -4590,7 +4612,15 @@ class OverseerImpl implements AgentHooks {
           .toSorted((a, b) => a - b);
       dirty = true;
     }
-    let ambientIds = context.alwaysAvailableCapsuleIds;
+    // The membership/order remains frozen for chat determinism, but deployment disablement is live
+    // policy. Reconcile it every turn so an already-seeded customer-data capability becomes inert
+    // immediately, without deleting its account or forgetting that this chat may restore it later.
+    let ambientConfig = await readAdminConfig(this.env);
+    let blockedGatekeeperIds = new Set([...this.storage.gatekeepers.list()]
+      .filter(record => isGatekeeperDisabled(ambientConfig, record))
+      .map(record => record.id));
+    let ambientIds = context.alwaysAvailableCapsuleIds
+      .filter(id => !blockedGatekeeperIds.has(id));
 
     if (context.bindings === undefined) {
       let seed: Record<string, WorkpieceId> = Object.create(null);
@@ -4618,28 +4648,39 @@ class OverseerImpl implements AgentHooks {
         Object.assign(seed, this.defaultBindingList());
       }
 
-      // Fold the ambient resources into the seed, each named by its gatekeeper's suggested
-      // binding name (deduped); skip any whose target already has a name in the seed.
-      let seededTargets = new Set(Object.values(seed));
-      for (let id of ambientIds) {
-        if (seededTargets.has(id)) continue;
-        let gk = this.storage.gatekeepers.get(id);
-        if (!gk) continue;  // disconnected since the freeze -- inert, no name needed
-        let suggested: string | undefined;
-        try {
-          suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
-        } catch (err) {
-          this.logger.warn("failed to fetch suggested binding name for ambient resource", {
-            event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
-          });
-        }
-        seed[fallbackBindingName(suggested || "RESOURCE", name => name in seed)] = id;
-      }
-
       context.bindings = seed;
       dirty = true;
     }
     let seedMap = context.bindings;
+
+    // Reconcile frozen ambient targets into the persistent seed on every turn. This removes a
+    // newly-disabled singleton before env materialization and restores the same frozen singleton
+    // after re-enable, while never adding capabilities acquired after the chat started.
+    let frozenAmbientIds = new Set(context.alwaysAvailableCapsuleIds);
+    let activeAmbientIds = new Set(ambientIds);
+    for (let [name, target] of Object.entries(seedMap)) {
+      if (frozenAmbientIds.has(target) && !activeAmbientIds.has(target)) {
+        delete seedMap[name];
+        dirty = true;
+      }
+    }
+    let seededTargets = new Set(Object.values(seedMap));
+    for (let id of ambientIds) {
+      if (seededTargets.has(id)) continue;
+      let gk = this.storage.gatekeepers.get(id);
+      if (!gk) continue;
+      let suggested: string | undefined;
+      try {
+        suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
+      } catch (err) {
+        this.logger.warn("failed to fetch suggested binding name for ambient resource", {
+          event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
+        });
+      }
+      seedMap[fallbackBindingName(suggested || "RESOURCE", name => name in seedMap)] = id;
+      seededTargets.add(id);
+      dirty = true;
+    }
 
     // --- The naming chokepoint: stamp binding names onto persisted messages that lack them. ---
     // First collect every name already in the chat's scope (and a target -> name map for reuse)
@@ -4839,17 +4880,19 @@ class OverseerImpl implements AgentHooks {
       }
       let gk = this.storage.gatekeepers.get(target);
       if (!gk) continue;
+      if (blockedGatekeeperIds.has(target)) continue;
       let info: SeedBindingInfo =
           {name, target, title: gk.resourceTitle || "(untitled resource)", isGadget: false};
       if (ambientSet.has(target)) info.catalog = catalogs.get(target) ?? null;
       result.push(info);
     }
-    return result;
+    return {bindings: result, blockedGatekeeperIds: [...blockedGatekeeperIds]};
   }
 
   async listSlashCommands(): Promise<SlashCommandChoice[]> {
+    let config = await readAdminConfig(this.env);
     let sources = [...this.storage.gatekeepers.list()]
-      .filter(record => record.hasSlashCommands)
+      .filter(record => record.hasSlashCommands && !isGatekeeperDisabled(config, record))
       .map(record => ({
         gatekeeperId: record.id,
         providerLabel: record.resourceTitle || `Gatekeeper ${record.id}`,
@@ -4859,7 +4902,7 @@ class OverseerImpl implements AgentHooks {
       selection: {builtin: true, commandId: "compact"},
       name: "compact",
       description: "Summarize older context while preserving recent messages.",
-      providerLabel: resolveSiteName((await readAdminConfig(this.env)).siteName),
+        providerLabel: resolveSiteName(config.siteName),
     }, ...await collectSlashCommands(sources)];
   }
 
@@ -5969,8 +6012,11 @@ class OverseerImpl implements AgentHooks {
     return result;
   }
 
-  listObserverRequirements(role: CollaboratorRole): ObserverBindingNeed[] {
-    return this.#inScopeGatekeepers(role).map(observerBindingNeed);
+  async listObserverRequirements(role: CollaboratorRole): Promise<ObserverBindingNeed[]> {
+    let config = await readAdminConfig(this.env);
+    return this.#inScopeGatekeepers(role)
+      .filter(record => !isGatekeeperDisabled(config, record))
+      .map(observerBindingNeed);
   }
 
   // Best-effort `removeObserver(observerId)` across the given gatekeeper ids. Never throws; logs
@@ -6049,7 +6095,9 @@ class OverseerImpl implements AgentHooks {
     // 1. Select in-scope gatekeepers. If none require an account, there is nothing to verify and
     //    no observer record is needed (built-in gatekeepers never name observers in
     //    excludeObservers).
-    let inScope = this.#inScopeGatekeepers(role);
+    let config = await readAdminConfig(this.env);
+    let inScope = this.#inScopeGatekeepers(role)
+      .filter(record => !isGatekeeperDisabled(config, record));
     if (inScope.length === 0) return;
 
     // 2. Load any existing observer record, and build a working copy of its account choices.
@@ -6712,8 +6760,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     if (!vendorId) throw new Error("Hook vendor is unavailable.");
 
     let config = await readAdminConfig(this.env);
-    if (config.disabledGatekeepers.includes(vendorId) ||
-        ambientGatekeeperMode(config, vendorId) === "disabled") {
+    if (isGatekeeperDisabled(
+        config, this.impl.storage.gatekeepers.get(record.gatekeeperId), vendorId)) {
       throw new Error("Gatekeeper is disabled.");
     }
 
@@ -7669,6 +7717,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async enableHook(id: number): Promise<void> {
     let record = this.impl.storage.boundHooks.get(id);
     if (!record) throw new Error("Invalid hook ID.");
+    let gatekeeperRecord = this.impl.storage.gatekeepers?.get(record.gatekeeperId);
+    if (gatekeeperVendorId(gatekeeperRecord) && isGatekeeperDisabled(
+        await readAdminConfig(this.impl.env), gatekeeperRecord)) {
+      throw new Error("Gatekeeper is disabled.");
+    }
 
     if (!record.enabled) {
       let props: GatekeeperHookLoopbackProps = {
