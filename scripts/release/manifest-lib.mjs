@@ -50,7 +50,11 @@ const NO_DEFAULT_CRED_INPUTS = new Set([
 
 // Not installable on customer instances: Email Routing needs a zone, which workers.dev-hosted
 // instances don't have. The bundle still ships in the release so the entry stays auditable.
-const NOT_INSTALLABLE = new Set(["gatekeeper-email"]);
+const NOT_INSTALLABLE = new Set([
+  "gatekeeper-email",
+  // Totango's tenant-bound Agentic/Zords MCP is specific to the hosted Odie instance.
+  "gatekeeper-odie-kg",
+]);
 const INTERNAL_SERVICES = new Set(["gatekeeper-sessions"]);
 
 // Ambient gatekeepers the deploy service installs on every fresh core deploy, server-side with

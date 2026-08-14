@@ -9,6 +9,7 @@
     { "binding": "GATEKEEPER_CONTEXT", "service": "odie-os-gk-context" },
     { "binding": "GATEKEEPER_GITHUB", "service": "odie-os-gk-github" },
     { "binding": "GATEKEEPER_JARVIS", "service": "odie-os-gk-jarvis" },
+    { "binding": "GATEKEEPER_ODIE_KG", "service": "odie-os-gk-odie-kg" },
     { "binding": "GATEKEEPER_SCHEDULER", "service": "odie-os-gk-scheduler" },
     { "binding": "GATEKEEPER_SESSIONS", "service": "odie-os-gk-sessions" },
     { "binding": "GATEKEEPER_TEAM_PI", "service": "odie-os-gk-team-pi" }

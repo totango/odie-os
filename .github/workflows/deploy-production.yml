@@ -164,6 +164,7 @@ jobs:
           wrangler deploy --no-bundle --config gatekeeper-context/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-github/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-jarvis/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-odie-kg/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-scheduler/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-team-pi/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-sessions/wrangler.json --message "$message"
