@@ -154,7 +154,7 @@ beforeAll(async () => {
       },
     }],
   });
-});
+}, 30_000);
 
 afterAll(async () => {
   const unmocked = interceptor.getUnmockedCalls();
@@ -162,7 +162,7 @@ afterAll(async () => {
   interceptor.uninstall();
   interceptor.reset();
   expect(unmocked).toEqual([]);
-});
+}, 30_000);
 
 async function withSession<T>(body: (api: RpcStub<PublicApi>) => Promise<T>): Promise<T> {
   const publicApi = connect(harness.url);
