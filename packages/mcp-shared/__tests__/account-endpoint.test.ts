@@ -116,6 +116,12 @@ class OAuthFlowAccount extends McpAccountBase<AccountEnv> {
   }
 }
 
+class ScopedOAuthFlowAccount extends OAuthFlowAccount {
+  protected override oauthScope(): string {
+    return "openid profile email mcp:odie:kg:read";
+  }
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 const server = (endpoint: string): ConnectedServer => ({
@@ -449,6 +455,49 @@ describe("connect initiation nonce", () => {
       .toBe("access-token");
     expect(complete).toHaveBeenCalledOnce();
     expect(await resumed.acceptAuthCode("authorization-code", oauthNonce)).toBe(false);
+  });
+
+  it("lets a deployment-owned connector request a least-privilege OAuth scope", async () => {
+    const context = fakeContext();
+    vi.stubGlobal("fetch", async (input: string) => {
+      const url = String(input);
+      if (url.includes("oauth-protected-resource")) {
+        return Response.json({
+          resource: "https://mcp.example/mcp",
+          authorization_servers: ["https://auth.example"],
+          scopes_supported: [
+            "openid", "profile", "email", "mcp:odie:kg:read", "mcp:odie:exports:write",
+          ],
+        });
+      }
+      if (url.includes("oauth-authorization-server")) {
+        return Response.json({
+          issuer: "https://auth.example",
+          authorization_endpoint: "https://auth.example/authorize",
+          token_endpoint: "https://auth.example/token",
+          registration_endpoint: "https://auth.example/register",
+          response_types_supported: ["code"],
+        });
+      }
+      if (url === "https://auth.example/register") {
+        return Response.json({
+          client_id: "client-id",
+          redirect_uris: ["https://gatekeeper.example/oauth"],
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"],
+          token_endpoint_auth_method: "none",
+        });
+      }
+      return new Response("", { status: 404 });
+    });
+    const account = new ScopedOAuthFlowAccount(context as never, {});
+    const nonce = "d".repeat(64);
+    await account.prepareReconnect(nonce);
+    const outcome = await account.beginConnect(nonce, server("https://mcp.example/mcp"));
+    expect(outcome.kind).toBe("redirect");
+    const authorizationUrl = new URL((outcome as { url: string }).url);
+    expect(authorizationUrl.searchParams.get("scope"))
+      .toBe("openid profile email mcp:odie:kg:read");
   });
 });
 
