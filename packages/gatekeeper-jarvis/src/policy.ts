@@ -51,7 +51,7 @@ export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): Jarvis
   return untouched ? defaultJarvisToolPolicy() : policy;
 }
 
-/** Normalizes policy input to the fixed JARVIS allowlist and deterministic allowlist order. */
+/** Normalizes policy input to the fixed allowlist, reserving arbitrary production calls for code. */
 export function normalizeJarvisToolPolicy(
   input: JarvisToolPolicyInput,
   revision: number,
@@ -59,7 +59,7 @@ export function normalizeJarvisToolPolicy(
   if (!input || !Array.isArray(input.chatTools) || typeof input.syncCode !== "boolean") {
     throw new TypeError("Invalid JARVIS tool policy.");
   }
-  const chat = normalizeTools(input.chatTools);
+  const chat = normalizeTools(input.chatTools).filter(tool => tool !== "jarvis_call_prod_tool");
   const code = input.syncCode ? [...chat] : normalizeTools(input.codeTools ?? []);
   return {
     revision,

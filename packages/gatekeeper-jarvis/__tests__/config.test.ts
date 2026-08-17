@@ -152,6 +152,19 @@ describe("JARVIS tool policy", () => {
     });
   });
 
+  it("keeps arbitrary production calls out of chat scope", () => {
+    expect(normalizeJarvisToolPolicy({
+      chatTools: ["query_knowledge", "jarvis_call_prod_tool"],
+      syncCode: false,
+      codeTools: ["query_knowledge", "jarvis_call_prod_tool"],
+    }, 8)).toEqual({
+      revision: 8,
+      chat: { tools: ["query_knowledge"] },
+      code: { tools: ["query_knowledge", "jarvis_call_prod_tool"] },
+      syncCode: false,
+    });
+  });
+
   it("keeps separate code scope and rejects names outside the fixed allowlist", () => {
     expect(normalizeJarvisToolPolicy({
       chatTools: ["query_knowledge"], syncCode: false, codeTools: ["lookup_incident"],
