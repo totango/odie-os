@@ -5567,8 +5567,15 @@ class OverseerImpl implements AgentHooks {
       let trace = await Promise.race([tracePromise, timeout])
 
       if (!trace) {
-        // Trace must have been lost... give up waiting.
-        throw new Error("Timed out waiting for logs from code execution.");
+        // Tail delivery is best-effort and can arrive late even after the worker completed. The
+        // run() RPC is the execution result, so missing logs must not turn successful work into a
+        // failed tool call.
+        this.logger.warn("timed out waiting for code execution logs", {
+          event: "code.mode.trace.timeout", chatId, executionId,
+        });
+        return error
+          ? `Uncaught exception: ${error}`
+          : "Code execution completed, but its logs were unavailable.";
       }
 
       let log = trace.logs.map(log => {

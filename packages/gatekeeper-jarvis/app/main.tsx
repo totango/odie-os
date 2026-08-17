@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import type { GatekeeperAppTheme, GatekeeperAppThemeReceiver } from "@gadgets/workshop-shared/theme";
 import { applyAccentColor } from "@gadgets/workshop-shared/theme";
 import {
-  JARVIS_ALLOWED_TOOLS,
+  JARVIS_SETTINGS_TOOLS,
   type JarvisToolPolicy,
   type JarvisToolPolicyInput,
 } from "../src/policy-types";
@@ -36,7 +36,7 @@ function ToolList({ selected, onChange, disabled = false }: {
   disabled?: boolean;
 }) {
   return <div className="grid gap-2 sm:grid-cols-2">
-    {JARVIS_ALLOWED_TOOLS.map(name => <label key={name} className="flex items-start gap-2 rounded-lg border border-kumo-line bg-kumo-control p-3 text-sm">
+    {JARVIS_SETTINGS_TOOLS.map(name => <label key={name} className="flex items-start gap-2 rounded-lg border border-kumo-line bg-kumo-control p-3 text-sm">
       <input type="checkbox" checked={selected.has(name)} disabled={disabled}
         onChange={event => {
           const next = new Set(selected);

@@ -94,20 +94,6 @@ export class CodingSessionSandbox extends Sandbox<Env> {
     WORKSHOP_MCP_HOST,
   ];
 
-  static outboundByHost = {
-    "team-pi-proxy.unison.totango.com":
-      (request: Request, env: Env, ctx: OutboundHandlerContext) =>
-        policyFor(env, ctx.containerId).forwardTeamPiCodexRequest(request),
-    [WORKSHOP_MCP_HOST]:
-      (request: Request, env: Env, ctx: OutboundHandlerContext) =>
-        policyFor(env, ctx.containerId).handleWorkshopMcpRequest(request),
-    "registry.npmjs.org": publicReadOnlyRequest,
-    "pypi.org": publicReadOnlyRequest,
-    "files.pythonhosted.org": publicReadOnlyRequest,
-    "proxy.golang.org": publicReadOnlyRequest,
-    "sum.golang.org": publicReadOnlyRequest,
-  };
-
   /** Installs GitHub authentication in the Worker-side credential proxy. */
   async configureGitHubAuth(token: string): Promise<void> {
     await this.registerGitAuthInterceptor({
@@ -129,6 +115,22 @@ export class CodingSessionSandbox extends Sandbox<Env> {
     throw new Error(`Timed out cloning ${repository}.`);
   }
 }
+
+// Assignment must invoke Container's inherited static setter, which installs these handlers in the
+// registry used by ContainerProxy. A static class field would shadow the setter without registering.
+CodingSessionSandbox.outboundByHost = {
+  "team-pi-proxy.unison.totango.com":
+    (request: Request, env: Env, ctx: OutboundHandlerContext) =>
+      policyFor(env, ctx.containerId).forwardTeamPiCodexRequest(request),
+  [WORKSHOP_MCP_HOST]:
+    (request: Request, env: Env, ctx: OutboundHandlerContext) =>
+      policyFor(env, ctx.containerId).handleWorkshopMcpRequest(request),
+  "registry.npmjs.org": publicReadOnlyRequest,
+  "pypi.org": publicReadOnlyRequest,
+  "files.pythonhosted.org": publicReadOnlyRequest,
+  "proxy.golang.org": publicReadOnlyRequest,
+  "sum.golang.org": publicReadOnlyRequest,
+};
 
 /** Durable repository and model egress policy for one sandbox instance. */
 export class CodingSessionPolicy extends DurableObject<Env> {
