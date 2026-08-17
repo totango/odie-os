@@ -24,6 +24,11 @@ export const JARVIS_ALLOWED_TOOLS = [
 /** A JARVIS MCP tool that this gatekeeper may expose. */
 export type JarvisAllowedTool = typeof JARVIS_ALLOWED_TOOLS[number];
 
+/** JARVIS tools administrators may configure through the management application. */
+export const JARVIS_SETTINGS_TOOLS: readonly JarvisAllowedTool[] = JARVIS_ALLOWED_TOOLS.filter(
+  name => name !== "repo_knowledge" && name !== "jarvis_call_prod_tool"
+);
+
 /** Deployment-global immutable-snapshot policy for JARVIS chat and code tool access. */
 export type JarvisToolPolicy = {
   /** Monotonic policy revision used as the singleton authority key. */

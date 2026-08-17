@@ -10,6 +10,7 @@ import {
   readJarvisConfig,
   JARVIS_ALLOWED_TOOLS,
 } from "../src/config.js";
+import { JARVIS_SETTINGS_TOOLS } from "../src/policy-types.js";
 import deployInputs from "../deploy-inputs.json";
 import {
   defaultJarvisToolPolicy,
@@ -65,6 +66,16 @@ describe("JARVIS allowlist", () => {
     ]);
     expect(isJarvisAllowedTool("create_skill")).toBe(false);
     expect(isJarvisAllowedTool("escalate_to_human")).toBe(false);
+  });
+
+  it("hides internal and arbitrary production tools from management settings", () => {
+    expect(JARVIS_SETTINGS_TOOLS).not.toContain("repo_knowledge");
+    expect(JARVIS_SETTINGS_TOOLS).not.toContain("jarvis_call_prod_tool");
+    expect(JARVIS_SETTINGS_TOOLS).toEqual(
+      JARVIS_ALLOWED_TOOLS.filter(
+        tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"
+      )
+    );
   });
 });
 
