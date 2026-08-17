@@ -1482,30 +1482,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async listCodingSessionTools(sessionId: string): Promise<CodingSessionTool[]> {
     await this.#assertCodingSessionAccess(sessionId);
-    const result: CodingSessionTool[] = [];
-    for (const binding of await this.#codingSessionBindings()) {
-      const session = await binding.facet.startSession(
-        new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+    const catalogs = await Promise.all((await this.#codingSessionBindings()).map(async binding => {
+      let session: McpSessionBase | undefined;
       try {
-        let tools: McpToolInfo[];
-        try {
-          tools = await session.listTools();
-        } catch {
-          continue;
-        }
-        for (const tool of tools) {
-          result.push({
-            name: this.#codingSessionToolName(binding.id, tool.name),
-            title: tool.title,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-          });
-        }
+        session = await binding.facet.startSession(
+          new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+        return { binding, tools: await session.listTools() };
+      } catch {
+        return { binding, tools: [] as McpToolInfo[] };
       } finally {
-        session[Symbol.dispose]();
+        session?.[Symbol.dispose]();
       }
-    }
-    return result;
+    }));
+    return catalogs.flatMap(({ binding, tools }) => tools.map(tool => ({
+      name: this.#codingSessionToolName(binding.id, tool.name),
+      title: tool.title,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    })));
   }
 
   async callCodingSessionTool(
@@ -1562,16 +1556,29 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     for (const record of this.#connectedAccountRecords()) {
       if (!areCredentialsValid(record) || config.disabledGatekeepers.includes(record.vendorId)) continue;
       if (record.autoProvisioned && ambientGatekeeperMode(config, record.vendorId) === "disabled") continue;
+      const generation = record.codingSessionGeneration ?? crypto.randomUUID();
+      if (!record.codingSessionGeneration) {
+        record.codingSessionGeneration = generation;
+        this.storage.connectedAccounts.put(record);
+      }
       let cls: DurableObjectClass<Gatekeeper<any>> | null = null;
-      if (record.description.singleton) {
-        cls = await this.getSingletonGatekeeperClass(record.id);
-      } else if (record.vendorId === "mcp" && record.description.uniqueName) {
-        cls = (await this.getGatekeeperClassFor(record.id, record.description.uniqueName)).class;
+      try {
+        if (record.description.singleton) {
+          cls = await this.getSingletonGatekeeperClass(record.id);
+        } else if (record.vendorId === "mcp" && record.description.uniqueName) {
+          cls = (await this.getGatekeeperClassFor(record.id, record.description.uniqueName)).class;
+        }
+      } catch (error) {
+        logger.warn("skipping coding session tools: failed to load connected account", {
+          event: "coding.session.binding.load.skipped",
+          accountId: record.id,
+          vendorId: record.vendorId,
+          error,
+        });
+        continue;
       }
       if (!cls) continue;
       const id = `${record.vendorId}-${record.id}`;
-      const generation = record.codingSessionGeneration ??= crypto.randomUUID();
-      this.storage.connectedAccounts.put(record);
       const facet = this.ctx.facets.get<Gatekeeper<McpSessionBase>>(
         `coding-session-${id}-${generation}`, () => ({ class: cls! }));
       bindings.push({

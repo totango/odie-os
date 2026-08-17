@@ -740,7 +740,7 @@ function opencodeEnvironment(env: Env, customization: OpenCodeUserCustomization)
           url: `https://${WORKSHOP_MCP_HOST}/mcp`,
           oauth: false,
           enabled: true,
-          timeout: 2_000,
+          timeout: 30_000,
         },
       },
       plugin: customization.plugins,
