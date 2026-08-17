@@ -1,5 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { validateWorkshopMcpRequestTarget } from "../src/mcp-policy.js";
+import {
+  normalizeMcpToolInputSchema,
+  validateWorkshopMcpRequestTarget,
+} from "../src/mcp-policy.js";
+
+describe("Workshop MCP tool schema normalization", () => {
+  it("omits null required fields published by connected tools", () => {
+    expect(normalizeMcpToolInputSchema({
+      type: "object",
+      properties: { tool: { type: "string" } },
+      required: null,
+      additionalProperties: false,
+    })).toEqual({
+      type: "object",
+      properties: { tool: { type: "string" } },
+      additionalProperties: false,
+    });
+  });
+
+  it("preserves valid required fields and supplies an object fallback", () => {
+    expect(normalizeMcpToolInputSchema({ type: "object", required: ["tool"] }))
+      .toEqual({ type: "object", required: ["tool"] });
+    expect(normalizeMcpToolInputSchema(null))
+      .toEqual({ type: "object", additionalProperties: true });
+  });
+});
 
 describe("Workshop MCP request target validation", () => {
   it("returns 405 for GET negotiation on the internal MCP endpoint", async () => {
