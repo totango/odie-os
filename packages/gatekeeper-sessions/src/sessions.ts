@@ -25,7 +25,11 @@ import {
   type GitHubAppEnv,
   type GitHubInstallationToken,
 } from "./github-app.js";
-import { WORKSHOP_MCP_HOST, validateWorkshopMcpRequestTarget } from "./mcp-policy.js";
+import {
+  normalizeMcpToolInputSchema,
+  WORKSHOP_MCP_HOST,
+  validateWorkshopMcpRequestTarget,
+} from "./mcp-policy.js";
 import { validateRepositories } from "./policy.js";
 
 export { ContainerProxy };
@@ -269,7 +273,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
               name: tool.name,
               title: tool.title,
               description: tool.description,
-              inputSchema: tool.inputSchema ?? { type: "object", additionalProperties: true },
+              inputSchema: normalizeMcpToolInputSchema(tool.inputSchema),
             })),
             {
               name: "workshop_action_result",
