@@ -69,11 +69,15 @@ describe("JARVIS allowlist", () => {
 });
 
 describe("JARVIS tool policy", () => {
-  it("defaults chat away from repo knowledge while retaining the explicit code scope", () => {
+  it("defaults chat away from repo knowledge and arbitrary production calls", () => {
     const policy = defaultJarvisToolPolicy();
     expect(policy).toEqual({
-      revision: 3,
-      chat: { tools: JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge") },
+      revision: 4,
+      chat: {
+        tools: JARVIS_ALLOWED_TOOLS.filter(
+          tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"
+        ),
+      },
       code: { tools: [...JARVIS_ALLOWED_TOOLS] },
       syncCode: false,
     });
@@ -102,10 +106,26 @@ describe("JARVIS tool policy", () => {
       code: { tools: [...historicalTools] },
       syncCode: false,
     };
-    expect(upgradeDefaultJarvisToolPolicy(priorDefault).revision).toBe(3);
+    expect(upgradeDefaultJarvisToolPolicy(priorDefault).revision).toBe(4);
+
+    const currentDefault = {
+      revision: 3,
+      chat: { tools: JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge") },
+      code: { tools: [...JARVIS_ALLOWED_TOOLS] },
+      syncCode: false,
+    };
+    const upgraded = upgradeDefaultJarvisToolPolicy(currentDefault);
+    expect(upgraded.revision).toBe(4);
+    expect(upgraded.chat.tools).not.toContain("jarvis_call_prod_tool");
+    expect(upgraded.code.tools).toContain("jarvis_call_prod_tool");
 
     const customized = { ...historical, revision: 2 };
     expect(upgradeDefaultJarvisToolPolicy(customized)).toBe(customized);
+    const customizedV3 = {
+      ...currentDefault,
+      chat: { tools: currentDefault.chat.tools.filter(tool => tool !== "lookup_incident") },
+    };
+    expect(upgradeDefaultJarvisToolPolicy(customizedV3)).toBe(customizedV3);
   });
 
   it("normalizes order and mirrors chat when synchronized", () => {
