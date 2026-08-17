@@ -491,6 +491,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
 
   /** Mints one single-use terminal attachment URL. */
   async mintAttachCapability(
+    owner: CodingSessionOwner,
     sessionId: string,
     terminal: CodingSessionTerminalKind = "opencode",
   ): Promise<CodingSessionAttachCapability> {
@@ -499,6 +500,11 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       throw new Error("Coding session is not running.");
     }
     if (terminal !== "opencode" && terminal !== "shell") throw new Error("Invalid terminal type.");
+    await policyForSandbox(this.env, record.sandboxId).configure({
+      sessionId: record.id,
+      owner,
+      repositories: record.repositories,
+    });
     let terminalId = record.terminalId;
     if (terminal === "shell") {
       const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
@@ -568,7 +574,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     owner: CodingSessionOwner,
     customization: OpenCodeUserCustomization,
   ): Promise<SessionRecord> {
-    const policy = policyFor(this.env, record.sandboxId);
+    const policy = policyForSandbox(this.env, record.sandboxId);
     await policy.configure({ sessionId: record.id, owner, repositories: record.repositories });
     const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
     await sandbox.destroy();
@@ -642,7 +648,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     sessionId: string,
     terminal?: CodingSessionTerminalKind,
   ): Promise<CodingSessionAttachCapability> {
-    return registryFor(this.ctx, owner.userId).mintAttachCapability(sessionId, terminal);
+    return registryFor(this.ctx, owner.userId).mintAttachCapability(owner, sessionId, terminal);
   }
 }
 
@@ -674,8 +680,12 @@ function registryFor(ctx: ExecutionContext, userId: string): DurableObjectStub<C
   return namespace.get(namespace.idFromName(userId));
 }
 
-function policyFor(env: Env, sandboxId: string): DurableObjectStub<CodingSessionPolicy> {
-  return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`session:${sandboxId}`));
+function policyFor(env: Env, containerId: string): DurableObjectStub<CodingSessionPolicy> {
+  return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`container:${containerId}`));
+}
+
+function policyForSandbox(env: Env, sandboxId: string): DurableObjectStub<CodingSessionPolicy> {
+  return policyFor(env, env.SESSION_SANDBOX.idFromName(sandboxId).toString());
 }
 
 async function ticketFor(env: Env, token: string): Promise<DurableObjectStub<CodingSessionPolicy>> {
