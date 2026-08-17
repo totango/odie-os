@@ -23,12 +23,14 @@ const HISTORICAL_V1_TOOLS = [
   "jarvis_call_prod_tool",
 ] as const;
 
-/** Returns the default policy with live repository lookup removed from the chat surface. */
+/** Returns the default policy without live repository or arbitrary production calls in chat. */
 export function defaultJarvisToolPolicy(): JarvisToolPolicy {
   const tools = [...JARVIS_ALLOWED_TOOLS];
   return {
-    revision: 3,
-    chat: { tools: tools.filter(tool => tool !== "repo_knowledge") },
+    revision: 4,
+    chat: {
+      tools: tools.filter(tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"),
+    },
     code: { tools },
     syncCode: false,
   };
@@ -42,7 +44,10 @@ export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): Jarvis
   const untouchedV2 = policy.revision === 2 && policy.syncCode === false &&
     sameTools(policy.chat.tools, historicalTools.filter(tool => tool !== "repo_knowledge")) &&
     sameTools(policy.code.tools, historicalTools);
-  const untouched = untouchedV1 || untouchedV2;
+  const untouchedV3 = policy.revision === 3 && policy.syncCode === false &&
+    sameTools(policy.chat.tools, JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge")) &&
+    sameTools(policy.code.tools, JARVIS_ALLOWED_TOOLS);
+  const untouched = untouchedV1 || untouchedV2 || untouchedV3;
   return untouched ? defaultJarvisToolPolicy() : policy;
 }
 
