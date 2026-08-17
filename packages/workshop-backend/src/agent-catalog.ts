@@ -95,7 +95,10 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
     `before using public web sources; say when an answer had to fall back to the public web. For ` +
     `engineering questions about the configured ODI repositories, prefer JARVIS repo_graph tools ` +
     `for indexed topology and relationships, then use the Totango GitHub source resource to verify ` +
-    `current implementation details or when the graph is missing or stale. If a Gadget's persistent ` +
-    `code needs one, wire it into that gadget with ` +
+    `current implementation details or when the graph is missing or stale. When ` +
+    `\`env.GITHUB_ORG\` is available, use it for read-only Totango source access instead of requesting ` +
+    `a per-repository GitHub connection; request one only when the task needs capabilities the ` +
+    `organization source does not provide. If a Gadget's persistent code needs one, wire it into ` +
+    `that gadget with ` +
     `setGadgetBinding.`;
 }

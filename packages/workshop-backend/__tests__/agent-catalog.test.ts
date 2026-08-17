@@ -85,6 +85,9 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("say when an answer had to fall back to the public web");
     expect(message).toContain("engineering questions");
     expect(message).toContain("prefer JARVIS repo_graph tools");
+    expect(message).toContain("use it for read-only Totango source access instead of requesting");
+    expect(message).toContain("a per-repository GitHub connection");
+    expect(message).toContain("only when the task needs capabilities the organization source does not provide");
   });
 });
 
