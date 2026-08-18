@@ -19,6 +19,7 @@ import { useDocumentTitle } from '../useDocumentTitle'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from '../components/WorkshopControls'
 import SessionTerminal from '../components/sessions/SessionTerminal'
 import { useSessionsContext } from '../components/sessions/SessionsContext'
+import { useUiFeatureFlag } from '../FeatureFlagsContext'
 
 export const Route = createFileRoute('/sessions')({ component: SessionsPage })
 
@@ -74,7 +75,7 @@ export function SessionsPage() {
                 aria-pressed={terminalKind === kind}
                 className={`rounded px-2 py-1 capitalize ${terminalKind === kind ? 'bg-kumo-base text-kumo-strong shadow-sm' : 'text-kumo-subtle hover:text-kumo-default'}`}
               >
-                {kind}
+                {kind === 'opencode' ? (activeSession.runtime === 'pi' ? 'Pi' : 'OpenCode') : 'Shell'}
               </button>
             ))}
             </div>
@@ -82,7 +83,7 @@ export function SessionsPage() {
         </div>
         {error && <div className="border-b border-kumo-danger/20 bg-kumo-danger-tint px-3 py-2 text-xs text-kumo-danger">{error}</div>}
         <div className={`grid min-h-0 flex-1 ${sessionActivity.some((entry) => entry.state === 'pending') ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
-          <div className="min-h-0"><SessionTerminal key={`${terminalKind}:${activeSession.lastActiveAt.valueOf()}`} sessionId={activeSession.id} terminalKind={terminalKind} /></div>
+          <div className="min-h-0"><SessionTerminal key={`${terminalKind}:${activeSession.lastActiveAt.valueOf()}`} sessionId={activeSession.id} terminalKind={terminalKind} runtime={activeSession.runtime} /></div>
           {sessionActivity.some((entry) => entry.state === 'pending') && (
             <ActivityPanel activity={sessionActivity} onResolve={resolveActivity} />
           )}
@@ -158,6 +159,7 @@ function CodeSetupScreen() {
 }
 
 function NewSessionPane() {
+  const { enabled: piEnabled } = useUiFeatureFlag('pi-coding-session-runtime')
   const {
     activity,
     resolveActivity,
@@ -170,6 +172,8 @@ function NewSessionPane() {
     repositoryLoading,
     title,
     setTitle,
+    runtime,
+    setRuntime,
     creating,
     create,
     error,
@@ -201,6 +205,29 @@ function NewSessionPane() {
                 </button>
               )
             })}
+          </div>
+        )}
+
+        {piEnabled && (
+          <div className="mt-7">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-kumo-subtle">Coding agent</div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2" role="group" aria-label="Coding agent runtime">
+              {([
+                ['opencode', 'OpenCode', 'Established runtime with your account plugins and skills.'],
+                ['pi', 'Pi', 'Focused runtime using Team PI and Workshop tools.'],
+              ] as const).map(([value, label, description]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={runtime === value}
+                  onClick={() => setRuntime(value)}
+                  className={`rounded-xl border bg-kumo-base p-3 text-left transition-colors ${runtime === value ? 'border-kumo-brand ring-1 ring-kumo-brand/15' : 'border-kumo-line hover:border-kumo-strong'}`}
+                >
+                  <span className="block text-[13px] font-medium text-kumo-default">{label}</span>
+                  <span className="mt-1 block text-xs leading-5 text-kumo-subtle">{description}</span>
+                </button>
+              ))}
+            </div>
           </div>
         )}
 

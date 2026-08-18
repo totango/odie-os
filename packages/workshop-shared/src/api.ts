@@ -297,6 +297,9 @@ export interface CodingSessionRepositoryOption {
 /** Current lifecycle state of a coding session. */
 export type CodingSessionStatus = "starting" | "running" | "stopping" | "stopped" | "failed";
 
+/** Coding agent runtime selected for a coding session. */
+export type CodingSessionRuntime = "opencode" | "pi";
+
 /** User-visible metadata for a coding session. */
 export interface CodingSessionSummary {
   /** Opaque session identifier. */
@@ -305,6 +308,8 @@ export interface CodingSessionSummary {
   title: string;
   /** Repositories available inside the session workspace. */
   repositories: CodingSessionRepository[];
+  /** Coding agent runtime used by this session. */
+  runtime: CodingSessionRuntime;
   /** Current lifecycle state. */
   status: CodingSessionStatus;
   /** When the session was created. */
@@ -323,6 +328,8 @@ export interface CreateCodingSessionRequest {
   title: string;
   /** Non-empty set of validated repository names selected from the connected GitHub account. */
   repositories: CodingSessionRepository[];
+  /** Coding agent runtime. Omitted requests retain the historical OpenCode behavior. */
+  runtime?: CodingSessionRuntime;
 }
 
 /** One account-scoped OpenCode skill materialized into a coding session. */

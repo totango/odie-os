@@ -13,12 +13,13 @@
   "preview_urls": false,
   "vars": {
     "BASE_URL": "https://odie-os.odie-os.workers.dev/gatekeeper/sessions",
-    "SESSION_ALLOWED_ORIGIN": "https://odie-os.odie-os.workers.dev"
+    "SESSION_ALLOWED_ORIGIN": "https://odie-os.odie-os.workers.dev",
+    "CODING_SESSION_PI_RUNTIME_ENABLED": "true"
   },
   "containers": [
     {
       "class_name": "CodingSessionSandbox",
-      "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:e70847436b599846475dfbe907573a2da72532b138ea7954e4cb331f56ef9154",
       "instance_type": "standard-1",
       "max_instances": 20
     }
