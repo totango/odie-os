@@ -28,6 +28,7 @@ describe("coding session runtimes", () => {
       "--provider", "odie-team-pi",
       "--model", "gpt-5.6-sol",
       "--models", "odie-team-pi/gpt-5.6-sol",
+      "--tui-mode", "fullscreen",
       "--no-extensions",
       "--extension", "/workspace/.odie-pi/odie-runtime.ts",
       "--no-skills",
