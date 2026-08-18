@@ -197,6 +197,21 @@ type GatekeeperRecord = {
   blueprintAnnotation?: BlueprintBindingAnnotation;
 };
 
+/** Finds the env name of an active ambient binding supplied by a vendor. */
+export function findAmbientBindingName(
+    bindings: Record<string, WorkpieceId> | undefined,
+    vendorId: string,
+    recordFor: (target: WorkpieceId) => {creationSpec?: GatekeeperCreationSpec} | undefined,
+): string | undefined {
+  if (!bindings) return undefined;
+  let normalizedVendorId = vendorId.toLowerCase();
+  for (let [name, target] of Object.entries(bindings)) {
+    let spec = recordFor(target)?.creationSpec;
+    if (spec?.type === "ambient" && spec.vendorId.toLowerCase() === normalizedVendorId) return name;
+  }
+  return undefined;
+}
+
 function gatekeeperVendorId(record: GatekeeperRecord | undefined): string | undefined {
   let spec = record?.creationSpec;
   return spec && "vendorId" in spec ? spec.vendorId.toLowerCase() : undefined;
@@ -5708,6 +5723,32 @@ class OverseerImpl implements AgentHooks {
     if (!resolved.ok) {
       return { requested: false, message:
           `Cannot request a connection for "${vendor.description.displayName}": ${resolved.reason}` };
+    }
+
+    if (resolved.resource.providedBySingleton) {
+      let existingBindingName = findAmbientBindingName(
+          this.getChatAgentContext(chatId).bindings,
+          input.vendorId,
+          target => this.storage.gatekeepers.get(target));
+      if (existingBindingName) {
+        return { requested: false, message:
+            `Cannot request another "${vendor.description.displayName}" connection: this account ` +
+            `is already available as env.${existingBindingName}. Call ` +
+            `describeBinding("${existingBindingName}") and use that binding. If its API does not ` +
+            `provide the required operation, explain the missing capability instead of requesting ` +
+            `a duplicate connection.` };
+      }
+
+      let connectedSingleton = (await this.#ownerUserDo().listProvidedAccounts()).some(account =>
+        account.vendorId.toLowerCase() === input.vendorId.toLowerCase() &&
+        account.description.singleton !== undefined);
+      if (connectedSingleton) {
+        return { requested: false, message:
+            `Cannot request another "${vendor.description.displayName}" connection: this account ` +
+            `is already connected, but its ambient binding is not present in this older chat. Ask ` +
+            `the user to start a new chat, where it will be available automatically; do not show ` +
+            `a connection approval request.` };
+      }
     }
 
     let requestId = `${chatId}:${crypto.randomUUID()}`;

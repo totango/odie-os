@@ -90,7 +90,10 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
   return `The following resources are always available as bindings in your env for use with the ` +
     `executeCode tool (you don't need to request them):\n${lines.join("\n")}\n` +
     `When one is relevant, use describeBinding with the binding's name to learn its API before ` +
-    `using it. For customer, account, CSM, product-usage, or internal business questions, prefer ` +
+    `using it. If its API lacks an operation you expected, do not request another connection to ` +
+    `the same vendor; a duplicate binding does not add methods. Explain the missing capability or ` +
+    `use another relevant resource instead. For customer, account, CSM, product-usage, or internal ` +
+    `business questions, prefer ` +
     `the Totango Knowledge Graph resource when available, then other relevant internal resources, ` +
     `before using public web sources; say when an answer had to fall back to the public web. For ` +
     `engineering questions about the configured ODI repositories, prefer JARVIS repo_graph tools ` +

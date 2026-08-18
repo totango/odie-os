@@ -225,6 +225,13 @@ export type SupportedResource = {
   //
   // If omitted/false, the resource type is not separately grantable.
   grantable?: boolean;
+
+  /**
+   * Indicates that this resource is the same capability as the connected account's ambient
+   * singleton. When that singleton is already present in a chat, the agent must use it instead of
+   * asking the user to approve a duplicate connection.
+   */
+  providedBySingleton?: true;
 }
 
 /** Removes every trailing slash from a string in linear time. */

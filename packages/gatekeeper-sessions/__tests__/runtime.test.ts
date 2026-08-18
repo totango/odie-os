@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertRuntimeEnabled,
   codingSessionRuntime,
+  openCodeCommand,
   piCommand,
   piEnvironment,
   piExtensionSource,
@@ -22,8 +23,9 @@ describe("coding session runtimes", () => {
     expect(() => assertRuntimeEnabled("opencode", undefined)).not.toThrow();
   });
 
-  it("starts Pi with only the trusted extension and no ambient resources", () => {
-    expect(piCommand()).toEqual([
+  it("starts Pi with only reviewed explicit resources", () => {
+    const command = piCommand();
+    expect(command.slice(0, 15)).toEqual([
       "/usr/local/bin/pi",
       "--provider", "odie-team-pi",
       "--model", "gpt-5.6-sol",
@@ -32,7 +34,13 @@ describe("coding session runtimes", () => {
       "--no-extensions",
       "--extension", "/workspace/.odie-pi/odie-runtime.ts",
       "--no-skills",
-      "--no-prompt-templates",
+      "--skill", "/opt/odie-pi/node_modules/@howlerops/valhalla/pi/skills/vegvisir/SKILL.md",
+    ]);
+    expect(command).toContain("--no-prompt-templates");
+    for (const name of ["hugin", "tyr", "munin", "eitri", "vidar", "skuld", "polaris"]) {
+      expect(command).toContain(`/opt/odie-pi/node_modules/@howlerops/valhalla/pi/prompts/${name}.md`);
+    }
+    expect(command.slice(-3)).toEqual([
       "--no-themes",
       "--no-context-files",
       "--no-approve",
@@ -41,6 +49,19 @@ describe("coding session runtimes", () => {
       PI_CODING_AGENT_DIR: "/workspace/.odie-pi",
       PI_OFFLINE: "1",
     });
+  });
+
+  it("starts OpenCode with pinned Valhalla commands and skills copied from the image", () => {
+    expect(openCodeCommand("odie-os")).toEqual([
+      "/bin/bash",
+      "-lc",
+      "if [ -d /opt/odie-valhalla/opencode ]; then " +
+        "mkdir -p /workspace/.odie-opencode/command /workspace/.odie-opencode/skills && " +
+        "cp -R /opt/odie-valhalla/opencode/command/. /workspace/.odie-opencode/command/ && " +
+        "cp -R /opt/odie-valhalla/opencode/skills/. /workspace/.odie-opencode/skills/; " +
+        "fi && " +
+        "cd /workspace/odie-os && exec opencode",
+    ]);
   });
 
   it("provides only Team PI and the isolated Workshop MCP server", () => {
