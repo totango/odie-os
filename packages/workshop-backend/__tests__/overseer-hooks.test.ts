@@ -1,9 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
-import { OverseerDurableObject } from "../src/overseer.js";
+import { findAmbientBindingName, OverseerDurableObject } from "../src/overseer.js";
 
 vi.mock("capnweb-validate", () => ({ validateRpc: () => () => undefined }));
+
+describe("ambient connection requests", () => {
+  it("finds an existing ambient binding for the requested vendor", () => {
+    let records = new Map([
+      [4, {creationSpec: {type: "ambient" as const, vendorId: "team_pi", accountId: 2}}],
+      [5, {creationSpec: {type: "gatekeeper" as const, vendorId: "github", accountId: 3,
+        resourceUrl: "https://github.com/totango/odie-os",
+        typeUrlPattern: "https://github.com/:owner/:repo"}}],
+    ]);
+
+    expect(findAmbientBindingName(
+        {TEAM_PI: 4, REPO: 5}, "TEAM_PI", target => records.get(target)))
+      .toBe("TEAM_PI");
+    expect(findAmbientBindingName(
+        {TEAM_PI: 4, REPO: 5}, "github", target => records.get(target)))
+      .toBeUndefined();
+  });
+});
 
 function makeOverseer(
     getConfig: () => Promise<string | null>,

@@ -88,6 +88,8 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("use it for read-only Totango source access instead of requesting");
     expect(message).toContain("a per-repository GitHub connection");
     expect(message).toContain("only when the task needs capabilities the organization source does not provide");
+    expect(message).toContain("do not request another connection to the same vendor");
+    expect(message).toContain("a duplicate binding does not add methods");
   });
 });
 

@@ -37,6 +37,8 @@ import {
   type TeamPiProvider,
   type TokenGrant,
 } from "./team-pi-api.js";
+import type { TeamPiAccountConfiguratorRpc } from "./configurator/account-configurator-types.js";
+import ACCOUNT_CONFIGURATOR_HTML from "./generated/account-configurator-ui.txt";
 import type { TeamPiActionResult, TeamPiConnection, TeamPiQueuedAction, TeamPiSession, TeamPiSkill, TeamPiSkillCheck } from "./types.js";
 
 type TeamPiLogFields = { event?: string; vendorId?: string; accountId?: string; status?: number; error?: unknown };
@@ -53,6 +55,7 @@ const ACCOUNT_RESOURCE: SupportedResource = {
   urlPattern: ACCOUNT_URL,
   title: "Team PI Account",
   description: "Per-user Team PI skills, connections, calendar, Gmail, Chorus, Zendesk, and Salesforce APIs.",
+  providedBySingleton: true,
 };
 
 type StoredDevice = { nonce: string; deviceCode: string; userCode: string; verificationUri: string; verificationUriComplete?: string; expiresAt: number; intervalMs: number };
@@ -306,9 +309,20 @@ export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements Gatekeep
   async getAuthenticatedEmail(): Promise<string | null> { return null; }
   async getSupportedResources(): Promise<SupportedResource[]> { return [ACCOUNT_RESOURCE]; }
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> { return {}; }
-  async getGatekeeperClassFor(_url: string): Promise<{ class: DurableObjectClass<Gatekeeper<TeamPiSession>>; resource: SupportedResource }> { return { class: this.ctx.exports.TeamPiGatekeeper({ props: this.ctx.props }), resource: ACCOUNT_RESOURCE }; }
+  async getGatekeeperClassFor(url: string): Promise<{ class: DurableObjectClass<Gatekeeper<TeamPiSession>>; resource: SupportedResource }> {
+    if (url !== ACCOUNT_URL) throw new Error(`Unsupported Team PI resource: ${url}`);
+    return { class: this.ctx.exports.TeamPiGatekeeper({ props: this.ctx.props }), resource: ACCOUNT_RESOURCE };
+  }
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<TeamPiSession>>> { return this.ctx.exports.TeamPiGatekeeper({ props: this.ctx.props }); }
-  startResourceConfigurator(_resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> { throw new Error("Team PI is provided as a broad user singleton; no resource configurator is available."); }
+  async startResourceConfigurator(resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    if (resourceUrlPattern !== ACCOUNT_URL) {
+      throw new Error(`Unsupported Team PI resource configurator: ${resourceUrlPattern}`);
+    }
+    return {
+      iframeHtml: ACCOUNT_CONFIGURATOR_HTML,
+      ui: new RpcStub(new TeamPiAccountConfiguratorUI()),
+    };
+  }
   async revoke(): Promise<void> { await this.#account().revoke(); }
   async reconnect(): Promise<{ url: string }> {
     const nonce = crypto.randomUUID();
@@ -317,6 +331,11 @@ export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements Gatekeep
   }
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> { return this.ctx.exports.TeamPiVerifier({}); }
+}
+
+@validateRpc()
+class TeamPiAccountConfiguratorUI extends RpcTarget implements TeamPiAccountConfiguratorRpc {
+  async resourceUrl(): Promise<string> { return ACCOUNT_URL; }
 }
 
 @validateRpc()

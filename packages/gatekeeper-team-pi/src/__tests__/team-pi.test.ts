@@ -10,7 +10,7 @@ import {
   startDeviceAuthorization,
   type TeamPiConfig,
 } from "../team-pi-api.js";
-import { TeamPiAccount, TeamPiGatekeeper, TeamPiSessionImpl, catalogEntries, claimPendingAction, getStoredActionResult, rejectPendingAction, safeConnectionUrl, sanitizeInstallSkillResult, sanitizeStartConnectionResult } from "../team-pi.js";
+import { TeamPiAccount, TeamPiGatekeeper, TeamPiSessionImpl, TeamPiUser, catalogEntries, claimPendingAction, getStoredActionResult, rejectPendingAction, safeConnectionUrl, sanitizeInstallSkillResult, sanitizeStartConnectionResult } from "../team-pi.js";
 
 const config: TeamPiConfig = {
   auth0Domain: "https://tenant.auth0.com",
@@ -285,6 +285,29 @@ function configEnv(): Env {
 }
 
 describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
+  it("configures the whole-account resource for an existing authenticated account", async () => {
+    const user = new TeamPiUser({} as never, configEnv());
+    (user as unknown as { ctx: unknown }).ctx = {
+      props: { accountId: "account-1" },
+      exports: { TeamPiGatekeeper: vi.fn(() => ({ class: "team-pi" })) },
+    };
+
+    const frame = await user.startResourceConfigurator("team-pi://account");
+    expect(frame.iframeHtml).toBeTruthy();
+    expect(frame.ui).toBeInstanceOf(RpcStub);
+    frame.ui[Symbol.dispose]();
+    await expect(user.getSupportedResources()).resolves.toEqual([
+      expect.objectContaining({urlPattern: "team-pi://account", providedBySingleton: true}),
+    ]);
+    await expect(user.getGatekeeperClassFor("team-pi://account")).resolves.toMatchObject({
+      resource: { title: "Team PI Account" },
+    });
+    await expect(user.startResourceConfigurator("team-pi://other"))
+      .rejects.toThrow(/Unsupported Team PI resource configurator/);
+    await expect(user.getGatekeeperClassFor("team-pi://other"))
+      .rejects.toThrow(/Unsupported Team PI resource/);
+  });
+
   it("only returns provider connection pages on the configured Team PI origin", () => {
     const baseUrl = "https://team-pi.example";
     expect(safeConnectionUrl("/connect/gmail/page?user=u", baseUrl, "gmail"))
