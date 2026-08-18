@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type OpenCodeUserCustomization } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -64,20 +64,26 @@ export class CodingSessionToolHostImpl
     return wrapDoStubForTelemetry(users.get(users.idFromString(owner.userId)));
   }
 
-  listTools(owner: CodingSessionOwner, sessionId: string) {
-    return this.#user(owner).listCodingSessionTools(sessionId);
+  async listTools(owner: CodingSessionOwner, sessionId: string) {
+    const user = this.#user(owner);
+    await user.assertRequiredConnectionsHealthy();
+    return user.listCodingSessionTools(sessionId);
   }
 
-  callTool(owner: CodingSessionOwner, sessionId: string, name: string,
+  async callTool(owner: CodingSessionOwner, sessionId: string, name: string,
       args?: Record<string, unknown>)
       : Promise<CodingSessionToolResult> {
-    return this.#user(owner).callCodingSessionTool(sessionId, name, args);
+    const user = this.#user(owner);
+    await user.assertRequiredConnectionsHealthy();
+    return user.callCodingSessionTool(sessionId, name, args);
   }
 
-  getActionResult(owner: CodingSessionOwner, sessionId: string, name: string,
+  async getActionResult(owner: CodingSessionOwner, sessionId: string, name: string,
       actionId: number)
       : Promise<CodingSessionToolResult> {
-    return this.#user(owner).getCodingSessionActionResult(sessionId, name, actionId);
+    const user = this.#user(owner);
+    await user.assertRequiredConnectionsHealthy();
+    return user.getCodingSessionActionResult(sessionId, name, actionId);
   }
 }
 
@@ -247,6 +253,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     }
   }
 
+  async #assertRequiredConnectionsHealthy(): Promise<void> {
+    await this.#user.assertRequiredConnectionsHealthy();
+  }
+
   listCodingSessions(): Promise<CodingSessionSummary[]> {
     return this.#user.listCodingSessions();
   }
@@ -256,6 +266,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
+    await this.#assertRequiredConnectionsHealthy();
     if (request.runtime === "pi") await this.#assertPiCodingSessionsEnabled();
     return this.#user.createCodingSession(request);
   }
@@ -273,6 +284,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async restartCodingSession(sessionId: string): Promise<CodingSessionSummary> {
+    await this.#assertRequiredConnectionsHealthy();
     const session = (await this.#user.listCodingSessions()).find(({ id }) => id === sessionId);
     if (session?.runtime === "pi") await this.#assertPiCodingSessionsEnabled();
     return this.#user.restartCodingSession(sessionId);
@@ -282,10 +294,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.archiveCodingSession(sessionId);
   }
 
-  mintCodingSessionAttachCapability(
+  async mintCodingSessionAttachCapability(
     sessionId: string,
     terminal?: CodingSessionTerminalKind,
   ): Promise<CodingSessionAttachCapability> {
+    await this.#assertRequiredConnectionsHealthy();
     return this.#user.mintCodingSessionAttachCapability(sessionId, terminal);
   }
 
@@ -293,7 +306,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.listCodingSessionActivity(sessionId);
   }
 
-  approveCodingSessionAction(activityId: string): Promise<void> {
+  async approveCodingSessionAction(activityId: string): Promise<void> {
+    await this.#assertRequiredConnectionsHealthy();
     return this.#user.approveCodingSessionAction(activityId);
   }
 
@@ -302,8 +316,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async #openGadgetInternal(id: string, shareKey?: string,
-                            configureObservers?: RpcStub<ObserverConfigCallback>)
+                            configureObservers?: RpcStub<ObserverConfigCallback>,
+                            requiredConnectionsChecked = false)
       : Promise<NativeRpcStub<Overseer>> {
+    if (!requiredConnectionsChecked) await this.#assertRequiredConnectionsHealthy();
     let userId = this.#userId.toString();
     let profileId = this.#userId.name!;
     let overseerId;
@@ -369,6 +385,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async newGadget(): Promise<RpcStub<Overseer>> {
+    await this.#assertRequiredConnectionsHealthy();
     let id = this.overseers.newUniqueId().toString();
     await this.#user.newGadget(id, "Untitled Workspace");
     recordAnalytics(this.ctx, this.env, {
@@ -377,10 +394,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       gadget_id: id,
       source: "blank",
     });
-    let result = await this.openGadget(id);
+    let result = await this.#openGadgetInternal(id, undefined, undefined, true);
     if (!result) {
       throw new Error("Open failed despite newly-created workspace?");
     }
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
     return result;
   }
 
@@ -400,6 +419,10 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]> {
     return this.#user.listGatekeeperVendors(filter);
+  }
+
+  getRequiredConnectionStatuses(): Promise<RequiredConnectionStatus[]> {
+    return this.#user.getRequiredConnectionStatuses();
   }
 
   connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
@@ -522,6 +545,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     blueprintId: string,
     bindings: Record<string, BlueprintBindingAssignment>
   ): Promise<RpcStub<Overseer>> {
+    await this.#assertRequiredConnectionsHealthy();
     // 1. Read blueprint from KV.
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) throw new Error("Blueprint not found.");
@@ -533,7 +557,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
     await this.#user.newGadget(id, kvRecord.metadata.title);
-    let overseerResult = await this.#openGadgetInternal(id);
+    let overseerResult = await this.#openGadgetInternal(id, undefined, undefined, true);
 
     // 4. Initialize from blueprint code.
     let overseerDo = this.overseers.get(this.overseers.idFromString(id));

@@ -22,6 +22,7 @@ const testState = vi.hoisted(() => ({
     stopSession: vi.fn<(id: string) => Promise<void>>(),
     archiveSession: vi.fn<(id: string) => Promise<void>>(),
     setActiveId: vi.fn<(id: string | undefined) => void>(),
+    refresh: vi.fn<() => void>(),
     connect: vi.fn<() => Promise<void>>(async () => {}),
     reconnect: vi.fn<(accountId: number) => Promise<void>>(async () => {}),
     availablePresets: [],
@@ -67,6 +68,7 @@ describe('SessionsPage locked Code setup', () => {
     testState.context.error = undefined
     testState.context.activeSession = undefined
     testState.context.runtime = 'opencode'
+    testState.context.refresh.mockClear()
     testState.piEnabled = false
   })
 
@@ -148,5 +150,49 @@ describe('SessionsPage locked Code setup', () => {
     expect(terminalMode?.textContent).toContain('Shell')
     expect(terminalMode?.textContent).not.toContain('OpenCode')
     expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'pi' }))
+  })
+
+  it('refreshes sessions when the terminal reports the environment is unavailable', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1',
+      title: 'Pi repair',
+      repositories: ['jarvis'],
+      runtime: 'pi',
+      status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    await render()
+    const props = testState.terminalProps.mock.calls.at(-1)?.[0] as { onSessionUnavailable?: () => void }
+    props.onSessionUnavailable?.()
+
+    expect(testState.context.refresh).toHaveBeenCalledOnce()
+  })
+
+  it('presents restart instead of terminal reconnect for expired environments', async () => {
+    window.confirm = vi.fn<() => boolean>(() => true)
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1',
+      title: 'Expired repair',
+      repositories: ['jarvis'],
+      runtime: 'opencode',
+      status: 'failed',
+      error: 'Coding session environment expired. Restart the session to continue.',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('Environment needs restart')
+    expect(rendered.textContent).not.toContain('Reconnect')
+    const button = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Restart environment'))
+    expect(button).toBeTruthy()
+
+    await act(async () => button!.click())
+    expect(testState.context.restartSession).toHaveBeenCalledWith('session-1')
   })
 })

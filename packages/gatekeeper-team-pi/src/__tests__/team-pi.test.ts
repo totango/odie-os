@@ -103,6 +103,13 @@ describe("Team PI token refresh and API isolation", () => {
     expect(vi.mocked(fetch).mock.calls[1]?.[1]?.headers).toMatchObject({ "X-Team-PI-ID-Token": "identity-b" });
   });
 
+  it("turns Team PI auth denials into actionable access errors", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "missing_id_token" }, 403));
+    const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
+
+    await expect(api.listSkills()).rejects.toThrow(/denied access|Reconnect Team PI|required provider\/skill/);
+  });
+
   it("coalesces in-instance refreshes to avoid rotating refresh-token races", async () => {
     let resolveRefresh!: (response: Response) => void;
     vi.mocked(fetch).mockImplementation(() => new Promise<Response>(resolve => { resolveRefresh = resolve; }));
@@ -127,7 +134,7 @@ describe("Team PI token refresh and API isolation", () => {
     expect(kv.get("identity")).toBeUndefined();
   });
 
-  it("does not forward an expired ID token with a still-valid access token", async () => {
+  it("requires a fresh ID token instead of forwarding an expired identity", async () => {
     const kv = new Kv();
     kv.put("accessToken", "valid-access");
     kv.put("accessTokenExpiresAt", Date.now() + 60 * 60 * 1000);
@@ -137,10 +144,7 @@ describe("Team PI token refresh and API isolation", () => {
     (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
     (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv } };
 
-    await expect(account.getApiCredentials()).resolves.toEqual({
-      accessToken: "valid-access",
-      idToken: undefined,
-    });
+    await expect(account.getApiCredentials()).rejects.toThrow(/fresh identity token|Reconnect Team PI/);
   });
 
   it("returns the renewed ID token on the first API request after refresh", async () => {
@@ -166,6 +170,27 @@ describe("Team PI token refresh and API isolation", () => {
     });
   });
 
+  it("reports connection status from the live credential probe", async () => {
+    const kv = new Kv();
+    kv.put("accessToken", "valid-access");
+    kv.put("accessTokenExpiresAt", Date.now() + 60 * 60 * 1000);
+    kv.put("idToken", "valid-id");
+    kv.put("idTokenExpiresAt", Date.now() + 60 * 60 * 1000);
+    const account = new TeamPiAccount({} as never, configEnv());
+    (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv } };
+    const user = new TeamPiUser({} as never, configEnv());
+    (user as unknown as { ctx: unknown }).ctx = {
+      props: { accountId: "account-1" },
+      exports: { TeamPiAccount: { idFromString: () => "account-1", get: () => account } },
+    };
+
+    await expect(user.getConnectionStatus()).resolves.toMatchObject({ state: "healthy" });
+
+    kv.put("idTokenExpiresAt", Date.now() - 1);
+    await expect(user.getConnectionStatus()).resolves.toMatchObject({ state: "expired" });
+  });
+
   it("preserves a valid access token when the legacy ID-token refresh fails", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(response({ error: "temporarily_unavailable" }, 503));
     const kv = new Kv();
@@ -182,7 +207,7 @@ describe("Team PI token refresh and API isolation", () => {
     expect(kv.get("accessTokenExpiresAt")).toBe(originalExpiry);
   });
 
-  it("rate-limits legacy refreshes when Auth0 returns no usable ID token", async () => {
+  it("surfaces legacy refreshes with no usable ID token as reconnect errors", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(response({
       access_token: "renewed-access",
       refresh_token: "renewed-refresh",
@@ -196,15 +221,23 @@ describe("Team PI token refresh and API isolation", () => {
     (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
     (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv } };
 
-    await expect(account.getApiCredentials()).resolves.toEqual({
-      accessToken: "renewed-access",
-      idToken: undefined,
-    });
-    await expect(account.getApiCredentials()).resolves.toEqual({
-      accessToken: "renewed-access",
-      idToken: undefined,
-    });
+    await expect(account.getApiCredentials()).rejects.toThrow(/fresh identity token|Reconnect Team PI/);
+    await expect(account.getApiCredentials()).rejects.toThrow(/fresh identity token|Reconnect Team PI/);
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks expired refresh-token grants and throws an actionable reconnect error", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "invalid_grant" }, 400));
+    const kv = new Kv();
+    const callback = { credentialsExpired: vi.fn() };
+    kv.put("refreshToken", "revoked-refresh");
+    kv.put("callback", callback);
+    const account = new TeamPiAccount({} as never, configEnv());
+    (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv } };
+
+    await expect(account.getAccessToken()).rejects.toThrow(/expired or been revoked|Reconnect Team PI/);
+    expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
   });
 
   it("coalesces concurrent device polls so the Workshop callback completes once", async () => {
@@ -375,6 +408,39 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     ] });
   });
 
+  it("covers a customer/product issue query flow across discovery and provider reads", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ skills: [{ id: "customer-health", name: "Customer Health", description: "Investigate customer product issues" }] }))
+      .mockResolvedValueOnce(response({ connections: { chorus: "chorus-user" }, shared: { zendesk: "zendesk-shared", salesforce: "sf-shared" } }))
+      .mockResolvedValueOnce(response({ account: { id: "acme", name: "Acme", health: "red", productArea: "Onboarding" } }))
+      .mockResolvedValueOnce(response({ tickets: [{ id: "ZD-7", subject: "Onboarding import failing", status: "open" }] }))
+      .mockResolvedValueOnce(response({ account: { id: "001", name: "Acme", csm: "Dana" } }));
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access", idToken: "identity" }), config.baseUrl), approval as never, new Kv() as never);
+
+    await expect(session.listSkills({ query: "customer product issue", limit: 5 })).resolves.toMatchObject({
+      items: [{ id: "customer-health", name: "Customer Health" }],
+    });
+    await expect(session.listConnections()).resolves.toMatchObject({
+      items: expect.arrayContaining([
+        { id: "chorus-user", name: "chorus", provider: "chorus", scope: "user", status: "connected" },
+        { id: "zendesk-shared", name: "zendesk", provider: "zendesk", scope: "shared", status: "connected" },
+        { id: "sf-shared", name: "salesforce", provider: "salesforce", scope: "shared", status: "connected" },
+      ]),
+    });
+    await expect(session.chorusAccount("acme")).resolves.toMatchObject({ account: { name: "Acme", productArea: "Onboarding" } });
+    await expect(session.zendeskSearch({ query: "Acme Onboarding import failing", limit: 5 })).resolves.toMatchObject({ tickets: [{ id: "ZD-7" }] });
+    await expect(session.salesforceAccount("Acme")).resolves.toMatchObject({ account: { csm: "Dana" } });
+    expect(approval.authorizeObservation).toHaveBeenCalledTimes(5);
+    expect(vi.mocked(fetch).mock.calls.map(call => String(call[0]))).toEqual([
+      "https://team-pi.example/api/skills?query=customer+product+issue&limit=5",
+      "https://team-pi.example/connections?limit=10",
+      "https://team-pi.example/chorus/account?q=acme",
+      "https://team-pi.example/zendesk/search?limit=5&q=Acme+Onboarding+import+failing",
+      "https://team-pi.example/salesforce/account?q=Acme",
+    ]);
+  });
+
   it("sanitizes write results and refuses unknown action IDs", async () => {
     const kv = new Kv();
     const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
@@ -452,14 +518,52 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       { limit: 10 },
       authorizer as never,
     )).resolves.toEqual({
-      entries: [{ id: "skill:s1", title: "Skill", description: "Public manifest" }],
+      entries: [
+        { id: "skill:s1", title: "Skill", description: "Public manifest" },
+        { id: "provider:gmail", title: "Gmail", description: "Search and read Gmail messages available through Team PI." },
+        { id: "provider:calendar", title: "Calendar", description: "Read calendar events available through Team PI." },
+        { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
+        { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
+        { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
+        { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
+      ],
       truncated: false,
     });
     expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toBe("https://team-pi.example/api/skills?limit=12");
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
     expect(authorizeObservation).toHaveBeenCalledWith({
-      title: "Read Team PI skill catalog",
-      description: "Listed bounded deployment-public Team PI skill manifests for agent discovery.",
+      title: "Read Team PI skill and provider catalog",
+      description: "Listed bounded Team PI skill manifests and provider capabilities for agent discovery.",
+    });
+  });
+
+  it("returns fallback capabilities when the live catalog cannot load", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "upstream_down" }, 503));
+    const authorizeObservation = vi.fn();
+    const authorizer = Object.assign(new RpcStub({} as never), { authorizeObservation });
+    const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
+    (gatekeeper as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (gatekeeper as unknown as { env: Env; ctx: unknown }).ctx = {
+      props: { accountId: "account-1" },
+      exports: {
+        TeamPiAccount: {
+          idFromString: (id: string) => id,
+          get: () => ({
+            getApiCredentials: async () => ({ accessToken: "access", idToken: "identity" }),
+          }),
+        },
+      },
+    };
+
+    await expect(gatekeeper.getAgentCatalog({ limit: 3 }, authorizer as never)).resolves.toEqual({
+      entries: [
+        { id: "team-pi:catalog-unavailable", title: "Team PI unavailable", description: "Team PI API failed: " },
+      ],
+      truncated: false,
+    });
+    expect(authorizeObservation).toHaveBeenCalledWith({
+      title: "Team PI catalog unavailable",
+      description: "Team PI API failed: ",
     });
   });
 });

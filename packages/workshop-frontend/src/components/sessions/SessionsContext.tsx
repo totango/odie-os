@@ -108,7 +108,7 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
     authenticatedApi.listCodingSessions().then((items) => {
       setSessions(items)
       setLoaded(true)
-      setActiveId((current) => items.some((session) => session.id === current && session.status === 'running') ? current : undefined)
+      setActiveId((current) => items.some((session) => session.id === current && !session.archivedAt) ? current : undefined)
     }).catch((caught: unknown) => {
       setError(caught instanceof Error ? caught.message : 'Could not load coding sessions.')
       setLoaded(true)
@@ -207,7 +207,7 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
     }
   }, [authenticatedApi, refreshActivity])
 
-  const activeSession = sessions.find((session) => session.id === activeId && session.status === 'running')
+  const activeSession = sessions.find((session) => session.id === activeId && !session.archivedAt)
   const availableRepositoryNames = new Set(repositoryOptions.map((option) => option.repository))
   const availablePresets = CODING_SESSION_PRESETS.filter((preset) => preset.repositories.every((repo) => availableRepositoryNames.has(repo)))
 

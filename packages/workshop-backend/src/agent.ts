@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-ai";
 import {
   runAgentLoopContinue, type AgentContext, type AgentEvent, type AgentTool,
+  type ToolExecutionMode,
 } from "@earendil-works/pi-agent-core";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { createTwoFilesPatch, FILE_HEADERS_ONLY } from "diff";
@@ -27,6 +28,22 @@ import {
 } from "./agent-compaction";
 
 const logger = createWorkshopLogger("workshop.agent");
+
+const READ_ONLY_PARALLEL_TOOL_NAMES = new Set<string>([
+  "readFile",
+  "describeBinding",
+  "listBlueprints",
+  "listConnectableResources",
+]);
+
+// pi-agent-core's parallel mode executes a whole assistant tool batch concurrently only when no
+// tool in the batch is marked sequential. Keep this allow-list deliberately narrow: these tools are
+// observations whose durable result order is restored by pi in assistant source order, while all
+// write/action-capable tools remain barriers for approvals, Yjs updates, connection stops, replay,
+// and captured action semantics. Exported only for focused scheduler tests.
+export function agentToolExecutionMode(toolName: string): ToolExecutionMode {
+  return READ_ONLY_PARALLEL_TOOL_NAMES.has(toolName) ? "parallel" : "sequential";
+}
 
 // Additional per-chat-thread info needed by the AI agent but not by the client.
 export type AiChatAgentContext = {
@@ -1090,7 +1107,10 @@ function makeReplayAssistantMessage(
 // the untyped AgentTool erases the parameter type (pi validates tool-call arguments against the
 // schema before calling execute, so the runtime types are guaranteed).
 function defineTool<TParameters extends TSchema>(def: AgentTool<TParameters>): AgentTool {
-  return def as unknown as AgentTool;
+  return {
+    ...def,
+    executionMode: def.executionMode ?? agentToolExecutionMode(def.name),
+  } as unknown as AgentTool;
 }
 
 // Runs one agent turn against the chat's history. Returns a checkpoint when the turn compacted
@@ -2095,15 +2115,15 @@ export async function runAgent(
       workpiece => hooks.resolveWorkpieceRoot(resolveToolWorkpieceId(workpiece), true, chatId));
   let executeCodeStreamManager = new ExecuteCodeStreamManager(emitStreamEvent);
 
-  // Deployment-wide admin instructions, appended to the static system slot (slot 0) so they stay
-  // inside the Anthropic prompt cache window. "" when unset.
-  let instanceInstructions = formatInstanceInstructions(await hooks.getInstanceInstructions());
-
   // The two system prompt slots: the non-project-specific parts, followed by the
   // project-specific parts. Kept as a two-part construction (static slot first) so the shared
   // prefix stays byte-stable for prompt caching; they are concatenated into pi's single
   // Context.systemPrompt string below.
   let systemPromptSlots: [string, string];
+
+  // Deployment-wide admin instructions, appended to the static system slot (slot 0) so they stay
+  // inside the Anthropic prompt cache window. "" when unset.
+  let instanceInstructions = formatInstanceInstructions(await hooks.getInstanceInstructions());
 
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt. Spawned agents see only the
@@ -2210,11 +2230,13 @@ export async function runAgent(
 
     // Named in the prompt because the request that should trigger them ("make me a doc") may
     // not look trigger the agent to browse blueprints.
-    let standardFormats = await hooks.describeStandardFormats();
+    let [standardFormats, connectableVendors] = await Promise.all([
+      hooks.describeStandardFormats(),
+      hooks.listConnectableVendors(),
+    ]);
 
     // Build connectable-vendors section. We only list vendor names here; the agent fetches a
     // vendor's resource URL patterns on demand via listConnectableResources.
-    let connectableVendors = await hooks.listConnectableVendors();
     let systemPromptConnections: string;
     if (connectableVendors.length == 0) {
       systemPromptConnections = "";
@@ -3090,7 +3112,11 @@ export async function runAgent(
       model: handle.model,
       // Replay already produces LLM-shaped messages; no custom message types exist.
       convertToLlm: (messages) => messages as Message[],
-      toolExecution: "sequential",
+      // pi's parallel scheduler falls back to sequential for any batch containing a tool whose
+      // definition is marked sequential. defineTool() marks every tool sequential except the
+      // explicit read-only allow-list, so only all-read batches run concurrently while mixed
+      // read/write/action batches preserve historical ordering.
+      toolExecution: "parallel",
       maxTokens: maxOutputTokens,
       shouldStopAfterTurn: () =>
           // Cancelled during tool execution: the completed turn was persisted by the turn_end

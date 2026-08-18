@@ -8,6 +8,7 @@ import {
   type AgentCatalog,
   type AgentCatalogRequest,
   type AvatarImage,
+  type ConnectionHealthStatus,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
@@ -26,8 +27,9 @@ import {
   type ConnectedServer,
   type ConnectOutcome,
 } from "@gadgets/mcp-shared/account";
+import { scopedTools } from "@gadgets/mcp-shared/catalog";
 import { generateNonce } from "@gadgets/mcp-shared/connect-nonce";
-import type { ConnectionAccount, McpConnection } from "@gadgets/mcp-shared/connection";
+import { withClient, type ConnectionAccount, type McpConnection } from "@gadgets/mcp-shared/connection";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import {
   errorPageHtml,
@@ -197,6 +199,54 @@ export class OdieKgAccount extends McpAccountBase<Env> {
   protected override oauthScope(_server: ConnectedServer): string {
     return ODIE_KG_OAUTH_SCOPE;
   }
+
+  /** Performs a live tenant/tool probe for required-connection health checks. */
+  async getConnectionStatus(): Promise<ConnectionHealthStatus> {
+    const config = readOdieKgConfig(this.env);
+    if (!config) return { state: "unavailable", message: "Totango Knowledge Graph is not configured." };
+    try {
+      const server = await this.getServer();
+      if (!sameEndpoint(server.endpoint, config.endpoint)) {
+        return {
+          state: "unavailable",
+          message: "The Totango Knowledge Graph endpoint changed. Reconnect this account.",
+        };
+      }
+
+      const tools = (await scopedTools({
+        store: this.ctx.storage.kv,
+        log: logger.with({ serverId: ODIE_KG_SERVER_ID, serverHost: hostOf(config.endpoint), trust: "vetted" }),
+        env: this.env,
+        account: this,
+        endpoint: config.endpoint,
+        scope: odieKgToolScope(),
+        trust: "vetted",
+        cacheTtlMs: 0,
+        allowStaleOnRefreshFailure: false,
+      }))
+        .map(applyOdieKgToolPolicy)
+        .filter(entry => entry !== null);
+      if (!tools.some(entry => entry.tool.name === "odie-kg-status")) {
+        return {
+          state: "unavailable",
+          message: "The Odie KG MCP resource did not expose the required status tool.",
+        };
+      }
+
+      const result = await withClient(this.env, this, config.endpoint,
+        client => client.callTool("odie-kg-status", {}));
+      if (result.isError) {
+        const message = mcpToolText(result);
+        return message ? classifyOdieKgStatusError(message) : {
+          state: "unavailable",
+          message: "The Totango Knowledge Graph status check failed. Try again or contact an administrator.",
+        };
+      }
+      return { state: "healthy", message: "Totango Knowledge Graph is reachable and tenant-bound." };
+    } catch (error) {
+      return classifyOdieKgStatusError(error);
+    }
+  }
 }
 
 /** Facet-side credential view that fails closed after a deployment endpoint repoint. */
@@ -301,6 +351,11 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
     return (this.ctx as ExportContext<McpGatekeeperUserProps>).exports.OdieKgVerifier({});
   }
+
+  /** Delegates the required-connection health check to the account Durable Object. */
+  async getConnectionStatus(): Promise<ConnectionHealthStatus> {
+    return this.#account().getConnectionStatus();
+  }
 }
 
 /** Opaque same-vendor verifier; owner-only facets never interrogate it. */
@@ -350,9 +405,36 @@ export class OdieKgGatekeeper
     if (!configured || !sameEndpoint(configured, this.ctx.props.endpoint)) {
       throw new Error("The Totango Knowledge Graph endpoint changed. Reconnect this account.");
     }
-    return (await super.tools())
-      .map(applyOdieKgToolPolicy)
-      .filter(entry => entry !== null);
+    try {
+      return (await scopedTools({
+        store: this.ctx.storage.kv,
+        log: this.log,
+        env: this.env,
+        account: this.account(),
+        endpoint: this.endpoint,
+        scope: this.scope,
+        trust: this.trust,
+        cacheTtlMs: 0,
+        allowStaleOnRefreshFailure: false,
+      }))
+        .map(applyOdieKgToolPolicy)
+        .filter(entry => entry !== null);
+    } catch (error) {
+      const message = boundedErrorMessage(error);
+      if (/reconnect the account|credential|authorization|401/i.test(message)) {
+        throw new Error(
+          "Totango Knowledge Graph credentials are stale or expired. Reconnect the account, " +
+          "then try the TOTANGO_KG binding again.",
+        );
+      }
+      if (/403|does not have access|refused/i.test(message)) {
+        throw new Error(
+          "Totango Knowledge Graph refused access. Ask an administrator to grant the connected " +
+          "account access to the Odie KG MCP resource and tools.",
+        );
+      }
+      throw new Error("Could not load the Totango Knowledge Graph tool catalog. Try again later.");
+    }
   }
 
   get serverName(): string {
@@ -361,7 +443,19 @@ export class OdieKgGatekeeper
 
   /** Describes the ambient customer/internal knowledge binding. */
   async describe(): Promise<ResourceDescription> {
-    const tools = await this.tools();
+    let tools;
+    try {
+      tools = await this.tools();
+    } catch (error) {
+      const message = boundedErrorMessage(error);
+      return {
+        url: this.resourceUrl,
+        title: ODIE_KG_DISPLAY_NAME,
+        snippet: `Unavailable: ${message}`,
+        suggestedBindingName: "TOTANGO_KG",
+        tsType: sessionTypeName(ODIE_KG_SERVER_ID, this.resourceUrl),
+      };
+    }
     return {
       url: this.resourceUrl,
       title: ODIE_KG_DISPLAY_NAME,
@@ -389,18 +483,62 @@ export class OdieKgGatekeeper
     request: AgentCatalogRequest,
     authorizer: RpcStub<ObservationAuthorizer>,
   ): Promise<AgentCatalog> {
-    const entries = (await this.tools()).map(entry => ({
-      id: entry.tool.name,
-      title: entry.tool.title ?? entry.tool.name,
-      description: entry.tool.description?.split(/\r?\n/)[0] ?? "Totango KG read tool.",
-    }));
+    let entries: AgentCatalog["entries"];
+    let unavailable: string | undefined;
+    try {
+      entries = (await this.tools()).map(entry => ({
+        id: entry.tool.name,
+        title: entry.tool.title ?? entry.tool.name,
+        description: entry.tool.description?.split(/\r?\n/)[0] ?? "Totango KG read tool.",
+      }));
+    } catch (error) {
+      unavailable = classifyOdieKgStatusError(error).message
+        ?? "The Totango Knowledge Graph is unavailable. Try again or contact an administrator.";
+      entries = [{
+        id: "totango-kg-unavailable",
+        title: "Totango KG unavailable",
+        description: unavailable,
+      }];
+    }
     const catalog = boundAgentCatalog(entries, request);
     await authorizer.authorizeObservation({
-      title: "Totango Knowledge Graph catalog",
-      description: `Listed ${catalog.entries.length} tenant-scoped KG tool(s).`,
+      title: unavailable ? "Totango Knowledge Graph unavailable" : "Totango Knowledge Graph catalog",
+      description: unavailable ?? `Listed ${catalog.entries.length} tenant-scoped KG tool(s).`,
     });
     return catalog;
   }
+}
+
+function boundedErrorMessage(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim();
+  return message.length <= 512 ? message : `${message.slice(0, 509)}...`;
+}
+
+function classifyOdieKgStatusError(error: unknown): ConnectionHealthStatus {
+  const message = boundedErrorMessage(error);
+  if (/403|does not have access|tenant|unbound|declined|refused/i.test(message)) {
+    return {
+      state: "unavailable",
+      message: "The Totango Knowledge Graph is not authorized for this tenant. Contact an administrator.",
+    };
+  }
+  if (/401|credential|authorization|required authorization|reconnect the account/i.test(message)) {
+    return { state: "expired", message: "Reconnect Totango Knowledge Graph to continue." };
+  }
+  return {
+    state: "unavailable",
+    message: "The Totango Knowledge Graph is unavailable. Try again or contact an administrator.",
+  };
+}
+
+function mcpToolText(result: { content?: unknown }): string | undefined {
+  const content = Array.isArray(result.content) ? result.content : [];
+  const text = content
+    .map(item => item && typeof item === "object" && "text" in item
+      && typeof item.text === "string" ? item.text : "")
+    .filter(Boolean)
+    .join("\n");
+  return text || undefined;
 }
 
 /** Typed MCP session installed with one method per allowlisted KG tool. */

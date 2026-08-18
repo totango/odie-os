@@ -1,4 +1,5 @@
 import { logRpcFailure } from '../rpcErrors'
+import { availableConnectionVendors } from '../connectionAvailability'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
@@ -575,6 +576,8 @@ function ConnectorsPage() {
   const handleConfirmConnect = async (resourceUrlPatterns?: string[]) => {
     if (!modalTarget || modalTarget.kind !== 'connect') return
     const vendorId = modalTarget.vendorId
+    const popup = isTargetAmbient ? null : window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
     setConnecting(true)
     try {
       if (isTargetAmbient) {
@@ -586,10 +589,12 @@ function ConnectorsPage() {
         refreshGatekeeperApps(authenticatedApi)
       } else {
         const { url } = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-        window.open(url, '_blank', 'noopener,noreferrer')
+        if (popup) popup.location.href = url
+        else window.location.assign(url)
       }
       handleCloseModal()
     } catch (err) {
+      popup?.close()
       console.error('Failed to connect account:', err)
       toasts.add({ title: 'Failed to start connection', variant: 'error' })
     } finally {
@@ -599,6 +604,8 @@ function ConnectorsPage() {
 
   const handleEnsureResources = async (resourceUrlPatterns: string[]) => {
     if (!modalTarget || modalTarget.kind !== 'manage') return
+    const popup = window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
     setEnsuringResourceUrlPatterns((prev) => [...new Set([...prev, ...resourceUrlPatterns])])
     try {
       const result = await authenticatedApi.ensureAccountResources(
@@ -606,11 +613,13 @@ function ConnectorsPage() {
         resourceUrlPatterns,
       )
       if (result.url) {
-        window.open(result.url, '_blank', 'noopener,noreferrer')
-      }
+        if (popup) popup.location.href = result.url
+        else window.location.assign(result.url)
+      } else popup?.close()
       // On success the new grant arrives via subscribeConnectedAccounts(); the toggle reflects it
       // once `grantedResourceUrlPatterns` updates.
     } catch (err) {
+      popup?.close()
       console.error('Failed to expand account access:', err)
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })
     } finally {
@@ -640,11 +649,15 @@ function ConnectorsPage() {
   }
 
   const handleReconnect = async (accountId: number) => {
+    const popup = window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
     setReconnectingAccountId(accountId)
     try {
       const { url } = await authenticatedApi.reconnectAccount(accountId)
-      window.open(url, '_blank', 'noopener,noreferrer')
+      if (popup) popup.location.href = url
+      else window.location.assign(url)
     } catch (err) {
+      popup?.close()
       console.error('Failed to reconnect account:', err)
       toasts.add({ title: 'Failed to reconnect account', variant: 'error' })
     } finally {
@@ -675,13 +688,12 @@ function ConnectorsPage() {
   // Connectable vendors = OAuth/resource gatekeepers plus opt-in ambient ones, rendered identically.
   // An ambient vendor is recognized by `description.autoProvisionsAccount`, which routes the connect
   // action to a direct (no-OAuth) add instead.
-  const availableVendors = useMemo<VendorEntry[]>(
-    () => [
-      ...vendors,
-      ...addable,
-    ],
-    [vendors, addable],
-  )
+  const availableVendors = useMemo<VendorEntry[]>(() => {
+    return availableConnectionVendors(
+      [...vendors, ...addable],
+      accounts.map((account) => account.vendorId),
+    )
+  }, [accounts, vendors, addable])
 
   const filteredAvailable = useMemo(() => {
     const matchesSearch = (text: string | undefined) =>

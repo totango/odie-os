@@ -9,6 +9,7 @@ import {
   type AgentCatalogEntry,
   type AgentCatalogRequest,
   type ApprovalQueue,
+  type ConnectionHealthStatus,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
@@ -63,6 +64,15 @@ type StoredIdentity = { displayName?: string; uniqueName?: string };
 type Props = { accountId: string };
 type PendingAction = { kind: "installSkill"; skillId: string } | { kind: "startConnection"; provider: TeamPiProvider };
 type ApplyingAction = PendingAction & { claimedAt: number };
+
+const PROVIDER_CATALOG_ENTRIES: AgentCatalogEntry[] = [
+  { id: "provider:gmail", title: "Gmail", description: "Search and read Gmail messages available through Team PI." },
+  { id: "provider:calendar", title: "Calendar", description: "Read calendar events available through Team PI." },
+  { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
+  { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
+  { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
+  { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
+];
 
 const html = (body: string, init?: ResponseInit) => new Response(body, {
   ...init,
@@ -223,7 +233,13 @@ export class TeamPiAccount extends DurableObject<Env> {
       })();
       await this.#refreshPromise;
     } catch (error) {
-      if (error instanceof TeamPiApiError && error.isAuthError) await this.#notifyExpired();
+      if (error instanceof TeamPiApiError && error.isAuthError) {
+        await this.#notifyExpired();
+        throw new Error(
+          "Team PI credentials have expired or been revoked. Reconnect Team PI from Connections, then retry.",
+          { cause: error },
+        );
+      }
       throw error;
     } finally {
       this.#refreshPromise = undefined;
@@ -246,11 +262,15 @@ export class TeamPiAccount extends DurableObject<Env> {
       idToken = this.ctx.storage.kv.get<string>("idToken");
       idTokenExpiresAt = this.ctx.storage.kv.get<number>("idTokenExpiresAt") ?? 0;
     }
+    if (!idToken || Date.now() >= idTokenExpiresAt - ACCESS_TOKEN_SAFETY_MS) {
+      await this.#notifyExpired();
+      throw new Error(
+        "Team PI requires a fresh identity token for agent reads, but this connection cannot provide one. Reconnect Team PI from Connections, then retry.",
+      );
+    }
     return {
       accessToken,
-      idToken: idToken && Date.now() < idTokenExpiresAt - ACCESS_TOKEN_SAFETY_MS
-        ? idToken
-        : undefined,
+      idToken,
     };
   }
 
@@ -309,6 +329,18 @@ export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements Gatekeep
   async getAuthenticatedEmail(): Promise<string | null> { return null; }
   async getSupportedResources(): Promise<SupportedResource[]> { return [ACCOUNT_RESOURCE]; }
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> { return {}; }
+  async getConnectionStatus(): Promise<ConnectionHealthStatus> {
+    try {
+      await this.#account().getApiCredentials();
+      return { state: "healthy", message: "Team PI credentials are usable." };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/expired|revoked|credentials have not been configured|fresh identity token|reconnect team pi/i.test(message)) {
+        return { state: "expired", message };
+      }
+      return { state: "unavailable", message };
+    }
+  }
   async getGatekeeperClassFor(url: string): Promise<{ class: DurableObjectClass<Gatekeeper<TeamPiSession>>; resource: SupportedResource }> {
     if (url !== ACCOUNT_URL) throw new Error(`Unsupported Team PI resource: ${url}`);
     return { class: this.ctx.exports.TeamPiGatekeeper({ props: this.ctx.props }), resource: ACCOUNT_RESOURCE };
@@ -350,13 +382,29 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TeamPiSession> { return new TeamPiSessionImpl(this.#api(), approvalQueue.dup(), this.ctx.storage.kv); }
   async getAgentCatalog(request: AgentCatalogRequest, authorizer: RpcStub<ObservationAuthorizer>): Promise<AgentCatalog> {
-    const skills = await this.#api().listSkills({ limit: 12 });
-    const entries = catalogEntries("skill", skillsFromEnvelope(skills));
-    await authorizer.authorizeObservation({
-      title: "Read Team PI skill catalog",
-      description: "Listed bounded deployment-public Team PI skill manifests for agent discovery.",
-    });
-    return boundAgentCatalog(entries, request);
+    try {
+      const skills = await this.#api().listSkills({ limit: 12 });
+      const entries = [...catalogEntries("skill", skillsFromEnvelope(skills)), ...PROVIDER_CATALOG_ENTRIES];
+      await authorizer.authorizeObservation({
+        title: "Read Team PI skill and provider catalog",
+        description: "Listed bounded Team PI skill manifests and provider capabilities for agent discovery.",
+      });
+      return boundAgentCatalog(entries, request);
+    } catch (error) {
+      logger.warn("team pi catalog fallback used", {
+        event: "team_pi.catalog.fallback.used", accountId: this.ctx.props.accountId, error,
+      });
+      const message = boundString(error instanceof Error ? error.message : String(error), 512);
+      await authorizer.authorizeObservation({
+        title: "Team PI catalog unavailable",
+        description: message,
+      });
+      return boundAgentCatalog([{
+        id: "team-pi:catalog-unavailable",
+        title: "Team PI unavailable",
+        description: message,
+      }], request);
+    }
   }
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> { throw new Error("Team PI observations are private to the connected user and cannot be observed by collaborators."); }
   async removeObserver(_id: string): Promise<void> {}
@@ -370,7 +418,11 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
         : sanitizeStartConnectionResult(pending.provider, raw, resolveConfig(this.env).baseUrl);
       this.ctx.storage.kv.put(resultKey(action), { status: "ready", result });
     } catch (error) {
-      this.ctx.storage.kv.put(resultKey(action), { status: "unknown", message: error instanceof Error ? error.message : String(error), canRetry: false });
+      this.ctx.storage.kv.put(resultKey(action), {
+        status: "unknown",
+        message: boundString(error instanceof Error ? error.message : String(error), 512),
+        canRetry: false,
+      });
     }
     this.ctx.storage.kv.delete(applyingKey(action));
   }

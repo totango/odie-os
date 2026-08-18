@@ -4679,24 +4679,6 @@ class OverseerImpl implements AgentHooks {
         dirty = true;
       }
     }
-    let seededTargets = new Set(Object.values(seedMap));
-    for (let id of ambientIds) {
-      if (seededTargets.has(id)) continue;
-      let gk = this.storage.gatekeepers.get(id);
-      if (!gk) continue;
-      let suggested: string | undefined;
-      try {
-        suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
-      } catch (err) {
-        this.logger.warn("failed to fetch suggested binding name for ambient resource", {
-          event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
-        });
-      }
-      seedMap[fallbackBindingName(suggested || "RESOURCE", name => name in seedMap)] = id;
-      seededTargets.add(id);
-      dirty = true;
-    }
-
     // --- The naming chokepoint: stamp binding names onto persisted messages that lack them. ---
     // First collect every name already in the chat's scope (and a target -> name map for reuse)
     // from the seed plus the log -- including the callback PARAMS_<n> names the replay loop will
@@ -4775,6 +4757,29 @@ class OverseerImpl implements AgentHooks {
         } while (taken.has(name));
         taken.add(name);
       }
+    }
+
+    // Restore active ambient targets only after reserving every persisted chat name. A singleton
+    // re-enabled after chat creation must not reclaim a name that history already binds elsewhere.
+    let seededTargets = new Set(Object.values(seedMap));
+    for (let id of ambientIds) {
+      if (seededTargets.has(id)) continue;
+      let gk = this.storage.gatekeepers.get(id);
+      if (!gk) continue;
+      let suggested: string | undefined;
+      try {
+        suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
+      } catch (err) {
+        this.logger.warn("failed to fetch suggested binding name for ambient resource", {
+          event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
+        });
+      }
+      let name = fallbackBindingName(suggested || "RESOURCE", candidate => taken.has(candidate));
+      seedMap[name] = id;
+      seededTargets.add(id);
+      taken.add(name);
+      if (!nameByTarget.has(id)) nameByTarget.set(id, name);
+      dirty = true;
     }
 
     if (anythingToName) {

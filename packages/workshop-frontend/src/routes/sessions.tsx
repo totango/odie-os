@@ -26,7 +26,7 @@ export const Route = createFileRoute('/sessions')({ component: SessionsPage })
 export function SessionsPage() {
   useDocumentTitle('Code')
   const sessions = useSessionsContext()
-  const { github, activeSession, error, activity, resolveActivity, restartSession, stopSession, archiveSession, setActiveId } = sessions
+  const { github, activeSession, error, activity, resolveActivity, restartSession, stopSession, archiveSession, setActiveId, refresh } = sessions
   const [terminalKind, setTerminalKind] = useState<'opencode' | 'shell'>('opencode')
 
   if (github.state === 'loading') return <CenteredMessage>Checking GitHub connection…</CenteredMessage>
@@ -46,7 +46,7 @@ export function SessionsPage() {
               <div className="truncate text-[13px] font-medium text-kumo-strong">{activeSession.title}</div>
               <div className="truncate text-[11px] text-kumo-subtle">{activeSession.repositories.join(' / ')}</div>
             </div>
-            <span className="hidden text-[11px] text-kumo-success md:inline">running</span>
+            <span className={`hidden text-[11px] md:inline ${activeSession.status === 'running' ? 'text-kumo-success' : 'text-kumo-danger'}`}>{activeSession.status}</span>
             <WorkshopButton
               title="Discards uncommitted sandbox changes and reclones repositories"
               aria-label="Restart environment"
@@ -58,9 +58,11 @@ export function SessionsPage() {
             >
               <ArrowClockwise size={13} /> <span className="hidden md:inline">Restart</span>
             </WorkshopButton>
-            <WorkshopButton aria-label="Stop session" onClick={() => stopSession(activeSession.id)}>
-              <Stop size={13} /> <span className="hidden sm:inline">Stop</span>
-            </WorkshopButton>
+            {activeSession.status === 'running' && (
+              <WorkshopButton aria-label="Stop session" onClick={() => stopSession(activeSession.id)}>
+                <Stop size={13} /> <span className="hidden sm:inline">Stop</span>
+              </WorkshopButton>
+            )}
             <WorkshopIconButton aria-label="Archive session" onClick={() => archiveSession(activeSession.id)}>
               <Archive size={15} />
             </WorkshopIconButton>
@@ -83,7 +85,13 @@ export function SessionsPage() {
         </div>
         {error && <div className="border-b border-kumo-danger/20 bg-kumo-danger-tint px-3 py-2 text-xs text-kumo-danger">{error}</div>}
         <div className={`grid min-h-0 flex-1 ${sessionActivity.some((entry) => entry.state === 'pending') ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
-          <div className="min-h-0"><SessionTerminal key={`${terminalKind}:${activeSession.lastActiveAt.valueOf()}`} sessionId={activeSession.id} terminalKind={terminalKind} runtime={activeSession.runtime} /></div>
+          <div className="min-h-0">
+            {activeSession.status === 'running' ? (
+              <SessionTerminal key={`${terminalKind}:${activeSession.lastActiveAt.valueOf()}`} sessionId={activeSession.id} terminalKind={terminalKind} runtime={activeSession.runtime} onSessionUnavailable={refresh} />
+            ) : (
+              <SessionRecoveryPanel session={activeSession} onRestart={restartSession} />
+            )}
+          </div>
           {sessionActivity.some((entry) => entry.state === 'pending') && (
             <ActivityPanel activity={sessionActivity} onResolve={resolveActivity} />
           )}
@@ -93,6 +101,40 @@ export function SessionsPage() {
   }
 
   return <NewSessionPane />
+}
+
+function SessionRecoveryPanel({ session, onRestart }: { session: { id: string; status: string; error?: string }; onRestart: (id: string) => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  return (
+    <div className="flex h-full items-center justify-center bg-kumo-tint/30 px-6 text-center">
+      <div className="max-w-md rounded-2xl border border-kumo-line bg-kumo-base p-6 shadow-sm">
+        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-kumo-fill text-kumo-brand">
+          <ArrowClockwise size={20} weight="bold" />
+        </div>
+        <h2 className="mt-4 text-lg font-semibold text-kumo-default">Environment needs restart</h2>
+        <p className="mt-2 text-sm leading-6 text-kumo-subtle">
+          This coding session is {session.status}. Restart it to create a fresh sandbox and reconnect the terminal.
+        </p>
+        {session.error && <p className="mt-3 rounded-lg border border-kumo-danger/20 bg-kumo-danger-tint px-3 py-2 text-xs text-kumo-danger">{session.error}</p>}
+        <WorkshopButton
+          tone="primary"
+          className="mt-5 !h-10 !rounded-lg !px-4"
+          disabled={busy}
+          onClick={async () => {
+            if (!window.confirm('Restart this environment? Uncommitted sandbox changes will be discarded.')) return
+            setBusy(true)
+            try {
+              await onRestart(session.id)
+            } finally {
+              setBusy(false)
+            }
+          }}
+        >
+          <ArrowClockwise size={14} /> {busy ? 'Restarting…' : 'Restart environment'}
+        </WorkshopButton>
+      </div>
+    </div>
+  )
 }
 
 function CodeSetupScreen() {

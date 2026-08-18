@@ -87,6 +87,11 @@ declare global {
       // Public base URL of the deployment.
       PUBLIC_BASE_URL?: string;
 
+      // Comma-separated gatekeeper vendor ids that must be connected and healthy for this deployment.
+      // Generic deployments leave this unset; hosted Odie production sets its first-party required
+      // connections explicitly in wrangler config.
+      REQUIRED_HEALTHY_CONNECTIONS?: string;
+
       // Daily free-tier LLM-call limit (per user). Defaults to DEFAULT_DAILY_LLM_CALL_LIMIT.
       DAILY_LLM_CALL_LIMIT?: string;
 

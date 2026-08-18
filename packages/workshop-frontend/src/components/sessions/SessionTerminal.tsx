@@ -19,10 +19,12 @@ export default function SessionTerminal({
   sessionId,
   terminalKind = 'opencode',
   runtime = 'opencode',
+  onSessionUnavailable,
 }: {
   sessionId: string
   terminalKind?: CodingSessionTerminalKind
   runtime?: CodingSessionRuntime
+  onSessionUnavailable?: () => void
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const { resolvedThemeMode } = useTheme()
@@ -164,6 +166,8 @@ export default function SessionTerminal({
             setError(message.message ?? 'Terminal error.')
           } else if (message.type === 'exit') {
             setError(`Terminal exited${message.exit?.code === undefined ? '' : ` (${message.exit.code})`}.`)
+            setState('disconnected')
+            onSessionUnavailable?.()
           } else {
             setError('Terminal protocol error.')
             socket?.close()
@@ -173,12 +177,23 @@ export default function SessionTerminal({
           socket?.close()
         }
       })
-      socket.addEventListener('close', () => { if (!cancelled) setState('disconnected') })
-      socket.addEventListener('error', () => { if (!cancelled) setError('Terminal connection failed.') })
+      socket.addEventListener('close', () => {
+        if (!cancelled) {
+          setState('disconnected')
+          onSessionUnavailable?.()
+        }
+      })
+      socket.addEventListener('error', () => {
+        if (!cancelled) {
+          setError('Terminal connection failed.')
+          onSessionUnavailable?.()
+        }
+      })
     }).catch((caught: unknown) => {
       if (!cancelled) {
         setError(caught instanceof Error ? caught.message : 'Could not attach to terminal.')
         setState('disconnected')
+        onSessionUnavailable?.()
       }
     })
 
@@ -193,7 +208,7 @@ export default function SessionTerminal({
       terminal.dispose()
       terminalRef.current = null
     }
-  }, [authenticatedApi, attempt, sessionId, terminalKind]) // Theme updates are applied without reconnecting below.
+  }, [authenticatedApi, attempt, onSessionUnavailable, sessionId, terminalKind]) // Theme updates are applied without reconnecting below.
 
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_THEMES[resolvedThemeMode]

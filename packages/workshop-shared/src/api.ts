@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 
 export const SERVICE_SALT = new Uint8Array([
@@ -588,6 +588,15 @@ export interface AuthenticatedApi extends RpcTarget {
   // List all third-party services that this account can connect to.
   listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]>;
 
+  /**
+   * Returns the live health of deployment-required connections for this user.
+   *
+   * Generic deployments return an empty list unless the backend is configured with required vendor
+   * ids. `expired` entries include `accountId` so callers can use reconnectAccount(accountId) rather
+   * than starting a duplicate connect flow.
+   */
+  getRequiredConnectionStatuses(): Promise<RequiredConnectionStatus[]>;
+
   // Connect this account to a specific account on a third-party service. Returns the URL which
   // should be opened in a new tab in the user's browser to complete the authorization. When the
   // authorization flow completes, the account will be added to the list, which can be observed
@@ -827,6 +836,24 @@ export type GatekeeperVendorInfo = {
   // Present when a bound gatekeeper could not be queried. UIs should surface this to the user but
   // not offer it as connectable.
   unavailable?: boolean;
+};
+
+/** Live health of one deployment-required connection for the authenticated user. */
+export type RequiredConnectionStatus = {
+  /** Required gatekeeper vendor id, matching the GATEKEEPER_* binding suffix. */
+  vendorId: string;
+
+  /** Human-readable vendor name resolved from GatekeeperVendor.describe(), or the id if unavailable. */
+  displayName: string;
+
+  /** Current connection state after any configured live probe has run. */
+  state: ConnectionHealthState;
+
+  /** Existing connected-account id, present when reconnecting or diagnosing that account is possible. */
+  accountId?: number;
+
+  /** Human-readable, non-secret explanation of the status. */
+  message?: string;
 };
 
 // Maximum length (characters) of the admin-authored agent system-prompt instructions.

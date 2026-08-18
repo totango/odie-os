@@ -17,7 +17,7 @@ export class TeamPiApiError extends Error {
   }
 
   get isAuthError(): boolean {
-    return this.status === 401 || this.status === 403;
+    return this.status === 401 || this.status === 403 || this.code === "invalid_grant";
   }
 }
 
@@ -249,7 +249,24 @@ export class TeamPiApi {
       headers,
     });
     const json = await boundedJson(response);
-    if (!response.ok) throw new TeamPiApiError(`Team PI API failed: ${response.statusText}`, response.status);
+    if (!response.ok) {
+      const code = typeof json.error === "string" ? json.error : undefined;
+      if (response.status === 401) {
+        throw new TeamPiApiError(
+          "Team PI rejected the stored credentials. Reconnect Team PI from Connections, then retry.",
+          response.status,
+          code,
+        );
+      }
+      if (response.status === 403) {
+        throw new TeamPiApiError(
+          "Team PI denied access. Reconnect Team PI or connect the required provider/skill, then retry.",
+          response.status,
+          code,
+        );
+      }
+      throw new TeamPiApiError(`Team PI API failed: ${response.statusText}`, response.status, code);
+    }
     return boundJsonValue(json);
   }
 }
@@ -296,7 +313,10 @@ async function auth0Post(config: TeamPiConfig, path: string, body: URLSearchPara
     body,
   });
   const json = await boundedJson(response);
-  if (!response.ok) throw new TeamPiApiError(`Auth0 request failed: ${response.statusText}`, response.status);
+  if (!response.ok) {
+    const code = typeof json.error === "string" ? json.error : undefined;
+    throw new TeamPiApiError(`Auth0 request failed: ${code ?? response.statusText}`, response.status, code);
+  }
   return json;
 }
 

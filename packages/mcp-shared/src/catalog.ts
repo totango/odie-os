@@ -46,6 +46,11 @@ export type CatalogRequest = {
   // Read from the deployment's current configuration on every call, never from stored account
   // state, so withdrawing the tier takes effect without a reconnect. See `ServerTrust`.
   trust: ServerTrust;
+  // Defaults to CATALOG_TTL_MS. A connector can force a live catalog probe when stale auth must be
+  // surfaced immediately rather than masked by a recently cached catalog.
+  cacheTtlMs?: number;
+  // Defaults to true. Set false for bindings where a cached catalog must not hide a failed refresh.
+  allowStaleOnRefreshFailure?: boolean;
 };
 
 // Returns the tools this binding may call, refreshing from the server when the cache is stale.
@@ -58,7 +63,8 @@ export async function scopedTools(request: CatalogRequest): Promise<ClassifiedTo
   let tools = cached?.tools;
   let truncated = cached?.truncated ?? false;
 
-  if (!cached || Date.now() - cached.fetchedAt > CATALOG_TTL_MS) {
+  const cacheTtlMs = request.cacheTtlMs ?? CATALOG_TTL_MS;
+  if (!cached || Date.now() - cached.fetchedAt >= cacheTtlMs) {
     try {
       const fetched = await fetchTools(request.env, request.account, request.endpoint);
       const revision = await catalogRevision(fetched.tools);
@@ -84,7 +90,7 @@ export async function scopedTools(request: CatalogRequest): Promise<ClassifiedTo
       }
     } catch (err) {
       // Serve the last known catalog rather than breaking a running Gadget on a transient failure.
-      if (!tools) throw err;
+      if (!tools || request.allowStaleOnRefreshFailure === false) throw err;
       request.log.warn("could not refresh tool catalog", {
         event: "catalog.refresh.failed", error: err,
       });
