@@ -392,7 +392,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       });
     } catch (error) {
       const current = this.#get(id);
-      if (current && (current.sandboxId !== record.sandboxId || current.status !== "starting")) {
+      if (!current) throw error;
+      if (current.sandboxId !== record.sandboxId || current.status !== "starting") {
         return publicSummary(current);
       }
       record = { ...record, status: "failed", error: boundedError(error), lastActiveAt: new Date() };
