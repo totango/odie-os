@@ -1,0 +1,22 @@
+FROM docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60
+
+LABEL org.opencontainers.image.source="https://github.com/totango/odie-os"
+
+ARG PI_VERSION=0.84.2
+ARG PI_MCP_ADAPTER_VERSION=2.26.0
+
+COPY pi-image/package.json pi-image/package-lock.json /opt/odie-pi/
+
+# Lifecycle scripts stay disabled; the reviewed lockfile is the complete runtime dependency set.
+RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
+    && ln -s /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi \
+    && opencode --version \
+    && pi --version \
+    && test "$(node -p "require('/opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" = "$PI_VERSION" \
+    && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
+    && node \
+      --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
+      --eval 'import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => { const create = module.createMcpAdapter ?? module.default?.createMcpAdapter; if (typeof create !== "function") process.exit(1); })'
+
+LABEL org.opencontainers.image.source="https://github.com/totango/odie-os" \
+      org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, and pi-mcp-adapter"

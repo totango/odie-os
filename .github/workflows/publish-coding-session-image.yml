@@ -1,0 +1,81 @@
+name: Publish coding session image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-coding-session-image-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/totango/odie-os-coding-session
+  PI_VERSION: "0.84.2"
+  PI_MCP_ADAPTER_VERSION: "2.26.0"
+
+jobs:
+  publish:
+    if: github.repository == 'totango/odie-os' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Verify tested current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          test "$main_sha" = "$GITHUB_SHA"
+          conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&status=completed&per_page=20" --jq '[.workflow_runs[] | select(.head_branch == "main")][0].conclusion // ""')"
+          test "$conclusion" = "success"
+
+      - name: Build and push image
+        env:
+          TAG: ${{ github.sha }}
+        run: |
+          if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing image tag $IMAGE:$TAG" >&2
+            exit 1
+          fi
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg "PI_VERSION=$PI_VERSION" \
+            --build-arg "PI_MCP_ADAPTER_VERSION=$PI_MCP_ADAPTER_VERSION" \
+            --tag "$IMAGE:$TAG" \
+            --file packages/gatekeeper-sessions/Dockerfile.pi \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file image-metadata.json \
+            --push \
+            packages/gatekeeper-sessions
+
+      - name: Record immutable digest
+        env:
+          TAG: ${{ github.sha }}
+        run: |
+          digest="$(jq --raw-output ".[\"containerimage.digest\"]" image-metadata.json)"
+          test -n "$digest"
+          test "$digest" != "null"
+          printf '%s@%s\n' "$IMAGE" "$digest" > image-digest.txt
+          printf "Published \`%s\`\n" "$digest" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nMake the package public in its GitHub package settings before runtime use.\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable digest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coding-session-image-${{ github.sha }}
+          path: image-digest.txt
+          if-no-files-found: error
+          retention-days: 90
