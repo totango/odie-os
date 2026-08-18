@@ -44,6 +44,7 @@ type SessionsLogFields = {
   sessionId?: string;
   userId?: string;
   repositoryCount?: number;
+  startupDurationMs?: number;
   mcpMethod?: string;
   status?: number;
 };
@@ -105,19 +106,6 @@ export class CodingSessionSandbox extends Sandbox<Env> {
     });
   }
 
-  /** Clones one selected repository through the configured credential proxy. */
-  async checkoutRepository(repository: CodingSessionRepository): Promise<void> {
-    await this.exec([
-      "git", "clone", "--depth=1", "--filter=blob:none",
-      `${GITHUB_ORIGIN}/totango/${repository}.git`, `/workspace/${repository}`,
-    ], { timeout: 120_000 });
-    const headPath = `/workspace/${repository}/.git/HEAD`;
-    for (let attempt = 0; attempt < 120; attempt++) {
-      if ((await this.exists(headPath)).exists) return;
-      await delay(1_000);
-    }
-    throw new Error(`Timed out cloning ${repository}.`);
-  }
 }
 
 // Assignment must invoke Container's inherited static setter, which installs these handlers in the
@@ -403,6 +391,11 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         repositoryCount: repositories.length,
       });
     } catch (error) {
+      const current = this.#get(id);
+      if (!current) throw error;
+      if (current.sandboxId !== record.sandboxId || current.status !== "starting") {
+        return publicSummary(current);
+      }
       record = { ...record, status: "failed", error: boundedError(error), lastActiveAt: new Date() };
       this.#put(record);
       logger.error("coding session failed to start", {
@@ -578,13 +571,20 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     owner: CodingSessionOwner,
     customization: OpenCodeUserCustomization,
   ): Promise<SessionRecord> {
+    const startedAt = Date.now();
     const policy = policyForSandbox(this.env, record.sandboxId);
     await policy.configure({ sessionId: record.id, owner, repositories: record.repositories });
     const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
-    await sandbox.destroy();
     const token = await policy.getInstallationToken();
     await sandbox.configureGitHubAuth(token);
-    for (const repository of record.repositories) await sandbox.checkoutRepository(repository);
+    for (const repository of record.repositories) {
+      const clone = await sandbox.exec([
+        "git", "clone", "--depth=1", "--filter=blob:none",
+        `${GITHUB_ORIGIN}/totango/${repository}.git`, `/workspace/${repository}`,
+      ], { timeout: 120_000 });
+      const exit = await clone.waitForExit({ timeout: 125_000 });
+      if (exit.code !== 0 || exit.timedOut) throw new Error(`Failed to clone ${repository}.`);
+    }
     await materializeOpenCodeCustomization(sandbox, customization);
     const terminal = await sandbox.createTerminal({
       command: ["/bin/bash", "-lc", `cd /workspace/${record.repositories[0]} && exec opencode`],
@@ -601,6 +601,13 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     }
     const running = { ...record, status: "running" as const, terminalId: terminal.id, lastActiveAt: new Date() };
     this.#put(running);
+    logger.info("coding session environment ready", {
+      event: "coding.session.environment.ready",
+      sessionId: record.id,
+      userId: owner.userId,
+      repositoryCount: record.repositories.length,
+      startupDurationMs: Date.now() - startedAt,
+    });
     return running;
   }
 }
@@ -795,10 +802,6 @@ function required(value: string | undefined, name: string): string {
 
 function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
 function randomToken(): string {
