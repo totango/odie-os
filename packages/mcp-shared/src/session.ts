@@ -104,7 +104,7 @@ export class McpSessionBase extends RpcTarget {
     if (!entry) {
       // Worded from the grant's point of view: on a scoped binding the tool may exist on the server,
       // and "no such tool" would send an agent looking for a typo.
-      const available = tools.map(candidate => candidate.tool.name).join(", ");
+      const available = (host.scope.tools ?? tools.map(candidate => candidate.tool.name)).join(", ");
       throw new Error(isWholeEndpoint(host.scope)
         ? `The MCP server "${host.serverName}" has no tool named "${name}". Available: ${available}`
         : `This binding grants only these tools: ${available}.`);

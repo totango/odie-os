@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type OpenCodeUserCustomization } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
@@ -65,11 +65,22 @@ export type ProvidedAccountInfo = {
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser,
   "getSingletonGatekeeperClass" | "getSingletonGatekeeperAuthority" | "startAppUi">>;
+type ConnectionStatusAccountStub = Required<Pick<GatekeeperUser, "getConnectionStatus">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
   if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
   return true;
+}
+
+function requiredHealthyConnectionVendorIds(env: Cloudflare.Env): string[] {
+  let raw = env.REQUIRED_HEALTHY_CONNECTIONS;
+  if (!raw) return [];
+  let vendorIds = raw.split(",").map(value => value.trim().toLowerCase());
+  if (vendorIds.some(value => !/^[a-z][a-z0-9_]*$/.test(value))) {
+    throw new Error("REQUIRED_HEALTHY_CONNECTIONS contains an invalid vendor ID.");
+  }
+  return [...new Set(vendorIds)];
 }
 
 // Vendor id of the Cloudflare gatekeeper (the suffix of GATEKEEPER_CLOUDFLARE, lowercased). The AI
@@ -1224,6 +1235,91 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return (await Promise.all(promises)).filter(value => value !== null);
   }
 
+  async getRequiredConnectionStatuses(): Promise<RequiredConnectionStatus[]> {
+    const requiredVendorIds = requiredHealthyConnectionVendorIds(this.env);
+    if (requiredVendorIds.length === 0) return [];
+
+    const config = await readAdminConfig(this.env);
+    const disabledGatekeepers = new Set(config.disabledGatekeepers);
+    return Promise.all(requiredVendorIds.map(vendorId =>
+      this.#requiredConnectionStatus(vendorId, disabledGatekeepers)));
+  }
+
+  /** Rejects operations that require every deployment-mandated connection to be healthy. */
+  async assertRequiredConnectionsHealthy(): Promise<void> {
+    const statuses = await this.getRequiredConnectionStatuses();
+    if (statuses.some(({ state }) => state !== "healthy")) {
+      throw new Error("Required connections must be healthy before using workspaces or coding sessions.");
+    }
+  }
+
+  async #requiredConnectionStatus(vendorId: string, disabledGatekeepers: Set<string>)
+      : Promise<RequiredConnectionStatus> {
+    const vendor = this.vendors.get(vendorId);
+    const displayName = await this.#requiredVendorDisplayName(vendorId, vendor);
+    if (!vendor) {
+      return { vendorId, displayName, state: "unavailable", message: "Required service is not installed." };
+    }
+    if (disabledGatekeepers.has(vendorId)) {
+      return { vendorId, displayName, state: "unavailable", message: "Required service is disabled by an administrator." };
+    }
+
+    const records = [...this.#connectedAccountRecords()].filter(record => record.vendorId === vendorId);
+    if (records.length === 0) {
+      return { vendorId, displayName, state: "missing", message: "Connect this required service." };
+    }
+
+    let fallback: RequiredConnectionStatus | undefined;
+    for (const record of records) {
+      if (!areCredentialsValid(record)) {
+        fallback ??= {
+          vendorId,
+          displayName,
+          state: "expired",
+          accountId: record.id,
+          message: "Reconnect this required service.",
+        };
+        continue;
+      }
+      try {
+        const status = await (record.account as unknown as ConnectionStatusAccountStub)
+          .getConnectionStatus();
+        if (status.state === "expired") await this.markCredentialsExpired(record.id);
+        const result = {
+          vendorId,
+          displayName,
+          state: status.state,
+          accountId: record.id,
+          message: status.message,
+        } satisfies RequiredConnectionStatus;
+        if (status.state === "healthy") return result;
+        fallback ??= result;
+      } catch (error) {
+        logger.warn("required connection status check failed", {
+          event: "required.connection.status.failed", vendorId, accountId: record.id, error,
+        });
+        fallback ??= {
+          vendorId,
+          displayName,
+          state: "unavailable",
+          accountId: record.id,
+          message: "The required connection could not be checked. Try again or contact an administrator.",
+        };
+      }
+    }
+    return fallback ?? { vendorId, displayName, state: "missing", message: "Connect this required service." };
+  }
+
+  async #requiredVendorDisplayName(vendorId: string, vendor: Service<GatekeeperVendor> | undefined)
+      : Promise<string> {
+    if (!vendor) return vendorId;
+    try {
+      return (await vendor.describe()).displayName;
+    } catch {
+      return vendorId;
+    }
+  }
+
   async connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
@@ -1337,9 +1433,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return { owner: { userId: this.ctx.id.toString(), email: profile.id }, service };
   }
 
-  /** Lists coding sessions after enforcing a valid GitHub connection. */
+  /** Lists owned coding sessions even when GitHub credentials need reconnection. */
   async listCodingSessions(): Promise<CodingSessionSummary[]> {
-    let {owner, service} = await this.#codingSessionsAccess();
+    let {owner, service} = await this.#codingSessionsOwner();
     return service.listSessions(owner);
   }
 
@@ -1769,6 +1865,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
       if (config.disabledGatekeepers.includes(rec.vendorId)) continue;
+      if (!areCredentialsValid(rec)) continue;
       // Auto-provisioned provider declarations may evolve after an account was persisted (for
       // example a singleton adding revisioned authority). Refresh them at this cold boundary without
       // adding remote calls for ordinary connected accounts.
@@ -1801,7 +1898,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // Present only when description.singleton is set; gate on that, then call through the derived
     // SingletonAccountStub view (see its definition for why the cast is needed).
     if (!record?.description.singleton) return null;
-    if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(record.vendorId)) return null;
+    if (!areCredentialsValid(record)) return null;
+    let config = await readAdminConfig(this.env);
+    if (config.disabledGatekeepers.includes(record.vendorId) ||
+        record.autoProvisioned && ambientGatekeeperMode(config, record.vendorId) === "disabled") return null;
     let account = record.account as unknown as SingletonAccountStub;
     if (record.description.singleton.revisionedAuthority) {
       let authority = await account.getSingletonGatekeeperAuthority();
@@ -1822,6 +1922,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    if (!areCredentialsValid(record)) throw new Error("This connection needs to be reconnected before it can be used.");
     let config = await readAdminConfig(this.env);
     let vendorId = record.vendorId.toLowerCase();
     if (config.disabledGatekeepers.includes(vendorId) ||
@@ -2134,6 +2235,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
                   typeUrlPattern: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
+    if (!areCredentialsValid(account)) throw new Error("This connection needs to be reconnected before it can be used.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
 
     // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a

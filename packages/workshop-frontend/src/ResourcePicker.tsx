@@ -390,11 +390,15 @@ export default function ResourcePicker({
   // --- Connect new account handler ---
 
   const handleConnectNew = async (vendorId: string, resourceUrlPatterns?: string[]) => {
+    const popup = window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
     setConnectingVendor(vendorId)
     try {
       const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      if (popup) popup.location.href = result.url
+      else window.location.assign(result.url)
     } catch (error) {
+      popup?.close()
       console.error('Failed to initiate connection:', error)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
     } finally {
@@ -406,14 +410,18 @@ export default function ResourcePicker({
 
   const handleGrantResourceAccess = useCallback(async (accountId: number, resourceUrlPatterns: string[]) => {
     if (resourceUrlPatterns.length === 0) return
+    const popup = window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
     setGrantingAccount(accountId)
     try {
       const result = await authenticatedApi.ensureAccountResources(accountId, resourceUrlPatterns)
       if (result.url) {
-        window.open(result.url, '_blank', 'noopener,noreferrer')
+        if (popup) popup.location.href = result.url
+        else window.location.assign(result.url)
         toasts.add({ title: 'Grant the additional access in the new tab.', variant: 'success' })
-      }
+      } else popup?.close()
     } catch (error) {
+      popup?.close()
       console.error('Failed to request additional access:', error)
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })
     } finally {
@@ -424,13 +432,17 @@ export default function ResourcePicker({
   // --- Reconnect expired account handler ---
 
   const handleReconnect = useCallback(async (accountId: number) => {
+    const popup = window.open('about:blank', '_blank')
+    if (popup) popup.opener = null
     setReconnectingAccount(accountId)
     try {
       const result = await authenticatedApi.reconnectAccount(accountId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      if (popup) popup.location.href = result.url
+      else window.location.assign(result.url)
       // The subscription will fire add() with credentialsValid: true when reconnect completes.
       // The reconnectingAccount state is cleared at that point.
     } catch (error) {
+      popup?.close()
       console.error('Failed to initiate reconnection:', error)
       toasts.add({ title: 'Failed to start re-authentication flow', variant: 'error' })
       setReconnectingAccount(null)

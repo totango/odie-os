@@ -1,6 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { zstdDecompressSync } from "node:zlib";
-import { ContainerProxy, Sandbox, getSandbox } from "@cloudflare/sandbox";
+import { ContainerProxy, Sandbox, getSandbox, type Terminal } from "@cloudflare/sandbox";
 import type { OutboundHandlerContext } from "@cloudflare/containers";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
@@ -83,6 +83,9 @@ type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
 type AttachTicket = {
   sandboxId: string;
   terminalId: string;
+  userId: string;
+  sessionId: string;
+  terminalKind: CodingSessionTerminalKind;
   expiresAt: number;
 };
 
@@ -356,7 +359,10 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   readonly #shellTerminalCreations = new Map<string, Promise<string>>();
 
   /** Lists this user's sessions newest first. */
-  listSessions(): CodingSessionSummary[] {
+  async listSessions(): Promise<CodingSessionSummary[]> {
+    for (const record of this.#records()) {
+      if (record.status === "running") await this.#runningPrimaryTerminal(record);
+    }
     return [...this.#records()].map(publicSummary)
       .toSorted((a, b) => b.createdAt.valueOf() - a.createdAt.valueOf());
   }
@@ -509,6 +515,9 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       throw new Error("Coding session is not running.");
     }
     if (terminal !== "opencode" && terminal !== "shell") throw new Error("Invalid terminal type.");
+    const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
+    const primary = await this.#runningPrimaryTerminal(record);
+    if (!primary) throw new Error("Coding session environment expired. Restart the session to continue.");
     await policyForSandbox(this.env, record.sandboxId).configure({
       sessionId: record.id,
       owner,
@@ -516,7 +525,6 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     });
     let terminalId = record.terminalId;
     if (terminal === "shell") {
-      const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
       let shell = record.shellTerminalId ? await sandbox.getTerminal(record.shellTerminalId) : undefined;
       if (!shell) {
         let creation = this.#shellTerminalCreations.get(sessionId);
@@ -542,7 +550,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       }
     }
     const current = this.#get(sessionId);
-    if (!current || current.status !== "running" || !current.terminalId) {
+    if (!current || current.status !== "running" ||
+        current.sandboxId !== record.sandboxId || current.terminalId !== record.terminalId) {
       throw new Error("Coding session is not running.");
     }
     const updated = terminal === "shell" ? { ...current, shellTerminalId: terminalId } : current;
@@ -551,10 +560,14 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     await (await ticketFor(this.env, token)).storeTicket({
       sandboxId: record.sandboxId,
       terminalId,
+      userId: owner.userId,
+      sessionId: record.id,
+      terminalKind: terminal,
       expiresAt: expiresAt.valueOf(),
     });
     const latest = this.#get(sessionId);
-    if (!latest || latest.status !== "running" || !latest.terminalId) {
+    if (!latest || latest.status !== "running" ||
+        latest.sandboxId !== record.sandboxId || latest.terminalId !== record.terminalId) {
       throw new Error("Coding session is not running.");
     }
     this.#put({
@@ -564,6 +577,40 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     });
     const baseUrl = this.env.BASE_URL?.replace(/\/$/, "") ?? "/gatekeeper/sessions";
     return { url: `${baseUrl}/attach/${token}`, expiresAt };
+  }
+
+  /** Records that the persisted primary terminal can no longer serve this session. */
+  markTerminalUnavailable(sessionId: string, sandboxId: string, terminalId: string | undefined, reason: string): void {
+    const record = this.#get(sessionId);
+    if (!record || record.sandboxId !== sandboxId ||
+        terminalId !== undefined && record.terminalId !== terminalId || record.status !== "running") return;
+    this.#put({
+      ...record,
+      status: "failed",
+      terminalId: undefined,
+      shellTerminalId: undefined,
+      error: reason,
+      lastActiveAt: new Date(),
+    });
+  }
+
+  async #runningPrimaryTerminal(record: SessionRecord): Promise<Terminal | undefined> {
+    const terminalId = record.terminalId;
+    if (!terminalId) {
+      this.markTerminalUnavailable(record.id, record.sandboxId, undefined, "Coding session environment expired. Restart the session to continue.");
+      return undefined;
+    }
+    const terminal = await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).getTerminal(terminalId);
+    if (!terminal) {
+      this.markTerminalUnavailable(record.id, record.sandboxId, terminalId, "Coding session environment expired. Restart the session to continue.");
+      return undefined;
+    }
+    const snapshot = await terminal.getSnapshot();
+    if (snapshot.status !== "running") {
+      this.markTerminalUnavailable(record.id, record.sandboxId, terminalId, "Coding session terminal exited. Restart the session to continue.");
+      return undefined;
+    }
+    return terminal;
   }
 
   *#records(): Generator<SessionRecord> {
@@ -682,7 +729,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   }
 }
 
-async function handleHttp(request: Request, env: Env): Promise<Response> {
+async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const match = /^\/gatekeeper\/sessions\/attach\/([^/]+)$/.exec(url.pathname);
   if (!match) return new Response("Not found", { status: 404 });
@@ -697,7 +744,19 @@ async function handleHttp(request: Request, env: Env): Promise<Response> {
   const ticket = await (await ticketFor(env, match[1])).consumeTicket(Date.now());
   if (!ticket) return new Response("Attachment capability is invalid or expired", { status: 403 });
   const terminal = await getSandbox(env.SESSION_SANDBOX, ticket.sandboxId).getTerminal(ticket.terminalId);
-  if (!terminal) return new Response("Terminal is no longer available", { status: 410 });
+  if (!terminal) {
+    if (ticket.terminalKind === "opencode") {
+      await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session environment expired. Restart the session to continue.");
+    }
+    return new Response("Terminal is no longer available", { status: 410 });
+  }
+  const snapshot = await terminal.getSnapshot();
+  if (snapshot.status !== "running") {
+    if (ticket.terminalKind === "opencode") {
+      await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session terminal exited. Restart the session to continue.");
+    }
+    return new Response("Terminal is no longer available", { status: 410 });
+  }
   return terminal.connect(request, { cols: 120, rows: 40 });
 }
 

@@ -491,6 +491,33 @@ export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   credentialsRestored(expiresAt?: Date): Promise<void>;
 }
 
+/** Stable health states a gatekeeper account can report for required connection checks. */
+export const CONNECTION_HEALTH_STATES = [
+  "healthy",
+  "missing",
+  "expired",
+  "unavailable",
+] as const;
+
+/**
+ * Machine-readable state for a required connection.
+ *
+ * `healthy` means the existing connected account passed a live vendor-owned probe. `missing` means
+ * no account exists yet. `expired` means reconnecting the same account should refresh OAuth or token
+ * credentials. `unavailable` means a non-OAuth condition needs action, such as tenant binding,
+ * upstream access, deployment configuration, or service availability.
+ */
+export type ConnectionHealthState = typeof CONNECTION_HEALTH_STATES[number];
+
+/** Result of a gatekeeper-owned live health probe for one connected account. */
+export type ConnectionHealthStatus = {
+  /** The account's current health state after the gatekeeper's live probe. */
+  state: Exclude<ConnectionHealthState, "missing">;
+
+  /** Human-readable, non-secret explanation suitable for logs or UI display. */
+  message?: string;
+};
+
 // RPC interface to an Adapter. This is a privileged interface exposed to the Gadget Workshop UI
 // itself, not to Gadgets nor AI agents.
 //
@@ -560,6 +587,16 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   //
   // SECURITY: As with connectAccount(), any returned URL must include a cryptographic nonce.
   ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}>;
+
+  /**
+   * Performs a gatekeeper-owned live health check for deployments that mark this vendor as required.
+   *
+   * Gatekeepers should verify more than local token presence: call a lightweight upstream endpoint or
+   * tool that proves the account can actually use the required tenant/resource. Return `expired` only
+   * for credentials a reconnect can refresh, and use `unavailable` for authenticated-but-not-bound or
+   * access-denied states where reconnecting OAuth alone is not the right diagnosis.
+   */
+  getConnectionStatus?(): Promise<ConnectionHealthStatus>;
 
   // ---------------------------------------------------------------------------
   // Singleton / management-UI capabilities. Present only on accounts created by

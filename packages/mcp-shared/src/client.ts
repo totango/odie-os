@@ -344,7 +344,9 @@ export class McpClient {
     }
     if (response.status === 403) {
       throw new McpProtocolError(
-        "The MCP server refused this request. The connected account may not have access to it.",
+        "The MCP server refused this request with HTTP 403. The connected account is authenticated " +
+        "but does not have access to this MCP resource or tool; ask an administrator to grant the " +
+        "required access or connect an account with sufficient permission.",
         undefined, "declined");
     }
     if (response.status === 404 && this.sessionId) throw new McpSessionExpiredError();

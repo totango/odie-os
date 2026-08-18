@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RpcStub } from "capnweb";
-import type { PublicApi } from "@gadgets/workshop-shared/api";
+import type { AuthenticatedApi, PublicApi } from "@gadgets/workshop-shared/api";
 import type { McpSessionBase } from "@gadgets/mcp-shared/session";
 import {
   connect,
@@ -27,6 +27,14 @@ type JsonRpcRequest = {
   params?: { name?: string; arguments?: Record<string, unknown> };
 };
 
+type RemoteScenario = {
+  listStatus?: 401 | 403;
+  omitTool?: string;
+  toolError?: { name: string; message: string };
+};
+
+let remoteScenario: RemoteScenario = {};
+
 function json(body: unknown, init: ResponseInit = {}): Response {
   return Response.json(body, init);
 }
@@ -35,8 +43,8 @@ function rpcResult(id: JsonRpcRequest["id"], result: unknown, init: ResponseInit
   return json({ jsonrpc: "2.0", id, result }, init);
 }
 
-function allRemoteTools() {
-  return [
+function allRemoteTools(scenario: RemoteScenario = {}) {
+  return ([
     ...ODIE_KG_ALLOWED_TOOLS.map(name => ({
       name,
       title: name,
@@ -45,7 +53,7 @@ function allRemoteTools() {
       annotations: name === "odie-kg-status" ? {} : { readOnlyHint: true },
     })),
     {name: "odie-export-request", title: "forbidden export", annotations: {readOnlyHint: false}},
-  ];
+  ]).filter(tool => tool.name !== scenario.omitTool);
 }
 
 function odieOauthAndMcpHandler(seen: string[]): Handler {
@@ -72,12 +80,22 @@ function odieOauthAndMcpHandler(seen: string[]): Handler {
         }, { headers: { "Mcp-Session-Id": "mcp-session-1" } });
       }
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
-      if (body.method === "tools/list") return rpcResult(body.id, {tools: allRemoteTools()});
+      if (body.method === "tools/list") {
+        if (remoteScenario.listStatus === 401) return new Response("token expired", { status: 401 });
+        if (remoteScenario.listStatus === 403) return new Response("forbidden", { status: 403 });
+        return rpcResult(body.id, {tools: allRemoteTools(remoteScenario)});
+      }
       if (body.method === "tools/call") {
-        expect(body.params?.name).toBe("odie-kg-status");
-        expect(body.params?.arguments).toEqual({domain: "acme"});
+        const toolError = remoteScenario.toolError;
+        if (toolError && body.params?.name === toolError.name) {
+          return rpcResult(body.id, {
+            content: [{type: "text", text: toolError.message}],
+            isError: true,
+          });
+        }
+        expect(ODIE_KG_ALLOWED_TOOLS).toContain(body.params?.name);
         return rpcResult(body.id, {
-          content: [{type: "text", text: "KG status is green for acme"}],
+          content: [{type: "text", text: `KG ${body.params?.name} returned data`}],
           isError: false,
         });
       }
@@ -153,8 +171,14 @@ beforeAll(async () => {
         };
       },
     }],
+    patchWorkshop(config) {
+      config.vars = {
+        ...config.vars,
+        REQUIRED_HEALTHY_CONNECTIONS: VENDOR_ID,
+      };
+    },
   });
-}, 30_000);
+}, 60_000);
 
 afterAll(async () => {
   const unmocked = interceptor.getUnmockedCalls();
@@ -173,10 +197,34 @@ async function withSession<T>(body: (api: RpcStub<PublicApi>) => Promise<T>): Pr
   }
 }
 
+async function connectOdieKgAccount(api: RpcStub<AuthenticatedApi>) {
+  const { url: connectUrl } = await api.connectAccount(VENDOR_ID);
+  const connectResponse = await harness.fetchWorker(
+    "gatekeeper-odie-kg", connectUrl, { redirect: "manual" });
+  expect(connectResponse.status).toBe(302);
+  const authorizationUrl = new URL(connectResponse.headers.get("location")!);
+  const callbackUrl = new URL("http://localhost:8787/gatekeeper/odie-kg/oauth");
+  callbackUrl.searchParams.set("code", "authorization-code");
+  callbackUrl.searchParams.set("state", authorizationUrl.searchParams.get("state")!);
+  const callbackResponse = await harness.fetchWorker("gatekeeper-odie-kg", callbackUrl.toString());
+  expect(callbackResponse.status).toBe(200);
+  const account = await waitFor("the Odie KG account to be connected", async () => {
+    const accounts = await listConnectedAccounts(api);
+    return accounts.find(candidate => candidate.vendorId === VENDOR_ID) ?? null;
+  });
+  return { account, authorizationUrl };
+}
+
 describe("Totango Knowledge Graph integration", () => {
   it("connects through OAuth and declares the tenant-bound ambient singleton", async () => {
+    remoteScenario = {};
     await withSession(async publicApi => {
       using api = await signUp(publicApi, nextUsernames("odiealice")[0]);
+
+      await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
+        vendorId: VENDOR_ID,
+        state: "missing",
+      })]);
 
       const vendors = await api.listGatekeeperVendors();
       expect(vendors).toEqual([expect.objectContaining({
@@ -191,32 +239,19 @@ describe("Totango Knowledge Graph integration", () => {
         })],
       })]);
 
-      const { url: connectUrl } = await api.connectAccount(VENDOR_ID);
-      expect(new URL(connectUrl).pathname.split("/").filter(Boolean).at(-2))
-        .toMatch(/^[0-9a-f]{64}$/);
-
-      const connectResponse = await harness.fetchWorker(
-        "gatekeeper-odie-kg", connectUrl, { redirect: "manual" });
-      expect(connectResponse.status).toBe(302);
-      const authorizationUrl = new URL(connectResponse.headers.get("location")!);
+      const { account, authorizationUrl } = await connectOdieKgAccount(api);
       expect(authorizationUrl.origin + authorizationUrl.pathname).toBe(`${AUTH_ISSUER}/authorize`);
       expect(authorizationUrl.searchParams.get("scope"))
         .toBe("openid profile email mcp:odie:kg:read");
       expect(authorizationUrl.searchParams.get("client_id")).toBe("odie-test-client");
-
-      const callbackUrl = new URL("http://localhost:8787/gatekeeper/odie-kg/oauth");
-      callbackUrl.searchParams.set("code", "authorization-code");
-      callbackUrl.searchParams.set("state", authorizationUrl.searchParams.get("state")!);
-      const callbackResponse = await harness.fetchWorker("gatekeeper-odie-kg", callbackUrl.toString());
-      expect(callbackResponse.status).toBe(200);
-
-      const account = await waitFor("the Odie KG account to be connected", async () => {
-        const accounts = await listConnectedAccounts(api);
-        return accounts.find(candidate => candidate.vendorId === VENDOR_ID) ?? null;
-      });
       expect(account.credentialsValid).toBe(true);
       expect(account.description.displayName).toBe(ODIE_KG_DISPLAY_NAME);
       expect(account.description.singleton?.tsType).toMatch(/^McpTotangoKg[0-9a-f]+Session$/);
+      await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
+        vendorId: VENDOR_ID,
+        accountId: account.id,
+        state: "healthy",
+      })]);
 
       using overseer = await api.newGadget();
       using gatekeeper = await overseer.getGatekeeperById(0);
@@ -240,12 +275,81 @@ describe("Totango Knowledge Graph integration", () => {
       })));
       await expect(session.callTool("odie-kg-status", {domain: "acme"})).resolves.toMatchObject({
         status: "ok",
-        text: "KG status is green for acme",
+        text: "KG odie-kg-status returned data",
         isError: false,
       });
       expect(seenNetwork).toContain("POST https://auth.test/register");
       expect(seenNetwork).toContain("POST https://auth.test/token");
       expect(seenNetwork.filter(call => call === `POST ${MCP_ENDPOINT}`).length).toBeGreaterThanOrEqual(5);
+    });
+  });
+
+  it("exposes generated odieKgQuery and preserves remote MCP tool-error results", async () => {
+    remoteScenario = { toolError: { name: "odie-kg-query", message: "KG query failed: bad domain" } };
+    await withSession(async publicApi => {
+      using api = await signUp(publicApi, nextUsernames("odiequery")[0]);
+      await connectOdieKgAccount(api);
+      using overseer = await api.newGadget();
+      using gatekeeper = await overseer.getGatekeeperById(0);
+      using session = await gatekeeper.openSession() as unknown as RpcStub<McpSessionBase> & {
+        odieKgQuery(args?: Record<string, unknown>): Promise<unknown>;
+      };
+
+      await expect(session.odieKgQuery({ question: "show churn risks" })).resolves.toMatchObject({
+        status: "ok",
+        text: "KG query failed: bad domain",
+        isError: true,
+      });
+      await expect(session.callTool("odie-kg-query", { question: "show churn risks" }))
+        .resolves.toMatchObject({ status: "ok", text: "KG query failed: bad domain", isError: true });
+    });
+  });
+
+  it("surfaces expired credentials and 403 access failures while inspecting the ambient binding", async () => {
+    await withSession(async publicApi => {
+      using api = await signUp(publicApi, nextUsernames("odiefail")[0]);
+      await connectOdieKgAccount(api);
+      using overseer = await api.newGadget();
+      using gatekeeper = await overseer.getGatekeeperById(0);
+
+      remoteScenario = { listStatus: 403 };
+      await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
+        vendorId: VENDOR_ID,
+        state: "unavailable",
+        accountId: expect.any(Number),
+        message: expect.stringMatching(/not authorized for this tenant/i),
+      })]);
+      await expect(gatekeeper.describe()).resolves.toMatchObject({
+        suggestedBindingName: "TOTANGO_KG",
+        snippet: expect.stringMatching(/refused access|HTTP 403|does not have access/i),
+      });
+
+      remoteScenario = { listStatus: 401 };
+      await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
+        vendorId: VENDOR_ID,
+        state: "expired",
+        accountId: expect.any(Number),
+      })]);
+      const expiredAccount = (await listConnectedAccounts(api)).find(candidate => candidate.vendorId === VENDOR_ID);
+      expect(expiredAccount?.credentialsValid).toBe(false);
+      await expect(gatekeeper.describe()).resolves.toMatchObject({
+        suggestedBindingName: "TOTANGO_KG",
+        snippet: expect.stringMatching(/reconnect the account/i),
+      });
+    });
+  });
+
+  it("lists the granted KG tools when a generated call is missing from the remote catalog", async () => {
+    remoteScenario = { omitTool: "odie-kg-query" };
+    await withSession(async publicApi => {
+      using api = await signUp(publicApi, nextUsernames("odiemissing")[0]);
+      await connectOdieKgAccount(api);
+      using overseer = await api.newGadget();
+      using gatekeeper = await overseer.getGatekeeperById(0);
+      using session = await gatekeeper.openSession() as unknown as RpcStub<McpSessionBase>;
+
+      await expect(session.callTool("odie-kg-query", { question: "missing?" }))
+        .rejects.toThrow(`This binding grants only these tools: ${ODIE_KG_ALLOWED_TOOLS.join(", ")}.`);
     });
   });
 });

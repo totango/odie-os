@@ -15,6 +15,7 @@ import LoginPage from '../LoginPage'
 import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 import { SessionsProvider } from '../components/sessions/SessionsContext'
+import { RequiredConnectionsGate } from '../RequiredConnectionsGate'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -116,6 +117,7 @@ function RootComponent() {
             <AuthenticatedShell
               authenticatedApi={authenticatedApi}
               isWorkspaceEditor={isWorkspaceEditor}
+              pathname={pathname}
             />
           </Toasty>
         </TooltipProvider>
@@ -132,9 +134,11 @@ function RootComponent() {
 function AuthenticatedShell({
   authenticatedApi,
   isWorkspaceEditor,
+  pathname,
 }: {
   authenticatedApi: RpcStub<AuthenticatedApi>
   isWorkspaceEditor: boolean
+  pathname: string
 }) {
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
@@ -170,7 +174,7 @@ function AuthenticatedShell({
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
   const fullscreen = isWorkspaceEditor
   return (
-    <>
+    <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
       <AccountSelectionModal />
       {fullscreen ? (
         <main>
@@ -183,6 +187,6 @@ function AuthenticatedShell({
           </AppShell>
         </SessionsProvider>
       )}
-    </>
+    </RequiredConnectionsGate>
   )
 }

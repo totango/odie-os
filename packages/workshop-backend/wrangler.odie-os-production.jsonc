@@ -24,7 +24,8 @@
     "CF_AI_GATEWAY_PROVIDERS": "cloudflare",
     "CODING_SESSION_PI_RUNTIME_ENABLED": "true",
     "DEPLOY_URL": "https://os.cloudflare.app/deploy/?instance=0b25cd3c-6772-4200-be89-353ceea1c63e",
-    "PUBLIC_BASE_URL": "https://odie-os.odie-os.workers.dev"
+    "PUBLIC_BASE_URL": "https://odie-os.odie-os.workers.dev",
+    "REQUIRED_HEALTHY_CONNECTIONS": "team_pi,odie_kg"
   },
   "browser": { "binding": "BROWSER" },
   "ai": { "binding": "WORKERS_AI" },

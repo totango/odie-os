@@ -1,0 +1,175 @@
+// @vitest-environment jsdom
+/* eslint-disable react/react-in-jsx-scope */
+
+import { act } from 'react'
+import type React from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { ConnectedAccountsSubscriber, RequiredConnectionStatus } from '@gadgets/workshop-shared/api'
+import { RequiredConnectionsGate } from './RequiredConnectionsGate'
+
+vi.mock('@tanstack/react-router', () => ({
+  Link: ({ to, children, ...props }: { to: string; children: React.ReactNode }) => <a href={to} {...props}>{children}</a>,
+}));
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+type FakeApi = {
+  getRequiredConnectionStatuses: ReturnType<typeof vi.fn<() => Promise<RequiredConnectionStatus[]>>>
+  connectAccount: ReturnType<typeof vi.fn<(vendorId: string) => Promise<{ url: string }>>>
+  reconnectAccount: ReturnType<typeof vi.fn<(accountId: number) => Promise<{ url: string }>>>
+  subscribeConnectedAccounts: ReturnType<typeof vi.fn<(subscriber: ConnectedAccountsSubscriber) => Promise<{ [Symbol.dispose](): void }>>>
+}
+
+function createApi(statuses: RequiredConnectionStatus[]): FakeApi & { subscriber?: ConnectedAccountsSubscriber; dispose: ReturnType<typeof vi.fn> } {
+  const dispose = vi.fn<() => void>()
+  const api: FakeApi & { subscriber?: ConnectedAccountsSubscriber; dispose: ReturnType<typeof vi.fn> } = {
+    dispose,
+    getRequiredConnectionStatuses: vi.fn<() => Promise<RequiredConnectionStatus[]>>(async () => statuses),
+    connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://connect.example.test' })),
+    reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://reconnect.example.test' })),
+    subscribeConnectedAccounts: vi.fn<(subscriber: ConnectedAccountsSubscriber) => Promise<{ [Symbol.dispose](): void }>>(async (subscriber) => {
+      api.subscriber = subscriber
+      return { [Symbol.dispose]: dispose }
+    }),
+  }
+  return api
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+describe('RequiredConnectionsGate', () => {
+  let container: HTMLDivElement | undefined
+  let root: Root | undefined
+
+  afterEach(async () => {
+    await act(async () => root?.unmount())
+    container?.remove()
+    root = undefined
+    container = undefined
+    vi.restoreAllMocks()
+  })
+
+  async function renderGate(api: FakeApi, pathname = '/') {
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => {
+      root!.render(
+        <RequiredConnectionsGate authenticatedApi={api as never} pathname={pathname}>
+          <div>Unlocked app</div>
+        </RequiredConnectionsGate>,
+      )
+    })
+    return container
+  }
+
+  it('blocks gated routes until all required connections are healthy', async () => {
+    const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
+
+    const rendered = await renderGate(api, '/')
+
+    expect(rendered.textContent).toContain('Connect required services to continue')
+    expect(rendered.textContent).toContain('GitHub')
+    expect(rendered.textContent).not.toContain('Unlocked app')
+  })
+
+  it('starts a missing connection and shows a popup-blocked fallback', async () => {
+    vi.spyOn(window, 'open').mockImplementation(() => null)
+    const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
+    const rendered = await renderGate(api, '/workspace/abc')
+    const button = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Connect GitHub'))
+
+    await act(async () => button!.click())
+
+    expect(api.connectAccount).toHaveBeenCalledWith('github')
+    expect(api.reconnectAccount).not.toHaveBeenCalled()
+    expect(window.open).toHaveBeenCalledWith('about:blank', '_blank')
+    expect(rendered.textContent).toContain('Your browser blocked the popup')
+    expect(rendered.querySelector('a[href="https://connect.example.test"]')).toBeTruthy()
+  })
+
+  it('starts an expired connection reconnect by account id', async () => {
+    vi.spyOn(window, 'open').mockImplementation(() => null)
+    const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'expired', accountId: 42 }])
+    const rendered = await renderGate(api, '/sessions')
+    const button = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect GitHub'))
+
+    await act(async () => button!.click())
+
+    expect(api.reconnectAccount).toHaveBeenCalledWith(42)
+    expect(api.connectAccount).not.toHaveBeenCalled()
+    expect(rendered.querySelector('a[href="https://reconnect.example.test"]')).toBeTruthy()
+  })
+
+  it('leaves admin and other recovery routes available even when a required vendor is unavailable', async () => {
+    const api = createApi([{ vendorId: 'required', displayName: 'Required App', state: 'unavailable', message: 'Disabled by admin.' }])
+
+    const admin = await renderGate(api, '/admin')
+
+    expect(admin.textContent).toContain('Unlocked app')
+    expect(admin.textContent).not.toContain('Connect required services')
+  })
+
+  it('fails closed on gated routes when required status cannot be checked', async () => {
+    const api = createApi([])
+    api.getRequiredConnectionStatuses.mockRejectedValueOnce(new Error('offline'))
+
+    const rendered = await renderGate(api, '/')
+
+    expect(rendered.textContent).toContain('We could not check required connections')
+    expect(rendered.textContent).not.toContain('Unlocked app')
+  })
+
+  it('locks a previously healthy route when a live recheck fails', async () => {
+    const api = createApi([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'healthy' }])
+    const rendered = await renderGate(api, '/')
+    expect(rendered.textContent).toContain('Unlocked app')
+    api.getRequiredConnectionStatuses.mockRejectedValueOnce(new Error('offline'))
+
+    await act(async () => api.subscriber!.ready())
+
+    expect(rendered.textContent).toContain('We could not check required connections')
+    expect(rendered.textContent).not.toContain('Unlocked app')
+  })
+
+  it('ignores an older health response that finishes after a newer recheck', async () => {
+    const api = createApi([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'missing' }])
+    const rendered = await renderGate(api, '/')
+    const slow = deferred<RequiredConnectionStatus[]>()
+    api.getRequiredConnectionStatuses
+      .mockImplementationOnce(() => slow.promise)
+      .mockResolvedValueOnce([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'healthy' }])
+
+    await act(async () => {
+      api.subscriber!.add(1, { displayName: 'Team PI' } as never, { displayName: 'Team PI' } as never, [], true, 'team_pi')
+      api.subscriber!.ready()
+    })
+    expect(rendered.textContent).toContain('Unlocked app')
+
+    await act(async () => slow.resolve([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'missing' }]))
+    expect(rendered.textContent).toContain('Unlocked app')
+  })
+
+  it('refreshes required connection status from the connected-accounts subscription', async () => {
+    const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
+    api.getRequiredConnectionStatuses
+      .mockResolvedValueOnce([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
+      .mockResolvedValueOnce([{ vendorId: 'github', displayName: 'GitHub', state: 'healthy' }])
+    const rendered = await renderGate(api, '/')
+
+    expect(rendered.textContent).toContain('Connect required services')
+    expect(api.subscriber).toBeTruthy()
+
+    await act(async () => {
+      api.subscriber!.add(1, { displayName: 'GitHub' } as never, { displayName: 'GitHub' } as never, [], true, 'github')
+    })
+
+    expect(api.getRequiredConnectionStatuses).toHaveBeenCalledTimes(2)
+    expect(rendered.textContent).toContain('Unlocked app')
+  })
+})
