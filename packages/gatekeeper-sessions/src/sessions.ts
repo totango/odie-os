@@ -35,6 +35,7 @@ import { validateRepositories } from "./policy.js";
 import {
   assertRuntimeEnabled,
   codingSessionRuntime,
+  openCodeCommand,
   PI_CONFIG_DIR,
   PI_EXTENSION_PATH,
   piCommand,
@@ -602,7 +603,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     else await materializePiRuntime(sandbox, this.env);
     const terminal = await sandbox.createTerminal({
       command: runtime === "opencode"
-        ? ["/bin/bash", "-lc", `cd /workspace/${record.repositories[0]} && exec opencode`]
+        ? openCodeCommand(record.repositories[0])
         : piCommand(),
       cwd: `/workspace/${record.repositories[0]}`,
       env: runtime === "opencode"

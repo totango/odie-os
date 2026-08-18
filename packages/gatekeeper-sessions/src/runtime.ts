@@ -3,6 +3,9 @@ import { WORKSHOP_MCP_HOST } from "./mcp-policy.js";
 
 export const PI_CONFIG_DIR = "/workspace/.odie-pi";
 export const PI_EXTENSION_PATH = `${PI_CONFIG_DIR}/odie-runtime.ts`;
+export const VALHALLA_ROOT = "/opt/odie-pi/node_modules/@howlerops/valhalla";
+
+const VALHALLA_PROMPTS = ["hugin", "tyr", "munin", "eitri", "vidar", "skuld", "polaris"];
 
 export function codingSessionRuntime(runtime: unknown): CodingSessionRuntime {
   if (runtime === undefined || runtime === "opencode") return "opencode";
@@ -26,10 +29,29 @@ export function piCommand(): [string, ...string[]] {
     "--no-extensions",
     "--extension", PI_EXTENSION_PATH,
     "--no-skills",
+    "--skill", `${VALHALLA_ROOT}/pi/skills/vegvisir/SKILL.md`,
     "--no-prompt-templates",
+    ...VALHALLA_PROMPTS.flatMap(name => [
+      "--prompt-template", `${VALHALLA_ROOT}/pi/prompts/${name}.md`,
+    ]),
     "--no-themes",
     "--no-context-files",
     "--no-approve",
+  ];
+}
+
+export function openCodeCommand(repository: string): [string, ...string[]] {
+  const configDir = "/workspace/.odie-opencode";
+  const defaults = "/opt/odie-valhalla/opencode";
+  return [
+    "/bin/bash",
+    "-lc",
+    `if [ -d ${defaults} ]; then ` +
+      `mkdir -p ${configDir}/command ${configDir}/skills && ` +
+      `cp -R ${defaults}/command/. ${configDir}/command/ && ` +
+      `cp -R ${defaults}/skills/. ${configDir}/skills/; ` +
+      `fi && ` +
+      `cd /workspace/${repository} && exec opencode`,
   ];
 }
 

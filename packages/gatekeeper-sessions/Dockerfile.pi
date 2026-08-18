@@ -4,19 +4,25 @@ LABEL org.opencontainers.image.source="https://github.com/totango/odie-os"
 
 ARG PI_VERSION=0.84.2
 ARG PI_MCP_ADAPTER_VERSION=2.26.0
+ARG VALHALLA_VERSION=0.3.0
 
-COPY pi-image/package.json pi-image/package-lock.json /opt/odie-pi/
+COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs /opt/odie-pi/
 
 # Lifecycle scripts stay disabled; the reviewed lockfile is the complete runtime dependency set.
 RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
+    && node /opt/odie-pi/build-valhalla-opencode.mjs \
     && ln -s /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi \
     && opencode --version \
     && pi --version \
     && test "$(node -p "require('/opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" = "$PI_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
+    && test "$(node -p "require('/opt/odie-pi/node_modules/@howlerops/valhalla/package.json').version")" = "$VALHALLA_VERSION" \
+    && test "$(find /opt/odie-pi/node_modules/@howlerops/valhalla/pi/prompts -name '*.md' -type f | wc -l)" = "7" \
+    && test "$(find /opt/odie-valhalla/opencode/command -name '*.md' -type f | wc -l)" = "8" \
+    && test -f /opt/odie-valhalla/opencode/skills/vegvisir/SKILL.md \
     && node \
       --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
       --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))'
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os" \
-      org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, and pi-mcp-adapter"
+      org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, Valhalla, and pi-mcp-adapter"

@@ -9,6 +9,7 @@
     "@earendil-works/pi-protocol": "0.84.2",
     "@earendil-works/pi-telemetry": "0.84.2",
     "@earendil-works/pi-tui": "0.84.2",
+    "@howlerops/valhalla": "https://github.com/howlerops/valhalla/archive/835b6b7958865c4a79d11d951efecbd2d6264c24.tar.gz",
     "pi-mcp-adapter": "2.26.0",
     "typebox": "1.3.7"
   }
