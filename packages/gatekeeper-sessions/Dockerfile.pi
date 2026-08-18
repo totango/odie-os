@@ -16,7 +16,7 @@ RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
     && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
     && node \
       --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
-      --eval 'import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => { const create = module.createMcpAdapter ?? module.default?.createMcpAdapter; if (typeof create !== "function") process.exit(1); })'
+      --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))'
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os" \
       org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, and pi-mcp-adapter"
