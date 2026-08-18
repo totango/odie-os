@@ -49,20 +49,25 @@ jobs:
           TAG: ${{ github.sha }}
         run: |
           if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
-            echo "Refusing to overwrite existing image tag $IMAGE:$TAG" >&2
-            exit 1
+            digest="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format "{{json .Manifest}}" \
+              | jq --raw-output ".digest")"
+            test -n "$digest"
+            test "$digest" != "null"
+            jq --null-input --arg digest "$digest" '{"containerimage.digest": $digest}' > image-metadata.json
+            printf "Reusing existing private GHCR source \`%s@%s\`.\n" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+          else
+            docker buildx build \
+              --platform linux/amd64 \
+              --build-arg "PI_VERSION=$PI_VERSION" \
+              --build-arg "PI_MCP_ADAPTER_VERSION=$PI_MCP_ADAPTER_VERSION" \
+              --tag "$IMAGE:$TAG" \
+              --file packages/gatekeeper-sessions/Dockerfile.pi \
+              --provenance=mode=max \
+              --sbom=true \
+              --metadata-file image-metadata.json \
+              --push \
+              packages/gatekeeper-sessions
           fi
-          docker buildx build \
-            --platform linux/amd64 \
-            --build-arg "PI_VERSION=$PI_VERSION" \
-            --build-arg "PI_MCP_ADAPTER_VERSION=$PI_MCP_ADAPTER_VERSION" \
-            --tag "$IMAGE:$TAG" \
-            --file packages/gatekeeper-sessions/Dockerfile.pi \
-            --provenance=mode=max \
-            --sbom=true \
-            --metadata-file image-metadata.json \
-            --push \
-            packages/gatekeeper-sessions
 
       - name: Record immutable digest
         env:
@@ -72,13 +77,49 @@ jobs:
           test -n "$digest"
           test "$digest" != "null"
           printf '%s@%s\n' "$IMAGE" "$digest" > image-digest.txt
-          printf "Published \`%s\`\n" "$digest" >> "$GITHUB_STEP_SUMMARY"
-          printf '\nMake the package public in its GitHub package settings before runtime use.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf "Published private GHCR source: \`%s@%s\`\n" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload immutable digest
+      - name: Install Wrangler
+        run: npm install --global wrangler@4.119.0
+
+      - name: Mirror image to Cloudflare registry
+        env:
+          TAG: ${{ github.sha }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_API_TOKEN"
+
+          source_ref="$(< image-digest.txt)"
+          local_ref="odie-os-coding-session:$TAG"
+          cloudflare_repo="registry.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/odie-os-coding-session"
+          cloudflare_tag="$cloudflare_repo:$TAG"
+
+          docker pull "$source_ref"
+          docker tag "$source_ref" "$local_ref"
+          source_id="$(docker image inspect --format '{{.Id}}' "$source_ref")"
+          local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
+          test "$source_id" = "$local_id"
+
+          wrangler containers push "$local_ref"
+          cloudflare_ref="$(docker image inspect --format '{{json .RepoDigests}}' "$cloudflare_tag" \
+            | jq --raw-output --arg repo "$cloudflare_repo" '[.[] | select(startswith($repo + "@"))][0] // empty')"
+          test -n "$cloudflare_ref"
+          docker image rm "$cloudflare_tag"
+          docker pull "$cloudflare_ref"
+          mirrored_id="$(docker image inspect --format '{{.Id}}' "$cloudflare_ref")"
+          test "$source_id" = "$mirrored_id"
+          printf '%s\n' "$cloudflare_ref" > cloudflare-image-digest.txt
+          printf "Mirrored Cloudflare image: \`%s\`\n" "$cloudflare_ref" >> "$GITHUB_STEP_SUMMARY"
+          printf 'The commit tag is transport-only; deployments must use this digest.\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable digests
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coding-session-image-${{ github.sha }}
-          path: image-digest.txt
+          path: |
+            image-digest.txt
+            cloudflare-image-digest.txt
           if-no-files-found: error
           retention-days: 90
