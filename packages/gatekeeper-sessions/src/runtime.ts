@@ -22,6 +22,7 @@ export function piCommand(): [string, ...string[]] {
     "--provider", "odie-team-pi",
     "--model", "gpt-5.6-sol",
     "--models", "odie-team-pi/gpt-5.6-sol",
+    "--tui-mode", "fullscreen",
     "--no-extensions",
     "--extension", PI_EXTENSION_PATH,
     "--no-skills",
