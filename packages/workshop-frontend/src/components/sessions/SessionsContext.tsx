@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { CodingSessionRepository, CodingSessionRepositoryOption, CodingSessionSummary } from '@gadgets/workshop-shared/api'
+import type { CodingSessionRepository, CodingSessionRepositoryOption, CodingSessionRuntime, CodingSessionSummary } from '@gadgets/workshop-shared/api'
 import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sessions'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useGitHubConnection } from '../../hooks/useGitHubConnection'
@@ -35,6 +35,8 @@ type SessionsContextValue = {
   creating: boolean
   title: string
   setTitle: (title: string) => void
+  runtime: CodingSessionRuntime
+  setRuntime: (runtime: CodingSessionRuntime) => void
   repositories: CodingSessionRepository[]
   setRepositories: (repositories: CodingSessionRepository[]) => void
   repositoryOptions: CodingSessionRepositoryOption[]
@@ -92,6 +94,7 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string>()
   const [creating, setCreating] = useState(false)
   const [title, setTitle] = useState('Coordinated code change')
+  const [runtime, setRuntime] = useState<CodingSessionRuntime>('opencode')
   const [repositories, setRepositories] = useState<CodingSessionRepository[]>([])
   const [activeId, setActiveId] = useState<string>()
   const [activity, setActivity] = useState<CodingSessionActivity[]>([])
@@ -160,7 +163,7 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
     setCreating(true)
     setError(undefined)
     try {
-      const session = await authenticatedApi.createCodingSession({ title, repositories })
+      const session = await authenticatedApi.createCodingSession({ title, repositories, runtime })
       setSessions((current) => [session, ...current])
       if (session.status === 'running') setActiveId(session.id)
     } catch (caught) {
@@ -168,7 +171,7 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
     } finally {
       setCreating(false)
     }
-  }, [authenticatedApi, repositories, title])
+  }, [authenticatedApi, repositories, runtime, title])
 
   const stopSession = useCallback(async (id: string) => {
     await authenticatedApi.stopCodingSession(id)
@@ -218,6 +221,8 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
     creating,
     title,
     setTitle,
+    runtime,
+    setRuntime,
     repositories,
     setRepositories,
     repositoryOptions,
@@ -241,7 +246,7 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
   }), [
     activeId, activeSession, activity, archiveSession, availablePresets, connect, create, creating, error,
     github, loaded, reconnect, refresh, refreshActivity, repositories, repositoryLoading, repositoryOptions,
-    repositorySearch, resolveActivity, restartSession, sessions, stopSession, title,
+    repositorySearch, resolveActivity, restartSession, runtime, sessions, stopSession, title,
   ])
 
   return <SessionsContext.Provider value={value}>{children}</SessionsContext.Provider>

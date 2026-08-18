@@ -34,6 +34,7 @@ declare global {
       TEAM_PI_CODEX_BASE_URL?: string;
       TEAM_PI_CODEX_HMAC_SECRET?: string;
       TEAM_PI_CODEX_MODELS?: string;
+      CODING_SESSION_PI_RUNTIME_ENABLED?: string;
 
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup

@@ -500,7 +500,7 @@ export default function SettingsPage() {
               <div>
                 <h3 className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">Code session customization</h3>
                 <p className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
-                  These account settings apply only to your future Code sessions. Existing or running sessions keep their current OpenCode setup.
+                  These account settings apply only to your future OpenCode sessions. Existing or running sessions keep their current OpenCode setup.
                 </p>
               </div>
 

@@ -7,6 +7,7 @@ import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   type CodingSessionAttachCapability,
   type CodingSessionRepository,
+  type CodingSessionRuntime,
   type CodingSessionSummary,
   type CodingSessionTerminalKind,
   type CreateCodingSessionRequest,
@@ -31,6 +32,15 @@ import {
   validateWorkshopMcpRequestTarget,
 } from "./mcp-policy.js";
 import { validateRepositories } from "./policy.js";
+import {
+  assertRuntimeEnabled,
+  codingSessionRuntime,
+  PI_CONFIG_DIR,
+  PI_EXTENSION_PATH,
+  piCommand,
+  piEnvironment,
+  piExtensionSource,
+} from "./runtime.js";
 
 export { ContainerProxy };
 
@@ -59,9 +69,11 @@ interface Env extends GitHubAppEnv {
   SESSION_ALLOWED_ORIGIN?: string;
   TEAM_PI_CODEX_BASE_URL?: string;
   TEAM_PI_CODEX_HMAC_SECRET?: string;
+  CODING_SESSION_PI_RUNTIME_ENABLED?: string;
 }
 
-type SessionRecord = CodingSessionSummary & {
+type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
+  runtime?: CodingSessionRuntime;
   sandboxId: string;
   terminalId?: string;
   shellTerminalId?: string;
@@ -344,12 +356,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
 
   /** Lists this user's sessions newest first. */
   listSessions(): CodingSessionSummary[] {
-    return [...this.#records()].map(({
-      sandboxId: _sandboxId,
-      terminalId: _terminalId,
-      shellTerminalId: _shellTerminalId,
-      ...summary
-    }) => summary)
+    return [...this.#records()].map(publicSummary)
       .toSorted((a, b) => b.createdAt.valueOf() - a.createdAt.valueOf());
   }
 
@@ -368,6 +375,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (!title || title.length > MAX_TITLE_LENGTH) {
       throw new Error(`Session title must be between 1 and ${MAX_TITLE_LENGTH} characters.`);
     }
+    const runtime = codingSessionRuntime(request.runtime);
+    assertRuntimeConfigured(this.env, runtime);
 
     const id = crypto.randomUUID();
     const now = new Date();
@@ -375,6 +384,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       id,
       title,
       repositories,
+      runtime,
       status: "starting",
       createdAt: now,
       lastActiveAt: now,
@@ -416,6 +426,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (record.status === "starting" || record.status === "stopping") {
       throw new Error("Coding session is already changing state.");
     }
+    assertRuntimeConfigured(this.env, codingSessionRuntime(record.runtime));
     const stopping: SessionRecord = {
       ...record,
       status: "stopping",
@@ -572,6 +583,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     customization: OpenCodeUserCustomization,
   ): Promise<SessionRecord> {
     const startedAt = Date.now();
+    const runtime = codingSessionRuntime(record.runtime);
+    assertRuntimeConfigured(this.env, runtime);
     const policy = policyForSandbox(this.env, record.sandboxId);
     await policy.configure({ sessionId: record.id, owner, repositories: record.repositories });
     const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
@@ -585,11 +598,16 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       const exit = await clone.waitForExit({ timeout: 125_000 });
       if (exit.code !== 0 || exit.timedOut) throw new Error(`Failed to clone ${repository}.`);
     }
-    await materializeOpenCodeCustomization(sandbox, customization);
+    if (runtime === "opencode") await materializeOpenCodeCustomization(sandbox, customization);
+    else await materializePiRuntime(sandbox, this.env);
     const terminal = await sandbox.createTerminal({
-      command: ["/bin/bash", "-lc", `cd /workspace/${record.repositories[0]} && exec opencode`],
+      command: runtime === "opencode"
+        ? ["/bin/bash", "-lc", `cd /workspace/${record.repositories[0]} && exec opencode`]
+        : piCommand(),
       cwd: `/workspace/${record.repositories[0]}`,
-      env: opencodeEnvironment(this.env, customization),
+      env: runtime === "opencode"
+        ? opencodeEnvironment(this.env, customization)
+        : piEnvironment(),
       cols: 120,
       rows: 40,
       bufferSize: 1024 * 1024,
@@ -711,7 +729,14 @@ function publicSummary(record: SessionRecord): CodingSessionSummary {
     shellTerminalId: _shellTerminalId,
     ...summary
   } = record;
-  return summary;
+  return { ...summary, runtime: codingSessionRuntime(record.runtime) };
+}
+
+function assertRuntimeConfigured(env: Env, runtime: CodingSessionRuntime): void {
+  assertRuntimeEnabled(runtime, env.CODING_SESSION_PI_RUNTIME_ENABLED);
+  if (runtime !== "pi") return;
+  required(env.TEAM_PI_CODEX_BASE_URL, "TEAM_PI_CODEX_BASE_URL");
+  required(env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
 }
 
 function opencodeEnvironment(env: Env, customization: OpenCodeUserCustomization): Record<string, string> {
@@ -757,6 +782,18 @@ function opencodeEnvironment(env: Env, customization: OpenCodeUserCustomization)
       plugin: customization.plugins,
     }),
   };
+}
+
+async function materializePiRuntime(
+  sandbox: {
+    mkdir(path: string, options?: { recursive?: boolean }): Promise<unknown>;
+    writeFile(path: string, content: string): Promise<unknown>;
+  },
+  env: Env,
+): Promise<void> {
+  const baseUrl = required(env.TEAM_PI_CODEX_BASE_URL, "TEAM_PI_CODEX_BASE_URL");
+  await sandbox.mkdir(PI_CONFIG_DIR, { recursive: true });
+  await sandbox.writeFile(PI_EXTENSION_PATH, piExtensionSource(baseUrl));
 }
 
 async function materializeOpenCodeCustomization(

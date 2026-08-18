@@ -5,7 +5,7 @@ import '@xterm/xterm/css/xterm.css'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useTheme } from '../../ThemeContext'
 import { WorkshopButton } from '../WorkshopControls'
-import type { CodingSessionTerminalKind } from '@gadgets/workshop-shared/api'
+import type { CodingSessionRuntime, CodingSessionTerminalKind } from '@gadgets/workshop-shared/api'
 import { OrderedTerminalOperationQueue, TerminalWriteBatcher } from './orderedTerminalOperations'
 
 type PendingChunk = { byteLength: number }
@@ -18,9 +18,11 @@ const TERMINAL_THEMES = {
 export default function SessionTerminal({
   sessionId,
   terminalKind = 'opencode',
+  runtime = 'opencode',
 }: {
   sessionId: string
   terminalKind?: CodingSessionTerminalKind
+  runtime?: CodingSessionRuntime
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const { resolvedThemeMode } = useTheme()
@@ -30,6 +32,7 @@ export default function SessionTerminal({
   const [state, setState] = useState<'connecting' | 'starting' | 'connected' | 'disconnected'>('connecting')
   const [interactive, setInteractive] = useState(false)
   const [error, setError] = useState<string>()
+  const terminalLabel = terminalKind === 'shell' ? 'Shell' : runtime === 'pi' ? 'Pi' : 'OpenCode'
 
   useEffect(() => {
     const host = hostRef.current
@@ -210,10 +213,10 @@ export default function SessionTerminal({
       <div className="relative min-h-0 flex-1">
         {!interactive && state !== 'disconnected' && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-kumo-base/90 text-xs text-kumo-subtle">
-            {state === 'connecting' ? 'Connecting to the sandbox…' : terminalKind === 'opencode' ? 'Starting OpenCode…' : 'Starting shell…'}
+            {state === 'connecting' ? 'Connecting to the sandbox…' : `Starting ${terminalLabel}…`}
           </div>
         )}
-        <div ref={hostRef} className="h-full min-h-0" aria-label={`${terminalKind === 'opencode' ? 'OpenCode' : 'Shell'} session terminal`} />
+        <div ref={hostRef} className="h-full min-h-0" aria-label={`${terminalLabel} session terminal`} />
       </div>
     </section>
   )

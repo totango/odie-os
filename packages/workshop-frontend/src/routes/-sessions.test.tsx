@@ -4,13 +4,17 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CodingSessionRepository, CodingSessionRuntime, CodingSessionSummary } from '@gadgets/workshop-shared/api'
 
 const testState = vi.hoisted(() => ({
+  piEnabled: false,
+  terminalProps: vi.fn<(props: unknown) => void>(),
   context: {
     github: { state: 'missing' } as
       | { state: 'missing' }
-      | { state: 'expired'; accountId: number; label: string },
-    activeSession: undefined,
+      | { state: 'expired'; accountId: number; label: string }
+      | { state: 'connected'; accountId: number; label: string },
+    activeSession: undefined as CodingSessionSummary | undefined,
     error: undefined as string | undefined,
     activity: [],
     resolveActivity: vi.fn<(id: string, decision: 'approve' | 'reject') => Promise<void>>(),
@@ -20,6 +24,19 @@ const testState = vi.hoisted(() => ({
     setActiveId: vi.fn<(id: string | undefined) => void>(),
     connect: vi.fn<() => Promise<void>>(async () => {}),
     reconnect: vi.fn<(accountId: number) => Promise<void>>(async () => {}),
+    availablePresets: [],
+    repositories: ['jarvis'],
+    setRepositories: vi.fn<(repositories: CodingSessionRepository[]) => void>(),
+    repositoryOptions: [{ repository: 'jarvis', title: 'totango/jarvis', private: true }],
+    repositorySearch: '',
+    setRepositorySearch: vi.fn<(query: string) => void>(),
+    repositoryLoading: false,
+    title: 'Fix Jarvis',
+    setTitle: vi.fn<(title: string) => void>(),
+    runtime: 'opencode' as 'opencode' | 'pi',
+    setRuntime: vi.fn<(runtime: CodingSessionRuntime) => void>(),
+    creating: false,
+    create: vi.fn<() => Promise<void>>(async () => {}),
   },
 }))
 
@@ -27,7 +44,12 @@ vi.mock('../useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
 vi.mock('../components/sessions/SessionsContext', () => ({
   useSessionsContext: () => testState.context,
 }))
-vi.mock('../components/sessions/SessionTerminal', () => ({ default: () => null }))
+vi.mock('../components/sessions/SessionTerminal', () => ({
+  default: (props: unknown) => { testState.terminalProps(props); return null },
+}))
+vi.mock('../FeatureFlagsContext', () => ({
+  useUiFeatureFlag: () => ({ enabled: testState.piEnabled, loading: false }),
+}))
 
 import { SessionsPage } from './sessions'
 
@@ -43,6 +65,9 @@ describe('SessionsPage locked Code setup', () => {
     vi.clearAllMocks()
     testState.context.github = { state: 'missing' }
     testState.context.error = undefined
+    testState.context.activeSession = undefined
+    testState.context.runtime = 'opencode'
+    testState.piEnabled = false
   })
 
   async function render() {
@@ -81,5 +106,47 @@ describe('SessionsPage locked Code setup', () => {
 
     expect(testState.context.reconnect).toHaveBeenCalledWith(42)
     expect(testState.context.connect).not.toHaveBeenCalled()
+  })
+
+  it('offers Pi only when the rollout flag is enabled', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    let rendered = await render()
+
+    expect(rendered.textContent).not.toContain('Coding agent')
+
+    await act(async () => root?.unmount())
+    root = undefined
+    container?.remove()
+    container = undefined
+    testState.piEnabled = true
+    rendered = await render()
+
+    expect(rendered.textContent).toContain('Coding agent')
+    const piButton = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.startsWith('Pi'))
+    expect(piButton).toBeTruthy()
+
+    await act(async () => piButton!.click())
+    expect(testState.context.setRuntime).toHaveBeenCalledWith('pi')
+  })
+
+  it('labels the primary terminal with the persisted runtime', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1',
+      title: 'Pi repair',
+      repositories: ['jarvis'],
+      runtime: 'pi',
+      status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+    const terminalMode = rendered.querySelector('[aria-label="Terminal mode"]')
+
+    expect(terminalMode?.textContent).toContain('Pi')
+    expect(terminalMode?.textContent).toContain('Shell')
+    expect(terminalMode?.textContent).not.toContain('OpenCode')
+    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'pi' }))
   })
 })
