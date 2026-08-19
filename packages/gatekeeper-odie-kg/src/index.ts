@@ -425,15 +425,19 @@ export class OdieKgGatekeeper
         throw new Error(
           "Totango Knowledge Graph credentials are stale or expired. Reconnect the account, " +
           "then try the TOTANGO_KG binding again.",
+          { cause: error },
         );
       }
       if (/403|does not have access|refused/i.test(message)) {
         throw new Error(
           "Totango Knowledge Graph refused access. Ask an administrator to grant the connected " +
           "account access to the Odie KG MCP resource and tools.",
+          { cause: error },
         );
       }
-      throw new Error("Could not load the Totango Knowledge Graph tool catalog. Try again later.");
+      throw new Error("Could not load the Totango Knowledge Graph tool catalog. Try again later.", {
+        cause: error,
+      });
     }
   }
 
