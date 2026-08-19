@@ -63,6 +63,8 @@ describe("JARVIS allowlist", () => {
       "jarvis_list_prod_tools",
       "jarvis_describe_prod_tool",
       "jarvis_call_prod_tool",
+      "jarvis_describe_wren_tool",
+      "jarvis_call_wren_tool",
     ]);
     expect(isJarvisAllowedTool("create_skill")).toBe(false);
     expect(isJarvisAllowedTool("escalate_to_human")).toBe(false);
@@ -80,10 +82,10 @@ describe("JARVIS allowlist", () => {
 });
 
 describe("JARVIS tool policy", () => {
-  it("defaults chat away from repo knowledge and arbitrary production calls", () => {
+  it("defaults chat to the scoped Wren caller but away from arbitrary production calls", () => {
     const policy = defaultJarvisToolPolicy();
     expect(policy).toEqual({
-      revision: 4,
+      revision: 5,
       chat: {
         tools: JARVIS_ALLOWED_TOOLS.filter(
           tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"
@@ -92,6 +94,7 @@ describe("JARVIS tool policy", () => {
       code: { tools: [...JARVIS_ALLOWED_TOOLS] },
       syncCode: false,
     });
+    expect(policy.chat.tools).toContain("jarvis_call_wren_tool");
   });
 
   it("upgrades only the original untouched default", () => {
@@ -117,26 +120,65 @@ describe("JARVIS tool policy", () => {
       code: { tools: [...historicalTools] },
       syncCode: false,
     };
-    expect(upgradeDefaultJarvisToolPolicy(priorDefault).revision).toBe(4);
+    expect(upgradeDefaultJarvisToolPolicy(priorDefault).revision).toBe(5);
 
     const currentDefault = {
       revision: 3,
-      chat: { tools: JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge") },
-      code: { tools: [...JARVIS_ALLOWED_TOOLS] },
+      chat: { tools: JARVIS_ALLOWED_TOOLS.filter(
+        tool => tool !== "repo_knowledge" && tool !== "jarvis_describe_wren_tool" &&
+          tool !== "jarvis_call_wren_tool") },
+      code: { tools: JARVIS_ALLOWED_TOOLS.filter(
+        tool => tool !== "jarvis_describe_wren_tool" && tool !== "jarvis_call_wren_tool") },
       syncCode: false,
     };
     const upgraded = upgradeDefaultJarvisToolPolicy(currentDefault);
-    expect(upgraded.revision).toBe(4);
+    expect(upgraded.revision).toBe(5);
     expect(upgraded.chat.tools).not.toContain("jarvis_call_prod_tool");
+    expect(upgraded.chat.tools).toContain("jarvis_call_wren_tool");
     expect(upgraded.code.tools).toContain("jarvis_call_prod_tool");
 
-    const customized = { ...historical, revision: 2 };
+    const priorV4Default = {
+      revision: 4,
+      chat: { tools: JARVIS_ALLOWED_TOOLS.filter(
+        tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool" &&
+          tool !== "jarvis_describe_wren_tool" && tool !== "jarvis_call_wren_tool") },
+      code: { tools: JARVIS_ALLOWED_TOOLS.filter(
+        tool => tool !== "jarvis_describe_wren_tool" && tool !== "jarvis_call_wren_tool") },
+      syncCode: false,
+    };
+    expect(upgradeDefaultJarvisToolPolicy(priorV4Default).revision).toBe(5);
+
+    const customized = {
+      ...historical,
+      revision: 2,
+      chat: { tools: historicalTools.filter(tool => tool !== "jarvis_call_prod_tool") },
+    };
     expect(upgradeDefaultJarvisToolPolicy(customized)).toBe(customized);
+    const unsafeCustomized = { ...historical, revision: 2 };
+    const sanitized = upgradeDefaultJarvisToolPolicy(unsafeCustomized);
+    expect(sanitized.chat.tools).not.toContain("jarvis_call_prod_tool");
+    expect(sanitized.code.tools).toContain("jarvis_call_prod_tool");
     const customizedV3 = {
       ...currentDefault,
       chat: { tools: currentDefault.chat.tools.filter(tool => tool !== "lookup_incident") },
     };
-    expect(upgradeDefaultJarvisToolPolicy(customizedV3)).toBe(customizedV3);
+    const sanitizedV3 = upgradeDefaultJarvisToolPolicy(customizedV3);
+    expect(sanitizedV3).not.toBe(customizedV3);
+    expect(sanitizedV3.chat.tools).not.toContain("lookup_incident");
+    expect(sanitizedV3.chat.tools).not.toContain("jarvis_call_prod_tool");
+    expect(sanitizedV3.code.tools).toContain("jarvis_call_prod_tool");
+
+    const unrestricted = {
+      revision: 9,
+      chat: {},
+      code: {},
+      syncCode: false,
+    };
+    const bounded = upgradeDefaultJarvisToolPolicy(unrestricted);
+    expect(bounded.chat.tools).toEqual(
+      JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "jarvis_call_prod_tool")
+    );
+    expect(bounded.code.tools).toEqual(JARVIS_ALLOWED_TOOLS);
   });
 
   it("normalizes order and mirrors chat when synchronized", () => {
@@ -152,15 +194,15 @@ describe("JARVIS tool policy", () => {
     });
   });
 
-  it("keeps arbitrary production calls out of chat scope", () => {
+  it("keeps arbitrary production calls out of chat while retaining the scoped Wren caller", () => {
     expect(normalizeJarvisToolPolicy({
-      chatTools: ["query_knowledge", "jarvis_call_prod_tool"],
+      chatTools: ["query_knowledge", "jarvis_call_prod_tool", "jarvis_call_wren_tool"],
       syncCode: false,
-      codeTools: ["query_knowledge", "jarvis_call_prod_tool"],
+      codeTools: ["query_knowledge", "jarvis_call_prod_tool", "jarvis_call_wren_tool"],
     }, 8)).toEqual({
       revision: 8,
-      chat: { tools: ["query_knowledge"] },
-      code: { tools: ["query_knowledge", "jarvis_call_prod_tool"] },
+      chat: { tools: ["query_knowledge", "jarvis_call_wren_tool"] },
+      code: { tools: ["query_knowledge", "jarvis_call_prod_tool", "jarvis_call_wren_tool"] },
       syncCode: false,
     });
   });
@@ -189,20 +231,24 @@ describe("applyJarvisToolPolicy", () => {
     expect(applyJarvisToolPolicy(entry("create_skill"))).toBeNull();
   });
 
-  it("queues a production tool call for approval however the far side labels it", () => {
+  it("queues production tool calls for approval however the far side labels them", () => {
     // The agent chooses the tool name and its arguments, and the reachable surface includes ad-hoc
     // SQL against production databases. A read-only claim from JARVIS must not be able to turn that
     // into an observation that runs with nobody asked.
-    for (const annotations of [undefined, { readOnlyHint: true }]) {
-      const policy = applyJarvisToolPolicy(entry("jarvis_call_prod_tool", annotations));
-      expect(policy?.mode).toBe("action");
-      expect(policy?.autoApprovable).toBe(false);
-      expect(policy?.classifiedBy).toBe("default");
+    for (const name of ["jarvis_call_prod_tool", "jarvis_call_wren_tool"]) {
+      for (const annotations of [undefined, { readOnlyHint: true }]) {
+        const policy = applyJarvisToolPolicy(entry(name, annotations));
+        expect(policy?.mode).toBe("action");
+        expect(policy?.autoApprovable).toBe(false);
+        expect(policy?.classifiedBy).toBe("default");
+      }
     }
   });
 
   it("leaves discovery as reads, since listing and describing disclose no production data", () => {
-    for (const name of ["jarvis_list_prod_tools", "jarvis_describe_prod_tool"]) {
+    for (const name of [
+      "jarvis_list_prod_tools", "jarvis_describe_prod_tool", "jarvis_describe_wren_tool",
+    ]) {
       const policy = applyJarvisToolPolicy(entry(name));
       expect(policy?.mode).toBe("read");
       expect(policy?.autoApprovable).toBe(false);

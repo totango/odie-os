@@ -134,8 +134,11 @@ repository, incident, integration-health, and status tools are reads. Support-qu
 investigation tools always require manual approval; upstream MCP annotations cannot weaken that
 policy. The deployment bearer is stored only as the `JARVIS_MCP_TOKEN` Worker secret.
 
-Three tools reach live production rather than recorded knowledge: `jarvis_list_prod_tools`,
-`jarvis_describe_prod_tool`, and `jarvis_call_prod_tool`. Listing and describing are reads.
+Five tools reach live production rather than recorded knowledge: `jarvis_list_prod_tools`,
+`jarvis_describe_prod_tool`, `jarvis_call_prod_tool`, `jarvis_describe_wren_tool`, and
+`jarvis_call_wren_tool`. Listing and describing are reads. The Wren-specific describe/call pair is
+available in Chat and Code, resolves tools only from `prod-wren`, and should be preferred for
+structured production-data questions because Wren provides semantic model and relationship context.
 **Calling is an action and waits for approval**, even though JARVIS declares the tool read-only —
 the agent chooses the tool name and the arguments, and the reachable surface includes ad-hoc SQL
 against the production databases, so the gatekeeper does not delegate that decision upstream. If the

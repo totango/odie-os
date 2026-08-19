@@ -23,11 +23,15 @@ const HISTORICAL_V1_TOOLS = [
   "jarvis_call_prod_tool",
 ] as const;
 
+const HISTORICAL_V4_TOOLS = JARVIS_ALLOWED_TOOLS.filter(
+  tool => tool !== "jarvis_describe_wren_tool" && tool !== "jarvis_call_wren_tool"
+);
+
 /** Returns the default policy without live repository or arbitrary production calls in chat. */
 export function defaultJarvisToolPolicy(): JarvisToolPolicy {
   const tools = [...JARVIS_ALLOWED_TOOLS];
   return {
-    revision: 4,
+    revision: 5,
     chat: {
       tools: tools.filter(tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"),
     },
@@ -36,7 +40,7 @@ export function defaultJarvisToolPolicy(): JarvisToolPolicy {
   };
 }
 
-/** Upgrades only the original untouched default, preserving every administrator-authored policy. */
+/** Upgrades untouched defaults and enforces the reserved generic-production Chat boundary. */
 export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): JarvisToolPolicy {
   const historicalTools = [...HISTORICAL_V1_TOOLS];
   const untouchedV1 = policy.revision === 1 && policy.syncCode === true &&
@@ -45,10 +49,25 @@ export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): Jarvis
     sameTools(policy.chat.tools, historicalTools.filter(tool => tool !== "repo_knowledge")) &&
     sameTools(policy.code.tools, historicalTools);
   const untouchedV3 = policy.revision === 3 && policy.syncCode === false &&
-    sameTools(policy.chat.tools, JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge")) &&
-    sameTools(policy.code.tools, JARVIS_ALLOWED_TOOLS);
-  const untouched = untouchedV1 || untouchedV2 || untouchedV3;
-  return untouched ? defaultJarvisToolPolicy() : policy;
+    sameTools(policy.chat.tools, HISTORICAL_V4_TOOLS.filter(tool => tool !== "repo_knowledge")) &&
+    sameTools(policy.code.tools, HISTORICAL_V4_TOOLS);
+  const untouchedV4 = policy.revision === 4 && policy.syncCode === false &&
+    sameTools(policy.chat.tools, HISTORICAL_V4_TOOLS.filter(
+      tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool")) &&
+    sameTools(policy.code.tools, HISTORICAL_V4_TOOLS);
+  const untouched = untouchedV1 || untouchedV2 || untouchedV3 || untouchedV4;
+  if (untouched) return defaultJarvisToolPolicy();
+  const normalizeChat = policy.chat.tools === undefined ||
+    policy.chat.tools.includes("jarvis_call_prod_tool");
+  const normalizeCode = policy.code.tools === undefined;
+  if (!normalizeChat && !normalizeCode) return policy;
+  const chatTools = (policy.chat.tools ?? JARVIS_ALLOWED_TOOLS)
+    .filter(tool => tool !== "jarvis_call_prod_tool");
+  return {
+    ...policy,
+    chat: normalizeChat ? { tools: chatTools } : policy.chat,
+    code: normalizeCode ? { tools: [...JARVIS_ALLOWED_TOOLS] } : policy.code,
+  };
 }
 
 /** Normalizes policy input to the fixed allowlist, reserving arbitrary production calls for code. */
@@ -88,7 +107,7 @@ function sameTools(actual: readonly string[] | undefined, expected: readonly str
 
 /** Deployment-global Durable Object storing the current JARVIS policy. */
 export class JarvisPolicy extends DurableObject<Env> {
-  /** Reads the policy, initializing or upgrading only the untouched deployment default. */
+  /** Reads the policy, initializing defaults and enforcing reserved Chat boundaries. */
   get(): JarvisToolPolicy {
     const stored = this.ctx.storage.kv.get<JarvisToolPolicy>("policy");
     const policy = stored ? upgradeDefaultJarvisToolPolicy(stored) : defaultJarvisToolPolicy();

@@ -83,6 +83,7 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("For customer, account, CSM, product-usage, or internal business questions");
     expect(message).toContain("prefer the Totango Knowledge Graph resource when available");
     expect(message).toContain("say when an answer had to fall back to the public web");
+    expect(message).not.toContain("prefer the Wren semantic query tools behind JARVIS");
     expect(message).toContain("engineering questions");
     expect(message).toContain("prefer JARVIS repo_graph tools");
     expect(message).toContain("use it for read-only Totango source access instead of requesting");
@@ -90,6 +91,19 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("only when the task needs capabilities the organization source does not provide");
     expect(message).toContain("do not request another connection to the same vendor");
     expect(message).toContain("a duplicate binding does not add methods");
+
+    let wrenMessage = formatAlwaysAvailableResourcesPrompt([{
+      title: "JARVIS",
+      name: "JARVIS",
+      catalog: {entries: [
+        {id: "jarvis_list_prod_tools", title: "List production tools"},
+        {id: "jarvis_describe_wren_tool", title: "Describe Wren tool"},
+        {id: "jarvis_call_wren_tool", title: "Call Wren tool"},
+      ]},
+    }]);
+    expect(wrenMessage).toContain("prefer the Wren semantic query tools behind JARVIS");
+    expect(wrenMessage).toContain("list production tools restricted to `prod-wren`");
+    expect(wrenMessage).toContain("Use raw Postgres or ClickHouse production tools only when Wren lacks");
   });
 });
 

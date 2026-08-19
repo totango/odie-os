@@ -87,6 +87,21 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
 }>): string {
   let lines = resources.map(resource =>
     `- ${resource.title}: \`env.${resource.name}\`${formatAgentCatalogPrompt(resource.catalog)}`);
+  let jarvisTools = new Set(resources
+    .filter(resource => resource.name === "JARVIS")
+    .flatMap(resource => resource.catalog?.entries.map(entry => entry.id) ?? []));
+  let hasWrenWorkflow = [
+    "jarvis_list_prod_tools",
+    "jarvis_describe_wren_tool",
+    "jarvis_call_wren_tool",
+  ].every(tool => jarvisTools.has(tool));
+  let wrenGuidance = hasWrenWorkflow
+    ? `For structured production-data questions, prefer the Wren semantic query tools behind ` +
+      `JARVIS: list production tools restricted to \`prod-wren\`, describe the relevant Wren tool, ` +
+      `validate SQL before execution, and call it through the Wren-specific JARVIS action. Use raw ` +
+      `Postgres or ClickHouse production tools only when Wren lacks the required model or capability, ` +
+      `and say why that fallback was necessary. `
+    : "";
   return `The following resources are always available as bindings in your env for use with the ` +
     `executeCode tool (you don't need to request them):\n${lines.join("\n")}\n` +
     `When one is relevant, use describeBinding with the binding's name to learn its API before ` +
@@ -95,7 +110,8 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
     `use another relevant resource instead. For customer, account, CSM, product-usage, or internal ` +
     `business questions, prefer ` +
     `the Totango Knowledge Graph resource when available, then other relevant internal resources, ` +
-    `before using public web sources; say when an answer had to fall back to the public web. For ` +
+    `before using public web sources; say when an answer had to fall back to the public web. ` +
+    wrenGuidance + `For ` +
     `engineering questions about the configured ODI repositories, prefer JARVIS repo_graph tools ` +
     `for indexed topology and relationships, then use the Totango GitHub source resource to verify ` +
     `current implementation details or when the graph is missing or stale. When ` +

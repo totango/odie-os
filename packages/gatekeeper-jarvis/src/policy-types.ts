@@ -19,6 +19,8 @@ export const JARVIS_ALLOWED_TOOLS = [
   "jarvis_list_prod_tools",
   "jarvis_describe_prod_tool",
   "jarvis_call_prod_tool",
+  "jarvis_describe_wren_tool",
+  "jarvis_call_wren_tool",
 ] as const;
 
 /** A JARVIS MCP tool that this gatekeeper may expose. */

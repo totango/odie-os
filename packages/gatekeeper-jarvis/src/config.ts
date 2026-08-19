@@ -22,6 +22,7 @@ const ALLOWED_TOOL_SET = new Set<string>(JARVIS_ALLOWED_TOOLS);
 const MANUAL_ACTION_TOOL_SET = new Set<string>([
   "jarvis_answer_support_question",
   "jarvis_investigate_customer_issue",
+  "jarvis_call_wren_tool",
   // Running an arbitrary named tool against live production is not an observation, whatever the
   // far side says about it. JARVIS refuses the writes it hosts, but this gatekeeper does not get to
   // depend on that being true today or after the next tool ships there: the name and arguments are
