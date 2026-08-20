@@ -3,6 +3,7 @@ import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import SandboxedGatekeeperApp from './SandboxedGatekeeperApp'
 import { reportIssue } from './errorReporting'
+import { useGatekeeperApps } from './useGatekeeperApps'
 
 // The frame's `ui` is an RPC stub at runtime; dispose it to release the server-side capability.
 function disposeFrame(frame: GatekeeperUiFrame | null) {
@@ -13,8 +14,18 @@ function disposeFrame(frame: GatekeeperUiFrame | null) {
  * Renders a gatekeeper's full-page management app (a sandboxed SPA the gatekeeper serves).
  * Fetches the app frame (iframe HTML + `ui` capability) from the backend and hosts it.
  */
-export default function GatekeeperAppPage({ appId }: { appId: string }) {
+export default function GatekeeperAppPage({
+  appId,
+  routeState,
+  setRouteState,
+}: {
+  appId: string,
+  routeState?: string,
+  setRouteState?: (value: string) => void,
+}) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const app = useGatekeeperApps().find((candidate) => candidate.id === appId)
+  const gatekeeperVendorId = app?.vendorId ?? appId
   // Wrap the frame in an object: it holds a `ui` RPC stub, and we never want useState's setter to
   // treat a stored value as an updater function.
   const [state, setState] = useState<{ frame: GatekeeperUiFrame } | null>(null)
@@ -23,6 +34,8 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
   useEffect(() => {
     let cancelled = false
     let acquired: GatekeeperUiFrame | null = null
+    setError(null)
+    setState(null)
     authenticatedApi
       .getGatekeeperApp(appId)
       .then((frame) => {
@@ -40,7 +53,7 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
       .catch((err) => {
         console.error('Failed to load gatekeeper app:', err)
         reportIssue('gatekeeper-app.load', err, {
-          gatekeeperVendorId: appId,
+          gatekeeperVendorId,
         })
         if (!cancelled) setError(`${err}`)
       })
@@ -48,7 +61,7 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
       cancelled = true
       disposeFrame(acquired)
     }
-  }, [authenticatedApi, appId])
+  }, [authenticatedApi, appId, gatekeeperVendorId])
 
   if (error) {
     return (
@@ -62,7 +75,12 @@ export default function GatekeeperAppPage({ appId }: { appId: string }) {
   // Fill the routed area below the header so the embedded app can manage its own internal layout.
   return (
     <div className="h-full">
-      <SandboxedGatekeeperApp frame={state.frame} gatekeeperVendorId={appId} />
+      <SandboxedGatekeeperApp
+        frame={state.frame}
+        gatekeeperVendorId={gatekeeperVendorId}
+        routeState={routeState}
+        setRouteState={setRouteState}
+      />
     </div>
   )
 }

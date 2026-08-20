@@ -20,7 +20,7 @@ import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
 import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
-import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID } from "./user";
+import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID, type ProvidedAccountInfo } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
@@ -33,6 +33,56 @@ import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 
 const logger = createWorkshopLogger("workshop.server");
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let text = "";
+  for (let byte of bytes) text += String.fromCharCode(byte);
+  return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+export async function gatekeeperAppInstanceId(account: Pick<ProvidedAccountInfo, "accountId">)
+    : Promise<string> {
+  let hash = await crypto.subtle.digest("SHA-256",
+      new TextEncoder().encode(`gatekeeper-app-account:${account.accountId}`));
+  return `acct_${base64UrlEncode(new Uint8Array(hash).slice(0, 18))}`;
+}
+
+function canOpenGatekeeperApp(account: ProvidedAccountInfo, isAdmin: boolean): boolean {
+  return Boolean(account.description.providesUi &&
+      (isAdmin || !account.description.providesUi.adminOnly));
+}
+
+export async function listVisibleGatekeeperApps(accounts: ProvidedAccountInfo[], isAdmin: boolean)
+    : Promise<GatekeeperAppInfo[]> {
+  return Promise.all(accounts
+      .filter((account) => canOpenGatekeeperApp(account, isAdmin))
+      .map(async (account) => ({
+        id: await gatekeeperAppInstanceId(account),
+        vendorId: account.vendorId,
+        accountDisplayName: account.description.displayName,
+        accountUniqueName: account.description.uniqueName,
+        title: account.description.providesUi!.title,
+        icon: account.description.providesUi!.icon,
+      })));
+}
+
+export async function resolveGatekeeperAppAccount(accounts: ProvidedAccountInfo[], id: string,
+    isAdmin: boolean): Promise<ProvidedAccountInfo | null> {
+  let app: ProvidedAccountInfo | undefined;
+  for (let account of accounts) {
+    if (account.description.providesUi && await gatekeeperAppInstanceId(account) === id) {
+      app = account;
+      break;
+    }
+  }
+  if (!app) {
+    let legacyMatches = accounts.filter((account) =>
+      account.vendorId === id && canOpenGatekeeperApp(account, isAdmin));
+    if (legacyMatches.length === 1) app = legacyMatches[0];
+  }
+  if (!app || !canOpenGatekeeperApp(app, isAdmin)) return null;
+  return app;
+}
 
 // Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
@@ -669,20 +719,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   // --- Gatekeeper management apps ---
 
   // The management apps available to the current user: their connected accounts that declare a
-  // top-level UI (AccountDescription.providesUi). The app id is the gatekeeper's routing id (its
-  // vendor id, e.g. "context"), so each app is hosted at /gatekeepers/<vendorId>. UI-providing
-  // accounts are auto-provisioned singletons (one per vendor), so the vendor id identifies them.
+  // top-level UI (AccountDescription.providesUi). The app id is an opaque stable account-addressed
+  // slug, so multiple UI accounts from the same vendor do not collide.
   async listGatekeeperApps(): Promise<GatekeeperAppInfo[]> {
     // listProvidedAccounts provisions auto-provisioned accounts first (idempotent), so their apps
     // appear in the nav even before the user opens a gadget — in a single round trip.
     let accounts = await this.#user.listProvidedAccounts();
-    return accounts
-        .filter((account: (typeof accounts)[number]) => account.description.providesUi)
-        .map((account: (typeof accounts)[number]) => ({
-          id: account.vendorId,
-          title: account.description.providesUi!.title,
-          icon: account.description.providesUi!.icon,
-        }));
+    return await listVisibleGatekeeperApps(accounts, this.#isAdmin());
   }
 
   async getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null> {
@@ -690,7 +733,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // so a direct URL load of /gatekeepers/$id works without racing the Header's listGatekeeperApps.
     let user = this.#user;  // one stub for both calls
     let accounts = await user.listProvidedAccounts();
-    let app = accounts.find((account: (typeof accounts)[number]) => account.vendorId === id && account.description.providesUi);
+    let app = await resolveGatekeeperAppAccount(accounts, id, this.#isAdmin());
     if (!app) return null;
     // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
     return user.startAccountAppUi(app.accountId, { isAdmin: this.#isAdmin() });

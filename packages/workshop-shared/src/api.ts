@@ -829,16 +829,19 @@ export interface AuthenticatedApi extends RpcTarget {
   // --- Gatekeeper management apps ---
 
   /**
-   * List the gatekeepers that expose a full-page management UI (VendorDescription.providesUi) and are
-   * available to this user. The Workshop renders a nav entry + page per entry. Independent of whether
-   * the gatekeeper is a singleton.
+   * List the connected accounts that expose a full-page management UI
+   * (AccountDescription.providesUi) and are available to this user. The Workshop renders a nav entry
+   * + page per entry. Independent of whether the account also provides an agent singleton. Apps whose
+   * `providesUi.adminOnly` metadata is true are omitted for non-admin callers.
    */
   listGatekeeperApps(): Promise<GatekeeperAppInfo[]>;
 
   /**
    * Get the app frame (self-contained iframe HTML + the gatekeeper's `ui` capability) for the given
-   * gatekeeper id, or null if there is no such UI-providing gatekeeper. The Workshop hosts the HTML
-   * in a sandboxed iframe and exposes `ui` to it over a MessagePort RPC session.
+   * opaque app instance id, or null if there is no such UI-providing account for the caller. The
+   * Workshop hosts the HTML in a sandboxed iframe and exposes `ui` to it over a MessagePort RPC
+   * session. For legacy bookmarks, a vendor id may be accepted only when it resolves to exactly one
+   * UI-providing account owned by the caller.
    */
   getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null>;
 
@@ -862,14 +865,23 @@ export interface AuthenticatedApi extends RpcTarget {
   // - Edit permissions on a connected account.
 }
 
-/** Describes a gatekeeper's management app, for the Workshop nav + page. */
+/** Describes a gatekeeper account's management app, for the Workshop nav + page. */
 export type GatekeeperAppInfo = {
   /**
-   * The vendor id (the GATEKEEPER_<ID> binding suffix, lowercased), used as the URL slug at
-   * /gatekeepers/$id. This is the vendor, not a specific account: it assumes one management-UI
-   * account per vendor per user, which holds for today's auto-provisioned singletons.
+   * Opaque, URL-safe, stable app instance id used as the URL slug at `/gatekeepers/$id`. This
+   * addresses one caller-owned UI-providing account, not merely a gatekeeper vendor.
    */
   id: string;
+  /**
+   * The vendor id (the `GATEKEEPER_<ID>` binding suffix, lowercased) for branding, diagnostics, and
+   * grouping. This is not sufficient to identify an app instance when a user has multiple
+   * UI-providing accounts for the same vendor.
+   */
+  vendorId: string;
+  /** Optional display name of the connected account backing this app, for disambiguation. */
+  accountDisplayName?: string;
+  /** Optional unique name of the connected account backing this app, for disambiguation. */
+  accountUniqueName?: string;
   /** Title for the nav entry / page header. */
   title: string;
   /** Optional icon. */

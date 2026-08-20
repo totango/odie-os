@@ -24,8 +24,8 @@ export function refreshGatekeeperApps(api: object): void {
  * The gatekeeper-served management apps available to the current user (one per gatekeeper that sets
  * `providesUi`, e.g. the Context Library). The Workshop hosts each at `/gatekeepers/$appId` and lists
  * them in the nav — no gatekeeper is hardcoded here; the set comes from the backend's discovery of
- * bound gatekeepers. Returns [] until authenticated/loaded. `GatekeeperAppInfo` is plain data
- * (id/title/icon), so it's safe to hold in state.
+ * bound gatekeepers. Returns [] until authenticated/loaded. `GatekeeperAppInfo` is plain data, so
+ * it's safe to hold in state.
  */
 export function useGatekeeperApps(): GatekeeperAppInfo[] {
   const auth = useOptionalAuthenticatedApi()

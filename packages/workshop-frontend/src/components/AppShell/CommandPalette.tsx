@@ -4,6 +4,7 @@ import {
   Blueprint,
   MagnifyingGlass,
   Plus,
+  Plugs,
   RocketLaunch,
   SquaresFour,
 } from '@phosphor-icons/react'
@@ -12,6 +13,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import type { GadgetMetadataWithTimestamps, OutputFormatOffer } from '@gadgets/workshop-shared/api'
 import { FormatGlyph } from '../format/FormatVisuals'
 import { createFromFormat } from '../format/useOutputFormats'
+import { useGatekeeperApps } from '../../useGatekeeperApps'
 
 // A ⌘K command palette: jump to a workspace or a primary destination. Because it's keyboard-driven
 // and opened many times a day, it deliberately has *no* open/close animation (instant feels faster
@@ -144,6 +146,7 @@ export default function CommandPalette({
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
+  const gatekeeperApps = useGatekeeperApps()
 
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
@@ -234,6 +237,14 @@ export default function CommandPalette({
       run: () => { void createFormat(format) },
     }))
 
+    const gatekeeperAppCommands: Command[] = gatekeeperApps.map((app) => ({
+      id: `nav-gatekeeper-app-${app.id}`,
+      label: app.title,
+      hint: 'App',
+      icon: <Plugs size={15} />,
+      run: () => navigate({ to: '/gatekeepers/$appId', params: { appId: app.id } }),
+    }))
+
     const nav: Command[] = [
       {
         id: 'nav-new',
@@ -248,6 +259,7 @@ export default function CommandPalette({
         icon: <SquaresFour size={15} />,
         run: () => navigate({ to: '/workspaces' }),
       },
+      ...gatekeeperAppCommands,
       {
         id: 'nav-getting-started',
         label: 'Getting started',
@@ -310,7 +322,7 @@ export default function CommandPalette({
     const groups = built.filter((g) => g.items.length > 0)
     const flat = groups.flatMap((g) => g.items)
     return { groups, flat }
-  }, [query, gadgets, blueprints, formats, navigate, createFormat])
+  }, [query, gadgets, blueprints, formats, gatekeeperApps, navigate, createFormat])
 
   // Keep the active index in range as the result set changes.
   useEffect(() => {

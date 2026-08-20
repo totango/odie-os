@@ -35,6 +35,7 @@ type OpenTarget = (target: GatekeeperAppWorkspaceTarget) => void
 // can no longer see. Deliberately a lookup, not an enumeration: the app learns nothing new.
 type ResolveWorkspaceTitles = (ids: string[]) => Promise<(string | null)[]>
 type OpenPrompt = (prompt: string) => void
+type RouteStateSetter = (value: string) => void
 
 type OverlayState = 'full' | null
 
@@ -44,6 +45,23 @@ const MAX_RESOLVED_WORKSPACES = 100
 // How long one gadget listing is reused across title lookups. The untrusted frame calls this once
 // per page of rows (and could call it in a loop), so the listing is shared rather than repeated.
 const WORKSPACE_TITLES_TTL_MS = 10_000
+export const MAX_GATEKEEPER_APP_ROUTE_STATE_LENGTH = 2048
+
+export function normalizeGatekeeperAppRouteState(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  if (value.length > MAX_GATEKEEPER_APP_ROUTE_STATE_LENGTH) return undefined
+  for (let index = 0; index < value.length; index++) {
+    const charCode = value.charCodeAt(index)
+    if (charCode <= 0x1F || charCode === 0x7F) return undefined
+  }
+  return value
+}
+
+function requireGatekeeperAppRouteState(value: string): string {
+  const normalized = normalizeGatekeeperAppRouteState(value)
+  if (normalized === undefined) throw new TypeError('Invalid gatekeeper app route state.')
+  return normalized
+}
 
 // Near the max int, so the full-viewport iframe sits above all Workshop chrome.
 const overlayZIndex = 2147483000
@@ -85,6 +103,8 @@ class GatekeeperAppHostImpl extends RpcTarget {
   readonly #openTarget: OpenTarget
   readonly #openPrompt: OpenPrompt
   readonly #resolveWorkspaceTitles: ResolveWorkspaceTitles
+  readonly #getRouteState: () => string
+  readonly #setRouteState: RouteStateSetter
   #presenting = false
   #theme: GatekeeperAppTheme
   #themeReceiver: RpcStub<GatekeeperAppThemeReceiver> | null = null
@@ -100,6 +120,8 @@ class GatekeeperAppHostImpl extends RpcTarget {
     openTarget: OpenTarget,
     openPrompt: OpenPrompt,
     resolveWorkspaceTitles: ResolveWorkspaceTitles,
+    getRouteState: () => string,
+    setRouteState: RouteStateSetter,
   ) {
     super()
     this.#theme = theme
@@ -116,6 +138,8 @@ class GatekeeperAppHostImpl extends RpcTarget {
     this.#openTarget = openTarget
     this.#openPrompt = openPrompt
     this.#resolveWorkspaceTitles = resolveWorkspaceTitles
+    this.#getRouteState = getRouteState
+    this.#setRouteState = setRouteState
   }
 
   get ui(): RpcStub<RpcTarget> {
@@ -139,6 +163,14 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   openPrompt(prompt: string): void {
     this.#openPrompt(normalizeGatekeeperAppPrompt(prompt))
+  }
+
+  getRouteState(): string {
+    return this.#getRouteState()
+  }
+
+  setRouteState(value: string): void {
+    this.#setRouteState(requireGatekeeperAppRouteState(value))
   }
 
   // The app calls this once to learn the current theme and register a receiver for later changes.
@@ -216,9 +248,11 @@ class GatekeeperAppHostImpl extends RpcTarget {
  * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
  * The iframe fills its parent container.
  */
-export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
+export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, routeState, setRouteState }: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
+  routeState?: string,
+  setRouteState?: RouteStateSetter,
 }) {
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
@@ -227,6 +261,10 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
   const hostRef = useRef<GatekeeperAppHostImpl | null>(null)
   const connectedRef = useRef(false)
   const invalidatedRef = useRef(false)
+  const routeStateRef = useRef('')
+  const setRouteStateRef = useRef<RouteStateSetter>(() => {})
+  routeStateRef.current = normalizeGatekeeperAppRouteState(routeState) ?? ''
+  setRouteStateRef.current = setRouteState ?? (() => {})
   const [overlay, setOverlay] = useState<OverlayState>(null)
   const overlayRef = useRef<OverlayState>(null)
   // Push the Workshop's resolved light/dark mode and deployment accent whenever either changes.
@@ -325,6 +363,8 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId }: {
         openTarget,
         openPrompt,
         resolveWorkspaceTitles,
+        () => routeStateRef.current,
+        (value) => setRouteStateRef.current(value),
       )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)

@@ -17,7 +17,7 @@ import type {
   GatekeeperAppTheme,
   GatekeeperAppThemeReceiver,
 } from "@gadgets/workshop-shared/theme";
-import SandboxedGatekeeperApp from "./SandboxedGatekeeperApp";
+import SandboxedGatekeeperApp, { normalizeGatekeeperAppRouteState } from "./SandboxedGatekeeperApp";
 
 vi.mock("./ThemeContext", () => ({
   useTheme: () => ({ resolvedThemeMode: "light" }),
@@ -43,12 +43,15 @@ vi.mock("./AuthContext", () => ({
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+Object.defineProperty(window, "scrollTo", { value: vi.fn<() => void>(), configurable: true });
 
 interface TestHost extends RpcTarget {
   subscribeTheme(receiver: GatekeeperAppThemeReceiver): Promise<GatekeeperAppTheme>;
   openWorkspace(workspaceId: string, gadgetId?: number): Promise<void>;
   resolveWorkspaceTitles(ids: string[]): Promise<(string | null)[]>;
   openPrompt(prompt: string): Promise<void>;
+  getRouteState(): Promise<string>;
+  setRouteState(value: string): Promise<void>;
 }
 
 class EmptyUi extends RpcTarget {}
@@ -153,5 +156,79 @@ describe("SandboxedGatekeeperApp navigation", () => {
       await vi.waitFor(() => expect(router.state.location.pathname).toBe("/"));
     });
     expect(router.state.location.search).toEqual({ prompt: "Create a daily brief." });
+  });
+
+  it("bridges bounded route state without allowing iframe-controlled route changes", async () => {
+    const frame = {
+      iframeHtml: "<!doctype html><title>Work Items</title>",
+      ui: new RpcStub(new EmptyUi()),
+    } as unknown as GatekeeperUiFrame;
+    const rootRoute = createRootRoute();
+    const route = createRoute({
+      getParentRoute: () => rootRoute,
+      path: "/gatekeepers/$appId",
+      validateSearch: (search: Record<string, unknown>): { state?: string } => {
+        const state = normalizeGatekeeperAppRouteState(search.state);
+        return state === undefined || state === "" ? {} : { state };
+      },
+      component: function RouteComponent() {
+        const { appId } = route.useParams();
+        const { state } = route.useSearch();
+        const navigate = route.useNavigate();
+        return <SandboxedGatekeeperApp
+          frame={frame}
+          gatekeeperVendorId={appId}
+          routeState={state}
+          setRouteState={(value) => {
+            void navigate({ search: value ? { state: value } : {}, replace: true });
+          }}
+        />;
+      },
+    });
+    const router = createRouter({
+      history: createMemoryHistory({ initialEntries: ["/gatekeepers/team-pi?state=source%3Djira%26q%3Dlogin"] }),
+      routeTree: rootRoute.addChildren([route]),
+    });
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<RouterProvider router={router} />));
+
+    const iframe = container.querySelector("iframe");
+    if (!iframe) throw new Error("Missing gatekeeper iframe");
+    const { port1, port2 } = new MessageChannel();
+    host = newMessagePortRpcSession<TestHost>(port1);
+    window.dispatchEvent(new MessageEvent("message", {
+      data: { type: "handshake" },
+      origin: "null",
+      source: iframe.contentWindow,
+      ports: [port2],
+    }));
+
+    await expect(host.getRouteState()).resolves.toBe("source=jira&q=login");
+
+    await act(async () => {
+      await host!.setRouteState("source=zendesk&q=refund");
+      await vi.waitFor(() => expect(router.state.location.search).toEqual({ state: "source=zendesk&q=refund" }));
+    });
+    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
+
+    await act(async () => {
+      await host!.setRouteState("");
+      await vi.waitFor(() => expect(router.state.location.search).toEqual({}));
+    });
+    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
+
+    await expect(host.setRouteState("x".repeat(2049))).rejects.toThrow("Invalid gatekeeper app route state");
+    await expect(host.setRouteState("q=bad\nvalue")).rejects.toThrow("Invalid gatekeeper app route state");
+    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
+    expect(router.state.location.search).toEqual({});
+
+    await act(async () => {
+      await host!.setRouteState("appId=evil&path=/admin&selected=jira%3A1001");
+      await vi.waitFor(() => expect(router.state.location.search).toEqual({ state: "appId=evil&path=/admin&selected=jira%3A1001" }));
+    });
+    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
   });
 });
