@@ -10,7 +10,7 @@ import {
   startDeviceAuthorization,
   type TeamPiConfig,
 } from "../team-pi-api.js";
-import { TeamPiAccount, TeamPiGatekeeper, TeamPiSessionImpl, TeamPiUser, catalogEntries, claimPendingAction, getStoredActionResult, rejectPendingAction, safeConnectionUrl, sanitizeInstallSkillResult, sanitizeStartConnectionResult } from "../team-pi.js";
+import { TeamPiAccount, TeamPiGatekeeper, TeamPiSessionImpl, TeamPiUser, TeamPiWorkItemManagementApi, TeamPiWorkItemsManagementApi, catalogEntries, claimPendingAction, detailFromEnvelope, getStoredActionResult, rejectPendingAction, safeConnectionUrl, sanitizeInstallSkillResult, sanitizeStartConnectionResult } from "../team-pi.js";
 
 const config: TeamPiConfig = {
   auth0Domain: "https://tenant.auth0.com",
@@ -101,6 +101,19 @@ describe("Team PI token refresh and API isolation", () => {
     expect(vi.mocked(fetch).mock.calls[1]?.[1]?.headers).toMatchObject({ Authorization: "Bearer user-b" });
     expect(vi.mocked(fetch).mock.calls[0]?.[1]?.headers).toMatchObject({ "X-Team-PI-ID-Token": "identity-a" });
     expect(vi.mocked(fetch).mock.calls[1]?.[1]?.headers).toMatchObject({ "X-Team-PI-ID-Token": "identity-b" });
+  });
+
+  it("bounds Team PI API requests with a total timeout", async () => {
+    const signal = AbortSignal.abort(new DOMException("timed out", "TimeoutError"));
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(signal);
+
+    await expect(new TeamPiApi(
+      async () => ({ accessToken: "user-a", idToken: "identity-a" }),
+      config.baseUrl,
+    ).listSkills()).rejects.toThrow("Team PI request timed out");
+    expect(timeout).toHaveBeenCalledWith(30_000);
+    expect(fetch).not.toHaveBeenCalled();
+    timeout.mockRestore();
   });
 
   it("turns Team PI auth denials into actionable access errors", async () => {
@@ -306,6 +319,45 @@ describe("Team PI token refresh and API isolation", () => {
     expect(urls).toContain("https://team-pi.example/salesforce/account?q=Acme");
     expect(urls).toContain("https://team-pi.example/connect/gmail");
   });
+
+  it("uses exact allowlisted Work Items v1 endpoints with auth headers and bounded JSON bodies", async () => {
+    vi.mocked(fetch).mockImplementation(() => Promise.resolve(response({ item: { source: "jira", id: "J-1", title: "Issue", fields: {} } })));
+    const api = new TeamPiApi(async () => ({ accessToken: "access", idToken: "identity" }), config.baseUrl);
+
+    await api.workItemsSourceStatus();
+    await api.workItemsSearch("jira", { query: "login", limit: 2, cursor: "5" });
+    await api.workItemsDetail("jira", "J-1");
+    await api.workItemsComments("jira", "J-1");
+    await api.workItemsActivity("jira", "J-1");
+    await api.workItemsUpdateOptions("jira", "J-1");
+    await api.workItemsAddComment("zendesk", "12", { body: "x".repeat(20_000) });
+    await api.workItemsUpdateFields("jira", "J-1", { summary: "New" });
+    await api.workItemsTransitions("J-1");
+    await api.workItemsApplyTransition("J-1", "31");
+    await api.workItemsLink("J-1", "12");
+
+    const calls = vi.mocked(fetch).mock.calls;
+    expect(calls.map(call => String(call[0]))).toEqual([
+      "https://team-pi.example/api/work-items/v1/sources/status",
+      "https://team-pi.example/api/work-items/v1/search?source=jira&limit=2&q=login&cursor=5",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1/comments",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1/activity",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1/update-options",
+      "https://team-pi.example/api/work-items/v1/items/zendesk/12/comments",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1/fields",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1/transitions",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1/transitions",
+      "https://team-pi.example/api/work-items/v1/links",
+    ]);
+    expect(calls[6]?.[1]).toMatchObject({ method: "POST", redirect: "manual" });
+    expect(calls[7]?.[1]).toMatchObject({ method: "PATCH" });
+    expect(calls[10]?.[1]).toMatchObject({ method: "POST" });
+    expect(calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer access", "X-Team-PI-ID-Token": "identity" });
+    expect(JSON.parse(String(calls[6]?.[1]?.body))).toEqual({ body: "x".repeat(12_000) });
+    expect(JSON.parse(String(calls[10]?.[1]?.body))).toEqual({ jiraId: "J-1", zendeskTicketId: "12" });
+    expect(() => assertAllowedEndpoint("workItems", "rawProxy")).toThrow(/not allowed/);
+  });
 });
 
 function configEnv(): Env {
@@ -320,6 +372,21 @@ function configEnv(): Env {
 describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
   it("configures the whole-account resource for an existing authenticated account", async () => {
     const user = new TeamPiUser({} as never, configEnv());
+    (user as unknown as { env: Env }).env = configEnv();
+    (user as unknown as { ctx: unknown }).ctx = {
+      props: { accountId: "account-1" },
+      exports: {
+        TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access", idToken: "identity" }) }) },
+        TeamPiGatekeeper: vi.fn(() => ({ class: "team-pi" })),
+      },
+    };
+
+    const app = await user.startAppUi({ isAdmin: true });
+    expect(app.iframeHtml).toContain("app.txt");
+    expect(app.ui).toBeInstanceOf(RpcStub);
+    app.ui[Symbol.dispose]();
+    await expect(user.startAppUi({ isAdmin: false })).rejects.toThrow(/admins only/);
+
     (user as unknown as { ctx: unknown }).ctx = {
       props: { accountId: "account-1" },
       exports: { TeamPiGatekeeper: vi.fn(() => ({ class: "team-pi" })) },
@@ -406,6 +473,107 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       { id: "shared-zd", name: "zendesk", provider: "zendesk", scope: "shared", status: "connected" },
       { id: undefined, name: "chorus", provider: "chorus", scope: "token", status: "configured" },
     ] });
+  });
+
+  it("normalizes and bounds Work Items responses before returning over RPC", () => {
+    expect(detailFromEnvelope({ item: {
+      source: "jira",
+      id: "J-1",
+      key: "J-1",
+      url: "https://jira.example/browse/J-1",
+      title: "x".repeat(400),
+      fields: { summary: "y".repeat(3_000), labels: ["secret"] },
+      token: "do-not-copy",
+    } })).toEqual({ item: expect.objectContaining({
+      source: "jira",
+      id: "J-1",
+      title: "x".repeat(300),
+      fields: { summary: "y".repeat(2_000), labels: "secret" },
+    }) });
+  });
+
+  it("isolates provider partial failures when searching both Work Items sources", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ source: "jira", items: [{ source: "jira", id: "J-1", title: "Issue", fields: {} }], cursor: "1", hasMore: true }))
+      .mockResolvedValueOnce(response({ error: "zendesk_down" }, 503));
+    const api = new TeamPiWorkItemsManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl));
+
+    await expect(api.search({ source: "both", query: "acme" })).resolves.toEqual({
+      items: [{ source: "jira", id: "J-1", title: "Issue", fields: {}, key: undefined, url: undefined, status: undefined, type: undefined, priority: undefined, assignee: undefined, requester: undefined, updatedAt: undefined, projectKey: undefined }],
+      cursors: { jira: "1" },
+      hasMore: { jira: true },
+      errors: [{ source: "zendesk", message: "Team PI API failed: ", status: 503 }],
+    });
+  });
+
+  it("normalizes Work Items source statuses through the management API", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({
+      sources: {
+        jira: { configured: true, connected: false, reason: "missing shared connection" },
+        zendesk: { configured: true, connected: true, secret: "ignored" },
+      },
+    }));
+    const api = new TeamPiWorkItemsManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl));
+
+    await expect(api.getSourceStatuses()).resolves.toEqual({
+      jira: { configured: true, connected: false, reason: "missing shared connection" },
+      zendesk: { configured: true, connected: true, reason: undefined },
+    });
+  });
+
+  it("uses Zendesk internal comments by default and public only when explicit", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "12", title: "Ticket", fields: {} } }))
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "12", title: "Ticket", fields: {} } }))
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "12", title: "Ticket", fields: {} } }))
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "12", title: "Ticket", fields: {} } }));
+    const item = new TeamPiWorkItemManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), { source: "zendesk", id: "12" });
+
+    await expect(item.addComment({ body: "internal note" })).resolves.toMatchObject({ item: { id: "12" } });
+    await expect(item.addComment({ body: "customer reply", visibility: "public" })).resolves.toMatchObject({ item: { id: "12" } });
+
+    const bodies = vi.mocked(fetch).mock.calls.filter(call => String(call[0]).endsWith("/comments")).map(call => JSON.parse(String(call[1]?.body)));
+    expect(bodies).toEqual([{ body: "internal note" }, { body: "customer reply", visibility: "public" }]);
+  });
+
+  it("calls Work Items transition, field update, link, and refreshes detail after mutations", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "Before", fields: {} } }))
+      .mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "After fields", fields: { summary: "After fields" } } }))
+      .mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "Transitioned", fields: {} } }))
+      .mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "Done", fields: {} } }))
+      .mockResolvedValueOnce(response({ link: { globalId: "gid", jiraId: "J-1", zendeskTicketId: "12" } }));
+    const item = new TeamPiWorkItemManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), { source: "jira", id: "J-1" });
+
+    await expect(item.updateFields({ fields: { summary: "After fields" } })).resolves.toMatchObject({ item: { title: "After fields" } });
+    await expect(item.transition("31")).resolves.toMatchObject({ item: { title: "Done" } });
+    await expect(item.linkTo({ source: "zendesk", id: "12" })).resolves.toEqual({ globalId: "gid", jiraId: "J-1", zendeskTicketId: "12" });
+
+    expect(vi.mocked(fetch).mock.calls.map(call => [String(call[0]), call[1]?.method ?? "GET"])).toEqual([
+      ["https://team-pi.example/api/work-items/v1/items/jira/J-1/fields", "PATCH"],
+      ["https://team-pi.example/api/work-items/v1/items/jira/J-1", "GET"],
+      ["https://team-pi.example/api/work-items/v1/items/jira/J-1/transitions", "POST"],
+      ["https://team-pi.example/api/work-items/v1/items/jira/J-1", "GET"],
+      ["https://team-pi.example/api/work-items/v1/links", "POST"],
+    ]);
+  });
+
+  it("composes selected Work Item reads from detail, comments, activity, options, and Jira transitions", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "Issue", fields: {} } }))
+      .mockResolvedValueOnce(response({ comments: [{ id: "c1", body: "hello" }] }))
+      .mockResolvedValueOnce(response({ activity: [{ id: "a1", type: "changelog", summary: "changed" }] }))
+      .mockResolvedValueOnce(response({ source: "jira", id: "J-1", allowedFields: ["summary"], providerOptions: ["summary", "secret".repeat(100)] }))
+      .mockResolvedValueOnce(response({ transitions: [{ id: "31", name: "Done", toStatus: "Done" }] }));
+    const item = new TeamPiWorkItemManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), { source: "jira", id: "J-1" });
+
+    await expect(item.read()).resolves.toMatchObject({
+      detail: { item: { id: "J-1", title: "Issue" } },
+      comments: [{ id: "c1", body: "hello", public: true }],
+      activity: [{ id: "a1", type: "changelog", summary: "changed" }],
+      updateOptions: { source: "jira", id: "J-1", allowedFields: ["summary"], providerOptions: ["summary", expect.stringMatching(/^secret/) ] },
+      transitions: [{ id: "31", name: "Done", toStatus: "Done" }],
+    });
   });
 
   it("covers a customer/product issue query flow across discovery and provider reads", async () => {
