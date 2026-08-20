@@ -6,10 +6,9 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
-import { collectModules } from "./release/hash-lib.mjs";
+import { collectModules } from "./release/hash-lib.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FRONTEND_DIR = join(ROOT, "packages", "workshop-frontend");
 const FRONTEND_DIST = join(ROOT, "packages", "workshop-frontend", "dist");
 const WORKERS = [
   "gatekeeper-context",
@@ -44,8 +43,10 @@ function runWrangler(packageDir, configPath, outDir) {
 }
 
 function buildFrontend() {
-  execFileSync("pnpm", ["run", "build"], {
-    cwd: FRONTEND_DIR,
+  execFileSync("pnpm", [
+    "exec", "vp", "run", "-F", "@gadgets/workshop-frontend", "build",
+  ], {
+    cwd: ROOT,
     env: { ...process.env, VITE_CF_ACCESS_MODE: "true" },
     stdio: "inherit",
   });
