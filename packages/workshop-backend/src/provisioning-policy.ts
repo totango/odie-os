@@ -16,19 +16,24 @@ import { AdminConfig } from "./admin-config.js";
 
 export const DEFAULT_AMBIENT_GATEKEEPER_MODE: AmbientGatekeeperMode = "optional";
 
-// Deployment-controlled internal sources are intentionally universal when configured. Other
-// ambient vendors retain the opt-in default because they may confer unrelated authority.
+/**
+ * Deployment-controlled internal sources are intentionally universal when configured. Other
+ * ambient vendors retain the opt-in default because they may confer unrelated authority.
+ */
 const DEFAULT_ENABLED_AMBIENT_GATEKEEPERS = new Set(["github_org", "jarvis"]);
 
-// The deployment default for an ambient vendor when no administrator override is stored.
+/** The deployment default for an ambient vendor when no administrator override is stored. */
 export function defaultAmbientGatekeeperMode(vendorId: string): AmbientGatekeeperMode {
   return DEFAULT_ENABLED_AMBIENT_GATEKEEPERS.has(vendorId.toLowerCase())
     ? "enabled"
     : DEFAULT_AMBIENT_GATEKEEPER_MODE;
 }
 
-// The configured mode for an ambient vendor, defaulting to "optional" when the admin hasn't set one.
-// Tolerates a config persisted before this field existed (ambientGatekeeperModes may be undefined).
+/**
+ * The configured mode for an ambient vendor, defaulting to the deployment default when the admin
+ * hasn't set one. Tolerates a config persisted before this field existed (ambientGatekeeperModes
+ * may be undefined).
+ */
 export function ambientGatekeeperMode(config: AdminConfig, vendorId: string): AmbientGatekeeperMode {
   let normalized = vendorId.toLowerCase();
   let configured = config.ambientGatekeeperModes?.[normalized];
@@ -37,9 +42,11 @@ export function ambientGatekeeperMode(config: AdminConfig, vendorId: string): Am
   return defaultAmbientGatekeeperMode(normalized);
 }
 
-// Whether this vendor's account is auto-provisioned for every user ("enabled" mode). Such accounts
-// are "forced": created for everyone, not user-removable, and hidden from the Connectors list.
-// ("optional" accounts are user-managed; "disabled" ones aren't offered.)
+/**
+ * Whether this vendor's account is auto-provisioned for every user ("enabled" mode). Such accounts
+ * are "forced": created for everyone, not user-removable, and hidden from the Connectors list.
+ * ("optional" accounts are user-managed; "disabled" ones aren't offered.)
+ */
 export function shouldAutoProvisionAccount(config: AdminConfig, vendorId: string): boolean {
   return ambientGatekeeperMode(config, vendorId) === "enabled";
 }

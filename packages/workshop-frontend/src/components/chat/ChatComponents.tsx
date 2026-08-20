@@ -18,17 +18,21 @@ import type {
   ChatTableComponent,
 } from "@gadgets/workshop-shared/api";
 
-// Renders the interactive components an agent attached to a message.
-//
-// A component is data the agent described, drawn here by trusted code -- agent output never
-// becomes markup or behaviour of its own. Interacting sends an ordinary chat message through the
-// same path as typing one, so nothing here carries authority: when the agent goes on to act on an
-// answer, that action still reaches the user as the usual approval request.
+/**
+ * Renders the interactive components an agent attached to a message.
+ *
+ * A component is data the agent described, drawn here by trusted code -- agent output never
+ * becomes markup or behaviour of its own. Interacting sends an ordinary chat message through the
+ * same path as typing one, so nothing here carries authority: when the agent goes on to act on an
+ * answer, that action still reaches the user as the usual approval request.
+ */
 export function ChatComponents(
   { components, onSend, disabled }: {
+    /** Components to render under the message body. */
     components: ChatComponent[] | undefined;
-    // The chat's ordinary send-a-message function.
+    /** The chat's ordinary send-a-message function. */
     onSend: (message: string) => void;
+    /** Whether interactions should be disabled. */
     disabled?: boolean;
   },
 ) {

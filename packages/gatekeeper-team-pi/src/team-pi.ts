@@ -7,7 +7,6 @@ import {
   type ActionKind,
   type AgentCatalog,
   type AgentCatalogEntry,
-  type AgentCatalogRequest,
   type ApprovalQueue,
   type ConnectionHealthStatus,
   type Gatekeeper,
@@ -381,7 +380,7 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TeamPiSession> { return new TeamPiSessionImpl(this.#api(), approvalQueue.dup(), this.ctx.storage.kv); }
-  async getAgentCatalog(request: AgentCatalogRequest, authorizer: RpcStub<ObservationAuthorizer>): Promise<AgentCatalog> {
+  async getAgentCatalog(authorizer: RpcStub<ObservationAuthorizer>): Promise<AgentCatalog> {
     try {
       const skills = await this.#api().listSkills({ limit: 12 });
       const entries = [...catalogEntries("skill", skillsFromEnvelope(skills)), ...PROVIDER_CATALOG_ENTRIES];
@@ -389,7 +388,7 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
         title: "Read Team PI skill and provider catalog",
         description: "Listed bounded Team PI skill manifests and provider capabilities for agent discovery.",
       });
-      return boundAgentCatalog(entries, request);
+      return boundAgentCatalog(entries);
     } catch (error) {
       logger.warn("team pi catalog fallback used", {
         event: "team_pi.catalog.fallback.used", accountId: this.ctx.props.accountId, error,
@@ -403,7 +402,7 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
         id: "team-pi:catalog-unavailable",
         title: "Team PI unavailable",
         description: message,
-      }], request);
+      }]);
     }
   }
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> { throw new Error("Team PI observations are private to the connected user and cannot be observed by collaborators."); }

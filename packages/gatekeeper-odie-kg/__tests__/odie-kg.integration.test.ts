@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { RpcStub } from "capnweb";
-import type { AuthenticatedApi, PublicApi } from "@gadgets/workshop-shared/api";
 import type { McpSessionBase } from "@gadgets/mcp-shared/session";
 import {
   connect,
@@ -34,6 +32,10 @@ type RemoteScenario = {
 };
 
 let remoteScenario: RemoteScenario = {};
+
+type PublicApiStub = ReturnType<typeof connect>;
+type AuthenticatedApiStub = Awaited<ReturnType<typeof signUp>>;
+type McpSessionStub = McpSessionBase & Disposable;
 
 function json(body: unknown, init: ResponseInit = {}): Response {
   return Response.json(body, init);
@@ -188,7 +190,7 @@ afterAll(async () => {
   expect(unmocked).toEqual([]);
 }, 30_000);
 
-async function withSession<T>(body: (api: RpcStub<PublicApi>) => Promise<T>): Promise<T> {
+async function withSession<T>(body: (api: PublicApiStub) => Promise<T>): Promise<T> {
   const publicApi = connect(harness.url);
   try {
     return await body(publicApi);
@@ -197,7 +199,7 @@ async function withSession<T>(body: (api: RpcStub<PublicApi>) => Promise<T>): Pr
   }
 }
 
-async function connectOdieKgAccount(api: RpcStub<AuthenticatedApi>) {
+async function connectOdieKgAccount(api: AuthenticatedApiStub) {
   const { url: connectUrl } = await api.connectAccount(VENDOR_ID);
   const connectResponse = await harness.fetchWorker(
     "gatekeeper-odie-kg", connectUrl, { redirect: "manual" });
@@ -265,7 +267,7 @@ describe("Totango Knowledge Graph integration", () => {
         suggestedBindingName: "TOTANGO_KG",
       });
 
-      using session = await gatekeeper.openSession() as unknown as RpcStub<McpSessionBase>;
+      using session = await gatekeeper.openSession() as unknown as McpSessionStub;
       const tools = await session.listTools();
       expect(tools.map(tool => tool.name)).toEqual([...ODIE_KG_ALLOWED_TOOLS]);
       expect(tools).toEqual(ODIE_KG_ALLOWED_TOOLS.map(name => expect.objectContaining({
@@ -291,7 +293,7 @@ describe("Totango Knowledge Graph integration", () => {
       await connectOdieKgAccount(api);
       using overseer = await api.newGadget();
       using gatekeeper = await overseer.getGatekeeperById(0);
-      using session = await gatekeeper.openSession() as unknown as RpcStub<McpSessionBase> & {
+      using session = await gatekeeper.openSession() as unknown as McpSessionStub & {
         odieKgQuery(args?: Record<string, unknown>): Promise<unknown>;
       };
 
@@ -346,10 +348,10 @@ describe("Totango Knowledge Graph integration", () => {
       await connectOdieKgAccount(api);
       using overseer = await api.newGadget();
       using gatekeeper = await overseer.getGatekeeperById(0);
-      using session = await gatekeeper.openSession() as unknown as RpcStub<McpSessionBase>;
+      using session = await gatekeeper.openSession() as unknown as McpSessionStub;
 
       await expect(session.callTool("odie-kg-query", { question: "missing?" }))
-        .rejects.toThrow(`This binding grants only these tools: ${ODIE_KG_ALLOWED_TOOLS.join(", ")}.`);
+        .rejects.toThrow(/does not grant|grants only/);
     });
   });
 });

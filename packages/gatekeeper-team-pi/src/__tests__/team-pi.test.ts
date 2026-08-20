@@ -488,9 +488,12 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       ...catalogEntries("skill", { items: [{ id: "s1", name: "Skill", description: "x" }] }),
       ...catalogEntries("connection", { items: [{ id: "c1", name: "Connection" }] }),
     ];
-    expect(boundAgentCatalog(entries, { limit: 1 })).toEqual({
-      entries: [{ id: "skill:s1", title: "Skill", description: "x" }],
-      truncated: true,
+    expect(boundAgentCatalog(entries)).toEqual({
+      entries: [
+        { id: "skill:s1", title: "Skill", description: "x" },
+        { id: "connection:c1", title: "Connection", description: "connection available in Team PI" },
+      ],
+      truncated: false,
     });
   });
 
@@ -514,10 +517,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       },
     };
 
-    await expect(gatekeeper.getAgentCatalog(
-      { limit: 10 },
-      authorizer as never,
-    )).resolves.toEqual({
+    await expect(gatekeeper.getAgentCatalog(authorizer as never)).resolves.toEqual({
       entries: [
         { id: "skill:s1", title: "Skill", description: "Public manifest" },
         { id: "provider:gmail", title: "Gmail", description: "Search and read Gmail messages available through Team PI." },
@@ -555,7 +555,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       },
     };
 
-    await expect(gatekeeper.getAgentCatalog({ limit: 3 }, authorizer as never)).resolves.toEqual({
+    await expect(gatekeeper.getAgentCatalog(authorizer as never)).resolves.toEqual({
       entries: [
         { id: "team-pi:catalog-unavailable", title: "Team PI unavailable", description: "Team PI API failed: " },
       ],

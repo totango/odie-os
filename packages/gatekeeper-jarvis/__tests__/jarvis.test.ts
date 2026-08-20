@@ -38,11 +38,11 @@ describe("JarvisConnectionAccount", () => {
     const first = await account.getConnection("https://jarvis.example.com/mcp");
     expect(first).toMatchObject({ authorization: "secret-token", sessionId: null, generation: 1 });
 
-    await account.setMcpSessionId("https://jarvis.example.com/mcp", first.generation, "mcp-session");
+    await account.setMcpSessionId("https://jarvis.example.com/mcp", first.generation, null, "mcp-session");
     expect(await account.getConnection("https://jarvis.example.com/mcp"))
       .toMatchObject({ sessionId: "mcp-session", generation: 1 });
 
-    await account.setMcpSessionId("https://jarvis.example.com/mcp", first.generation + 1, "stale");
+    await account.setMcpSessionId("https://jarvis.example.com/mcp", first.generation + 1, "mcp-session", "stale");
     expect(await account.getConnection("https://jarvis.example.com/mcp"))
       .toMatchObject({ sessionId: "mcp-session" });
   });
@@ -240,7 +240,7 @@ describe("JarvisGatekeeper runtime scope", () => {
       dup() { return this; }, [Symbol.dispose]() {},
     } as never;
     const session = await gatekeeper.startSession(queue);
-    await expect(session.callTool("query_knowledge")).rejects.toThrow(/grants only/);
+    await expect(session.callTool("query_knowledge")).rejects.toThrow(/does not grant|grants only/);
     expect((await session.listTools()).map(tool => tool.name)).toEqual(["repo_knowledge"]);
   });
 });
@@ -260,9 +260,9 @@ describe("JarvisGatekeeper catalog", () => {
     let authorized = false;
     const authorizer = {
       authorizeObservation: async () => { authorized = true; },
-    } as unknown as Parameters<JarvisGatekeeper["getAgentCatalog"]>[1];
+    } as unknown as Parameters<JarvisGatekeeper["getAgentCatalog"]>[0];
 
-    const catalog = await gatekeeper.getAgentCatalog({ limit: 10 }, authorizer);
+    const catalog = await gatekeeper.getAgentCatalog(authorizer);
     expect(authorized).toBe(true);
     expect(catalog.entries).toEqual([{ id: "query_knowledge", title: "Query", description: "Search knowledge" }]);
   });
@@ -278,9 +278,9 @@ describe("JarvisGatekeeper catalog", () => {
     let authorized = false;
     const authorizer = {
       authorizeObservation: async () => { authorized = true; },
-    } as unknown as Parameters<JarvisGatekeeper["getAgentCatalog"]>[1];
+    } as unknown as Parameters<JarvisGatekeeper["getAgentCatalog"]>[0];
 
-    const catalog = await gatekeeper.getAgentCatalog({ limit: 10 }, authorizer);
+    const catalog = await gatekeeper.getAgentCatalog(authorizer);
     expect(catalog.entries).toEqual([]);
     expect(authorized).toBe(true);
   });

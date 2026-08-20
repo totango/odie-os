@@ -39,24 +39,32 @@ import { AccountsSubscriberAdapter } from './accountsSubscriber'
 export interface GatekeeperModalProps {
   open: boolean
   onClose: () => void
-  // Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
-  // the Home page to lazily provision a gadget on first use.
+  /**
+   * Returns an overseer stub. Called only when actually creating a gatekeeper. This allows
+   * the Home page to lazily provision a gadget on first use.
+   */
   getOverseer: () => Promise<RpcStub<Overseer>> | RpcStub<Overseer>
-  // Called after the gatekeeper is successfully created. The caller decides what to do with
-  // the stub (e.g. assign a binding name, or insert a capsule). The modal awaits this callback
-  // and shows a loading state while it runs.
+  /**
+   * Called after the gatekeeper is successfully created. The caller decides what to do with
+   * the stub (e.g. assign a binding name, or insert a capsule). The modal awaits this callback
+   * and shows a loading state while it runs.
+   */
   onCreated: (gk: RpcStub<GatekeeperClient<any>>) => Promise<void>
-  // Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
-  // normally the gadget the spawner is being created for plus that gadget's own bindings. All are
-  // enabled by default, reproducing the pre-multi-gadget "spawned agents inherit everything"
-  // behavior; the user may deselect or rename them. Empty (the default) means the spawner starts
-  // with an empty env, which is all a context with no gadget can offer.
+  /**
+   * Workpieces offered as env entries when creating an agent spawner (see AgentSpawnerConfig.env),
+   * normally the gadget the spawner is being created for plus that gadget's own bindings. All are
+   * enabled by default, reproducing the pre-multi-gadget "spawned agents inherit everything"
+   * behavior; the user may deselect or rename them. Empty (the default) means the spawner starts
+   * with an empty env, which is all a context with no gadget can offer.
+   */
   spawnerEnvCandidates?: Omit<SpawnerEnvRow, 'enabled'>[]
-  // Optional pre-seed: when the modal opens, auto-select the resource connection for this vendor.
-  // Used by the agent's requestConnection accept flow so the user lands on the right connection with
-  // minimal clicks. `initialResourceUrlPattern` is the exact SupportedResource.urlPattern the
-  // backend resolved the request to (authoritative); `initialResourceUrl` is the raw URL the agent
-  // supplied (used only as a fallback if the resolved pattern isn't present in the current list).
+  /**
+   * Optional pre-seed: when the modal opens, auto-select the resource connection for this vendor.
+   * Used by the agent's requestConnection accept flow so the user lands on the right connection with
+   * minimal clicks. `initialResourceUrlPattern` is the exact SupportedResource.urlPattern the
+   * backend resolved the request to (authoritative); `initialResourceUrl` is the raw URL the agent
+   * supplied (used only as a fallback if the resolved pattern isn't present in the current list).
+   */
   initialVendorId?: string
   initialResourceUrl?: string
   initialResourceUrlPattern?: string
@@ -216,7 +224,6 @@ export default function GatekeeperModal({
   const spawnerEnvCandidatesRef = useRef(spawnerEnvCandidates)
   spawnerEnvCandidatesRef.current = spawnerEnvCandidates
 
-  const accountSubscriptionRef = useRef<{ [Symbol.dispose](): void } | null>(null)
   const configuratorFrameRef = useRef<ConfiguratorFrameState | null>(null)
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
   const nextConfiguratorFrameKeyRef = useRef(0)
@@ -319,9 +326,10 @@ export default function GatekeeperModal({
         const scrollStyle = getComputedStyle(scroll)
         const scrollPadding = parseFloat(scrollStyle.paddingTop) + parseFloat(scrollStyle.paddingBottom)
         const requested = header + footer + scrollContent.getBoundingClientRect().height + scrollPadding
-        // Cap at the viewport-derived max-height so we don't push the dialog off-screen.
-        const top = Math.max(28, Math.min(96, window.innerHeight * 0.1))
-        const maxAvailable = (window.innerHeight - top - 28) * 0.9
+        // Cap at the visible viewport so the keyboard cannot push the configurator off-screen.
+        const viewportHeight = window.visualViewport?.height ?? window.innerHeight
+        const top = Math.max(28, Math.min(96, viewportHeight * 0.1))
+        const maxAvailable = (viewportHeight - top - 28) * 0.9
         setDialogMinHeight(Math.ceil(Math.min(requested, maxAvailable)))
       })
     }
@@ -330,10 +338,12 @@ export default function GatekeeperModal({
     if (scrollContentRef.current) ro.observe(scrollContentRef.current)
     const onWindowResize = () => recompute()
     window.addEventListener('resize', onWindowResize)
+    window.visualViewport?.addEventListener('resize', onWindowResize)
     return () => {
       cancelAnimationFrame(frame)
       ro.disconnect()
       window.removeEventListener('resize', onWindowResize)
+      window.visualViewport?.removeEventListener('resize', onWindowResize)
     }
   }, [open, selectedConnectionId])
 
@@ -420,22 +430,15 @@ export default function GatekeeperModal({
         setAccounts(Array.from(accountMap.values()))
       },
     })
-    authenticatedApi.subscribeConnectedAccounts(subscriber)
-      .then(stub => {
-        if (cancelled) {
-          stub[Symbol.dispose]()
-        } else {
-          accountSubscriptionRef.current = stub
-        }
-      })
-      .catch(error => {
-        logRpcFailure('Failed to subscribe to connected accounts:', error)
-      })
+    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
+    subscription.catch(error => {
+      if (cancelled) return
+      logRpcFailure('Failed to subscribe to connected accounts:', error)
+    })
 
     return () => {
       cancelled = true
-      accountSubscriptionRef.current?.[Symbol.dispose]()
-      accountSubscriptionRef.current = null
+      subscription[Symbol.dispose]()
     }
   }, [open, authenticatedApi])
 
@@ -786,7 +789,7 @@ export default function GatekeeperModal({
   return (
     <Dialog.Root open={open} onOpenChange={(o) => { if (!o) onClose() }}>
       <Dialog
-        className="!z-[1000] !top-[clamp(28px,10vh,96px)] !flex !max-h-[calc((100vh_-_clamp(28px,10vh,96px)_-_28px)_*_0.9)] !w-[min(760px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
+        className="responsive-dialog !z-[1000] !top-[clamp(28px,10vh,96px)] !flex !max-h-[calc((100vh_-_clamp(28px,10vh,96px)_-_28px)_*_0.9)] !w-[min(760px,calc(100vw-32px))] !-translate-y-0 flex-col overflow-hidden bg-kumo-base p-0"
         style={dialogMinHeight > 0 ? { minHeight: `${dialogMinHeight}px` } : undefined}
         size="lg"
       >
