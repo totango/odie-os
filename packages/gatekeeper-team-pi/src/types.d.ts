@@ -94,3 +94,214 @@ export interface TeamPiSession {
   /** Polls the result of a previously queued Team PI action. */
   getActionResult(actionId: number): Promise<TeamPiActionResult>;
 }
+
+/** Team PI Work Items provider kind. */
+export type WorkItemProviderKind = "jira" | "zendesk";
+
+/** Stable provider-qualified reference to a work item. */
+export type WorkItemProviderRef = {
+  /** Source system that owns the item. */
+  source: WorkItemProviderKind;
+  /** Provider-native item identifier accepted by Team PI Work Items routes. */
+  id: string;
+  /** Optional human-readable key, such as a Jira issue key. */
+  key?: string;
+};
+
+/** Current source availability and shared-connection status. */
+export type WorkItemSourceStatus = {
+  /** Whether Team PI has the deployment-level provider settings required for this source. */
+  configured: boolean;
+  /** Whether Team PI has a shared connection available for the caller. */
+  connected: boolean;
+  /** Bounded explanation for an unavailable source. */
+  reason?: string;
+};
+
+/** Bounded status map for all Team PI Work Items providers. */
+export type WorkItemSourceStatuses = Record<WorkItemProviderKind, WorkItemSourceStatus>;
+
+/** Minimal person metadata exposed by normalized provider records. */
+export type WorkItemPerson = {
+  /** Display name when supplied by the source. */
+  name?: string;
+  /** Email address when supplied by the source. */
+  email?: string;
+  /** Provider-native person identifier when no richer metadata is available. */
+  id?: string;
+};
+
+/** Search-list summary for a Jira issue or Zendesk ticket. */
+export type WorkItemSummary = WorkItemProviderRef & {
+  /** Trusted provider UI URL, when Team PI can construct one. */
+  url?: string;
+  /** Bounded title or subject. */
+  title: string;
+  /** Provider status name. */
+  status?: string;
+  /** Provider type name. */
+  type?: string;
+  /** Provider priority name. */
+  priority?: string;
+  /** Assignee display name or identifier. */
+  assignee?: string;
+  /** Requester display name or identifier. */
+  requester?: string;
+  /** Provider update timestamp as an ISO-like string. */
+  updatedAt?: string;
+  /** Jira project key, when present. */
+  projectKey?: string;
+  /** Allowlisted normalized field values. */
+  fields: Record<string, string | number | boolean | null>;
+};
+
+/** Authoritative item detail returned by Team PI. */
+export type WorkItemDetail = {
+  /** The normalized authoritative item. */
+  item: WorkItemSummary;
+};
+
+/** Bounded work item comment. */
+export type WorkItemComment = {
+  /** Provider-native comment id. */
+  id: string;
+  /** Bounded author display string. */
+  author?: string;
+  /** Plain text bounded body. */
+  body: string;
+  /** Whether the comment is public in Zendesk; Jira comments are always public. */
+  public: boolean;
+  /** Provider creation timestamp as an ISO-like string. */
+  createdAt?: string;
+};
+
+/** Bounded work item activity entry. */
+export type WorkItemActivity = {
+  /** Provider-native activity id. */
+  id: string;
+  /** Provider activity kind, such as changelog or audit. */
+  type: string;
+  /** Bounded actor display string. */
+  author?: string;
+  /** Provider creation timestamp as an ISO-like string. */
+  createdAt?: string;
+  /** Bounded human-readable summary. */
+  summary: string;
+};
+
+/** Provider-backed field update metadata for one item. */
+export type WorkItemUpdateOptions = WorkItemProviderRef & {
+  /** Lowercase allowlisted field names accepted by Team PI for this item. */
+  allowedFields: string[];
+  /** Bounded provider-native editable option names, when available. */
+  providerOptions?: string[];
+};
+
+/** Jira workflow transition exposed by Team PI. */
+export type WorkItemTransition = {
+  /** Provider-native transition id. */
+  id: string;
+  /** Transition display name. */
+  name: string;
+  /** Destination status name, when supplied. */
+  toStatus?: string;
+};
+
+/** Full read model for one selected item. */
+export type WorkItemRead = {
+  /** Authoritative item detail. */
+  detail: WorkItemDetail;
+  /** Recent provider comments. */
+  comments: WorkItemComment[];
+  /** Recent provider activity. */
+  activity: WorkItemActivity[];
+  /** Allowlisted update options. */
+  updateOptions: WorkItemUpdateOptions;
+  /** Jira workflow transitions; empty for Zendesk. */
+  transitions: WorkItemTransition[];
+};
+
+/** Work item source selector for search. */
+export type WorkItemSearchSource = WorkItemProviderKind | "both";
+
+/** Bounded work item search request. */
+export type WorkItemSearchRequest = {
+  /** Source to search, or both with provider-isolated partial failures. */
+  source: WorkItemSearchSource;
+  /** Optional provider text query. Empty searches use the provider default. */
+  query?: string;
+  /** Maximum items per provider, capped by Team PI. */
+  limit?: number;
+  /** Optional per-provider cursor map. */
+  cursors?: Partial<Record<WorkItemProviderKind, string>>;
+};
+
+/** Bounded provider search error for partial-result pages. */
+export type WorkItemProviderError = {
+  /** Provider that failed. */
+  source: WorkItemProviderKind;
+  /** Bounded non-secret error message. */
+  message: string;
+  /** HTTP status when Team PI supplied one. */
+  status?: number;
+};
+
+/** Search page returned by the Work Items management API. */
+export type WorkItemSearchPage = {
+  /** Normalized items from all successful selected providers. */
+  items: WorkItemSummary[];
+  /** Next cursors keyed by provider. */
+  cursors: Partial<Record<WorkItemProviderKind, string>>;
+  /** Whether each provider reported more data. */
+  hasMore: Partial<Record<WorkItemProviderKind, boolean>>;
+  /** Provider-local failures when searching both. */
+  errors?: WorkItemProviderError[];
+};
+
+/** Input for adding a provider comment. */
+export type WorkItemCommentInput = {
+  /** Plain text comment body. */
+  body: string;
+  /** Visibility override. Zendesk defaults to internal; public must be explicit. Jira allows public only. */
+  visibility?: "internal" | "public";
+};
+
+/** Bounded allowlisted field patch. */
+export type WorkItemFieldPatch = {
+  /** Field values keyed by provider field name. */
+  fields: Record<string, string | number | boolean | null | string[]>;
+};
+
+/** Result of linking a Jira issue and Zendesk ticket through a Jira remote link. */
+export type WorkItemLinkResult = {
+  /** Stable Team PI remote-link global id. */
+  globalId: string;
+  /** Jira issue id or key used for the backlink. */
+  jiraId: string;
+  /** Zendesk ticket id linked from Jira. */
+  zendeskTicketId: string;
+};
+
+/** Admin-only Team PI Work Items management root capability. */
+export interface WorkItemsManagementApi {
+  /** Reads provider configuration and shared-connection statuses. */
+  getSourceStatuses(): Promise<WorkItemSourceStatuses>;
+  /** Searches Jira, Zendesk, or both; both-provider searches isolate provider failures. */
+  search(request: WorkItemSearchRequest): Promise<WorkItemSearchPage>;
+  /** Selects one item and returns a narrow per-item capability. The client must dispose it. */
+  item(ref: WorkItemProviderRef): Promise<WorkItemManagementApi>;
+}
+
+/** Admin-only Team PI Work Items per-item management capability. */
+export interface WorkItemManagementApi {
+  /** Reads authoritative detail plus comments, activity, update options, and Jira transitions. */
+  read(): Promise<WorkItemRead>;
+  /** Adds a comment, defaulting Zendesk comments to internal unless public is explicit, then returns refreshed detail. */
+  addComment(input: WorkItemCommentInput): Promise<WorkItemDetail>;
+  /** Updates allowlisted fields and returns refreshed authoritative detail. */
+  updateFields(patch: WorkItemFieldPatch): Promise<WorkItemDetail>;
+  /** Applies a Jira transition and returns refreshed authoritative detail. */
+  transition(transitionId: string): Promise<WorkItemDetail>;
+  /** Links this item to another Jira/Zendesk item by creating the supported Jira backlink. */
+  linkTo(other: WorkItemProviderRef): Promise<WorkItemLinkResult>;
+}

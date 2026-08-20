@@ -83,6 +83,7 @@ export type VendorDescription = {
  * each time rather than baked into the account, since a user's admin status can change over time.
  */
 export type AppUiContext = {
+  /** Whether the caller is currently a deployment administrator. */
   isAdmin: boolean;
 }
 
@@ -183,7 +184,20 @@ export type AccountDescription = {
    * If set, this account has a full-page management UI (see GatekeeperUser.startAppUi). The Workshop
    * surfaces it as a nav entry / page using this title.
    */
-  providesUi?: { title: string; icon?: AvatarImage };
+  providesUi?: {
+    /** Title for the Workshop navigation entry and page header. */
+    title: string;
+
+    /** Optional icon for the Workshop navigation entry. */
+    icon?: AvatarImage;
+
+    /**
+     * When true, only deployment admins may see or open this management UI. The Workshop enforces
+     * this metadata before minting the app frame capability; gatekeepers should still use the
+     * `isAdmin` app context for feature-level authorization inside the UI.
+     */
+    adminOnly?: boolean;
+  };
 }
 
 /** Describes metadata about a specific instance of a resource. Returned by Gatekeeper.describe(). */

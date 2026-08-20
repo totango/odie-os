@@ -2,10 +2,12 @@ const MAX_ID_LENGTH = 256;
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const MAX_RESPONSE_BYTES = 256_000;
+const MAX_REQUEST_BYTES = 64_000;
 const MAX_STRING_LENGTH = 16_000;
 const MAX_ARRAY_LENGTH = 100;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
+const REQUEST_TIMEOUT_MS = 30_000;
 
 export class TeamPiApiError extends Error {
   constructor(
@@ -61,6 +63,10 @@ type ReadEndpoint =
   | "gmailSearch" | "gmailMessage" | "chorusSearch" | "chorusAccount" | "chorusEngagement"
   | "chorusConversation" | "zendeskSearch" | "zendeskTicket" | "salesforceAccount";
 type WriteEndpoint = "installSkill" | "startConnection";
+type WorkItemsEndpoint =
+  | "workItemsSourceStatus" | "workItemsSearch" | "workItemsDetail" | "workItemsComments"
+  | "workItemsActivity" | "workItemsUpdateOptions" | "workItemsAddComment" | "workItemsUpdateFields"
+  | "workItemsTransitions" | "workItemsApplyTransition" | "workItemsLink";
 
 const READ_ENDPOINTS = new Set<ReadEndpoint>([
   "listSkills", "getSkill", "checkSkill", "listConnections", "calendarEvents", "gmailSearch",
@@ -68,6 +74,11 @@ const READ_ENDPOINTS = new Set<ReadEndpoint>([
   "zendeskSearch", "zendeskTicket", "salesforceAccount",
 ]);
 const WRITE_ENDPOINTS = new Set<WriteEndpoint>(["installSkill", "startConnection"]);
+const WORK_ITEMS_ENDPOINTS = new Set<WorkItemsEndpoint>([
+  "workItemsSourceStatus", "workItemsSearch", "workItemsDetail", "workItemsComments",
+  "workItemsActivity", "workItemsUpdateOptions", "workItemsAddComment", "workItemsUpdateFields",
+  "workItemsTransitions", "workItemsApplyTransition", "workItemsLink",
+]);
 
 export function resolveConfig(env: Env): TeamPiConfig {
   const auth0Domain = normalizeHttpsBaseUrl(env.TEAM_PI_AUTH0_DOMAIN, "TEAM_PI_AUTH0_DOMAIN");
@@ -82,8 +93,9 @@ export function resolveConfig(env: Env): TeamPiConfig {
 
 export function assertAllowedEndpoint(kind: "read", endpoint: string): asserts endpoint is ReadEndpoint;
 export function assertAllowedEndpoint(kind: "write", endpoint: string): asserts endpoint is WriteEndpoint;
-export function assertAllowedEndpoint(kind: "read" | "write", endpoint: string): void {
-  const allowed = kind === "read" ? READ_ENDPOINTS : WRITE_ENDPOINTS;
+export function assertAllowedEndpoint(kind: "workItems", endpoint: string): asserts endpoint is WorkItemsEndpoint;
+export function assertAllowedEndpoint(kind: "read" | "write" | "workItems", endpoint: string): void {
+  const allowed = kind === "read" ? READ_ENDPOINTS : kind === "write" ? WRITE_ENDPOINTS : WORK_ITEMS_ENDPOINTS;
   if (!allowed.has(endpoint as never)) throw new Error(`Team PI endpoint not allowed: ${endpoint}`);
 }
 
@@ -110,12 +122,12 @@ export async function pollDeviceAuthorization(config: TeamPiConfig, deviceCode: 
     client_id: config.clientId,
     device_code: safeId(deviceCode, "device code"),
   });
-  const response = await fetch(`${config.auth0Domain}/oauth/token`, {
+  const response = await fetchWithTimeout(`${config.auth0Domain}/oauth/token`, {
     method: "POST",
     redirect: "manual",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
-  });
+  }, "Auth0 device authorization timed out");
   const json = await boundedJson(response);
   if (!response.ok) {
     const code = typeof json.error === "string" ? json.error : undefined;
@@ -137,12 +149,12 @@ export async function refreshAccessToken(config: TeamPiConfig, refreshToken: str
 
 export async function revokeRefreshToken(config: TeamPiConfig, refreshToken: string): Promise<void> {
   const body = new URLSearchParams({ client_id: config.clientId, token: refreshToken });
-  const response = await fetch(`${config.auth0Domain}/oauth/revoke`, {
+  const response = await fetchWithTimeout(`${config.auth0Domain}/oauth/revoke`, {
     method: "POST",
     redirect: "manual",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
-  });
+  }, "Auth0 token revocation timed out");
   if (!response.ok) throw new TeamPiApiError("Auth0 token revocation failed", response.status);
 }
 
@@ -234,8 +246,76 @@ export class TeamPiApi {
     return this.request("POST", `/connect/${encodeURIComponent(safeProvider(provider))}`);
   }
 
-  private async request(method: "GET" | "POST", path: string, params?: URLSearchParams): Promise<unknown> {
-    const credentials = await this.getCredentials();
+  workItemsSourceStatus(): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsSourceStatus");
+    return this.request("GET", "/api/work-items/v1/sources/status");
+  }
+
+  workItemsSearch(source: "jira" | "zendesk", options: { query?: string; limit?: number; cursor?: string } = {}): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsSearch");
+    const params = new URLSearchParams({ source: safeWorkItemSource(source), limit: String(limit(options.limit)) });
+    if (options.query) params.set("q", boundedString(options.query, 300));
+    if (options.cursor) params.set("cursor", safeId(options.cursor, "cursor"));
+    return this.request("GET", "/api/work-items/v1/search", params);
+  }
+
+  workItemsDetail(source: "jira" | "zendesk", id: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsDetail");
+    return this.request("GET", workItemsItemPath(source, id));
+  }
+
+  workItemsComments(source: "jira" | "zendesk", id: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsComments");
+    return this.request("GET", `${workItemsItemPath(source, id)}/comments`);
+  }
+
+  workItemsActivity(source: "jira" | "zendesk", id: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsActivity");
+    return this.request("GET", `${workItemsItemPath(source, id)}/activity`);
+  }
+
+  workItemsUpdateOptions(source: "jira" | "zendesk", id: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsUpdateOptions");
+    return this.request("GET", `${workItemsItemPath(source, id)}/update-options`);
+  }
+
+  workItemsAddComment(source: "jira" | "zendesk", id: string, input: { body: string; visibility?: "internal" | "public" }): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsAddComment");
+    const visibility = input.visibility === "public" ? "public" : input.visibility === "internal" ? "internal" : undefined;
+    return this.request("POST", `${workItemsItemPath(source, id)}/comments`, undefined, {
+      body: boundedString(input.body, 12_000),
+      ...(visibility ? { visibility } : {}),
+    });
+  }
+
+  workItemsUpdateFields(source: "jira" | "zendesk", id: string, fields: Record<string, unknown>): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsUpdateFields");
+    return this.request("PATCH", `${workItemsItemPath(source, id)}/fields`, undefined, { fields: boundJsonValue(fields) });
+  }
+
+  workItemsTransitions(id: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsTransitions");
+    return this.request("GET", `/api/work-items/v1/items/jira/${encodeURIComponent(safeId(id, "item id"))}/transitions`);
+  }
+
+  workItemsApplyTransition(id: string, transitionId: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsApplyTransition");
+    return this.request("POST", `/api/work-items/v1/items/jira/${encodeURIComponent(safeId(id, "item id"))}/transitions`, undefined, {
+      transitionId: safeId(transitionId, "transitionId"),
+    });
+  }
+
+  workItemsLink(jiraId: string, zendeskTicketId: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsLink");
+    return this.request("POST", "/api/work-items/v1/links", undefined, {
+      jiraId: safeId(jiraId, "jiraId"),
+      zendeskTicketId: safeId(zendeskTicketId, "zendeskTicketId"),
+    });
+  }
+
+  private async request(method: "GET" | "POST" | "PUT" | "PATCH", path: string, params?: URLSearchParams, body?: unknown): Promise<unknown> {
+    const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const credentials = await abortable(this.getCredentials(), signal, "Team PI request timed out");
     const url = new URL(`${this.baseUrl}${path}`);
     if (params) url.search = params.toString();
     const headers: Record<string, string> = {
@@ -243,12 +323,35 @@ export class TeamPiApi {
       Accept: "application/json",
     };
     if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
-    const response = await fetch(url, {
-      method,
-      redirect: "manual",
-      headers,
-    });
-    const json = await boundedJson(response);
+    let requestBody: string | undefined;
+    if (body !== undefined) {
+      requestBody = JSON.stringify(boundJsonValue(body));
+      if (new TextEncoder().encode(requestBody).byteLength > MAX_REQUEST_BYTES) {
+        throw new TeamPiApiError("Team PI request body exceeded size limit");
+      }
+      headers["Content-Type"] = "application/json";
+    }
+    let response: Response;
+    try {
+      const requestInit: RequestInit = {
+        method,
+        redirect: "manual",
+        headers,
+        signal,
+      };
+      if (method !== "GET") requestInit.body = requestBody;
+      response = await fetch(url, requestInit);
+    } catch (error) {
+      if (signal.aborted) throw new TeamPiApiError("Team PI request timed out");
+      throw error;
+    }
+    let json: Record<string, unknown>;
+    try {
+      json = await boundedJson(response);
+    } catch (error) {
+      if (signal.aborted) throw new TeamPiApiError("Team PI request timed out", response.status);
+      throw error;
+    }
     if (!response.ok) {
       const code = typeof json.error === "string" ? json.error : undefined;
       if (response.status === 401) {
@@ -269,6 +372,15 @@ export class TeamPiApi {
     }
     return boundJsonValue(json);
   }
+}
+
+function safeWorkItemSource(value: string): "jira" | "zendesk" {
+  if (value !== "jira" && value !== "zendesk") throw new Error("Invalid Team PI Work Items source.");
+  return value;
+}
+
+function workItemsItemPath(source: "jira" | "zendesk", id: string): string {
+  return `/api/work-items/v1/items/${safeWorkItemSource(source)}/${encodeURIComponent(safeId(id, "item id"))}`;
 }
 
 export function safeProvider(value: string): TeamPiProvider {
@@ -306,18 +418,46 @@ export function boundJsonValue(value: unknown, depth = 0): unknown {
 }
 
 async function auth0Post(config: TeamPiConfig, path: string, body: URLSearchParams): Promise<Record<string, unknown>> {
-  const response = await fetch(`${config.auth0Domain}${path}`, {
+  const response = await fetchWithTimeout(`${config.auth0Domain}${path}`, {
     method: "POST",
     redirect: "manual",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
-  });
+  }, "Auth0 request timed out");
   const json = await boundedJson(response);
   if (!response.ok) {
     const code = typeof json.error === "string" ? json.error : undefined;
     throw new TeamPiApiError(`Auth0 request failed: ${code ?? response.statusText}`, response.status, code);
   }
   return json;
+}
+
+async function fetchWithTimeout(input: string | URL, init: RequestInit, message: string): Promise<Response> {
+  const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal });
+  } catch (error) {
+    if (signal.aborted) throw new TeamPiApiError(message);
+    throw error;
+  }
+}
+
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal, message: string): Promise<T> {
+  if (signal.aborted) throw new TeamPiApiError(message);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new TeamPiApiError(message));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      value => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      error => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 async function boundedJson(response: Response): Promise<Record<string, unknown>> {
