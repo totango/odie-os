@@ -78,7 +78,13 @@ function openSubscription(overseer: RpcStub<Overseer>, store: Store) {
 
   ;(async () => {
     try {
-      const sub = await overseer.subscribeToActions(
+      const actionApi = overseer as unknown as {
+        subscribeToActions(
+          subscriber: RpcStub<ActionsSubscriber>,
+          startAfter?: Date,
+        ): Promise<RpcStub<{}>>
+      }
+      const sub = await actionApi.subscribeToActions(
         new ActionsSubscriberImpl() as unknown as RpcStub<ActionsSubscriber>,
         new Date(0),
       )

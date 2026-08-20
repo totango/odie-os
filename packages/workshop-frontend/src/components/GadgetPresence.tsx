@@ -46,11 +46,11 @@ export function GadgetPresence({
       }
     }
 
-    const promise = overseer.subscribeToPresence(
+    const promise: Promise<RpcStub<{}>> = overseer.subscribeToPresence(
       new PresenceSubscriberImpl() as unknown as RpcStub<PresenceSubscriber>,
     )
 
-    promise.then((stub) => {
+    promise.then((stub: RpcStub<{}>) => {
       if (cancelled) {
         stub[Symbol.dispose]()
       } else {

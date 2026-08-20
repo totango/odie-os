@@ -5,7 +5,7 @@
 import { RpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
-import { boundAgentCatalog, type AccountDescription, type AgentCatalog, type AgentCatalogRequest, type AppUiContext, type AvatarImage, type Gatekeeper, type GatekeeperConnectCallback, type GatekeeperConnectOptions, type GatekeeperUiFrame, type GatekeeperUser, type GatekeeperUserVerifier, type GatekeeperVendor as GatekeeperVendorIface, type ObservationAuthorizer, type ResourceDescription, type SupportedResource, type VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { boundAgentCatalog, type AccountDescription, type AgentCatalog, type AppUiContext, type AvatarImage, type Gatekeeper, type GatekeeperConnectCallback, type GatekeeperConnectOptions, type GatekeeperUiFrame, type GatekeeperUser, type GatekeeperUserVerifier, type GatekeeperVendor as GatekeeperVendorIface, type ObservationAuthorizer, type ResourceDescription, type SupportedResource, type VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { MCP_BASE_TYPES } from "@gadgets/mcp-shared/base-types";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import type { McpLogFields } from "@gadgets/mcp-shared/log";
@@ -130,22 +130,38 @@ export class JarvisConnectionAccount implements ConnectionAccount {
     return { authorization: token, sessionId: state.sessionId ?? null, generation: state.generation };
   }
 
-  /** Persists a refreshed MCP transport session id if the connection generation is still current. */
-  async setMcpSessionId(
-    endpoint: string, generation: number, sessionId: string | null,
-  ): Promise<void> {
+  /** Fails if the JARVIS connection changed since the caller captured credentials. */
+  async assertConnectionCurrent(endpoint: string, generation: number): Promise<void> {
     const state = this.storage.kv.get<StoredConnectionState>("connection");
     if (!state || state.endpoint !== endpoint || endpoint !== this.endpoint ||
         state.generation !== generation) {
-      return;
+      throw new Error("This JARVIS connection changed before the request was sent. Try again.");
     }
+  }
+
+  /** Persists a refreshed MCP transport session id if the connection generation is still current. */
+  async setMcpSessionId(
+    endpoint: string, generation: number, previousSessionId: string | null,
+    sessionId: string | null,
+  ): Promise<boolean> {
+    const state = this.storage.kv.get<StoredConnectionState>("connection");
+    if (!state || state.endpoint !== endpoint || endpoint !== this.endpoint ||
+        state.generation !== generation) {
+      return false;
+    }
+    const currentSessionId = state.sessionId ?? null;
+    if (currentSessionId !== previousSessionId) return currentSessionId === sessionId;
     if (sessionId) this.storage.kv.put("connection", { ...state, sessionId });
     else this.storage.kv.put("connection", { endpoint, generation });
+    return true;
   }
 
   /** Clears stale session state after an auth failure; the deployment must fix the secret. */
   async noteCredentialsExpired(endpoint: string, generation: number): Promise<void> {
-    await this.setMcpSessionId(endpoint, generation, null);
+    const state = this.storage.kv.get<StoredConnectionState>("connection");
+    if (state?.endpoint === endpoint && endpoint === this.endpoint && state.generation === generation) {
+      this.storage.kv.put("connection", { endpoint, generation });
+    }
     logger.warn("JARVIS MCP token was rejected", {
       event: "credentials.expiry.detected",
       serverHost: hostOf(endpoint),
@@ -367,7 +383,6 @@ export class JarvisGatekeeper
 
   /** Returns bounded allowlisted tool discovery after recording observation authorization. */
   async getAgentCatalog(
-    request: AgentCatalogRequest,
     authorizer: RpcStub<ObservationAuthorizer>,
   ): Promise<AgentCatalog> {
     const allowed = new Set((this.ctx.props.chatScope ?? this.ctx.props.scope).tools ?? []);
@@ -380,7 +395,7 @@ export class JarvisGatekeeper
         description: entry.tool.description?.split(/\r?\n/)[0] ?? "JARVIS MCP tool.",
       }))
       .toSorted((left, right) => left.title.localeCompare(right.title) || left.id.localeCompare(right.id));
-    const catalog = boundAgentCatalog(entries, request);
+    const catalog = boundAgentCatalog(entries);
     await authorizer.authorizeObservation({
       title: "JARVIS catalog",
       description: `Listed ${catalog.entries.length} available JARVIS tool(s).`,

@@ -6,7 +6,6 @@ import {
   stripTrailingSlashes,
   type AccountDescription,
   type AgentCatalog,
-  type AgentCatalogRequest,
   type AvatarImage,
   type ConnectionHealthStatus,
   type Gatekeeper,
@@ -27,9 +26,8 @@ import {
   type ConnectedServer,
   type ConnectOutcome,
 } from "@gadgets/mcp-shared/account";
-import { scopedTools } from "@gadgets/mcp-shared/catalog";
 import { generateNonce } from "@gadgets/mcp-shared/connect-nonce";
-import { withClient, type ConnectionAccount, type McpConnection } from "@gadgets/mcp-shared/connection";
+import { fetchTools, withClient, type ConnectionAccount, type McpConnection } from "@gadgets/mcp-shared/connection";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import {
   errorPageHtml,
@@ -42,7 +40,7 @@ import type { McpLog, McpLogFields } from "@gadgets/mcp-shared/log";
 import { generateSessionTypes, sessionTypeName } from "@gadgets/mcp-shared/schema-to-ts";
 import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import { endpointTag, sameEndpoint, type ToolScope } from "@gadgets/mcp-shared/scope";
-import type { ServerTrust } from "@gadgets/mcp-shared/tools";
+import { classifyTool, type ServerTrust } from "@gadgets/mcp-shared/tools";
 import {
   McpGatekeeperUserBase,
   mcpGatekeeperUserContext,
@@ -213,17 +211,14 @@ export class OdieKgAccount extends McpAccountBase<Env> {
         };
       }
 
-      const tools = (await scopedTools({
-        store: this.ctx.storage.kv,
-        log: logger.with({ serverId: ODIE_KG_SERVER_ID, serverHost: hostOf(config.endpoint), trust: "vetted" }),
-        env: this.env,
-        account: this,
-        endpoint: config.endpoint,
-        scope: odieKgToolScope(),
-        trust: "vetted",
-        cacheTtlMs: 0,
-        allowStaleOnRefreshFailure: false,
-      }))
+      const scope = odieKgToolScope();
+      const tools = (await fetchTools(
+        this.env,
+        this,
+        config.endpoint,
+        tool => scope.tools?.includes(tool.name) ?? false,
+      )).tools
+        .map(tool => classifyTool(tool, "vetted"))
         .map(applyOdieKgToolPolicy)
         .filter(entry => entry !== null);
       if (!tools.some(entry => entry.tool.name === "odie-kg-status")) {
@@ -270,13 +265,19 @@ export class OdieKgConnectionAccount implements ConnectionAccount {
     return this.account.getConnection(endpoint);
   }
 
+  async assertConnectionCurrent(endpoint: string, generation: number): Promise<void> {
+    this.#assertCurrent(endpoint);
+    await this.account.assertConnectionCurrent(endpoint, generation);
+  }
+
   async setMcpSessionId(
     endpoint: string,
     generation: number,
+    previousSessionId: string | null,
     sessionId: string | null,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.#assertCurrent(endpoint);
-    await this.account.setMcpSessionId(endpoint, generation, sessionId);
+    return this.account.setMcpSessionId(endpoint, generation, previousSessionId, sessionId);
   }
 
   async noteCredentialsExpired(endpoint: string, generation: number): Promise<void> {
@@ -406,17 +407,13 @@ export class OdieKgGatekeeper
       throw new Error("The Totango Knowledge Graph endpoint changed. Reconnect this account.");
     }
     try {
-      return (await scopedTools({
-        store: this.ctx.storage.kv,
-        log: this.log,
-        env: this.env,
-        account: this.account(),
-        endpoint: this.endpoint,
-        scope: this.scope,
-        trust: this.trust,
-        cacheTtlMs: 0,
-        allowStaleOnRefreshFailure: false,
-      }))
+      return (await fetchTools(
+        this.env,
+        this.account(),
+        this.endpoint,
+        tool => this.scope.tools?.includes(tool.name) ?? false,
+      )).tools
+        .map(tool => classifyTool(tool, this.trust))
         .map(applyOdieKgToolPolicy)
         .filter(entry => entry !== null);
     } catch (error) {
@@ -484,7 +481,6 @@ export class OdieKgGatekeeper
 
   /** Returns a bounded discovery catalog for agent routing. */
   async getAgentCatalog(
-    request: AgentCatalogRequest,
     authorizer: RpcStub<ObservationAuthorizer>,
   ): Promise<AgentCatalog> {
     let entries: AgentCatalog["entries"];
@@ -504,7 +500,7 @@ export class OdieKgGatekeeper
         description: unavailable,
       }];
     }
-    const catalog = boundAgentCatalog(entries, request);
+    const catalog = boundAgentCatalog(entries);
     await authorizer.authorizeObservation({
       title: unavailable ? "Totango Knowledge Graph unavailable" : "Totango Knowledge Graph catalog",
       description: unavailable ?? `Listed ${catalog.entries.length} tenant-scoped KG tool(s).`,

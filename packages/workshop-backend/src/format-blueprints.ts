@@ -24,12 +24,14 @@ const logger = createWorkshopLogger("workshop.formats");
 
 type InstallEnv = Pick<Cloudflare.Env, "BLUEPRINTS" | "BLUEPRINT_CONTENT">;
 
-// Identifies the exact set of bundled blueprints a deployment has installed, and how. Compared
-// with what was installed last time, so any change here triggers reinstallation.
-//
-// Everything that ends up in the installed metadata contributes, not just `revision`: editing a
-// description would otherwise build, deploy, and change nothing on a deployment that had already
-// installed. `revision` covers the one input this can't see, the archive bytes.
+/**
+ * Identifies the exact set of bundled blueprints a deployment has installed, and how. Compared
+ * with what was installed last time, so any change here triggers reinstallation.
+ *
+ * Everything that ends up in the installed metadata contributes, not just `revision`: editing a
+ * description would otherwise build, deploy, and change nothing on a deployment that had already
+ * installed. `revision` covers the one input this can't see, the archive bytes.
+ */
 export function formatBlueprintsManifestVersion(): string {
   return FORMAT_BLUEPRINTS
       .map(e => `${e.blueprintId}@${e.revision}+` +
@@ -38,8 +40,10 @@ export function formatBlueprintsManifestVersion(): string {
       .join(",");
 }
 
-// Identifies the exact featured starter set installed into Explore. Kept separate from the format
-// fingerprint so starters never participate in format promotion or curation.
+/**
+ * Identifies the exact featured starter set installed into Explore. Kept separate from the format
+ * fingerprint so starters never participate in format promotion or curation.
+ */
 export function featuredBlueprintsManifestVersion(): string {
   return FEATURED_BLUEPRINTS
       .map(e => `${e.blueprintId}@${e.revision}+` +
@@ -87,8 +91,10 @@ async function installOne(env: InstallEnv, entry: BundledFormatBlueprint | Bundl
   return {id: entry.blueprintId, metadata: installed};
 }
 
-// Install every bundled blueprint, skipping (and logging) any that fail. Returns the public info
-// of those that installed, so the caller can offer them to users.
+/**
+ * Install every bundled blueprint, skipping (and logging) any that fail. Returns the public info
+ * of those that installed, so the caller can offer them to users.
+ */
 export async function installFormatBlueprints(env: InstallEnv): Promise<BlueprintPublicInfo[]> {
   let installed: BlueprintPublicInfo[] = [];
   for (let entry of FORMAT_BLUEPRINTS) {
@@ -107,9 +113,11 @@ export async function installFormatBlueprints(env: InstallEnv): Promise<Blueprin
   return installed;
 }
 
-// Install every bundled featured starter blueprint. These are ordinary ownerless blueprints and are
-// mirrored to the deployment featured collection by AdminSettings, but are never promoted as output
-// formats.
+/**
+ * Install every bundled featured starter blueprint. These are ordinary ownerless blueprints and are
+ * mirrored to the deployment featured collection by AdminSettings, but are never promoted as output
+ * formats.
+ */
 export async function installFeaturedBlueprints(env: InstallEnv): Promise<BlueprintPublicInfo[]> {
   let installed: BlueprintPublicInfo[] = [];
   for (let entry of FEATURED_BLUEPRINTS) {

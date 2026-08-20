@@ -29,12 +29,14 @@ function boundedComponentText(value: unknown, max: number): string | undefined {
   return trimmed.length > max ? trimmed.slice(0, max) : trimmed;
 }
 
-// Drops interactive components the client couldn't safely draw.
-//
-// Components are described by the model, never executed, so the risk here is not code but nonsense:
-// a table whose rows don't match its columns, a select with no options, a chart with more points
-// than labels. Each of those is dropped or repaired rather than thrown, so one bad component never
-// costs the user the message it came with.
+/**
+ * Drops interactive components the client couldn't safely draw.
+ *
+ * Components are described by the model, never executed, so the risk here is not code but nonsense:
+ * a table whose rows don't match its columns, a select with no options, a chart with more points
+ * than labels. Each of those is dropped or repaired rather than thrown, so one bad component never
+ * costs the user the message it came with.
+ */
 export function sanitizeChatComponents(components: ChatComponent[] | undefined)
     : ChatComponent[] | undefined {
   if (!Array.isArray(components) || components.length === 0) return undefined;
@@ -181,16 +183,18 @@ const COMPONENT_FENCE = "odie-ui";
 const COMPONENT_BLOCK = new RegExp("^[ \\t]*```" + COMPONENT_FENCE + "(?:[ \\t]+[jJ][sS][oO][nN])?[ \\t]*\\r?\\n" +
     "([\\s\\S]*?)\\r?\\n?[ \\t]*```[ \\t]*$", "m");
 
-// Lifts an agent's component block out of its prose.
-//
-// Components arrive inside the message because that is how a model writes: asking it to fill a
-// separate tool argument would split one thought across two places and lose the block whenever the
-// turn ends without a tool call. The block is removed from the text it came in, so the user reads
-// the prose and sees the components drawn, never the JSON that described them.
-//
-// Anything malformed is left exactly where it was. A model that writes a broken block has usually
-// written something it meant the reader to see, and showing a stray code block is a smaller failure
-// than silently deleting part of an answer.
+/**
+ * Lifts an agent's component block out of its prose.
+ *
+ * Components arrive inside the message because that is how a model writes: asking it to fill a
+ * separate tool argument would split one thought across two places and lose the block whenever the
+ * turn ends without a tool call. The block is removed from the text it came in, so the user reads
+ * the prose and sees the components drawn, never the JSON that described them.
+ *
+ * Anything malformed is left exactly where it was. A model that writes a broken block has usually
+ * written something it meant the reader to see, and showing a stray code block is a smaller failure
+ * than silently deleting part of an answer.
+ */
 export function extractChatComponents(message: string)
     : {message: string, components?: ChatComponent[]} {
   let match = COMPONENT_BLOCK.exec(message);

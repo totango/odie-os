@@ -1,7 +1,7 @@
 import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
-import { RpcStub } from 'capnweb'
+import { RpcPromise, RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi, AdminApi, BlueprintPublicInfo, BlueprintBinding, BlueprintBindingAssignment, BlueprintUserSummary, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { SupportedResource, VendorDescription, ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { Button, Dialog, DropdownMenu, Select, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
@@ -156,7 +156,6 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     }
     let cancelled = false
     const accountMap = new Map<number, AccountOption>()
-    let subStub: { [Symbol.dispose](): void } | null = null
 
     const subscriber = new AccountsSubscriberAdapter({
       add({ id: accountId, description, vendor, supportedResources, credentialsValid, vendorId }) {
@@ -177,21 +176,15 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       },
     })
 
-    authenticatedApi.subscribeConnectedAccounts(subscriber)
-      .then(stub => {
-        if (cancelled) {
-          stub[Symbol.dispose]()
-        } else {
-          subStub = stub
-        }
-      })
-      .catch(err => {
-        logRpcFailure('Failed to subscribe to connected accounts:', err)
-      })
+    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber) as unknown as RpcPromise<{}>
+    subscription.catch((err: unknown) => {
+      if (cancelled) return
+      logRpcFailure('Failed to subscribe to connected accounts:', err)
+    })
 
     return () => {
       cancelled = true
-      subStub?.[Symbol.dispose]()
+      subscription[Symbol.dispose]()
     }
   }, [isAuthenticated, authenticatedApi])
 
@@ -1011,7 +1004,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       >
         <Dialog
           // The configurator iframe measures getBoundingClientRect(), which includes transforms.
-          className="!z-[1000] !top-[clamp(28px,10vh,96px)] !flex !max-h-[calc((100vh_-_clamp(28px,10vh,96px)_-_28px)_*_0.9)] !w-[min(760px,calc(100vw-32px))] !-translate-y-0 data-ending-style:!scale-100 data-starting-style:!scale-100 flex-col overflow-hidden bg-kumo-base p-0"
+          className="responsive-dialog !z-[1000] !top-[clamp(28px,10vh,96px)] !flex !max-h-[calc((100vh_-_clamp(28px,10vh,96px)_-_28px)_*_0.9)] !w-[min(760px,calc(100vw-32px))] !-translate-y-0 data-ending-style:!scale-100 data-starting-style:!scale-100 flex-col overflow-hidden bg-kumo-base p-0"
           size="lg"
         >
           {activeBinding && activeBindingName && authenticatedApi && (
@@ -1083,7 +1076,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         open={showDeleteConfirm}
         onOpenChange={(open) => { if (!open) setShowDeleteConfirm(false) }}
       >
-        <Dialog className="p-8" size="sm">
+        <Dialog className="responsive-dialog overflow-y-auto p-8" size="sm">
           <Dialog.Title className="text-lg font-semibold">
             Delete blueprint
           </Dialog.Title>
@@ -1142,7 +1135,7 @@ function BlueprintScreenshotHero({
         )}
       />
       <Dialog
-        className="!z-[1200] !w-[min(1120px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0"
+        className="responsive-dialog !z-[1200] !w-[min(1120px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0"
         size="lg"
       >
         <Dialog.Title className="sr-only">Screenshot of {title}</Dialog.Title>
@@ -1161,7 +1154,7 @@ function BlueprintScreenshotHero({
           <img
             src={screenshotUrl}
             alt={`Screenshot of ${title}`}
-            className="max-h-[calc(100vh-96px)] w-full rounded-xl object-contain"
+            className="max-h-[calc(var(--app-height)-96px)] w-full rounded-xl object-contain"
           />
         </div>
       </Dialog>
