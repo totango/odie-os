@@ -5,6 +5,8 @@ import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/k
 import { RpcStub } from 'capnweb'
 import { useAuthenticatedApi } from '../AuthContext'
 import { GadgetMetadataWithTimestamps, BlueprintPublicInfo, Overseer, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
+import { useHub } from '../HubContext'
+import { isSupportOrigin, rankForSelectedHub } from '../supportCuration'
 import ShareModal from '../ShareModal'
 import { BindingBadge, getGradient as getBlueprintGradient, uniqueBindingBadges } from './BlueprintCard'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
@@ -168,6 +170,7 @@ function AppRow({
 
 export default function GadgetList({ showHeader = true }: { showHeader?: boolean } = {}) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const { hub } = useHub()
   const toasts = useKumoToastManager()
   const [gadgets, setGadgets] = useState<GadgetMetadataWithTimestamps[]>([])
   const [search, setSearch] = useState('')
@@ -201,7 +204,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
         if (!a.pinned && b.pinned) return 1
         return b.lastActive.getTime() - a.lastActive.getTime()
       })
-      setGadgets(sorted)
+      setGadgets(rankForSelectedHub(sorted, hub, (g) => isSupportOrigin(g.originHubId)))
       setLoading(false)
     }).catch((err) => {
       console.error('Failed to load gadgets:', err)
@@ -210,7 +213,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     return () => { cancelled = true }
   }
 
-  useEffect(() => loadGadgets(), [authenticatedApi])
+  useEffect(() => loadGadgets(), [authenticatedApi, hub])
 
   // Clean up share overseer when modal closes
   useEffect(() => {

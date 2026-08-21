@@ -24,6 +24,8 @@ import { MENU_CONTENT, MENU_ITEM, MENU_POSITIONER_STYLE } from '../components/me
 import { formatOf } from '../components/format/formats'
 import { FormatThumbnail, FormatTile } from '../components/format/FormatVisuals'
 import { useOutputFormats } from '../components/format/useOutputFormats'
+import { useHub } from '../HubContext'
+import { isSupportOrigin, rankForSelectedHub } from '../supportCuration'
 import NewFormatRow from '../components/format/NewFormatRow'
 import DeleteConfirmationDialog from '../components/DeleteConfirmationDialog'
 import { WorkshopButton, WorkshopIconButton } from '../components/WorkshopControls'
@@ -390,6 +392,7 @@ type TypeFilter = 'all' | string
 function OutputsPage() {
   useDocumentTitle('Outputs')
   const { authenticatedApi } = useAuthenticatedApi()
+  const { hub } = useHub()
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
   const { formats } = useOutputFormats()
@@ -433,7 +436,7 @@ function OutputsPage() {
       for (;;) {
         const { outputs: list, catchingUp } = await authenticatedApi.listOutputs()
         if (cancelled) return
-        setOutputs(list)
+        setOutputs(rankForSelectedHub(list, hub, (output) => isSupportOrigin(output.originHubId)))
         setLoading(false)
         loadedOnce.current = true
         if (!catchingUp) return
@@ -451,7 +454,7 @@ function OutputsPage() {
       }
     })
     return () => { cancelled = true }
-  }, [authenticatedApi, reloadToken])
+  }, [authenticatedApi, hub, reloadToken])
 
   // A cheap snapshot rather than another live subscription, so refetch when the user returns to
   // the window.

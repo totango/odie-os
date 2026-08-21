@@ -8,8 +8,6 @@ import Sidebar from './Sidebar'
 import CommandPalette from './CommandPalette'
 import { OPEN_COMMAND_PALETTE_EVENT } from './commandPaletteBus'
 import HubSwitcher from './HubSwitcher'
-import { HubProvider } from '../../HubContext'
-import { useEnabledHubs } from '../../ServerConfigContext'
 
 const STORAGE_KEY_COLLAPSED = 'gadgets:sidebar-collapsed'
 
@@ -38,7 +36,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const drawerRef = useRef<HTMLDivElement>(null)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
   const connectionLost = useConnectionLost()
-  const enabledHubs = useEnabledHubs()
 
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
@@ -112,8 +109,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   }, [])
 
   return (
-    <HubProvider enabledHubs={enabledHubs}>
-      <div className="flex h-full min-h-0 w-full overflow-hidden bg-kumo-base">
+    <div className="flex h-full min-h-0 w-full overflow-hidden bg-kumo-base">
         {/* Desktop sidebar — hidden on mobile in favor of the drawer. */}
         <div className="hidden md:flex">
           <Sidebar collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
@@ -175,7 +171,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </div>
 
         <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
-      </div>
-    </HubProvider>
+    </div>
   )
 }

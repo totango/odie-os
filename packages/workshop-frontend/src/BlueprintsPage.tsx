@@ -12,11 +12,14 @@ import { useAuthenticatedApi } from "./AuthContext";
 import { BindingBadge, uniqueBindingBadges } from "./components/BlueprintCard";
 import { BlueprintPreviewPlaceholder } from "./components/BlueprintPreviewImage";
 import ViewToggle from "./components/ViewToggle";
+import { useHub } from "./HubContext";
+import { isSupportCuratedAsset, rankForSelectedHub } from "./supportCuration";
 
 type VendorMap = Map<string, VendorDescription>;
 
 export default function BlueprintsPage() {
   const { authenticatedApi } = useAuthenticatedApi();
+  const { hub } = useHub();
   const toasts = useKumoToastManager();
   const toastsRef = useRef(toasts);
   toastsRef.current = toasts;
@@ -45,7 +48,11 @@ export default function BlueprintsPage() {
     ])
       .then(([featured, vendors]) => {
         if (cancelled) return;
-        setFeaturedBlueprints(featured);
+        setFeaturedBlueprints(rankForSelectedHub(featured, hub, (blueprint) =>
+          isSupportCuratedAsset('featured', blueprint.id)
+          || isSupportCuratedAsset('featured', blueprint.metadata.title)
+          || isSupportCuratedAsset('featured', blueprint.metadata.description ?? ''),
+        ));
         setVendorDescriptions(
           new Map(vendors.map((vendor) => [vendor.id.toLowerCase(), vendor.description])),
         );
@@ -64,7 +71,7 @@ export default function BlueprintsPage() {
     return () => {
       cancelled = true;
     };
-  }, [authenticatedApi]);
+  }, [authenticatedApi, hub]);
 
   const q = search.trim().toLowerCase();
   const filtered = featuredBlueprints.filter((b) => {

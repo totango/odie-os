@@ -2,7 +2,7 @@ import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useMemo, useCallback, type MutableRefObject } from 'react'
 import { Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import { Plus, CaretRight, Warning } from '@phosphor-icons/react'
-import { RpcStub } from 'capnweb'
+import { RpcPromise, RpcStub } from 'capnweb'
 import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { extractHostname, extractBaseUrl, matchesResource, matchesResourceText, classifyMatch, getPlaceholderRanges } from './resourceMatching'
@@ -141,8 +141,8 @@ export default function ResourcePicker({
         setAccountsLoaded(true)
       },
     })
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
-    subscription.catch(error => {
+    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber) as unknown as RpcPromise<{}>
+    subscription.catch((error: unknown) => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)
       // Nothing more is coming, so show what we have rather than hiding forever.

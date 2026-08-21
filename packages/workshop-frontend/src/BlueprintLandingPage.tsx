@@ -21,6 +21,7 @@ import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControl
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyles'
 import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { useHub } from './HubContext'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -31,6 +32,7 @@ type BindingFormState = Record<string, any>
 const NO_AGENT_MODEL_ID = 'gadgets:sentinel:no-agent-model'
 
 export default function BlueprintLandingPage({ rpcStub }: Props) {
+  const { hub } = useHub()
   const params = useParams({ strict: false }) as { id?: string }
   const id = params.id ?? ''
   const navigate = useNavigate()
@@ -564,7 +566,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
     setCreating(true)
     setError(null)
-    const overseer = authenticatedApi.newGadgetFromBlueprint(id, draftAssignments)
+    const overseer = authenticatedApi.newGadgetFromBlueprint(id, draftAssignments, hub)
     try {
       let metadata = await overseer.getMetadata()
       window.location.href = `/workspace/${metadata.id}`

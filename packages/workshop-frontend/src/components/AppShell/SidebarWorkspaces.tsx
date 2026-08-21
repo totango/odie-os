@@ -28,6 +28,8 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import ShareModal from '../../ShareModal'
 import DeleteConfirmationDialog from '../DeleteConfirmationDialog'
 import SidebarGadgetRow from './SidebarGadgetRow'
+import { useHub } from '../../HubContext'
+import { isSupportOrigin, rankForSelectedHub } from '../../supportCuration'
 
 // Cap on items shown in the Recent list before the user clicks through to /workspaces.
 const RECENT_INITIAL_LIMIT = 6
@@ -70,6 +72,7 @@ function useWorkspacesContext(): WorkspacesContextValue {
  */
 export function SidebarWorkspacesProvider({ children }: { children: ReactNode }) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const { hub } = useHub()
   const toasts = useKumoToastManager()
 
   const [gadgets, setGadgets] = useState<GadgetMetadataWithTimestamps[]>([])
@@ -134,8 +137,11 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
       b.lastActive.getTime() - a.lastActive.getTime()
     favs.sort(byActive)
     rest.sort(byActive)
-    return { favorites: favs, recent: rest }
-  }, [gadgets, matchText])
+    return {
+      favorites: rankForSelectedHub(favs, hub, (g) => isSupportOrigin(g.originHubId)),
+      recent: rankForSelectedHub(rest, hub, (g) => isSupportOrigin(g.originHubId)),
+    }
+  }, [gadgets, hub, matchText])
 
   // --- Workspace actions ---------------------------------------------------
 
