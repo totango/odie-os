@@ -935,7 +935,8 @@ function zendeskMemoryEntriesFromStorage(value: unknown, now: number): StoredZen
   const minRememberedAt = now - ZENDESK_MEMORY_TTL_MS;
   return (Array.isArray(value) ? value : [])
     .map(zendeskMemoryEntryFromStorage)
-    .filter((entry): entry is StoredZendeskTicketMemoryEntry => Boolean(entry) && entry.rememberedAt >= minRememberedAt)
+    .filter((entry): entry is StoredZendeskTicketMemoryEntry =>
+      entry !== null && entry.rememberedAt >= minRememberedAt)
     .toSorted((a, b) => b.rememberedAt - a.rememberedAt)
     .slice(0, ZENDESK_MEMORY_MAX_ENTRIES);
 }
