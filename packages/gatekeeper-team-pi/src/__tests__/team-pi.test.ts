@@ -134,7 +134,9 @@ describe("Team PI token refresh and API isolation", () => {
     kv.put("identity", { uniqueName: "stale@totango.com" });
     const account = new TeamPiAccount({} as never, configEnv());
     (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
-    (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv } };
+    (account as unknown as { env: Env; ctx: unknown }).ctx = {
+      storage: { kv, transactionSync: <T>(callback: () => T) => callback() },
+    };
     const first = account.getAccessToken();
     const second = account.getAccessToken();
     await Promise.resolve();
@@ -369,6 +371,16 @@ function configEnv(): Env {
   } as unknown as Env;
 }
 
+function fakeAccount(overrides: Partial<TeamPiAccount> = {}): DurableObjectStub<TeamPiAccount> {
+  return {
+    describeIdentity: async () => ({}),
+    listSavedWorkItemViews: async () => [],
+    saveWorkItemView: async (view: never) => view,
+    deleteWorkItemView: async () => {},
+    ...overrides,
+  } as unknown as DurableObjectStub<TeamPiAccount>;
+}
+
 describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
   it("configures the whole-account resource for an existing authenticated account", async () => {
     const user = new TeamPiUser({} as never, configEnv());
@@ -376,10 +388,15 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     (user as unknown as { ctx: unknown }).ctx = {
       props: { accountId: "account-1" },
       exports: {
-        TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access", idToken: "identity" }) }) },
+        TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access", idToken: "identity" }), describeIdentity: async () => ({ displayName: "Dana", uniqueName: "dana@example.com" }) }) },
         TeamPiGatekeeper: vi.fn(() => ({ class: "team-pi" })),
       },
     };
+
+    await expect(user.describe()).resolves.toMatchObject({
+      avatar: expect.objectContaining({ url: expect.stringContaining("PI") }),
+      providesUi: { title: "Work Items", adminOnly: true, icon: expect.objectContaining({ url: expect.not.stringContaining("PI") }) },
+    });
 
     const app = await user.startAppUi({ isAdmin: true });
     expect(app.iframeHtml).toContain("app.txt");
@@ -496,7 +513,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(response({ source: "jira", items: [{ source: "jira", id: "J-1", title: "Issue", fields: {} }], cursor: "1", hasMore: true }))
       .mockResolvedValueOnce(response({ error: "zendesk_down" }, 503));
-    const api = new TeamPiWorkItemsManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl));
+    const api = new TeamPiWorkItemsManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), fakeAccount());
 
     await expect(api.search({ source: "both", query: "acme" })).resolves.toEqual({
       items: [{ source: "jira", id: "J-1", title: "Issue", fields: {}, key: undefined, url: undefined, status: undefined, type: undefined, priority: undefined, assignee: undefined, requester: undefined, updatedAt: undefined, projectKey: undefined }],
@@ -513,12 +530,61 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
         zendesk: { configured: true, connected: true, secret: "ignored" },
       },
     }));
-    const api = new TeamPiWorkItemsManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl));
+    const api = new TeamPiWorkItemsManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), fakeAccount());
 
     await expect(api.getSourceStatuses()).resolves.toEqual({
       jira: { configured: true, connected: false, reason: "missing shared connection" },
       zendesk: { configured: true, connected: true, reason: undefined },
     });
+  });
+
+  it("reads the Work Items current user from the stored Team PI OAuth identity", async () => {
+    const api = new TeamPiWorkItemsManagementApi(
+      new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl),
+      fakeAccount({ describeIdentity: async () => ({ displayName: "Dana CSM", uniqueName: "dana@example.com" }) }),
+    );
+
+    await expect(api.getCurrentUser()).resolves.toEqual({ displayName: "Dana CSM", uniqueName: "dana@example.com" });
+  });
+
+  it("normalizes, replaces, bounds, and deletes stored Work Items saved views", async () => {
+    const kv = new Kv();
+    const account = new TeamPiAccount({} as never, configEnv());
+    (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (account as unknown as { env: Env; ctx: unknown }).ctx = {
+      storage: { kv, transactionSync: <T>(callback: () => T) => callback() },
+    };
+    const oversized = {
+      id: " mine ",
+      name: " My triage ",
+      query: "q".repeat(400),
+      source: "jira",
+      filters: { status: " Open ", priority: "P".repeat(200), type: "Bug", person: "Dana" },
+      view: "kanban",
+      hiddenStatuses: Array.from({ length: 30 }, (_, i) => `Hidden ${i}`),
+    };
+
+    await expect(account.saveWorkItemView(oversized as never)).resolves.toEqual({
+      id: "mine",
+      name: "My triage",
+      query: "q".repeat(300),
+      source: "jira",
+      filters: { status: "Open", priority: "P".repeat(120), type: "Bug", person: "Dana" },
+      view: "kanban",
+      hiddenStatuses: Array.from({ length: 25 }, (_, i) => `Hidden ${i}`),
+    });
+    await expect(account.saveWorkItemView({ ...oversized, id: "builtin:all" } as never))
+      .rejects.toThrow("reserved");
+    await account.saveWorkItemView({ ...oversized, name: "Replacement", source: "nonsense", view: "grid" } as never);
+    await expect(account.listSavedWorkItemViews()).resolves.toMatchObject([{ id: "mine", name: "Replacement", source: "both", view: "list" }]);
+
+    for (let i = 0; i < 25; i++) {
+      await account.saveWorkItemView({ id: `v-${i}`, name: `View ${i}`, query: "", source: "both", filters: { status: "", priority: "", type: "", person: "" }, view: "list", hiddenStatuses: [] });
+    }
+    await expect(account.listSavedWorkItemViews()).resolves.toHaveLength(20);
+    await expect(account.listSavedWorkItemViews()).resolves.not.toEqual(expect.arrayContaining([expect.objectContaining({ id: "mine" })]));
+    await account.deleteWorkItemView("v-24");
+    await expect(account.listSavedWorkItemViews()).resolves.not.toEqual(expect.arrayContaining([expect.objectContaining({ id: "v-24" })]));
   });
 
   it("uses Zendesk internal comments by default and public only when explicit", async () => {

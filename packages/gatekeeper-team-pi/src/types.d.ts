@@ -258,6 +258,44 @@ export type WorkItemSearchPage = {
   errors?: WorkItemProviderError[];
 };
 
+/** Current Team PI Work Items user identity shown in the management UI. */
+export type WorkItemsCurrentUser = {
+  /** Human-readable display name from the connected Team PI OAuth identity. */
+  displayName?: string;
+  /** Stable unique user name, usually the connected Team PI OAuth email address. */
+  uniqueName?: string;
+};
+
+/** Persisted filter selections for a Team PI Work Items saved view. */
+export type WorkItemSavedViewFilters = {
+  /** Provider status name included by the saved view. */
+  status: string;
+  /** Provider priority name included by the saved view. */
+  priority: string;
+  /** Provider work item type name included by the saved view. */
+  type: string;
+  /** Person display name, email, or identifier included by the saved view. */
+  person: string;
+};
+
+/** Admin-created Team PI Work Items saved search/view stored on the Team PI account. */
+export type WorkItemSavedView = {
+  /** Stable user-supplied identifier used for replacement and deletion. */
+  id: string;
+  /** Human-readable saved view name. */
+  name: string;
+  /** Provider text query associated with the saved view. */
+  query: string;
+  /** Source selector searched by the saved view. */
+  source: WorkItemSearchSource;
+  /** Structured filters applied by the management UI. */
+  filters: WorkItemSavedViewFilters;
+  /** Preferred saved view presentation. */
+  view: "list" | "kanban";
+  /** Provider statuses hidden from the saved view. */
+  hiddenStatuses: string[];
+};
+
 /** Input for adding a provider comment. */
 export type WorkItemCommentInput = {
   /** Plain text comment body. */
@@ -284,6 +322,14 @@ export type WorkItemLinkResult = {
 
 /** Admin-only Team PI Work Items management root capability. */
 export interface WorkItemsManagementApi {
+  /** Reads the connected Team PI OAuth identity for display in the management UI. */
+  getCurrentUser(): Promise<WorkItemsCurrentUser>;
+  /** Lists normalized saved Work Items views stored on this Team PI account. */
+  listSavedViews(): Promise<WorkItemSavedView[]>;
+  /** Saves or replaces one normalized Work Items saved view by its stable user-supplied id. */
+  saveSavedView(view: WorkItemSavedView): Promise<WorkItemSavedView>;
+  /** Deletes one Work Items saved view by its stable user-supplied id. */
+  deleteSavedView(id: string): Promise<void>;
   /** Reads provider configuration and shared-connection statuses. */
   getSourceStatuses(): Promise<WorkItemSourceStatuses>;
   /** Searches Jira, Zendesk, or both; both-provider searches isolate provider failures. */
