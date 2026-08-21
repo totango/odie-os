@@ -337,6 +337,7 @@ describe("Team PI token refresh and API isolation", () => {
     await api.workItemsTransitions("J-1");
     await api.workItemsApplyTransition("J-1", "31");
     await api.workItemsLink("J-1", "12");
+    await api.workItemsAttachments("jira", "J-1");
 
     const calls = vi.mocked(fetch).mock.calls;
     expect(calls.map(call => String(call[0]))).toEqual([
@@ -351,6 +352,7 @@ describe("Team PI token refresh and API isolation", () => {
       "https://team-pi.example/api/work-items/v1/items/jira/J-1/transitions",
       "https://team-pi.example/api/work-items/v1/items/jira/J-1/transitions",
       "https://team-pi.example/api/work-items/v1/links",
+      "https://team-pi.example/api/work-items/v1/items/jira/J-1/attachments",
     ]);
     expect(calls[6]?.[1]).toMatchObject({ method: "POST", redirect: "manual" });
     expect(calls[7]?.[1]).toMatchObject({ method: "PATCH" });
@@ -359,6 +361,31 @@ describe("Team PI token refresh and API isolation", () => {
     expect(JSON.parse(String(calls[6]?.[1]?.body))).toEqual({ body: "x".repeat(12_000) });
     expect(JSON.parse(String(calls[10]?.[1]?.body))).toEqual({ jiraId: "J-1", zendeskTicketId: "12" });
     expect(() => assertAllowedEndpoint("workItems", "rawProxy")).toThrow(/not allowed/);
+  });
+
+  it("fetches Work Items attachment bytes through the bounded binary allowlist", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+      status: 200,
+      headers: { "Content-Type": "image/png", "Content-Disposition": "attachment; filename=screen.png" },
+    }));
+    const api = new TeamPiApi(async () => ({ accessToken: "access", idToken: "identity" }), config.baseUrl);
+    await expect(api.workItemsAttachmentContent("jira", "J-1", "a1")).resolves.toEqual({ data: new Uint8Array([1, 2, 3]), name: "screen.png", contentType: "image/png" });
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toBe("https://team-pi.example/api/work-items/v1/items/jira/J-1/attachments/a1/content");
+    expect(vi.mocked(fetch).mock.calls[0]?.[1]).toMatchObject({ method: "GET", redirect: "manual", headers: expect.objectContaining({ Authorization: "Bearer access", "X-Team-PI-ID-Token": "identity" }) });
+  });
+
+  it("preserves Work Item descriptions above the generic JSON string limit", async () => {
+    const description = "x".repeat(50_000);
+    vi.mocked(fetch).mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "Issue", description: { body: description, format: "adf-text", truncated: false }, fields: {} } }));
+    const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
+
+    await expect(api.workItemsDetail("jira", "J-1")).resolves.toMatchObject({ item: { description: { body: description, truncated: false } } });
+  });
+
+  it("blocks Team PI attachment redirects", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 302, headers: { Location: "https://evil.example/file" } }));
+    const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
+    await expect(api.workItemsAttachmentContent("jira", "J-1", "a1")).rejects.toThrow(/redirect was blocked/);
   });
 });
 
@@ -499,14 +526,36 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       key: "J-1",
       url: "https://jira.example/browse/J-1",
       title: "x".repeat(400),
-      fields: { summary: "y".repeat(3_000), labels: ["secret"] },
+      description: { body: "Full description", format: "markdown", truncated: true },
+      fields: { summary: "y".repeat(3_000), labels: ["secret"], customfield_12345: "raw custom", providerOptions: "raw options" },
       token: "do-not-copy",
     } })).toEqual({ item: expect.objectContaining({
       source: "jira",
       id: "J-1",
       title: "x".repeat(300),
+      description: { body: "Full description", format: "markdown", truncated: true },
       fields: { summary: "y".repeat(2_000), labels: "secret" },
     }) });
+  });
+
+  it("preserves bounded rich descriptions and marks only local overflow as truncated", () => {
+    const complete = "x".repeat(50_000);
+    expect(detailFromEnvelope({ item: { source: "jira", id: "J-1", title: "Issue", description: { body: complete, format: "adf-text", truncated: false }, fields: {} } }))
+      .toMatchObject({ item: { description: { body: complete, format: "text" } } });
+
+    const oversized = "y".repeat(60_001);
+    expect(detailFromEnvelope({ item: { source: "jira", id: "J-1", title: "Issue", description: { body: oversized, format: "text", truncated: false }, fields: {} } }))
+      .toMatchObject({ item: { description: { body: "y".repeat(60_000), format: "text", truncated: true } } });
+  });
+
+  it("authorizes exactly one private observation for agent Work Items search", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ items: [{ source: "jira", id: "J-1", title: "Issue", fields: {} }], hasMore: false }));
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, new Kv() as never);
+
+    await expect(session.workItemsSearch({ source: "jira", query: "login" })).resolves.toMatchObject({ items: [{ source: "jira", id: "J-1" }] });
+    expect(approval.authorizeObservation).toHaveBeenCalledTimes(1);
+    expect(approval.authorizeObservation).toHaveBeenCalledWith({ title: "Search Team PI Work Items", description: "Searched Jira and Zendesk Work Items through Team PI.", prohibitAllSharing: true });
   });
 
   it("isolates provider partial failures when searching both Work Items sources", async () => {
@@ -624,13 +673,27 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     ]);
   });
 
+  it("preserves complete bounded descriptions when updating fields", async () => {
+    const description = "Detailed context.\n".repeat(2_000);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "Issue", fields: {} } }));
+    const item = new TeamPiWorkItemManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), { source: "jira", id: "J-1" });
+
+    await item.updateFields({ fields: { description } });
+
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body))).toEqual({ fields: { description } });
+  });
+
   it("composes selected Work Item reads from detail, comments, activity, options, and Jira transitions", async () => {
+    const attachments = Array.from({ length: 100 }, (_, index) => ({ id: `att-${index}`, name: `file-${index}.png`, contentType: "image/png", size: index, commentId: "c1", createdAt: undefined }));
     vi.mocked(fetch)
       .mockResolvedValueOnce(response({ item: { source: "jira", id: "J-1", title: "Issue", fields: {} } }))
       .mockResolvedValueOnce(response({ comments: [{ id: "c1", body: "hello" }] }))
       .mockResolvedValueOnce(response({ activity: [{ id: "a1", type: "changelog", summary: "changed" }] }))
       .mockResolvedValueOnce(response({ source: "jira", id: "J-1", allowedFields: ["summary"], providerOptions: ["summary", "secret".repeat(100)] }))
-      .mockResolvedValueOnce(response({ transitions: [{ id: "31", name: "Done", toStatus: "Done" }] }));
+      .mockResolvedValueOnce(response({ transitions: [{ id: "31", name: "Done", toStatus: "Done" }] }))
+      .mockResolvedValueOnce(response({ attachments }));
     const item = new TeamPiWorkItemManagementApi(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), { source: "jira", id: "J-1" });
 
     await expect(item.read()).resolves.toMatchObject({
@@ -639,6 +702,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       activity: [{ id: "a1", type: "changelog", summary: "changed" }],
       updateOptions: { source: "jira", id: "J-1", allowedFields: ["summary"], providerOptions: ["summary", expect.stringMatching(/^secret/) ] },
       transitions: [{ id: "31", name: "Done", toStatus: "Done" }],
+      attachments,
     });
   });
 
@@ -759,6 +823,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
         { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
         { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
         { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
+        { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through the read-only Team PI workItemsSearch(request) API." },
         { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
       ],
       truncated: false,
@@ -766,8 +831,8 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toBe("https://team-pi.example/api/skills?limit=12");
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
     expect(authorizeObservation).toHaveBeenCalledWith({
-      title: "Read Team PI skill and provider catalog",
-      description: "Listed bounded Team PI skill manifests and provider capabilities for agent discovery.",
+      title: "Read Team PI skill, provider, and Work Items catalog",
+      description: "Listed bounded Team PI skill manifests, provider capabilities, and the read-only Work Items/Jira search capability for agent discovery.",
     });
   });
 

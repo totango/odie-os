@@ -93,6 +93,9 @@ export interface TeamPiSession {
 
   /** Polls the result of a previously queued Team PI action. */
   getActionResult(actionId: number): Promise<TeamPiActionResult>;
+
+  /** Searches Jira and Zendesk Work Items as a private read-only observation. */
+  workItemsSearch(request: WorkItemSearchRequest): Promise<WorkItemSearchPage>;
 }
 
 /** Team PI Work Items provider kind. */
@@ -151,8 +154,46 @@ export type WorkItemSummary = WorkItemProviderRef & {
   updatedAt?: string;
   /** Jira project key, when present. */
   projectKey?: string;
+  /** First-class normalized description text returned by Team PI, when present. */
+  description?: WorkItemDescription;
   /** Allowlisted normalized field values. */
   fields: Record<string, string | number | boolean | null>;
+};
+
+/** Normalized provider description content for a work item. */
+export type WorkItemDescription = {
+  /** Complete or bounded body text in the declared format. */
+  body: string;
+  /** Text format supplied by the proxy. */
+  format: "text" | "markdown";
+  /** True when the proxy explicitly truncated the returned description. */
+  truncated?: boolean;
+};
+
+/** Normalized metadata for an attachment exposed by Team PI. */
+export type WorkItemAttachment = {
+  /** Provider-native attachment id accepted by readAttachment(). */
+  id: string;
+  /** Safe display name supplied by the provider. */
+  name: string;
+  /** Provider content type, when supplied. */
+  contentType?: string;
+  /** File size in bytes, when supplied. */
+  size?: number;
+  /** Provider creation timestamp as an ISO-like string. */
+  createdAt?: string;
+  /** Provider-native comment id associated with the attachment, when supplied. */
+  commentId?: string;
+};
+
+/** Bounded binary attachment content returned through the Team PI proxy. */
+export type WorkItemAttachmentContent = {
+  /** Bounded bytes of the attachment content. */
+  data: Uint8Array;
+  /** Safe display name for the attachment. */
+  name: string;
+  /** Content type selected from the proxy response, when supplied. */
+  contentType?: string;
 };
 
 /** Authoritative item detail returned by Team PI. */
@@ -219,6 +260,8 @@ export type WorkItemRead = {
   updateOptions: WorkItemUpdateOptions;
   /** Jira workflow transitions; empty for Zendesk. */
   transitions: WorkItemTransition[];
+  /** Bounded attachment metadata for the selected item. */
+  attachments: WorkItemAttachment[];
 };
 
 /** Work item source selector for search. */
@@ -342,6 +385,8 @@ export interface WorkItemsManagementApi {
 export interface WorkItemManagementApi {
   /** Reads authoritative detail plus comments, activity, update options, and Jira transitions. */
   read(): Promise<WorkItemRead>;
+  /** Reads bounded binary content for one attachment id on this item. */
+  readAttachment(id: string): Promise<WorkItemAttachmentContent>;
   /** Adds a comment, defaulting Zendesk comments to internal unless public is explicit, then returns refreshed detail. */
   addComment(input: WorkItemCommentInput): Promise<WorkItemDetail>;
   /** Updates allowlisted fields and returns refreshed authoritative detail. */

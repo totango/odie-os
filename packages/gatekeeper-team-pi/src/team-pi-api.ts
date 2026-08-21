@@ -2,8 +2,10 @@ const MAX_ID_LENGTH = 256;
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 50;
 const MAX_RESPONSE_BYTES = 256_000;
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 64_000;
 const MAX_STRING_LENGTH = 16_000;
+const MAX_WORK_ITEM_DESCRIPTION_LENGTH = 60_000;
 const MAX_ARRAY_LENGTH = 100;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
@@ -66,7 +68,8 @@ type WriteEndpoint = "installSkill" | "startConnection";
 type WorkItemsEndpoint =
   | "workItemsSourceStatus" | "workItemsSearch" | "workItemsDetail" | "workItemsComments"
   | "workItemsActivity" | "workItemsUpdateOptions" | "workItemsAddComment" | "workItemsUpdateFields"
-  | "workItemsTransitions" | "workItemsApplyTransition" | "workItemsLink";
+  | "workItemsTransitions" | "workItemsApplyTransition" | "workItemsLink" | "workItemsAttachments"
+  | "workItemsAttachmentContent";
 
 const READ_ENDPOINTS = new Set<ReadEndpoint>([
   "listSkills", "getSkill", "checkSkill", "listConnections", "calendarEvents", "gmailSearch",
@@ -77,7 +80,8 @@ const WRITE_ENDPOINTS = new Set<WriteEndpoint>(["installSkill", "startConnection
 const WORK_ITEMS_ENDPOINTS = new Set<WorkItemsEndpoint>([
   "workItemsSourceStatus", "workItemsSearch", "workItemsDetail", "workItemsComments",
   "workItemsActivity", "workItemsUpdateOptions", "workItemsAddComment", "workItemsUpdateFields",
-  "workItemsTransitions", "workItemsApplyTransition", "workItemsLink",
+  "workItemsTransitions", "workItemsApplyTransition", "workItemsLink", "workItemsAttachments",
+  "workItemsAttachmentContent",
 ]);
 
 export function resolveConfig(env: Env): TeamPiConfig {
@@ -261,7 +265,7 @@ export class TeamPiApi {
 
   workItemsDetail(source: "jira" | "zendesk", id: string): Promise<unknown> {
     assertAllowedEndpoint("workItems", "workItemsDetail");
-    return this.request("GET", workItemsItemPath(source, id));
+    return this.request("GET", workItemsItemPath(source, id), undefined, undefined, MAX_WORK_ITEM_DESCRIPTION_LENGTH);
   }
 
   workItemsComments(source: "jira" | "zendesk", id: string): Promise<unknown> {
@@ -290,7 +294,7 @@ export class TeamPiApi {
 
   workItemsUpdateFields(source: "jira" | "zendesk", id: string, fields: Record<string, unknown>): Promise<unknown> {
     assertAllowedEndpoint("workItems", "workItemsUpdateFields");
-    return this.request("PATCH", `${workItemsItemPath(source, id)}/fields`, undefined, { fields: boundJsonValue(fields) });
+    return this.request("PATCH", `${workItemsItemPath(source, id)}/fields`, undefined, { fields }, MAX_WORK_ITEM_DESCRIPTION_LENGTH);
   }
 
   workItemsTransitions(id: string): Promise<unknown> {
@@ -313,7 +317,17 @@ export class TeamPiApi {
     });
   }
 
-  private async request(method: "GET" | "POST" | "PUT" | "PATCH", path: string, params?: URLSearchParams, body?: unknown): Promise<unknown> {
+  workItemsAttachments(source: "jira" | "zendesk", id: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsAttachments");
+    return this.request("GET", `${workItemsItemPath(source, id)}/attachments`);
+  }
+
+  workItemsAttachmentContent(source: "jira" | "zendesk", id: string, attachmentId: string): Promise<{ data: Uint8Array; name: string; contentType?: string }> {
+    assertAllowedEndpoint("workItems", "workItemsAttachmentContent");
+    return this.binaryRequest(`${workItemsItemPath(source, id)}/attachments/${encodeURIComponent(safeId(attachmentId, "attachment id"))}/content`);
+  }
+
+  private async request(method: "GET" | "POST" | "PUT" | "PATCH", path: string, params?: URLSearchParams, body?: unknown, maxStringLength = MAX_STRING_LENGTH): Promise<unknown> {
     const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const credentials = await abortable(this.getCredentials(), signal, "Team PI request timed out");
     const url = new URL(`${this.baseUrl}${path}`);
@@ -325,7 +339,7 @@ export class TeamPiApi {
     if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
     let requestBody: string | undefined;
     if (body !== undefined) {
-      requestBody = JSON.stringify(boundJsonValue(body));
+      requestBody = JSON.stringify(boundJsonValueWithLimit(body, 0, maxStringLength));
       if (new TextEncoder().encode(requestBody).byteLength > MAX_REQUEST_BYTES) {
         throw new TeamPiApiError("Team PI request body exceeded size limit");
       }
@@ -347,7 +361,7 @@ export class TeamPiApi {
     }
     let json: Record<string, unknown>;
     try {
-      json = await boundedJson(response);
+      json = await boundedJson(response, maxStringLength);
     } catch (error) {
       if (signal.aborted) throw new TeamPiApiError("Team PI request timed out", response.status);
       throw error;
@@ -370,7 +384,40 @@ export class TeamPiApi {
       }
       throw new TeamPiApiError(`Team PI API failed: ${response.statusText}`, response.status, code);
     }
-    return boundJsonValue(json);
+    return boundJsonValueWithLimit(json, 0, maxStringLength);
+  }
+
+  private async binaryRequest(path: string): Promise<{ data: Uint8Array; name: string; contentType?: string }> {
+    const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const credentials = await abortable(this.getCredentials(), signal, "Team PI attachment request timed out");
+    const url = new URL(`${this.baseUrl}${path}`);
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${credentials.accessToken}`,
+      Accept: "application/octet-stream, application/pdf, image/*, */*;q=0.8",
+    };
+    if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "GET", redirect: "manual", headers, signal });
+    } catch (error) {
+      if (signal.aborted) throw new TeamPiApiError("Team PI attachment request timed out");
+      throw error;
+    }
+    if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel();
+      throw new TeamPiApiError("Team PI attachment redirect was blocked", response.status);
+    }
+    if (!response.ok) {
+      const code = response.headers.get("x-team-pi-error") ?? undefined;
+      await response.body?.cancel();
+      throw new TeamPiApiError(`Team PI attachment fetch failed: ${response.statusText}`, response.status, code);
+    }
+    const data = await boundedBytes(response, MAX_ATTACHMENT_BYTES, "Team PI attachment exceeded size limit");
+    return {
+      data,
+      name: contentDispositionName(response.headers.get("content-disposition")) ?? "attachment",
+      contentType: optionalHeader(response.headers.get("content-type")),
+    };
   }
 }
 
@@ -403,14 +450,18 @@ function hasControlCharacter(value: string): boolean {
 }
 
 export function boundJsonValue(value: unknown, depth = 0): unknown {
+  return boundJsonValueWithLimit(value, depth, MAX_STRING_LENGTH);
+}
+
+function boundJsonValueWithLimit(value: unknown, depth: number, maxStringLength: number): unknown {
   if (depth > MAX_DEPTH) return null;
-  if (typeof value === "string") return boundedString(value, MAX_STRING_LENGTH);
+  if (typeof value === "string") return boundedString(value, maxStringLength);
   if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
-  if (Array.isArray(value)) return value.slice(0, MAX_ARRAY_LENGTH).map(item => boundJsonValue(item, depth + 1));
+  if (Array.isArray(value)) return value.slice(0, MAX_ARRAY_LENGTH).map(item => boundJsonValueWithLimit(item, depth + 1, maxStringLength));
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value).slice(0, MAX_OBJECT_KEYS)) {
-      out[boundedString(key, 256)] = boundJsonValue(child, depth + 1);
+      out[boundedString(key, 256)] = boundJsonValueWithLimit(child, depth + 1, maxStringLength);
     }
     return out;
   }
@@ -460,12 +511,12 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal, message: s
   });
 }
 
-async function boundedJson(response: Response): Promise<Record<string, unknown>> {
+async function boundedJson(response: Response, maxStringLength = MAX_STRING_LENGTH): Promise<Record<string, unknown>> {
   const text = await boundedText(response);
   if (text.length === 0) return {};
   const parsed = JSON.parse(text) as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { value: boundJsonValue(parsed) };
-  return boundJsonValue(parsed) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { value: boundJsonValueWithLimit(parsed, 0, maxStringLength) };
+  return boundJsonValueWithLimit(parsed, 0, maxStringLength) as Record<string, unknown>;
 }
 
 async function boundedText(response: Response): Promise<string> {
@@ -473,12 +524,19 @@ async function boundedText(response: Response): Promise<string> {
   if (!reader) return "";
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_RESPONSE_BYTES) throw new TeamPiApiError("Team PI response exceeded size limit", response.status);
-    chunks.push(value);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new TeamPiApiError("Team PI response exceeded size limit", response.status);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
   }
   return new TextDecoder().decode(concat(chunks, total));
 }
@@ -491,6 +549,46 @@ function concat(chunks: Uint8Array[], total: number): Uint8Array {
     offset += chunk.byteLength;
   }
   return out;
+}
+
+async function boundedBytes(response: Response, maxBytes: number, message: string): Promise<Uint8Array> {
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new TeamPiApiError(message, response.status);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return concat(chunks, total);
+}
+
+function optionalHeader(value: string | null): string | undefined {
+  return value && value.length <= 160 && !/[\r\n]/.test(value) ? value : undefined;
+}
+
+function contentDispositionName(value: string | null): string | undefined {
+  if (!value) return undefined;
+  const match = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(value);
+  let raw = match?.[2];
+  if (match?.[1]) {
+    try {
+      raw = decodeURIComponent(match[1]);
+    } catch {
+      raw = match[1];
+    }
+  }
+  return raw ? boundedString(raw.replace(/[\\/\r\n]/g, "_"), 240) : undefined;
 }
 
 function parseGrant(json: Record<string, unknown>): TokenGrant {
