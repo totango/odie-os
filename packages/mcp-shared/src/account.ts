@@ -185,6 +185,9 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     return undefined;
   }
 
+  /** Runs after the endpoint and credentials are verified, before the account is handed to Workshop. */
+  protected connectionCompleted(_server: ConnectedServer): void | Promise<void> {}
+
   /** Relaxes host and scheme checks for local development against an MCP server on localhost. */
   protected fetchOptions(): FetchOptions {
     return fetchOptions(this.env);
@@ -635,6 +638,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     if (reported && server.provenance === "user") {
       this.ctx.storage.kv.put<ConnectedServer>("server", { ...server, serverName: reported });
     }
+    await this.connectionCompleted(this.server() ?? server);
 
     // The initiation nonce authorized exactly one connect, which has now happened. Left in place, a
     // replayed connect URL could mint a second account against the same callback.
