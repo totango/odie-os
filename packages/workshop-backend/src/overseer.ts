@@ -6833,8 +6833,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       let gadgetId = this.impl.ctx.id.toString();
       void (async () => {
         try {
-          const ownerProfile = await owner.whoami();
-          await clientUser.recordSharedGadgetOpen(gadgetId, title, ownerProfile, role);
+          const [ownerProfile, ownerRecord] = await Promise.all([
+            owner.whoami(),
+            owner.getGadget(gadgetId),
+          ]);
+          await clientUser.recordSharedGadgetOpen(
+              gadgetId, title, ownerProfile, role, ownerRecord?.originHubId);
         } catch (err) {
           this.impl.logger.warn("failed to record shared gadget open", {
             event: "shared.gadget.open.record.failed", gadgetId, error: err,
@@ -7572,6 +7576,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async getMetadata(): Promise<GadgetMetadata> {
+    let ownerRecord = await retryOnDoReset(
+        () => this.#owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger);
     let result: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
@@ -7579,6 +7585,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
+      ...(ownerRecord?.originHubId ? {originHubId: ownerRecord.originHubId} : {}),
     };
     if (!this.isOwner) {
       result.owner = await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger);
@@ -7591,6 +7598,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     callback = callback.dup();  // keep stub after return
 
+    let ownerRecord = await retryOnDoReset(
+        () => this.#owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger);
     let metadata: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
@@ -7598,6 +7607,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
+      ...(ownerRecord?.originHubId ? {originHubId: ownerRecord.originHubId} : {}),
     };
 
     // For collaborators, include owner info.
@@ -9300,12 +9310,15 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // --- Allowed methods ---
 
   async getMetadata(): Promise<GadgetMetadata> {
+    let ownerRecord = await retryOnDoReset(
+        () => this.#owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger);
     return {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
+      ...(ownerRecord?.originHubId ? {originHubId: ownerRecord.originHubId} : {}),
     };
   }
 
@@ -9314,12 +9327,15 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<{}>> {
     callback = callback.dup();  // keep stub after return
 
+    let ownerRecord = await retryOnDoReset(
+        () => this.#owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger);
     let metadata: GadgetMetadata = {
       id: this.impl.ctx.id.toString(),
       title: this.impl.storage.title.get(),
       owner: await retryOnDoReset(() => this.#owner.whoami(), this.impl.logger),
       role: "use",
       defaultGadgetId: this.impl.defaultGadgetId,
+      ...(ownerRecord?.originHubId ? {originHubId: ownerRecord.originHubId} : {}),
     };
 
     let titleSubscriber = {

@@ -41,6 +41,9 @@ export default defineConfig({
       if (error.message?.includes("abortAllDurableObjects")) return false;
       // Same, for the test that aborts only the user DO (state.abort with this reason).
       if (error.message?.includes("user-DO reset injected by test")) return false;
+      // Workerd can replace the abort reason with this remote cancellation message when a held
+      // capability rejects after the responding Durable Object has already been torn down.
+      if (error.message === "The execution context responding to this call was canceled.") return false;
     },
   },
 });

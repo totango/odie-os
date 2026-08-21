@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
@@ -544,7 +544,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * Overseer when attempted.
    */
   async recordSharedGadgetOpen(
-      gadgetId: string, title: string, ownerProfile: AiChatAuthorInfo, role?: CollaboratorRole
+      gadgetId: string, title: string, ownerProfile: AiChatAuthorInfo, role?: CollaboratorRole,
+      originHubId?: DeploymentHubId,
   ): Promise<void> {
     let record = this.storage.gadgets.get(gadgetId);
     if (record && !record.owner) {
@@ -557,6 +558,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       record.title = title;
       record.owner = ownerProfile;
       record.role = role;
+      if (originHubId) record.originHubId = originHubId;
       this.storage.gadgets.put(record);
     } else {
       // First time opening this shared gadget.
@@ -565,6 +567,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         title,
         owner: ownerProfile,
         role,
+        ...(originHubId ? {originHubId} : {}),
         created: now,
         lastActive: now,
       });
@@ -889,14 +892,29 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.gadgets.get(id) || null;
   }
 
-  async newGadget(id: string, title: string): Promise<void> {
+  async newGadget(id: string, title: string, originHubId?: DeploymentHubId): Promise<void> {
     let created = new Date();
-    this.storage.gadgets.put({id, title, created});
+    this.storage.gadgets.put({id, title, created, ...(originHubId ? {originHubId} : {})});
   }
 
-  async ensureGadgetRegistered(id: string, title: string): Promise<void> {
+  async ensureGadgetRegistered(id: string, title: string, originHubId?: DeploymentHubId): Promise<void> {
     if (this.storage.gadgets.get(id)) return;
-    await this.newGadget(id, title);
+    await this.newGadget(id, title, originHubId);
+  }
+
+  async updateProvisionalWorkspaceOrigin(id: string, originHubId: DeploymentHubId): Promise<void> {
+    let record = this.storage.gadgets.get(id);
+    if (!record || record.owner) {
+      throw createProvisionalWorkspaceOriginError(
+          PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES.workspaceNotFound);
+    }
+    if (record.lastActive !== undefined) {
+      throw createProvisionalWorkspaceOriginError(
+          PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES.workspaceAlreadyActive);
+    }
+    if (record.originHubId === originHubId) return;
+    record.originHubId = originHubId;
+    this.storage.gadgets.put(record);
   }
 
   async setGadgetLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {
@@ -1010,6 +1028,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         lastActive: workspace.lastActive,
         ...(workspace.owner ? {owner: workspace.owner} : {}),
         ...(workspace.role ? {role: workspace.role} : {}),
+        ...(workspace.originHubId ? {originHubId: workspace.originHubId} : {}),
       });
     }
     result.sort((a, b) => b.lastActive.getTime() - a.lastActive.getTime());
