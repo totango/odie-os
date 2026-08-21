@@ -528,10 +528,14 @@ function ConnectorsPage() {
           credentialsValid,
         })
         setAccounts(Array.from(accountMap.values()))
+        if (description.providesUi) refreshGatekeeperApps(authenticatedApi)
       },
       remove(id) {
+        if (cancelled) return
+        const removedAccount = accountMap.get(id)
         accountMap.delete(id)
-        if (!cancelled) setAccounts(Array.from(accountMap.values()))
+        setAccounts(Array.from(accountMap.values()))
+        if (removedAccount?.accountDescription.providesUi) refreshGatekeeperApps(authenticatedApi)
       },
       ready() {
         if (!cancelled) setAccountsLoaded(true)

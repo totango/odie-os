@@ -135,11 +135,15 @@ function useGettingStartedReadiness(): ReadinessState {
           credentialsValid,
         })
         setAccounts(Array.from(accountMap.values()))
+        if (description.providesUi) refreshGatekeeperApps(authenticatedApi)
       }
 
       remove(id: number) {
+        if (cancelled) return
+        const removedAccount = accountMap.get(id)
         accountMap.delete(id)
-        if (!cancelled) setAccounts(Array.from(accountMap.values()))
+        setAccounts(Array.from(accountMap.values()))
+        if (removedAccount?.accountDescription.providesUi) refreshGatekeeperApps(authenticatedApi)
       }
 
       ready() {
@@ -267,6 +271,7 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
   const teamPiModels = readiness.models.filter(isTeamPiCodexModel)
   const singletonAccounts = readiness.accounts.filter((account) => account.accountDescription.singleton)
   const teamPiAccounts = readiness.accounts.filter(isTeamPiAccount)
+  const expiredTeamPiAccount = teamPiAccounts.find((account) => !account.credentialsValid)
   const jarvisAccounts = readiness.accounts.filter((account) => isJarvisAccount(account) && account.credentialsValid)
   const connectableVendors = [...readiness.vendors, ...readiness.addableGatekeepers]
   const teamPiVendors = connectableVendors.filter(isTeamPiVendor)
@@ -280,6 +285,7 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
   const approvedWorkAppRouteReady = teamPiReady || portalAccounts.length > 0
   const portalVendorId = connectableVendors.find((candidate) => candidate.id === 'mcp-portal')?.id
   const workAppVendorId = teamPiVendors[0]?.id ?? portalVendorId
+  const workAppAvailable = Boolean(expiredTeamPiAccount || workAppVendorId)
   const setupChecks = [githubAccounts.length > 0, jarvisAccounts.length > 0, approvedWorkAppRouteReady, modelReady]
   const completedSetupChecks = setupChecks.filter(Boolean).length
 
@@ -299,6 +305,28 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
       }
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : `Could not connect ${vendorId}.`)
+    } finally {
+      setConnectingVendor(undefined)
+    }
+  }
+
+  const connectWorkApps = async () => {
+    const popup = window.open('about:blank', '_blank')
+    setConnectingVendor(workAppVendorId ?? 'team-pi')
+    setSetupError(undefined)
+    try {
+      const result = expiredTeamPiAccount
+        ? await authenticatedApi.reconnectAccount(expiredTeamPiAccount.id)
+        : workAppVendorId
+          ? await authenticatedApi.connectAccount(workAppVendorId)
+          : null
+      if (result) {
+        if (popup) popup.location.href = result.url
+        else window.location.assign(result.url)
+      }
+    } catch (error) {
+      popup?.close()
+      setSetupError(error instanceof Error ? error.message : 'Could not connect Team PI.')
     } finally {
       setConnectingVendor(undefined)
     }
@@ -412,14 +440,20 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
               <DeveloperSetupStep
                 icon={<Plugs size={17} />}
                 title="Route Jira and Zendesk"
-                description={approvedWorkAppRouteReady
-                  ? 'An approved Team PI or MCP Portal route is available. Finish Jira and Zendesk authorization inside that connector.'
-                  : 'Use Team PI when available, or the deployment-configured MCP Portal. User-pasted MCP endpoints do not count as an approved Jira or Zendesk route.'}
+                description={teamPiReady
+                  ? 'Team PI reuses deployment-managed shared Jira and Zendesk connections; no separate provider authorization is required in Odie.'
+                  : portalAccounts.length > 0
+                    ? 'A deployment-managed MCP Portal route is connected for approved Jira and Zendesk access.'
+                  : expiredTeamPiAccount
+                    ? 'Reconnect your existing Team PI account. Odie will reuse Team PI’s shared Jira and Zendesk connections.'
+                    : teamPiVendors.length > 0
+                      ? 'Connect Team PI to reuse its deployment-managed shared Jira and Zendesk connections. User-pasted MCP endpoints do not count as an approved route.'
+                      : 'Connect the deployment-managed MCP Portal. User-pasted MCP endpoints do not count as an approved Jira or Zendesk route.'}
                 ready={approvedWorkAppRouteReady}
-                available={!!workAppVendorId}
-                actionLabel={teamPiVendors.length > 0 ? 'Connect Team PI' : 'Connect MCP Portal'}
-                busy={connectingVendor === workAppVendorId}
-                onAction={workAppVendorId ? () => connectVendor(workAppVendorId) : undefined}
+                available={workAppAvailable}
+                actionLabel={expiredTeamPiAccount ? 'Reconnect Team PI' : teamPiVendors.length > 0 ? 'Connect Team PI' : 'Connect MCP Portal'}
+                busy={connectingVendor === (workAppVendorId ?? 'team-pi')}
+                onAction={workAppAvailable ? () => void connectWorkApps() : undefined}
               />
               <div className="grid gap-3 sm:grid-cols-2">
                 <Link to="/blueprint/$id" params={{ id: 'starter.developer-delivery-kit' }} className={`${INTERNAL_LINK_CLASS} !justify-between`}>

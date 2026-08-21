@@ -20,6 +20,7 @@ const testState = vi.hoisted(() => ({
     ]),
     listAddableGatekeepers: vi.fn<() => Promise<GatekeeperVendorInfo[]>>(async () => []),
     connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://connect.example.test' })),
+    reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://reconnect.example.test' })),
     provisionAmbientAccount: vi.fn<(vendorId: string) => Promise<void>>(async () => {}),
     subscribeConnectedAccounts: vi.fn<(subscriber: ConnectedAccountsSubscriber, filter: { includeForcedAutoProvisionedAccounts: boolean }) => Promise<{ [Symbol.dispose](): void }>>(),
   },
@@ -217,6 +218,43 @@ describe('Getting started', () => {
 
     expect(container.textContent).toContain('1 / 4')
     expect(container.textContent).not.toContain('Ready to build')
+  })
+
+  it('reconnects an expired Team PI account instead of creating a duplicate', async () => {
+    const popup = { location: { href: 'about:blank' }, close: vi.fn<() => void>() } as unknown as Window
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => root!.render(
+      <GettingStartedPageContent readiness={{
+        models: [],
+        accounts: [{
+          id: 42,
+          accountDescription: { displayName: 'Team PI', avatar: { url: '' }, singleton: { tsType: 'TeamPiSession' } },
+          vendorDescription: { displayName: 'Team PI', url: 'https://team-pi.test' },
+          vendorId: 'team-pi',
+          supportedResources: [],
+          credentialsValid: false,
+        }],
+        vendors: [{ id: 'team-pi', description: { displayName: 'Team PI', url: 'https://team-pi.test' }, supportedResources: [] }],
+        addableGatekeepers: [],
+        modelsLoaded: true,
+        accountsLoaded: true,
+        vendorsLoaded: true,
+        loadError: false,
+      }} />,
+    ))
+
+    const reconnect = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Reconnect Team PI'))
+    expect(reconnect).toBeDefined()
+    await act(async () => { reconnect!.click(); await Promise.resolve() })
+
+    expect(testState.authenticatedApi.reconnectAccount).toHaveBeenCalledWith(42)
+    expect(testState.authenticatedApi.connectAccount).not.toHaveBeenCalled()
+    expect(open).toHaveBeenCalledWith('about:blank', '_blank')
+    expect(popup.location.href).toBe('https://reconnect.example.test')
   })
 
   it('does not treat an unrelated connectable vendor as TEAM_PI readiness', async () => {
