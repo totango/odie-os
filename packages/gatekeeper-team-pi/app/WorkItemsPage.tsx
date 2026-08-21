@@ -3,6 +3,8 @@ import {
   ArrowLeft,
   ChatCircleText,
   CheckCircle,
+  DownloadSimple,
+  File,
   GitBranch,
   LinkSimple,
   MagnifyingGlass,
@@ -30,6 +32,7 @@ import {
 } from "react";
 import type {
   WorkItemDetail,
+  WorkItemAttachment,
   WorkItemFieldPatch,
   WorkItemManagementApi,
   WorkItemProviderKind,
@@ -63,7 +66,7 @@ const MARKDOWN_COMPONENTS: Components = {
   a({ href, children, node: _node, ...props }) {
     const safeHref = safeLinkHref(href);
     if (!safeHref) return <>{children}</>;
-    return <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a>;
+    return <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer" aria-label={`${textFromChildren(children)} (opens in a new tab)`}>{children}<span className="new-tab-cue" aria-hidden="true">↗</span></a>;
   },
   img({ alt }) {
     return alt ? <span>{alt}</span> : null;
@@ -645,7 +648,7 @@ function DetailPanel(props: {
   const item = read?.detail.item;
   return <div className="detail-overlay" role="presentation">
     <button className="detail-backdrop" type="button" aria-label="Close detail" onClick={onClose} />
-    <aside ref={detailRef} className="detail-pane" role="dialog" aria-modal="true" aria-labelledby={item ? "work-item-detail-title" : undefined} aria-label={item ? undefined : "Selected work item detail"} style={{ "--detail-width": `${width}px` } as CSSProperties} onKeyDown={onDialogKeyDown}>
+    <aside ref={detailRef} className="detail-pane" role="dialog" aria-labelledby={item ? "work-item-detail-title" : undefined} aria-label={item ? undefined : "Selected work item detail"} style={{ "--detail-width": `${width}px` } as CSSProperties} onKeyDown={onDialogKeyDown}>
     <div
       className="detail-resize-handle"
       role="separator"
@@ -667,12 +670,13 @@ function DetailPanel(props: {
     </div>
     {loading && !read ? <DetailSkeleton /> : error ? <div className="detail-error" role="alert"><WarningCircle size={18} /><p>{error}</p><button onClick={onRetry}>Retry</button></div> : item && read ? <>
       <header className="detail-header">
-        <div className="detail-kicker"><SourceBadge source={item.source} /><span className="mono">{item.key ?? item.id}</span>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Open trusted URL</a>}</div>
+        <div className="detail-kicker"><SourceBadge source={item.source} /><span className="mono">{item.key ?? item.id}</span>{item.url && <a href={safeLinkHref(item.url)} target="_blank" rel="noopener noreferrer" aria-label={`Open in ${labelSource(item.source)} (opens in a new tab)`}>Open in {labelSource(item.source)}<span className="new-tab-cue" aria-hidden="true">↗</span></a>}</div>
         <h2 id="work-item-detail-title">{item.title}</h2>
       </header>
       <MetadataEditor read={read} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />
       {notice && <p className="success-note" role="status"><CheckCircle size={15} />{notice}</p>}
       <DescriptionEditor read={read} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />
+      <AttachmentsSection read={read} api={selected.stub} />
       <CommentComposer item={item} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />
       {item.source === "jira" && <TransitionEditor item={item} transitions={read.transitions} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />}
       <LinkEditor item={item} api={selected.stub} rootApi={rootApi} />
@@ -716,7 +720,7 @@ function MetadataEditor({ read, api, mutationEpoch, onMutated }: { read: WorkIte
     { label: "Priority", field: "priority", value: item.priority || "—" },
     { label: "Labels/tags", field: item.fields.labels === undefined ? "tags" : "labels", value: tagsValue || "—" },
   ];
-  return <section className="metadata-section" aria-label="Work item metadata"><div className="metadata-chips">{chips.map((chip) => <InlineFieldChip key={chip.field} chip={chip} editable={!chip.readonly && allowed.has(chip.field.toLowerCase())} item={item} api={api} mutationEpoch={mutationEpoch} onMutated={onMutated} />)}<div className="meta-chip readonly"><span>Updated</span><strong>{fullDate(item.updatedAt)}</strong></div></div>{read.updateOptions.providerOptions?.length ? <p className="hint">Provider options: {read.updateOptions.providerOptions.join(", ")}</p> : null}</section>;
+  return <section className="metadata-section" aria-label="Work item metadata"><div className="metadata-chips">{chips.map((chip) => <InlineFieldChip key={chip.field} chip={chip} editable={!chip.readonly && allowed.has(chip.field.toLowerCase())} item={item} api={api} mutationEpoch={mutationEpoch} onMutated={onMutated} />)}<div className="meta-chip readonly"><span>Updated</span><strong>{fullDate(item.updatedAt)}</strong></div></div></section>;
 }
 
 function InlineFieldChip({ chip, editable, item, api, mutationEpoch, onMutated }: { chip: { label: string; field: string; value: string }; editable: boolean; item: WorkItemSummary; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
@@ -743,13 +747,15 @@ function InlineFieldChip({ chip, editable, item, api, mutationEpoch, onMutated }
 function DescriptionEditor({ read, api, mutationEpoch, onMutated }: { read: WorkItemRead; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
   const item = read.detail.item;
   const allowed = read.updateOptions.allowedFields.some((field) => field.toLowerCase() === "description");
-  const description = String(item.fields.description ?? "");
+  const description = item.description?.body ?? String(item.fields.description ?? "");
+  const truncated = item.description?.truncated === true;
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(description);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => { setEditing(false); setValue(description); setError(undefined); }, [description, item.id]);
   async function submit() {
+    if (truncated) { setError("Cannot save an explicitly truncated description. Refresh the source or edit it in the provider."); return; }
     setBusy(true); setError(undefined);
     try {
       onMutated(await api.updateFields({ fields: { description: value } }), { stub: api, ref: item, epoch: mutationEpoch });
@@ -757,7 +763,43 @@ function DescriptionEditor({ read, api, mutationEpoch, onMutated }: { read: Work
     } catch (caught) { setError(safeMessage(caught)); }
     finally { setBusy(false); }
   }
-  return <section className="description-section" aria-label="Description"><div className="section-heading"><h3>Description</h3>{allowed && !editing && <button type="button" onClick={() => setEditing(true)}><PencilSimple size={14} /> Edit</button>}</div>{editing ? <><textarea aria-label="Description body" value={value} onChange={(event) => setValue(event.currentTarget.value)} /><div className="inline-editor"><button type="button" disabled={busy} onClick={() => void submit()}>{busy ? "Saving…" : "Save description"}</button><button type="button" onClick={() => { setEditing(false); setValue(description); }}>Cancel</button></div></> : description ? <RichText value={description} /> : <p className="hint">No description returned by the provider.</p>}{error && <p className="mutation-error" role="alert">{error}</p>}</section>;
+  return <section className="description-section" aria-label="Description"><div className="section-heading"><h3>Description</h3>{allowed && !editing && !truncated && <button type="button" onClick={() => setEditing(true)}><PencilSimple size={14} /> Edit</button>}</div>{truncated && <p className="mutation-error" role="status">Description was truncated by the provider, so editing is disabled to avoid overwriting hidden content.</p>}{editing ? <><textarea aria-label="Description body" value={value} onChange={(event) => setValue(event.currentTarget.value)} /><div className="inline-editor"><button type="button" disabled={busy || truncated} onClick={() => void submit()}>{busy ? "Saving…" : "Save description"}</button><button type="button" onClick={() => { setEditing(false); setValue(description); }}>Cancel</button></div></> : description ? <RichText value={description} /> : <p className="hint">No description returned by the provider.</p>}{error && <p className="mutation-error" role="alert">{error}</p>}</section>;
+}
+
+function AttachmentsSection({ read, api }: { read: WorkItemRead; api: DisposableItemApi }) {
+  const attachments = read.attachments ?? [];
+  if (attachments.length === 0) return null;
+  return <section className="attachments-section" aria-label="Attachments"><h3><File size={15} /> Attachments</h3><div className="attachment-list">{attachments.map((attachment) => <AttachmentCard key={attachment.id} attachment={attachment} api={api} itemId={read.detail.item.id} />)}</div></section>;
+}
+
+function AttachmentCard({ attachment, api, itemId }: { attachment: WorkItemAttachment; api: DisposableItemApi; itemId: string }) {
+  const [loadVersion, setLoadVersion] = useState(0);
+  const [objectUrl, setObjectUrl] = useState<string>();
+  const [contentType, setContentType] = useState(attachment.contentType ?? "application/octet-stream");
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    if (loadVersion === 0) return;
+    let cancelled = false;
+    let localUrl: string | undefined;
+    setObjectUrl(undefined);
+    setError(undefined);
+    void api.readAttachment(attachment.id).then((content) => {
+      if (cancelled) return;
+      const type = safeInlineContentType(content.contentType ?? attachment.contentType);
+      const bytes = content.data.slice();
+      const blob = new Blob([bytes.buffer], { type: type ?? "application/octet-stream" });
+      localUrl = URL.createObjectURL(blob);
+      setContentType(type ?? content.contentType ?? attachment.contentType ?? "application/octet-stream");
+      setObjectUrl(localUrl);
+    }).catch((caught) => { if (!cancelled) setError(safeMessage(caught)); });
+    return () => {
+      cancelled = true;
+      if (localUrl) URL.revokeObjectURL(localUrl);
+    };
+  }, [api, attachment.id, attachment.contentType, itemId, loadVersion]);
+  const safeInline = safeInlineContentType(contentType);
+  const loadLabel = safeInline ? `Load preview for ${attachment.name}` : `Prepare download for ${attachment.name}`;
+  return <article className="attachment-card"><div><File size={18} /><div><strong>{attachment.name}</strong><p>{attachment.contentType || "File"}{typeof attachment.size === "number" ? ` · ${formatBytes(attachment.size)}` : ""}</p></div></div>{error ? <><p className="mutation-error" role="alert">{error}</p><button type="button" onClick={() => setLoadVersion((version) => version + 1)}>Retry {attachment.name}</button></> : !objectUrl ? loadVersion > 0 ? <p className="hint">Loading attachment…</p> : <button type="button" onClick={() => setLoadVersion(1)}>{loadLabel}</button> : safeInline?.startsWith("image/") ? <img src={objectUrl} alt={attachment.name} /> : safeInline === "application/pdf" ? <iframe title={attachment.name} src={objectUrl} sandbox="" /> : <a className="attachment-download" href={objectUrl} download={attachment.name} target="_blank" rel="noopener noreferrer" aria-label={`Download ${attachment.name} (opens in a new tab)`}><DownloadSimple size={15} /> Download or open<span className="new-tab-cue" aria-hidden="true">↗</span></a>}</article>;
 }
 
 function TransitionEditor({ item, transitions, api, mutationEpoch, onMutated }: { item: WorkItemSummary; transitions: WorkItemRead["transitions"]; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
@@ -988,8 +1030,24 @@ function safeLinkHref(href: string | undefined): string | undefined {
   if (!href) return undefined;
   try {
     const url = new URL(href, window.location.href);
-    return ["http:", "https:", "mailto:"].includes(url.protocol) ? href : undefined;
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.toString() : undefined;
   } catch { return undefined; }
+}
+function textFromChildren(children: ReactNode): string {
+  if (typeof children === "string" || typeof children === "number") return String(children);
+  if (Array.isArray(children)) return children.map(textFromChildren).join("").slice(0, 120) || "External link";
+  return "External link";
+}
+function safeInlineContentType(value: string | undefined): string | undefined {
+  const type = value?.toLowerCase().split(";")[0]?.trim();
+  if (!type) return undefined;
+  if (type === "image/png" || type === "image/jpeg" || type === "image/gif" || type === "image/webp" || type === "image/avif" || type === "application/pdf") return type;
+  return undefined;
+}
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 function getFocusableElements(root: HTMLElement | null): HTMLElement[] {
   if (!root) return [];

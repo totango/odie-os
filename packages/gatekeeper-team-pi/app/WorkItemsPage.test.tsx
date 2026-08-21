@@ -203,7 +203,7 @@ describe("WorkItemsPage", () => {
     expect(host.innerHTML).not.toContain("alert('x')");
     expect(host.innerHTML).not.toContain("tracker.example");
     expect([...host.querySelectorAll("a")].some((a) => a.getAttribute("href")?.startsWith("javascript:"))).toBe(false);
-    const safeLink = [...host.querySelectorAll<HTMLAnchorElement>("a")].find((a) => a.textContent === "ok")!;
+    const safeLink = [...host.querySelectorAll<HTMLAnchorElement>("a")].find((a) => a.textContent?.includes("ok"))!;
     expect(safeLink.href).toBe("https://example.com/");
     expect(safeLink.rel).toContain("noopener");
   });
@@ -443,6 +443,94 @@ describe("WorkItemsPage", () => {
     expect(itemApi.updateFields).toHaveBeenCalledWith({ fields: { description: "Updated description" } });
   });
 
+  it("renders the complete returned description and blocks truncated edits", async () => {
+    const longBody = `Intro\n\n${"Long description line.\n".repeat(80)}`;
+    const read = readFor({ ...jiraItem, description: { body: longBody, format: "markdown" }, fields: {} });
+    read.updateOptions.allowedFields = ["description"];
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(read)] });
+    await render(api);
+    await clickText("Jira login is slow");
+    expect(host.textContent).toContain("Long description line.");
+    expect(host.querySelector(".description-section")?.textContent).toContain("Intro");
+
+    const truncated = readFor({ ...jiraItem, description: { body: "Partial only", format: "text", truncated: true }, fields: {} });
+    truncated.updateOptions.allowedFields = ["description"];
+    act(() => root?.unmount()); root = undefined; host.textContent = ""; sessionStorage.clear(); history.replaceState(null, "", "/");
+    await render(createApi({ items: [jiraItem], itemApis: [createItemApi(truncated)] }));
+    await clickText("Jira login is slow");
+    expect(host.textContent).toContain("editing is disabled");
+    expect([...host.querySelectorAll("button")].some((button) => button.textContent?.includes("Edit"))).toBe(false);
+  });
+
+  it("renders attachment previews from blob URLs and revokes them on cleanup", async () => {
+    if (!URL.createObjectURL) Object.assign(URL, { createObjectURL: () => "blob:stub", revokeObjectURL: () => {} });
+    const createObjectURL = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:team-pi-attachment");
+    const revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const read = readFor({ ...jiraItem, fields: {} });
+    read.attachments = [
+      { id: "a1", name: "screenshot.png", contentType: "image/png", size: 2048 },
+      { id: "a2", name: "runbook.html", contentType: "text/html" },
+    ];
+    const itemApi = createItemApi(read);
+    itemApi.readAttachment.mockImplementation(async (id) => ({ data: new Uint8Array([1, 2, 3]), name: id === "a1" ? "screenshot.png" : "runbook.html", contentType: id === "a1" ? "image/png" : "text/html" }));
+    const api = createApi({ items: [jiraItem], itemApis: [itemApi] });
+    await render(api);
+    await clickText("Jira login is slow");
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(host.textContent).toContain("Attachments");
+    expect(itemApi.readAttachment).not.toHaveBeenCalled();
+    await clickText("Load preview for screenshot.png");
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(itemApi.readAttachment).toHaveBeenCalledWith("a1");
+    expect(itemApi.readAttachment).not.toHaveBeenCalledWith("a2");
+    expect(host.querySelector<HTMLImageElement>(".attachment-card img")?.src).toBe("blob:team-pi-attachment");
+    await clickText("Prepare download for runbook.html");
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(itemApi.readAttachment).toHaveBeenCalledWith("a2");
+    expect(host.querySelector(".attachment-card iframe")).toBeNull();
+    expect(host.querySelector(".attachment-download")?.getAttribute("href")).toBe("blob:team-pi-attachment");
+    await clickText("Close detail");
+    await act(async () => { await Promise.resolve(); });
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:team-pi-attachment");
+    createObjectURL.mockRestore();
+  });
+
+  it("hides raw provider option and customfield text from visible detail UI", async () => {
+    const read = readFor({ ...jiraItem, fields: { customfield_12345: "secret field", description: "Visible description" } });
+    read.updateOptions.providerOptions = ["customfield_12345", "secret option"];
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(read)] });
+    await render(api);
+    await clickText("Jira login is slow");
+    expect(host.textContent).toContain("Visible description");
+    expect(host.textContent).not.toContain("customfield_12345");
+    expect(host.textContent).not.toContain("secret option");
+  });
+
+  it("uses provider-specific safe new-tab links for item and markdown URLs", async () => {
+    const read = readFor({ ...jiraItem, url: "https://jira.example/browse/ODIE-1", fields: { description: "[docs](/docs) [bad](javascript:alert(1))" } });
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(read)] });
+    await render(api);
+    await clickText("Jira login is slow");
+    const providerLink = [...host.querySelectorAll<HTMLAnchorElement>("a")].find((link) => link.textContent?.includes("Open in Jira"))!;
+    expect(providerLink.target).toBe("_blank");
+    expect(providerLink.rel).toContain("noopener");
+    expect(providerLink.getAttribute("aria-label")).toContain("opens in a new tab");
+    const markdownLink = [...host.querySelectorAll<HTMLAnchorElement>("a")].find((link) => link.textContent?.includes("docs"))!;
+    expect(markdownLink.href).toBe(`${location.origin}/docs`);
+    expect(markdownLink.rel).toContain("noreferrer");
+    expect(markdownLink.getAttribute("aria-label")).toContain("opens in a new tab");
+    expect([...host.querySelectorAll<HTMLAnchorElement>("a")].some((link) => link.href.startsWith("javascript:"))).toBe(false);
+  });
+
+  it("keeps overflow-sensitive detail structure bounded while allowing code block scrolling", async () => {
+    const read = readFor({ ...jiraItem, title: "x".repeat(500), description: { body: "```\n" + "long-code-line".repeat(80) + "\n```", format: "markdown" }, fields: {} });
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(read)] });
+    await render(api);
+    await clickText("Jira login is slow");
+    expect(host.querySelector(".detail-pane")).toBeTruthy();
+    expect(host.querySelector(".rich-text pre")).toBeTruthy();
+  });
+
   it("debounces opposite-source link search and selects suggestions before linking", async () => {
     const itemApi = createItemApi(readFor(jiraItem));
     const api = createApi({ items: [jiraItem], itemApis: [itemApi], search: async (request) => request.query ? { items: [zendeskItem, jiraItem], cursors: {}, hasMore: {} } : { items: [jiraItem], cursors: {}, hasMore: {} } });
@@ -512,6 +600,7 @@ function createItemApi(read: WorkItemRead) {
     updateFields: vi.fn<WorkItemManagementApi["updateFields"]>(async () => detail),
     transition: vi.fn<WorkItemManagementApi["transition"]>(async () => detail),
     linkTo: vi.fn<WorkItemManagementApi["linkTo"]>(async () => ({ globalId: "team-pi:link", jiraId: "ODIE-1", zendeskTicketId: "222" })),
+    readAttachment: vi.fn<WorkItemManagementApi["readAttachment"]>(async () => ({ data: new Uint8Array([1]), name: "attachment.bin", contentType: "application/octet-stream" })),
     dispose,
     [Symbol.dispose]() { dispose(); },
   } satisfies WorkItemManagementApi & { dispose: typeof dispose; [Symbol.dispose]: () => void };
@@ -531,5 +620,6 @@ function readFor(item: WorkItemSummary): WorkItemRead {
     activity: [{ id: "a1", type: "audit", author: "System", summary: "Status changed", createdAt: "2026-08-20T12:30:00Z" }],
     updateOptions: { source: item.source, id: item.id, key: item.key, allowedFields: ["priority", "tags"], providerOptions: ["high", "normal"] },
     transitions: item.source === "jira" ? [{ id: "31", name: "Start progress", toStatus: "In Progress" }] : [],
+    attachments: [],
   };
 }

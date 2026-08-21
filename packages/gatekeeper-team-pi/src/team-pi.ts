@@ -50,6 +50,8 @@ import type {
   TeamPiSkill,
   TeamPiSkillCheck,
   WorkItemActivity,
+  WorkItemAttachment,
+  WorkItemAttachmentContent,
   WorkItemComment,
   WorkItemCommentInput,
   WorkItemDetail,
@@ -85,12 +87,13 @@ const APPLYING_TIMEOUT_MS = 5 * 60 * 1000;
 const SKILL_INSTRUCTIONS_MAX_LENGTH = 12_000;
 const WORK_ITEM_FIELD_MAX = 2_000;
 const WORK_ITEM_BODY_MAX = 12_000;
+const WORK_ITEM_DESCRIPTION_MAX = 60_000;
 const WORK_ITEM_SAVED_VIEWS_MAX = 20;
 const ACCOUNT_URL = "team-pi://account";
 const ACCOUNT_RESOURCE: SupportedResource = {
   urlPattern: ACCOUNT_URL,
   title: "Team PI Account",
-  description: "Per-user Team PI skills, connections, calendar, Gmail, Chorus, Zendesk, and Salesforce APIs.",
+  description: "Per-user Team PI skills, Work Items (Jira/Zendesk), calendar, Gmail, Chorus, Zendesk, and Salesforce reads for agents.",
   providedBySingleton: true,
 };
 
@@ -109,6 +112,7 @@ const PROVIDER_CATALOG_ENTRIES: AgentCatalogEntry[] = [
   { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
   { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
   { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
+  { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through the read-only Team PI workItemsSearch(request) API." },
   { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
 ];
 
@@ -159,7 +163,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       logo: ICON,
       color: "#111827",
       tagline: "Use your per-user Team PI skills and connected work apps",
-      description: "Connect Team PI with Auth0 device authorization to expose approved per-user skills, connections, calendar, Gmail, Chorus, Zendesk, and Salesforce APIs to agents.",
+      description: "Connect Team PI with Auth0 device authorization to expose approved per-user skills, Work Items/Jira search, calendar, Gmail, Chorus, Zendesk, and Salesforce reads to agents. Management UI writes stay admin-only.",
     };
   }
 
@@ -474,33 +478,7 @@ export class TeamPiWorkItemsManagementApi extends RpcTarget implements WorkItems
   }
 
   async search(request: WorkItemSearchRequest): Promise<WorkItemSearchPage> {
-    const normalized = normalizeWorkItemSearchRequest(request);
-    const sources: WorkItemProviderKind[] = normalized.source === "both" ? ["jira", "zendesk"] : [normalized.source];
-    const pages = await Promise.all(sources.map(async (source): Promise<WorkItemProviderSearchResult> => {
-      try {
-        return { source, page: searchPageFromEnvelope(source, await this.api.workItemsSearch(source, {
-          query: normalized.query,
-          limit: normalized.limit,
-          cursor: normalized.cursors[source],
-        })) };
-      } catch (error) {
-        if (normalized.source !== "both") throw error;
-        return { source, error: providerError(source, error) };
-      }
-    }));
-    const out: WorkItemSearchPage = { items: [], cursors: {}, hasMore: {} };
-    const errors: WorkItemProviderError[] = [];
-    for (const result of pages) {
-      if ("page" in result) {
-        out.items.push(...result.page.items);
-        if (result.page.cursors[result.source]) out.cursors[result.source] = result.page.cursors[result.source];
-        out.hasMore[result.source] = result.page.hasMore[result.source] === true;
-      } else {
-        errors.push(result.error);
-      }
-    }
-    if (errors.length > 0) out.errors = errors;
-    return { ...out, items: out.items.slice(0, 100) };
+    return searchWorkItems(this.api, request);
   }
 
   async item(ref: WorkItemProviderRef): Promise<WorkItemManagementApi> {
@@ -513,14 +491,20 @@ export class TeamPiWorkItemManagementApi extends RpcTarget implements WorkItemMa
   constructor(private readonly api: TeamPiApi, private readonly ref: WorkItemProviderRef) { super(); }
 
   async read(): Promise<WorkItemRead> {
-    const [detail, comments, activity, updateOptions, transitions] = await Promise.all([
+    const [detail, comments, activity, updateOptions, transitions, attachments] = await Promise.all([
       this.#detail(),
       this.api.workItemsComments(this.ref.source, this.ref.id).then(value => commentsFromEnvelope(this.ref.source, value)),
       this.api.workItemsActivity(this.ref.source, this.ref.id).then(activityFromEnvelope),
       this.api.workItemsUpdateOptions(this.ref.source, this.ref.id).then(value => updateOptionsFromEnvelope(this.ref, value)),
       this.ref.source === "jira" ? this.api.workItemsTransitions(this.ref.id).then(transitionsFromEnvelope) : Promise.resolve([]),
+      this.api.workItemsAttachments(this.ref.source, this.ref.id).then(attachmentsFromEnvelope),
     ]);
-    return { detail, comments, activity, updateOptions, transitions };
+    return { detail, comments, activity, updateOptions, transitions, attachments };
+  }
+
+  async readAttachment(id: string): Promise<WorkItemAttachmentContent> {
+    const content = await this.api.workItemsAttachmentContent(this.ref.source, this.ref.id, boundString(id, 180));
+    return { data: content.data, name: boundString(content.name, 240), contentType: optionalBoundString(content.contentType, 160) };
   }
 
   async addComment(input: WorkItemCommentInput): Promise<WorkItemDetail> {
@@ -562,7 +546,7 @@ export class TeamPiVerifier extends WorkerEntrypoint<Env> implements GatekeeperU
 export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<TeamPiSession> {
   #account(): DurableObjectStub<TeamPiAccount> { return this.ctx.exports.TeamPiAccount.get(this.ctx.exports.TeamPiAccount.idFromString(this.ctx.props.accountId)); }
   #api(): TeamPiApi { return new TeamPiApi(() => this.#account().getApiCredentials(), resolveConfig(this.env).baseUrl); }
-  async describe(): Promise<ResourceDescription> { return { url: ACCOUNT_URL, title: "Team PI", snippet: "Broad per-user Team PI singleton with approved reads and staged writes.", suggestedBindingName: "TEAM_PI", tsType: "TeamPiSession" }; }
+  async describe(): Promise<ResourceDescription> { return { url: ACCOUNT_URL, title: "Team PI", snippet: "Private Team PI singleton with approved reads, Work Items search, and staged non-agent writes.", suggestedBindingName: "TEAM_PI", tsType: "TeamPiSession" }; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TeamPiSession> { return new TeamPiSessionImpl(this.#api(), approvalQueue.dup(), this.ctx.storage.kv); }
@@ -571,8 +555,8 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
       const skills = await this.#api().listSkills({ limit: 12 });
       const entries = [...catalogEntries("skill", skillsFromEnvelope(skills)), ...PROVIDER_CATALOG_ENTRIES];
       await authorizer.authorizeObservation({
-        title: "Read Team PI skill and provider catalog",
-        description: "Listed bounded Team PI skill manifests and provider capabilities for agent discovery.",
+        title: "Read Team PI skill, provider, and Work Items catalog",
+        description: "Listed bounded Team PI skill manifests, provider capabilities, and the read-only Work Items/Jira search capability for agent discovery.",
       });
       return boundAgentCatalog(entries);
     } catch (error) {
@@ -637,6 +621,7 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
   async installSkill(skillId: string): Promise<TeamPiQueuedAction> { return this.queue({ kind: "installSkill", skillId }, `Install Team PI skill ${skillId}`, `Install Team PI skill \`${escapeMd(skillId)}\`.`); }
   async startConnection(provider: TeamPiProvider): Promise<TeamPiQueuedAction> { const safe = safeProvider(provider); return this.queue({ kind: "startConnection", provider: safe }, `Start Team PI connection ${safe}`, `Start Team PI connection \`${escapeMd(safe)}\`.`); }
   async getActionResult(actionId: number): Promise<TeamPiActionResult> { return getStoredActionResult(this.kv, actionId); }
+  async workItemsSearch(request: WorkItemSearchRequest): Promise<WorkItemSearchPage> { return this.read("Search Team PI Work Items", "Searched Jira and Zendesk Work Items through Team PI.", () => searchWorkItems(this.api, request)); }
   private async read<T>(title: string, description: string, fn: () => Promise<T>): Promise<T> { const result = await fn(); await this.approvalQueue.authorizeObservation({ title, description, prohibitAllSharing: true }); return result; }
   private async queue(action: PendingAction, title: string, description: string): Promise<TeamPiQueuedAction> {
     const actionId = (this.kv.get<number>("nextActionId") ?? 1);
@@ -812,6 +797,36 @@ function searchPageFromEnvelope(source: WorkItemProviderKind, value: unknown): W
   };
 }
 
+async function searchWorkItems(api: TeamPiApi, request: WorkItemSearchRequest): Promise<WorkItemSearchPage> {
+  const normalized = normalizeWorkItemSearchRequest(request);
+  const sources: WorkItemProviderKind[] = normalized.source === "both" ? ["jira", "zendesk"] : [normalized.source];
+  const pages = await Promise.all(sources.map(async (source): Promise<WorkItemProviderSearchResult> => {
+    try {
+      return { source, page: searchPageFromEnvelope(source, await api.workItemsSearch(source, {
+        query: normalized.query,
+        limit: normalized.limit,
+        cursor: normalized.cursors[source],
+      })) };
+    } catch (error) {
+      if (normalized.source !== "both") throw error;
+      return { source, error: providerError(source, error) };
+    }
+  }));
+  const out: WorkItemSearchPage = { items: [], cursors: {}, hasMore: {} };
+  const errors: WorkItemProviderError[] = [];
+  for (const result of pages) {
+    if ("page" in result) {
+      out.items.push(...result.page.items);
+      if (result.page.cursors[result.source]) out.cursors[result.source] = result.page.cursors[result.source];
+      out.hasMore[result.source] = result.page.hasMore[result.source] === true;
+    } else {
+      errors.push(result.error);
+    }
+  }
+  if (errors.length > 0) out.errors = errors;
+  return { ...out, items: out.items.slice(0, 100) };
+}
+
 function commentsFromEnvelope(source: WorkItemProviderKind, value: unknown): WorkItemComment[] {
   const comments = asRecord(value).comments;
   return (Array.isArray(comments) ? comments : []).slice(0, 50).map((comment) => commentFromValue(source, comment));
@@ -820,6 +835,27 @@ function commentsFromEnvelope(source: WorkItemProviderKind, value: unknown): Wor
 function activityFromEnvelope(value: unknown): WorkItemActivity[] {
   const activity = asRecord(value).activity;
   return (Array.isArray(activity) ? activity : []).slice(0, 50).map(activityFromValue);
+}
+
+function attachmentsFromEnvelope(value: unknown): WorkItemAttachment[] {
+  const attachments = asRecord(value).attachments;
+  return (Array.isArray(attachments) ? attachments : []).slice(0, 100).map(attachmentFromValue).filter((attachment): attachment is WorkItemAttachment => Boolean(attachment));
+}
+
+function attachmentFromValue(value: unknown): WorkItemAttachment | null {
+  const obj = asRecord(value);
+  const id = boundString(stringField(obj.id, ""), 180);
+  const name = safeFileName(stringField(obj.name, id || "attachment"));
+  if (!id || !name) return null;
+  const size = typeof obj.size === "number" && Number.isFinite(obj.size) && obj.size >= 0 ? Math.min(Math.floor(obj.size), 10_000_000_000) : undefined;
+  return {
+    id,
+    name,
+    contentType: optionalContentType(obj.contentType),
+    size,
+    createdAt: optionalBoundString(obj.createdAt, 80),
+    commentId: optionalBoundString(obj.commentId, 180),
+  };
 }
 
 function updateOptionsFromEnvelope(ref: WorkItemProviderRef, value: unknown): WorkItemUpdateOptions {
@@ -862,7 +898,19 @@ function workItemSummaryFromValue(value: unknown): WorkItemSummary | null {
     requester: optionalBoundString(obj.requester, 120),
     updatedAt: optionalBoundString(obj.updatedAt, 80),
     projectKey: optionalBoundString(obj.projectKey, 40),
+    description: descriptionFromValue(obj.description ?? asRecord(obj.fields).description),
     fields: normalizedScalarFields(obj.fields),
+  };
+}
+
+function descriptionFromValue(value: unknown): { body: string; format: "text" | "markdown"; truncated?: boolean } | undefined {
+  const obj = asRecord(value);
+  const body = typeof value === "string" ? value : stringField(obj.body, "");
+  if (!body) return undefined;
+  return {
+    body: boundString(body, WORK_ITEM_DESCRIPTION_MAX),
+    format: obj.format === "markdown" ? "markdown" : "text",
+    truncated: obj.truncated === true || body.length > WORK_ITEM_DESCRIPTION_MAX ? true : undefined,
   };
 }
 
@@ -917,7 +965,7 @@ function normalizeFieldPatch(patch: WorkItemFieldPatch): Record<string, string |
     if (!key || /[\r\n]/.test(key)) continue;
     if (value === null || typeof value === "boolean" || typeof value === "number") out[key] = value;
     else if (Array.isArray(value)) out[key] = value.filter((item): item is string => typeof item === "string").slice(0, 50).map(item => boundString(item, 200));
-    else out[key] = boundString(String(value ?? ""), WORK_ITEM_FIELD_MAX);
+    else out[key] = boundString(String(value ?? ""), key.toLowerCase() === "description" ? WORK_ITEM_DESCRIPTION_MAX : WORK_ITEM_FIELD_MAX);
   }
   return out;
 }
@@ -1008,10 +1056,23 @@ function normalizedScalarFields(value: unknown): Record<string, string | number 
   const fields = asRecord(value);
   const out: Record<string, string | number | boolean | null> = {};
   for (const [key, child] of Object.entries(fields).slice(0, 40)) {
-    if (child === null || typeof child === "number" || typeof child === "boolean") out[boundString(key, 120)] = child;
-    else out[boundString(key, 120)] = boundString(String(child ?? ""), WORK_ITEM_FIELD_MAX);
+    const safeKey = boundString(key, 120);
+    if (!safeKey || /^customfield_\d+$/i.test(safeKey) || safeKey === "providerOptions") continue;
+    if (child === null || typeof child === "number" || typeof child === "boolean") out[safeKey] = child;
+    else if (Array.isArray(child)) out[safeKey] = boundString(child.map(item => String(item ?? "")).join(", "), WORK_ITEM_FIELD_MAX);
+    else if (typeof child === "object" && child !== null) continue;
+    else out[safeKey] = boundString(String(child ?? ""), WORK_ITEM_FIELD_MAX);
   }
   return out;
+}
+
+function safeFileName(value: string): string {
+  return boundString(value.replace(/[\\/\r\n]/g, "_").trim(), 240);
+}
+
+function optionalContentType(value: unknown): string | undefined {
+  if (typeof value !== "string" || !value || value.length > 160 || /[\r\n]/.test(value)) return undefined;
+  return value.toLowerCase();
 }
 
 function stringArray(value: unknown, maxItems: number, maxLength: number): string[] {
