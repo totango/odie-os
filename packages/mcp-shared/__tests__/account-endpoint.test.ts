@@ -531,6 +531,72 @@ describe("connect initiation nonce", () => {
     expect(authorizationUrl.searchParams.get("scope"))
       .toBe("openid profile email mcp:odie:kg:read");
   });
+
+  it("forces a fresh authorization redirect on reconnect without discarding client discovery", async () => {
+    const context = fakeContext();
+    const connected = server("https://mcp.example/mcp");
+    const discovery = {
+      authorizationServerUrl: "https://auth.example",
+      authorizationServerMetadata: {
+        issuer: "https://auth.example",
+        authorization_endpoint: "https://auth.example/authorize",
+        token_endpoint: "https://auth.example/token",
+        registration_endpoint: "https://auth.example/register",
+        response_types_supported: ["code"],
+      },
+    };
+    const client = {
+      client_id: "retained-client-id",
+      issuer: "https://auth.example",
+      redirect_uris: ["https://gatekeeper.example/oauth"],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    };
+    context.storage.kv.put("server", connected);
+    context.storage.kv.put("tokens", {
+      access_token: "stale-access-token",
+      token_type: "Bearer",
+      refresh_token: "stale-refresh-token",
+      issuer: "https://auth.example",
+      expiresAt: Date.now() + 60_000,
+    });
+    context.storage.kv.put("oauthVerifier", "stale-verifier");
+    context.storage.kv.put("pendingAuth", { generation: 1 });
+    context.storage.kv.put("oauthDiscovery", discovery);
+    context.storage.kv.put("oauthClient", client);
+
+    const fetchedUrls: string[] = [];
+    vi.stubGlobal("fetch", async (input: string) => {
+      fetchedUrls.push(String(input));
+      return new Response("", { status: 404 });
+    });
+
+    const account = new ScopedOAuthFlowAccount(context as never, {});
+    const nonce = "7".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
+      .toBe("stale-access-token");
+    expect(context.storage.kv.get("oauthVerifier")).toBeUndefined();
+    expect(context.storage.kv.get("pendingAuth")).toBeUndefined();
+    expect(context.storage.kv.get("oauthDiscovery")).toEqual(discovery);
+    expect(context.storage.kv.get("oauthClient")).toEqual(client);
+
+    const outcome = await account.beginConnect(nonce, connected);
+
+    expect(outcome.kind).toBe("redirect");
+    const authorizationUrl = new URL((outcome as { url: string }).url);
+    expect(authorizationUrl.origin).toBe("https://auth.example");
+    expect(authorizationUrl.searchParams.get("client_id")).toBe("retained-client-id");
+    expect(authorizationUrl.searchParams.get("scope"))
+      .toBe("openid profile email mcp:odie:kg:read");
+    expect(context.storage.kv.get("oauthDiscovery")).toEqual(discovery);
+    expect(context.storage.kv.get("oauthClient")).toEqual(client);
+    expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
+      .toBe("stale-access-token");
+    expect(fetchedUrls).not.toContain("https://auth.example/register");
+  });
 });
 
 describe("resolveConnectTarget", () => {
