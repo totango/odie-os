@@ -289,6 +289,9 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     this.advanceConnectionGeneration();
     this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
+    for (const key of ["oauthVerifier", "pendingAuth"]) {
+      this.ctx.storage.kv.delete(key);
+    }
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
@@ -418,6 +421,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     redirect: (url: URL) => void = () => {
       throw new Error("The authorization server unexpectedly requested a redirect.");
     },
+    reuseTokens = true,
   ): OAuthClientProvider {
     const current = () => {
       if (!this.isCurrentConnection(server, generation)) {
@@ -451,6 +455,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
       },
       tokens: context => {
         current();
+        if (!reuseTokens) return undefined;
         const tokens = this.ctx.storage.kv.get<OAuthTokens>("tokens");
         if (tokens && (typeof tokens.access_token !== "string" ||
             typeof tokens.token_type !== "string")) {
@@ -529,7 +534,10 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     try {
       let result: Awaited<ReturnType<typeof auth>>;
       try {
-        result = await auth(this.oauthProvider(server, generation, url => { redirectUrl = url; }), {
+        result = await auth(this.oauthProvider(
+          server, generation, url => { redirectUrl = url; },
+          !this.ctx.storage.kv.get<boolean>("reconnecting"),
+        ), {
           serverUrl: server.endpoint,
           resourceMetadataUrl: resourceMetadataUrl ? new URL(resourceMetadataUrl) : undefined,
           scope: this.oauthScope(server),

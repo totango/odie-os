@@ -8,6 +8,7 @@ import type {
   WorkItemManagementApi,
   WorkItemRead,
   WorkItemSearchPage,
+  WorkItemSourceStatuses,
   WorkItemSummary,
   WorkItemsManagementApi,
 } from "../src/types";
@@ -122,6 +123,79 @@ describe("WorkItemsPage", () => {
     expect(host.textContent).toContain("Requester");
   });
 
+  it("opens details in an overlay sheet with no empty detail rail and keyboard resizing", async () => {
+    const innerWidth = vi.spyOn(window, "innerWidth", "get").mockReturnValue(900);
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(readFor(jiraItem))] });
+    await render(api);
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(host.textContent).not.toContain("Select a Jira issue or Zendesk ticket");
+    await clickText("Jira login is slow");
+    const dialog = host.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog).toBeTruthy();
+    expect(host.querySelector(".detail-backdrop")).toBeTruthy();
+    const handle = host.querySelector<HTMLElement>('[aria-label="Resize detail panel"]')!;
+    expect(handle.getAttribute("aria-valuenow")).toBe("520");
+    await act(async () => {
+      handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    });
+    expect(host.querySelector<HTMLElement>('[aria-label="Resize detail panel"]')?.getAttribute("aria-valuenow")).toBe("544");
+    await act(async () => {
+      innerWidth.mockReturnValue(380);
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(host.querySelector<HTMLElement>('[aria-label="Resize detail panel"]')?.getAttribute("aria-valuenow")).toBe("360");
+    await clickText("Close detail");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(host.querySelector("[data-row-key='jira:1001']"));
+  });
+
+  it("moves focus into the desktop detail sheet and traps tab navigation", async () => {
+    vi.stubGlobal("matchMedia", (query: string) => ({ matches: false, media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false }));
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(readFor(jiraItem))] });
+    await render(api);
+    await clickText("Jira login is slow");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(document.activeElement).toBe(host.querySelector("[data-detail-back]"));
+    const dialog = host.querySelector<HTMLElement>('[role="dialog"]')!;
+    const first = host.querySelector<HTMLElement>('[aria-label="Resize detail panel"]')!;
+    first.focus();
+    await act(async () => {
+      dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
+    });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(first);
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
+    });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
+
+  it("renders provider rich text and entities without unsafe HTML", async () => {
+    const read = readFor(jiraItem);
+    read.comments = [{
+      id: "rich",
+      author: "Ada",
+      body: "**Bold**&nbsp;&nbsp;<em>safe</em><script>alert('x')</script><a href=\"javascript:alert(1)\">bad</a> ![beacon](https://tracker.example/pixel.gif) [ok](https://example.com)",
+      public: true,
+      createdAt: "2026-08-20T12:00:00Z",
+    }];
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(read)] });
+    await render(api);
+    await clickText("Jira login is slow");
+    const richText = host.querySelector(".rich-text")!;
+    expect(richText.querySelector("strong")?.textContent).toBe("Bold");
+    expect(richText.querySelector("em")?.textContent).toBe("safe");
+    expect(host.querySelector("script")).toBeNull();
+    expect(host.querySelector("img")).toBeNull();
+    expect(host.innerHTML).not.toContain("alert('x')");
+    expect(host.innerHTML).not.toContain("tracker.example");
+    expect([...host.querySelectorAll("a")].some((a) => a.getAttribute("href")?.startsWith("javascript:"))).toBe(false);
+    const safeLink = [...host.querySelectorAll<HTMLAnchorElement>("a")].find((a) => a.textContent === "ok")!;
+    expect(safeLink.href).toBe("https://example.com/");
+    expect(safeLink.rel).toContain("noopener");
+  });
+
   it("defaults Zendesk comments to internal and requires an explicit public choice", async () => {
     const itemApi = createItemApi(readFor(zendeskItem));
     const api = createApi({ items: [zendeskItem], itemApis: [itemApi] });
@@ -200,8 +274,72 @@ describe("WorkItemsPage", () => {
     expect(document.activeElement).toBe(host.querySelector("[data-detail-back]"));
     await clickText("Back");
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    expect(host.textContent).toContain("Select a Jira issue or Zendesk ticket");
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(host.querySelector("[data-row-key='jira:1001']"));
+  });
+
+  it("searches only configured and connected sources and avoids setup conflicts", async () => {
+    const api = createApi({
+      items: [zendeskItem],
+      statuses: { jira: { configured: true, connected: false, reason: "Conflict" }, zendesk: { configured: true, connected: true } },
+    });
+    await render(api);
+    expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "zendesk" }));
+    expect(host.textContent).toContain("Customer cannot export");
+    expect(host.textContent).not.toContain("Conflict");
+
+    const unavailableApi = createApi({
+      items: [jiraItem],
+      statuses: { jira: { configured: true, connected: false, reason: "Conflict" }, zendesk: { configured: false, connected: false, reason: "Missing" } },
+    });
+    act(() => root?.unmount());
+    root = undefined;
+    host.textContent = "";
+    await render(unavailableApi);
+    expect(unavailableApi.search).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("Provider setup");
+    expect(host.textContent).not.toContain("Couldn’t load work items");
+  });
+
+  it("refreshes source status and searches newly available providers", async () => {
+    let nextStatuses: WorkItemSourceStatuses = { jira: { configured: true, connected: false, reason: "Conflict" }, zendesk: { configured: false, connected: false, reason: "Missing" } };
+    const api = createApi({ items: [jiraItem], statuses: () => nextStatuses });
+    await render(api);
+    expect(api.search).not.toHaveBeenCalled();
+    nextStatuses = { jira: { configured: true, connected: true }, zendesk: { configured: false, connected: false, reason: "Missing" } };
+    await clickText("Refresh work items");
+    expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "jira" }));
+    expect(host.textContent).toContain("Jira login is slow");
+  });
+
+  it("does not search with stale statuses when status refresh fails", async () => {
+    const api = createApi({ items: [jiraItem] });
+    await render(api);
+    api.search.mockClear();
+    api.getSourceStatuses.mockRejectedValueOnce(new Error("status failed"));
+    await clickText("Refresh work items");
+    expect(api.search).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("status failed");
+  });
+
+  it("loads more from only providers that still have more results", async () => {
+    const search = vi.fn<WorkItemsManagementApi["search"]>(async (request) => request.cursors?.jira ? {
+      items: [{ ...jiraItem, id: "1002", key: "ODIE-2", title: "Second Jira item" }],
+      cursors: {},
+      hasMore: { jira: false },
+    } : {
+      items: [jiraItem, zendeskItem],
+      cursors: { jira: "jira-next" },
+      hasMore: { jira: true, zendesk: false },
+    });
+    const api = createApi({ search });
+    await render(api);
+    await clickText("Load more");
+    expect(search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "jira", cursors: { jira: "jira-next" } }));
+    expect(host.textContent).toContain("Jira login is slow");
+    expect(host.textContent).toContain("Customer cannot export");
+    expect(host.textContent).toContain("Second Jira item");
+    expect([...host.querySelectorAll("[data-row-key='zendesk:222']")]).toHaveLength(1);
   });
 
   it("does not close detail on global Escape while editing text", async () => {
@@ -222,7 +360,7 @@ async function render(api: WorkItemsManagementApi, routeStateHost?: WorkItemsRou
     root = createRoot(host);
     root.render(<WorkItemsPage api={api} routeStateHost={routeStateHost} />);
   });
-  await act(async () => { await Promise.resolve(); });
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
 async function clickText(text: string) {
@@ -240,14 +378,15 @@ async function changeText(element: HTMLTextAreaElement | HTMLInputElement, value
   });
 }
 
-function createApi(options: { items?: WorkItemSummary[]; page?: WorkItemSearchPage; itemApis?: ReturnType<typeof createItemApi>[] }): WorkItemsManagementApi & {
+function createApi(options: { items?: WorkItemSummary[]; page?: WorkItemSearchPage; itemApis?: ReturnType<typeof createItemApi>[]; statuses?: WorkItemSourceStatuses | (() => WorkItemSourceStatuses | Promise<WorkItemSourceStatuses>); search?: WorkItemsManagementApi["search"] }): WorkItemsManagementApi & {
+  getSourceStatuses: ReturnType<typeof vi.fn<WorkItemsManagementApi["getSourceStatuses"]>>;
   search: ReturnType<typeof vi.fn<WorkItemsManagementApi["search"]>>;
   item: ReturnType<typeof vi.fn<WorkItemsManagementApi["item"]>>;
 } {
   const queue = [...(options.itemApis ?? [])];
   return {
-    getSourceStatuses: vi.fn<WorkItemsManagementApi["getSourceStatuses"]>(async () => statuses),
-    search: vi.fn<WorkItemsManagementApi["search"]>(async () => options.page ?? { items: options.items ?? [], cursors: {}, hasMore: {} }),
+    getSourceStatuses: vi.fn<WorkItemsManagementApi["getSourceStatuses"]>(async () => typeof options.statuses === "function" ? options.statuses() : options.statuses ?? statuses),
+    search: vi.fn<WorkItemsManagementApi["search"]>(options.search ?? (async () => options.page ?? { items: options.items ?? [], cursors: {}, hasMore: {} })),
     item: vi.fn<WorkItemsManagementApi["item"]>(async () => queue.shift() ?? createItemApi(readFor(options.items?.[0] ?? jiraItem))),
   };
 }

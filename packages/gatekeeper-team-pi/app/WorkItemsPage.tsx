@@ -11,13 +11,19 @@ import {
   WarningCircle,
   X,
 } from "@phosphor-icons/react";
+import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import remarkGfm from "remark-gfm";
 import {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
+  type PointerEvent,
   type RefObject,
   type ReactNode,
 } from "react";
@@ -41,10 +47,35 @@ type Selected = { stub: DisposableItemApi; ref: WorkItemProviderRef };
 type MutationContext = { stub: DisposableItemApi; ref: WorkItemProviderRef; epoch: number };
 type Filters = { status: string; priority: string; type: string; person: string };
 type Tab = "comments" | "activity";
+type StatusLoadResult = { ok: true; statuses: WorkItemSourceStatuses } | { ok: false };
 
 const EMPTY_FILTERS: Filters = { status: "", priority: "", type: "", person: "" };
 const STORE_KEY = "team-pi-work-items:v1";
 const LIMIT = 40;
+const DETAIL_WIDTH = { min: 360, default: 520, max: 760, margin: 32 };
+const MARKDOWN_COMPONENTS: Components = {
+  a({ href, children, node: _node, ...props }) {
+    const safeHref = safeLinkHref(href);
+    if (!safeHref) return <>{children}</>;
+    return <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer">{children}</a>;
+  },
+  img({ alt }) {
+    return alt ? <span>{alt}</span> : null;
+  },
+};
+const SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: defaultSchema.tagNames?.filter((tag) => tag !== "img"),
+  attributes: {
+    ...defaultSchema.attributes,
+    a: [...(defaultSchema.attributes?.a ?? []), "target", "rel"],
+    img: [],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: ["http", "https", "mailto"],
+  },
+};
 
 export default function WorkItemsPage({
   api: apiProp,
@@ -82,13 +113,28 @@ export default function WorkItemsPage({
   const lastSelectedRowKey = useRef<string | null>(null);
   const searchEpoch = useRef(0);
   const selectEpoch = useRef(0);
+  const statusEpoch = useRef(0);
+  const pageRef = useRef(page);
   const selectedRef = useRef<Selected | null>(null);
 
-  const loadStatuses = useCallback(async () => {
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
+
+  const loadStatuses = useCallback(async (): Promise<StatusLoadResult> => {
+    const epoch = ++statusEpoch.current;
     try {
-      setStatuses(await api.getSourceStatuses());
+      const next = await api.getSourceStatuses();
+      if (epoch !== statusEpoch.current) return { ok: false };
+      setStatuses(next);
+      setError(undefined);
+      return { ok: true, statuses: next };
     } catch (caught) {
-      setError(safeMessage(caught));
+      if (epoch === statusEpoch.current) {
+        setError(safeMessage(caught));
+        setLoading(false);
+      }
+      return { ok: false };
     }
   }, [api]);
 
@@ -102,21 +148,35 @@ export default function WorkItemsPage({
   }, [query]);
 
   const search = useCallback(
-    async (opts?: { cursor?: Partial<Record<WorkItemProviderKind, string>>; append?: boolean }) => {
+    async (opts?: { cursor?: Partial<Record<WorkItemProviderKind, string>>; append?: boolean; statuses?: WorkItemSourceStatuses }) => {
+      const statusSnapshot = opts?.statuses ?? statuses;
+      if (!statusSnapshot) return;
+      const effectiveSource = opts?.append ? getAppendSource(source, statusSnapshot, pageRef.current.hasMore) : getEffectiveSource(source, statusSnapshot);
       const epoch = ++searchEpoch.current;
       if (opts?.append) setLoadingMore(true);
       else setLoading(true);
       setError(undefined);
+      if (!effectiveSource) {
+        setPage({ items: [], cursors: {}, hasMore: {} });
+        setActiveIndex(0);
+        setLoading(false);
+        setLoadingMore(false);
+        return;
+      }
       try {
         const result = await api.search({
-          source,
+          source: effectiveSource,
           query: debouncedQuery || undefined,
           limit: LIMIT,
           cursors: opts?.cursor,
         });
         if (epoch !== searchEpoch.current) return;
         setPage((current) => ({
+          ...current,
           ...result,
+          cursors: opts?.append ? { ...current.cursors, ...result.cursors } : result.cursors,
+          hasMore: opts?.append ? { ...current.hasMore, ...result.hasMore } : result.hasMore,
+          errors: opts?.append ? mergeProviderErrors(current.errors, result.errors) : result.errors,
           items: opts?.append ? [...current.items, ...result.items] : result.items,
         }));
         if (!opts?.append) setActiveIndex(0);
@@ -129,7 +189,7 @@ export default function WorkItemsPage({
         }
       }
     },
-    [api, debouncedQuery, source],
+    [api, debouncedQuery, source, statuses],
   );
 
   useEffect(() => {
@@ -247,7 +307,9 @@ export default function WorkItemsPage({
   }, [disposeSelected]);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([loadStatuses(), search()]);
+    const nextStatuses = await loadStatuses();
+    if (!nextStatuses.ok) return;
+    await search({ statuses: nextStatuses.statuses });
     if (selected?.stub) await readSelected(selected.stub, selectEpoch.current, selected.ref);
   }, [loadStatuses, readSelected, search, selected]);
 
@@ -277,7 +339,7 @@ export default function WorkItemsPage({
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (!selected && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         searchRef.current?.focus();
         searchRef.current?.select();
@@ -288,7 +350,7 @@ export default function WorkItemsPage({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeDetail]);
+  }, [closeDetail, selected]);
 
   const hasMore = Object.values(page.hasMore).some(Boolean);
   useEffect(() => {
@@ -352,7 +414,7 @@ export default function WorkItemsPage({
       {page.errors?.map((providerError) => (
         <Banner key={providerError.source} tone="warning" title={`${labelSource(providerError.source)} search failed`} message={providerError.message} />
       ))}
-      {error && <Banner tone="danger" title="Couldn’t load work items" message={error} action={<button onClick={() => void search()}>Retry</button>} />}
+      {error && <Banner tone="danger" title="Couldn’t load work items" message={error} action={<button onClick={() => void refreshAll()}>Retry</button>} />}
 
       <div className="content-grid">
         <section className="list-pane" aria-label="Work item results">
@@ -390,21 +452,21 @@ export default function WorkItemsPage({
           )}
         </section>
 
-        <DetailPanel
-          selected={selected}
-          read={selectedRead}
-          loading={detailLoading}
-          error={detailError}
-          tab={tab}
-          setTab={setTab}
-          notice={notice}
-          backButtonRef={backButtonRef}
-          onClose={closeDetail}
-          onRetry={() => selected && void readSelected(selected.stub, selectEpoch.current, selected.ref)}
-          mutationEpoch={selectEpoch.current}
-          onMutated={handleMutated}
-        />
       </div>
+      <DetailPanel
+        selected={selected}
+        read={selectedRead}
+        loading={detailLoading}
+        error={detailError}
+        tab={tab}
+        setTab={setTab}
+        notice={notice}
+        backButtonRef={backButtonRef}
+        onClose={closeDetail}
+        onRetry={() => selected && void readSelected(selected.stub, selectEpoch.current, selected.ref)}
+        mutationEpoch={selectEpoch.current}
+        onMutated={handleMutated}
+      />
     </main>
   );
 }
@@ -461,9 +523,78 @@ function DetailPanel(props: {
   onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void;
 }) {
   const { selected, read, loading, error, tab, setTab, notice, backButtonRef, onClose, onRetry, mutationEpoch, onMutated } = props;
-  if (!selected) return <aside className="detail-pane empty"><Ticket size={24} /><p>Select a Jira issue or Zendesk ticket to inspect, comment, edit, transition, or link.</p></aside>;
+  const [width, setWidth] = useState(DETAIL_WIDTH.default);
+  const dragStart = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+  const detailRef = useRef<HTMLElement>(null);
+  const clampWidth = useCallback((value: number) => clampDetailWidth(value), []);
+  const resizeBy = useCallback((delta: number) => setWidth((current) => clampWidth(current + delta)), [clampWidth]);
+  const startResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (isMobileLayout()) return;
+    event.preventDefault();
+    dragStart.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [width]);
+  const moveResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const start = dragStart.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    setWidth(clampWidth(start.startWidth + start.startX - event.clientX));
+  }, [clampWidth]);
+  const stopResize = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (dragStart.current?.pointerId === event.pointerId) dragStart.current = null;
+  }, []);
+  const onResizeKeyDown = useCallback((event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      resizeBy(24);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      resizeBy(-24);
+    }
+  }, [resizeBy]);
+  const onDialogKeyDown = useCallback((event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab") return;
+    const focusable = getFocusableElements(detailRef.current);
+    if (focusable.length === 0) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, []);
+  useEffect(() => {
+    if (!selected) return;
+    window.setTimeout(() => backButtonRef.current?.focus({ preventScroll: true }), 0);
+  }, [backButtonRef, selected]);
+  useEffect(() => {
+    if (!selected) return;
+    const onResize = () => setWidth((current) => clampWidth(current));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [clampWidth, selected]);
+  if (!selected) return null;
   const item = read?.detail.item;
-  return <aside className="detail-pane" aria-label="Selected work item detail">
+  return <div className="detail-overlay" role="presentation">
+    <button className="detail-backdrop" type="button" aria-label="Close detail" onClick={onClose} />
+    <aside ref={detailRef} className="detail-pane" role="dialog" aria-modal="true" aria-labelledby={item ? "work-item-detail-title" : undefined} aria-label={item ? undefined : "Selected work item detail"} style={{ "--detail-width": `${width}px` } as CSSProperties} onKeyDown={onDialogKeyDown}>
+    <div
+      className="detail-resize-handle"
+      role="separator"
+      aria-label="Resize detail panel"
+      aria-orientation="vertical"
+      aria-valuemin={DETAIL_WIDTH.min}
+      aria-valuemax={Math.min(DETAIL_WIDTH.max, Math.max(DETAIL_WIDTH.min, window.innerWidth - DETAIL_WIDTH.margin))}
+      aria-valuenow={clampWidth(width)}
+      tabIndex={0}
+      onPointerDown={startResize}
+      onPointerMove={moveResize}
+      onPointerUp={stopResize}
+      onPointerCancel={stopResize}
+      onKeyDown={onResizeKeyDown}
+    />
     <div className="detail-toolbar">
       <button ref={backButtonRef} data-detail-back className="back-button" type="button" onClick={onClose}><ArrowLeft size={16} /> Back</button>
       <button className="icon-button" type="button" aria-label="Close detail" onClick={onClose}><X size={16} /></button>
@@ -471,7 +602,7 @@ function DetailPanel(props: {
     {loading && !read ? <DetailSkeleton /> : error ? <div className="detail-error" role="alert"><WarningCircle size={18} /><p>{error}</p><button onClick={onRetry}>Retry</button></div> : item && read ? <>
       <header className="detail-header">
         <div className="detail-kicker"><SourceBadge source={item.source} /><span className="mono">{item.key ?? item.id}</span>{item.url && <a href={item.url} target="_blank" rel="noreferrer">Open trusted URL</a>}</div>
-        <h2>{item.title}</h2>
+        <h2 id="work-item-detail-title">{item.title}</h2>
       </header>
       <dl className="field-grid">
         <Field label="Status" value={item.status} /><Field label="Priority" value={item.priority} /><Field label="Type" value={item.type} />
@@ -485,9 +616,14 @@ function DetailPanel(props: {
       {item.source === "jira" && <TransitionEditor item={item} transitions={read.transitions} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />}
       <LinkEditor item={item} api={selected.stub} />
       <div className="tabs" role="tablist" aria-label="Detail timeline"><button role="tab" aria-selected={tab === "comments"} onClick={() => setTab("comments")}>Comments</button><button role="tab" aria-selected={tab === "activity"} onClick={() => setTab("activity")}>Activity</button></div>
-      {tab === "comments" ? <TimelineEmptyAware emptyText="No comments returned by the provider.">{read.comments.map((comment) => <article className="timeline-entry" key={comment.id}><div><strong>{comment.author || "Unknown"}</strong><time title={fullDate(comment.createdAt)}>{relativeDate(comment.createdAt)}</time><span className={`visibility ${comment.public ? "public" : "internal"}`}>{comment.public ? "Public" : "Internal"}</span></div><p>{comment.body}</p></article>)}</TimelineEmptyAware> : <TimelineEmptyAware emptyText="No activity returned by the provider.">{read.activity.map((entry) => <article className="timeline-entry" key={entry.id}><div><strong>{entry.author || entry.type}</strong><time title={fullDate(entry.createdAt)}>{relativeDate(entry.createdAt)}</time></div><p>{entry.summary}</p></article>)}</TimelineEmptyAware>}
+      {tab === "comments" ? <TimelineEmptyAware emptyText="No comments returned by the provider.">{read.comments.map((comment) => <article className="timeline-entry" key={comment.id}><div><strong>{comment.author || "Unknown"}</strong><time title={fullDate(comment.createdAt)}>{relativeDate(comment.createdAt)}</time><span className={`visibility ${comment.public ? "public" : "internal"}`}>{comment.public ? "Public" : "Internal"}</span></div><RichText value={comment.body} /></article>)}</TimelineEmptyAware> : <TimelineEmptyAware emptyText="No activity returned by the provider.">{read.activity.map((entry) => <article className="timeline-entry" key={entry.id}><div><strong>{entry.author || entry.type}</strong><time title={fullDate(entry.createdAt)}>{relativeDate(entry.createdAt)}</time></div><RichText value={entry.summary} /></article>)}</TimelineEmptyAware>}
     </> : null}
-  </aside>;
+  </aside>
+  </div>;
+}
+
+function RichText({ value }: { value: string }) {
+  return <div className="rich-text"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]]} components={MARKDOWN_COMPONENTS}>{normalizeProviderText(value)}</ReactMarkdown></div>;
 }
 
 function CommentComposer({ item, api, mutationEpoch, onMutated }: { item: WorkItemSummary; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
@@ -582,6 +718,27 @@ function collectFilterOptions(items: WorkItemSummary[]) {
 function applyFilters(items: WorkItemSummary[], filters: Filters): WorkItemSummary[] {
   return items.filter((item) => (!filters.status || item.status === filters.status) && (!filters.priority || item.priority === filters.priority) && (!filters.type || item.type === filters.type) && (!filters.person || item.assignee === filters.person || item.requester === filters.person));
 }
+function getEffectiveSource(source: WorkItemSearchSource, statuses: WorkItemSourceStatuses): WorkItemSearchSource | null {
+  const available = (["jira", "zendesk"] as const).filter((candidate) => statuses[candidate].configured && statuses[candidate].connected);
+  if (source !== "both") return available.includes(source) ? source : null;
+  if (available.length === 2) return "both";
+  return available[0] ?? null;
+}
+function getAppendSource(source: WorkItemSearchSource, statuses: WorkItemSourceStatuses, hasMore: WorkItemSearchPage["hasMore"]): WorkItemSearchSource | null {
+  const effective = getEffectiveSource(source, statuses);
+  if (!effective) return null;
+  if (effective !== "both") return hasMore[effective] ? effective : null;
+  const nextSources = (["jira", "zendesk"] as const).filter((candidate) => hasMore[candidate] && statuses[candidate].configured && statuses[candidate].connected);
+  if (nextSources.length === 2) return "both";
+  return nextSources[0] ?? null;
+}
+function mergeProviderErrors(current: WorkItemSearchPage["errors"], next: WorkItemSearchPage["errors"]): WorkItemSearchPage["errors"] {
+  if (!current?.length) return next;
+  if (!next?.length) return current;
+  const bySource = new Map(current.map((error) => [error.source, error]));
+  for (const error of next) bySource.set(error.source, error);
+  return [...bySource.values()];
+}
 function hasFilters(filters: Filters) { return Object.values(filters).some(Boolean); }
 function sameRef(a: WorkItemProviderRef, b?: WorkItemProviderRef) { return !!b && a.source === b.source && a.id === b.id; }
 function rowKey(item: WorkItemProviderRef) { return `${item.source}:${item.id}`; }
@@ -641,6 +798,25 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === "input" || tag === "textarea" || tag === "select" || !!target.closest("[contenteditable='true'],[role='textbox']");
 }
 function isMobileLayout(): boolean { try { return window.matchMedia("(max-width: 900px)").matches; } catch { return false; } }
+function clampDetailWidth(value: number): number {
+  const viewportMax = typeof window === "undefined" ? DETAIL_WIDTH.max : Math.max(DETAIL_WIDTH.min, window.innerWidth - DETAIL_WIDTH.margin);
+  return Math.min(Math.max(value, DETAIL_WIDTH.min), Math.min(DETAIL_WIDTH.max, viewportMax));
+}
+function normalizeProviderText(value: string): string {
+  return value.replace(/&nbsp;/gi, "\u00a0").replace(/\u00a0{2,}/g, (spaces) => " ".repeat(spaces.length));
+}
+function safeLinkHref(href: string | undefined): string | undefined {
+  if (!href) return undefined;
+  try {
+    const url = new URL(href, window.location.href);
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? href : undefined;
+  } catch { return undefined; }
+}
+function getFocusableElements(root: HTMLElement | null): HTMLElement[] {
+  if (!root) return [];
+  return [...root.querySelectorAll<HTMLElement>('a[href],button:not(:disabled),textarea:not(:disabled),input:not(:disabled),select:not(:disabled),[tabindex]:not([tabindex="-1"])')]
+    .filter((node) => !node.hasAttribute("disabled") && node.getAttribute("aria-hidden") !== "true");
+}
 function setRowRef(item: WorkItemProviderRef, node: HTMLButtonElement | null, refs: Map<string, HTMLButtonElement>): void {
   const key = rowKey(item);
   if (node) refs.set(key, node); else refs.delete(key);
