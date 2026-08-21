@@ -22,6 +22,7 @@ import { obsContext } from "./observability.js";
 import {
   decodeStoredContextBody, encodeStoredContextBody, truncateContextDescription,
 } from "./context-storage.js";
+import type { BundledContextCollection } from "./bundled-context.js";
 
 const logger = obsContext.createLogger({
   component: "gatekeeper.context", vendorId: VENDOR_ID,
@@ -162,6 +163,12 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     return artifacts;
   }
 
+  #assertNotBundled(): void {
+    if (this.getMetadata().content.source === "bundled") {
+      throw new Error("Bundled Context collections are read-only.");
+    }
+  }
+
   async #createArtifactRepo(metadata: ContextCollectionMetadata): Promise<string> {
     // Artifact repo id is always set to collection id.
     let artifacts = this.#artifacts();
@@ -204,6 +211,47 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     // A new collection starts with an up-to-date empty path list.
     this.storage.skillIndexVersion.put(SKILL_INDEX_VERSION);
     return metadata;
+  }
+
+  /** Install or repair a code-backed bundled collection by replacing its documents atomically. */
+  async installBundled(collection: BundledContextCollection, sharingDomain: string): Promise<ContextCollectionMetadata> {
+    let existing = this.getMetadata();
+    if (existing.id && existing.id !== collection.id) {
+      throw new Error("Collection already exists with a different id.");
+    }
+    if (existing.id && existing.content.source !== "bundled") {
+      throw new Error("Collection already exists and is not bundled.");
+    }
+
+    let records = collection.documents.map(doc => contextRecord({
+      ...doc,
+      lastUpdated: new Date(doc.lastUpdated),
+    }));
+    this.storage.transaction(() => {
+      this.storage.sharingDomain.put(sharingDomain);
+      this.storage.ownerAccountId.put("");
+      for (let record of this.storage.documents.list()) {
+        this.storage.documents.delete(record.path);
+      }
+      this.#clearSkillIndex();
+      for (let record of records) {
+        this.#putDocument(record);
+      }
+      let metadata: ContextCollectionMetadata = {
+        id: collection.id,
+        icon: collection.icon,
+        title: collection.title,
+        description: collection.description,
+        visibility: "public",
+        created: existing.id ? existing.created : new Date(collection.created),
+        lastUpdated: new Date(collection.lastUpdated),
+        documentCount: records.length,
+        content: collection.content,
+      };
+      this.storage.metadata.put(metadata);
+      this.storage.skillIndexVersion.put(SKILL_INDEX_VERSION);
+    });
+    return this.getMetadata();
   }
 
   getMetadata(): ContextCollectionMetadata {
@@ -298,6 +346,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     icon?: string;
     branch?: string;
   }): Promise<void> {
+    this.#assertNotBundled();
     let meta = this.getMetadata();
     let changed = false;
 
@@ -325,6 +374,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   // --- Document CRUD ---
 
   #assertWebWritable(): void {
+    this.#assertNotBundled();
     if (this.#isGitBased()) {
       throw new Error("Git-based collections are read-only. All changes must be made through git.");
     }
@@ -659,6 +709,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   async deleteSelf(): Promise<void> {
     let meta = this.getMetadata();
+    this.#assertNotBundled();
     let id = meta.id;
 
     if (id) {
@@ -685,6 +736,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   /** Account revocation clears the whole user-library index separately; don't update it per item. */
   async deleteForRevokedOwner(): Promise<void> {
     let meta = this.getMetadata();
+    this.#assertNotBundled();
     if (meta.content.source === "git" && meta.id && this.env.ARTIFACTS) {
       await this.env.ARTIFACTS.delete(meta.id).catch((err) => {
         logger.warn("failed to delete Artifacts repo while revoking context collection owner", {

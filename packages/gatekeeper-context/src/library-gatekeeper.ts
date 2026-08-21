@@ -22,6 +22,7 @@ import {
 } from "./agent-skill.js";
 import type { EnabledCollectionInfo } from "./context-types.js";
 import { domainName, DEFAULT_SHARING_DOMAIN } from "./domain.js";
+import { validateSharingDomain } from "./bundled-context.js";
 import APP_HTML from "./generated/app.txt";
 
 // The Context Library icon: the Phosphor "BookOpen" glyph as a self-contained SVG data URI (no
@@ -127,6 +128,10 @@ export class ContextAccount
   #collections() { return this.ctx.exports.ContextCollectionDurableObject; }
   #userLibraries() { return this.ctx.exports.UserLibraryDurableObject; }
   #registries() { return this.ctx.exports.LibraryRegistryDurableObject; }
+  async #installBundledCollections(): Promise<void> {
+    let domain = this.ctx.props.sharingDomain;
+    await this.#registries().getByName(domain).installBundledCollections(domain);
+  }
 
   async describe(): Promise<AccountDescription> {
     return {
@@ -139,12 +144,14 @@ export class ContextAccount
 
   /** Return the gadget-side read-path class, scoped by this account's props. */
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<any>>> {
+    await this.#installBundledCollections();
     return this.ctx.exports.ContextGatekeeper({
       props: { sharingDomain: this.ctx.props.sharingDomain, accountId: this.ctx.props.accountId },
     });
   }
 
   async startAppUi(context: AppUiContext): Promise<GatekeeperUiFrame> {
+    await this.#installBundledCollections();
     // Hand the iframe its per-user UI capability. isAdmin is supplied fresh per open.
     let ui = new RpcStub(new ContextApiImpl(
       this.env, this.ctx.props.sharingDomain, this.ctx.props.accountId, context.isAdmin,
@@ -399,7 +406,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env, Gatekeepe
    */
   @skipRpcValidation()
   async createAccount(): Promise<Fetcher<GatekeeperUser>> {
-    let sharingDomain = this.ctx.props.sharingDomain ?? DEFAULT_SHARING_DOMAIN;
+    let sharingDomain = validateSharingDomain(this.ctx.props.sharingDomain ?? DEFAULT_SHARING_DOMAIN);
+    await this.ctx.exports.LibraryRegistryDurableObject
+        .getByName(sharingDomain)
+        .installBundledCollections(sharingDomain);
     return this.ctx.exports.ContextAccount({
       props: { sharingDomain, accountId: crypto.randomUUID() },
     }) as unknown as Fetcher<GatekeeperUser>;
