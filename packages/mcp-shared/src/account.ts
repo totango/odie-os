@@ -638,11 +638,11 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     if (reported && server.provenance === "user") {
       this.ctx.storage.kv.put<ConnectedServer>("server", { ...server, serverName: reported });
     }
-    await this.connectionCompleted(this.server() ?? server);
 
     // The initiation nonce authorized exactly one connect, which has now happened. Left in place, a
     // replayed connect URL could mint a second account against the same callback.
     this.ctx.storage.kv.delete("nonce");
+    await this.connectionCompleted(this.server() ?? server);
 
     // Recorded before the callback rather than after it. The alarm below deletes any account that
     // never got this far, and handing the account over is the point of no return: if the callback
