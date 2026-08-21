@@ -113,6 +113,38 @@ describe("SchedulerPage", () => {
     expect(host.openPrompt).toHaveBeenCalledWith(CREATE_SCHEDULE_PROMPT);
   });
 
+  it("offers support starter prompts that create disabled personal hooks after confirmation", async () => {
+    const list = vi.fn<ScheduleManagementClient["list"]>(async () => ({ schedules: [] }));
+    const host = hostProps();
+    await render(<SchedulerPage api={{ list }} {...host} />);
+
+    const supportStarters = [
+      "Daily escalation review",
+      "SLA-risk sweep",
+      "Waiting-on-customer follow-up",
+      "Executive escalation digest",
+      "Stale war-room check",
+    ];
+
+    for (const title of supportStarters) {
+      expect(container!.textContent).toContain(title);
+      await click("button", title);
+      const prompt = host.openPrompt.mock.lastCall?.[0] ?? "";
+      expect(prompt).toContain("Confirm");
+      expect(prompt).toContain("workspace");
+      expect(prompt).toContain("resources");
+      expect(prompt).toContain("timezone");
+      expect(prompt).toContain("Home");
+      expect(prompt).toContain("do not auto-submit or register anything");
+      expect(prompt).toContain("disabled personal hook");
+      expect(prompt).toContain("Connections");
+      expect(prompt).not.toMatch(/shared|deployment/i);
+    }
+
+    const prompted = host.openPrompt.mock.calls.map(([prompt]) => prompt).join("\n---\n");
+    expect(prompted).toMatch(/finite|occurrence|until date/i);
+  });
+
   it("expands the failure reason on needs-attention rows only", async () => {
     const list = vi.fn<ScheduleManagementClient["list"]>(async () => ({
       schedules: [active, dead],
