@@ -1,0 +1,17 @@
+{
+  "blueprintId": "format.support.weekly-digest",
+  "title": "Weekly Support Digest",
+  "description": "Use to compile a weekly support leadership digest. Separate facts, customer claims, trend deductions, unknowns, and provenance; call out confidence and do not fabricate metrics.",
+  "output": {
+    "id": "document",
+    "noun": "Digest",
+    "plural": "Digests",
+    "icon": "chartBar"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 2
+}

@@ -1,0 +1,17 @@
+{
+  "blueprintId": "format.support.engineering-escalation",
+  "title": "Engineering Escalation",
+  "description": "Use to ask Engineering for help on a customer-blocking support issue. Separate verified facts, customer claims, deductions, unknowns, and provenance; never overstate impact or omit source links.",
+  "output": {
+    "id": "document",
+    "noun": "Escalation",
+    "plural": "Escalations",
+    "icon": "flowArrow"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 2
+}

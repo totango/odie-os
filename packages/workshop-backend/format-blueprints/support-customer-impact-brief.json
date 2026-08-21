@@ -1,0 +1,17 @@
+{
+  "blueprintId": "format.support.customer-impact-brief",
+  "title": "Customer Impact Brief",
+  "description": "Use to brief stakeholders on customer impact from a support issue. Keep facts, customer claims, deductions, unknowns, and provenance explicit; quantify impact only when evidence supports it.",
+  "output": {
+    "id": "document",
+    "noun": "Brief",
+    "plural": "Briefs",
+    "icon": "fileText"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 2
+}
