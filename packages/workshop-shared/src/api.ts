@@ -431,6 +431,29 @@ export const createOpenGadgetError = openGadgetErrors.create;
 /** Reads the machine-readable code from an expected `openGadget()` error. */
 export const getOpenGadgetErrorCode = openGadgetErrors.getCode;
 
+/** Stable error codes attached to expected provisional workspace origin failures. */
+export const PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES = {
+  workspaceNotFound: "WORKSPACE_NOT_FOUND",
+  workspaceAlreadyActive: "WORKSPACE_ALREADY_ACTIVE",
+} as const;
+
+/** An expected failure code from `AuthenticatedApi.updateProvisionalWorkspaceOrigin()`. */
+export type ProvisionalWorkspaceOriginErrorCode =
+    typeof PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES[
+        keyof typeof PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES];
+
+const provisionalWorkspaceOriginErrors = codedErrorFamily<ProvisionalWorkspaceOriginErrorCode>({
+  [PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES.workspaceNotFound]: "Workspace not found.",
+  [PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES.workspaceAlreadyActive]:
+      "Workspace origin can no longer be changed after activity starts.",
+});
+
+/** Creates an expected provisional workspace origin error with a machine-readable code. */
+export const createProvisionalWorkspaceOriginError = provisionalWorkspaceOriginErrors.create;
+
+/** Reads the machine-readable code from an expected provisional workspace origin error. */
+export const getProvisionalWorkspaceOriginErrorCode = provisionalWorkspaceOriginErrors.getCode;
+
 /** Stable error codes attached to authentication failures. */
 export const AUTH_ERROR_CODES = {
   invalidSessionToken: "INVALID_SESSION_TOKEN",
@@ -628,7 +651,15 @@ export interface AuthenticatedApi extends RpcTarget {
    *
    * TODO(multi-gadget): This should be renamed to newWorkspace().
    */
-  newGadget(): Promise<RpcStub<Overseer>>;
+  newGadget(originHubId?: DeploymentHubId): Promise<RpcStub<Overseer>>;
+
+  /**
+   * Assign the immutable hub origin for a provisional workspace created by this owner. The hub id is
+   * presentation metadata only: it is never used for authorization, and legacy workspaces may omit
+   * it. The update is idempotent for the same hub, rejects invalid hub ids, rejects missing
+   * workspaces with a stable expected error, and rejects once the workspace has any activity.
+   */
+  updateProvisionalWorkspaceOrigin(workspaceId: string, originHubId: DeploymentHubId): Promise<void>;
 
   /**
    * List metadata about all the user's Gadgets. Used to display the front-page listing.
@@ -804,7 +835,8 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   newGadgetFromBlueprint(
     blueprintId: string,
-    bindings: Record<string, BlueprintBindingAssignment>
+    bindings: Record<string, BlueprintBindingAssignment>,
+    originHubId?: DeploymentHubId,
   ): Promise<RpcStub<Overseer>>;
 
   /**
@@ -1462,6 +1494,12 @@ export type GadgetMetadata = {
   role?: CollaboratorRole;
 
   /**
+   * Hub selected when this workspace was first created. Missing means a legacy or external origin;
+   * callers must keep such workspaces visible and must never authorize by this field.
+   */
+  originHubId?: DeploymentHubId;
+
+  /**
    * True when the gadget has observed data marked as share-prohibited. Such gadgets can no longer
    * be shared with additional users or links.
    */
@@ -1612,6 +1650,12 @@ export type OutputSummary = {
    * predates this field.
    */
   role?: CollaboratorRole;
+
+  /**
+   * Hub inherited from the containing workspace. Missing means legacy or unclassified; outputs stay
+   * visible and this field is never an authority boundary.
+   */
+  originHubId?: DeploymentHubId;
 }
 
 /**

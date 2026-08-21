@@ -38,6 +38,7 @@ export function metadataToSummary(metadata: ContextCollectionMetadata): ContextC
     description: metadata.description,
     icon: metadata.icon,
     visibility: metadata.visibility,
+    source: metadata.content.source === "bundled" ? "bundled" : "public",
     documentCount: metadata.documentCount,
     lastUpdated: metadata.lastUpdated,
   };

@@ -15,6 +15,8 @@ import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 import { SessionsProvider } from '../components/sessions/SessionsContext'
 import { RequiredConnectionsGate } from '../RequiredConnectionsGate'
+import { HubProvider } from '../HubContext'
+import { useEnabledHubs } from '../ServerConfigContext'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -138,6 +140,7 @@ function AuthenticatedShell({
   isWorkspaceEditor: boolean
   pathname: string
 }) {
+  const enabledHubs = useEnabledHubs()
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
 
@@ -172,19 +175,21 @@ function AuthenticatedShell({
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
   const fullscreen = isWorkspaceEditor
   return (
-    <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
-      <AccountSelectionModal />
-      {fullscreen ? (
-        <main className="h-full min-h-0">
-          <Outlet />
-        </main>
-      ) : (
-        <SessionsProvider>
-          <AppShell>
+    <HubProvider enabledHubs={enabledHubs}>
+      <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
+        <AccountSelectionModal />
+        {fullscreen ? (
+          <main className="h-full min-h-0">
             <Outlet />
-          </AppShell>
-        </SessionsProvider>
-      )}
-    </RequiredConnectionsGate>
+          </main>
+        ) : (
+          <SessionsProvider>
+            <AppShell>
+              <Outlet />
+            </AppShell>
+          </SessionsProvider>
+        )}
+      </RequiredConnectionsGate>
+    </HubProvider>
   )
 }

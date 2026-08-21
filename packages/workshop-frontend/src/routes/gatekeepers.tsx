@@ -26,6 +26,8 @@ import { GatekeeperVendorInfo } from '@gadgets/workshop-shared/api'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useSiteName } from '../ServerConfigContext'
 import { AccountsSubscriberAdapter } from '../accountsSubscriber'
+import { useHub } from '../HubContext'
+import { isSupportCuratedAsset, rankForSelectedHub } from '../supportCuration'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -445,6 +447,7 @@ type ModalTarget =
 function ConnectorsPage() {
   useDocumentTitle('Connections')
   const siteName = useSiteName()
+  const { hub } = useHub()
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
@@ -668,7 +671,7 @@ function ConnectorsPage() {
       vendors.find((v) => v.id === account.vendorId)?.supportedResources ??
       account.supportedResources
 
-    return accounts.filter((a) => {
+    const filtered = accounts.filter((a) => {
       const resources = resourcesForAccountFilter(a)
       return (
         matchesSearch(a.accountDescription.displayName) ||
@@ -678,7 +681,11 @@ function ConnectorsPage() {
         resources.some((r) => matchesSearch(r.title))
       )
     })
-  }, [accounts, vendors, searchLower])
+    return rankForSelectedHub(filtered, hub, (account) =>
+      isSupportCuratedAsset('connector', account.vendorId)
+      || isSupportCuratedAsset('connector', account.vendorDescription.displayName),
+    )
+  }, [accounts, hub, vendors, searchLower])
 
   // Connectable vendors = OAuth/resource gatekeepers plus opt-in ambient ones, rendered identically.
   // An ambient vendor is recognized by `description.autoProvisionsAccount`, which routes the connect
@@ -694,13 +701,27 @@ function ConnectorsPage() {
     const matchesSearch = (text: string | undefined) =>
       !searchLower || (text ?? '').toLowerCase().includes(searchLower)
 
-    return availableVendors.filter(
+    const filtered = availableVendors.filter(
       (v) =>
         matchesSearch(v.description.displayName) ||
         matchesSearch(v.description.tagline) ||
         v.supportedResources.some((r) => matchesSearch(r.title)),
     )
-  }, [availableVendors, searchLower])
+    return rankForSelectedHub(filtered, hub, (vendor) =>
+      isSupportCuratedAsset('connector', vendor.id)
+      || isSupportCuratedAsset('connector', vendor.description.displayName),
+    )
+  }, [availableVendors, hub, searchLower])
+
+  const supportReadiness = useMemo(() => {
+    const supportAccounts = accounts.filter((account) =>
+      isSupportCuratedAsset('connector', account.vendorId)
+      || isSupportCuratedAsset('connector', account.vendorDescription.displayName),
+    )
+    const connected = supportAccounts.filter((account) => account.credentialsValid).length
+    const expired = supportAccounts.filter((account) => !account.credentialsValid).length
+    return { connected, expired }
+  }, [accounts])
 
   const activeAccount: AccountEntry | undefined =
     modalTarget?.kind === 'manage'
@@ -762,6 +783,18 @@ function ConnectorsPage() {
           </div>
           <ViewToggle view={view} onChange={setView} />
         </div>
+
+        {hub === 'support' && !initialLoading && (
+          <div className="mb-6 rounded-2xl border border-kumo-line bg-kumo-elevated px-4 py-3 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+            <span className="font-medium text-kumo-default">Support readiness:</span>{' '}
+            {supportReadiness.connected === 0 && supportReadiness.expired === 0
+              ? ' No support connections yet. Support recommendations appear first below.'
+              : ` ${supportReadiness.connected} support connection${supportReadiness.connected === 1 ? '' : 's'} ready`}
+            {supportReadiness.expired > 0
+              ? ` · ${supportReadiness.expired} connection${supportReadiness.expired === 1 ? '' : 's'} need attention`
+              : supportReadiness.connected > 0 ? ' · credentials ready' : ''}
+          </div>
+        )}
 
         {loadError && (
           <div className="rounded-2xl border border-kumo-line bg-kumo-base px-4 py-6 text-center">

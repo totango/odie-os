@@ -18,6 +18,13 @@ management app at `/gatekeepers/scheduler`.
 The Scheduler app is intentionally read-only. Enabling and disabling remain in Connections; the app
 does not provide editing, pausing, deletion, run history, or a second hook toggle.
 
+The starter prompt list includes general personal automations plus support-oriented personal prompts
+for escalation reviews, SLA-risk sweeps, waiting-on-customer follow-ups, executive escalation digests,
+and stale war-room checks. These starters only place editable text in Home; the starter action never
+auto-submits or registers anything. They ask the agent to confirm the target workspace, needed
+resources, destination, and timezone, then create a disabled personal hook that the user must enable
+in Connections; temporary support workflows also ask for a finite occurrence count or until date.
+
 ## Agent API
 
 The ambient binding exposes `ScheduleSession`. The exact agent-facing contract and examples live in

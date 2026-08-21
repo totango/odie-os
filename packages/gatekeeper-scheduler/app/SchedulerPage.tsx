@@ -51,6 +51,46 @@ const STARTERS = [
       "Every Monday at 8:00 AM, refresh a spreadsheet or query and call out what moved. Ask me which data source, destination, and timezone to use, then set up the schedule.",
     icon: Clock,
   },
+  {
+    title: "Daily escalation review",
+    cadence: "Weekdays at 8:30 AM",
+    description: "Review my active escalations and surface urgent owner updates",
+    prompt:
+      "Draft a personal scheduled task for Home: every weekday at 8:30 AM, review my active support escalations, summarize the highest-risk items, and suggest the next owner update for each. Confirm the workspace, support resources to read, destination, and IANA timezone before creating anything. Only place this editable text in Home; do not auto-submit or register anything from this starter action. After I confirm, create a disabled personal hook that requires me to enable it in Connections.",
+    icon: WarningCircle,
+  },
+  {
+    title: "SLA-risk sweep",
+    cadence: "Weekdays at 2:00 PM",
+    description: "Find my cases or tickets approaching SLA breach and rank the risks",
+    prompt:
+      "Draft a personal scheduled task for Home: every weekday at 2:00 PM, sweep my support queue for cases or tickets at risk of breaching SLA, rank them by urgency, and recommend the next action. Confirm the workspace, support resources to read, escalation destination, and IANA timezone before creating anything. Only place this editable text in Home; do not auto-submit or register anything from this starter action. After I confirm, create a disabled personal hook that requires me to enable it in Connections.",
+    icon: WarningCircle,
+  },
+  {
+    title: "Waiting-on-customer follow-up",
+    cadence: "Mondays, Wednesdays, Fridays",
+    description: "Identify my customer threads that need a polite follow-up",
+    prompt:
+      "Draft a personal scheduled task for Home: every Monday, Wednesday, and Friday at 10:00 AM, find my waiting-on-customer support threads that have gone quiet and draft polite follow-up notes. Confirm the workspace, support resources and mailbox to read, destination, and IANA timezone before creating anything. If this follow-up campaign is temporary, ask me for a finite occurrence count or until date. Only place this editable text in Home; do not auto-submit or register anything from this starter action. After I confirm, create a disabled personal hook that requires me to enable it in Connections.",
+    icon: CalendarBlank,
+  },
+  {
+    title: "Executive escalation digest",
+    cadence: "Fridays at 3:00 PM",
+    description: "Prepare my concise executive-ready escalation summary",
+    prompt:
+      "Draft a personal scheduled task for Home: every Friday at 3:00 PM, prepare a concise executive escalation digest with status, customer impact, owner, next milestone, and asks. Confirm the workspace, support resources to read, recipient or destination, and IANA timezone before creating anything. Ask whether this digest should stop after a finite occurrence count or until date tied to the escalation period. Only place this editable text in Home; do not auto-submit or register anything from this starter action. After I confirm, create a disabled personal hook that requires me to enable it in Connections.",
+    icon: CalendarBlank,
+  },
+  {
+    title: "Stale war-room check",
+    cadence: "Daily during incidents",
+    description: "Check my active war rooms for inactivity and missing next steps",
+    prompt:
+      "Draft a personal scheduled task for Home: daily during an active incident, check my war-room channels or docs for stale activity, missing owners, and unclear next steps, then draft a nudge. Confirm the workspace, support resources and channels to read, destination, IANA timezone, and incident end condition before creating anything. Because war rooms are temporary, ask for a finite occurrence count or until date. Only place this editable text in Home; do not auto-submit or register anything from this starter action. After I confirm, create a disabled personal hook that requires me to enable it in Connections.",
+    icon: Clock,
+  },
 ] as const;
 
 type Filter = "all" | "active" | "dead" | "finished";

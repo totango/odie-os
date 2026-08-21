@@ -98,7 +98,9 @@ export type ContextCollectionContent =
   // Content in this collection is managed via the web UI.
   | { source: "web" }
   // Content in this collection is managed via git.
-  | { source: "git"; remote: string; branch: string; lastRefreshedAt: Date; commit?: string };
+  | { source: "git"; remote: string; branch: string; lastRefreshedAt: Date; commit?: string }
+  // Content in this collection is shipped with the gatekeeper bundle and installed read-only.
+  | { source: "bundled"; fingerprint: string };
 
 export type ContextCollectionMetadata = {
   /** Random hex ID. */
@@ -146,6 +148,7 @@ export type ContextCollectionSummary = {
   description: string;
   icon?: string;
   visibility: ContextCollectionVisibility;
+  source?: "public" | "bundled";
   documentCount: number;
   lastUpdated: Date;
 };
@@ -198,7 +201,7 @@ export type EnabledCollectionInfo = {
   title: string;
   description: string;
   icon?: string;
-  source: "private" | "public";
+  source: "private" | "public" | "bundled";
   lastUpdated: Date;
 };
 

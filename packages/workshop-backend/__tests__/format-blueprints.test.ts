@@ -166,6 +166,66 @@ const starterSlugs: StarterSlug[] = [
 ];
 
 describe("bundled format blueprints", () => {
+  it("bundles support document formats with curated metadata and fact-grounding hints", () => {
+    let expectedSupportFormats = [
+      {
+        blueprintId: "format.support.engineering-escalation",
+        title: "Engineering Escalation",
+        noun: "Escalation",
+        plural: "Escalations",
+        icon: "flowArrow",
+      },
+      {
+        blueprintId: "format.support.customer-impact-brief",
+        title: "Customer Impact Brief",
+        noun: "Brief",
+        plural: "Briefs",
+        icon: "fileText",
+      },
+      {
+        blueprintId: "format.support.handoff",
+        title: "Support Handoff",
+        noun: "Handoff",
+        plural: "Handoffs",
+        icon: "listChecks",
+      },
+      {
+        blueprintId: "format.support.incident-rca-summary",
+        title: "Incident/RCA Summary",
+        noun: "RCA",
+        plural: "RCAs",
+        icon: "notebook",
+      },
+      {
+        blueprintId: "format.support.weekly-digest",
+        title: "Weekly Support Digest",
+        noun: "Digest",
+        plural: "Digests",
+        icon: "chartBar",
+      },
+    ];
+
+    for (let expected of expectedSupportFormats) {
+      let entry = FORMAT_BLUEPRINTS.find(format => format.blueprintId === expected.blueprintId);
+      expect(entry, expected.blueprintId).toBeDefined();
+      expect(entry).toMatchObject({
+        title: expected.title,
+        output: {
+          id: "document",
+          noun: expected.noun,
+          plural: expected.plural,
+          icon: expected.icon,
+        },
+        author: {type: "user", name: "Cloudflare", id: "agent@cloudflare.com"},
+      });
+      expect(entry!.description, expected.blueprintId).toMatch(/facts?/iu);
+      expect(entry!.description, expected.blueprintId).toMatch(/customer claims?/iu);
+      expect(entry!.description, expected.blueprintId).toMatch(/deductions?/iu);
+      expect(entry!.description, expected.blueprintId).toMatch(/unknowns?/iu);
+      expect(entry!.description, expected.blueprintId).toMatch(/provenance/iu);
+    }
+  });
+
   it("installs every manifest entry as an ordinary blueprint", async () => {
     let {kv, r2, env} = makeEnv();
 
@@ -507,6 +567,74 @@ describe("featured starter server runtime smoke tests", () => {
     expect(jiraSaved.records[0].tags).toHaveLength(12);
     await jira.gadget.importText("title,program\nCSV risk,Program", "csv");
     expect((await jira.gadget.resetDemo() as {records: unknown[]}).records).toHaveLength(4);
+  });
+
+  it("normalizes support escalation anchor fields from JSON and CSV imports", async () => {
+    let support = await loadStarter("support-escalation-cockpit");
+
+    let jsonImport = await support.gadget.importText(JSON.stringify({records: [{
+      title: "Catalyst renewal blocked by <script>alert(1)</script>",
+      accountName: "Acme Global",
+      brand: "Catalyst",
+      zendeskTicketUrl: "https://acme.zendesk.com/agent/tickets/123",
+      ticketId: "ZD-123",
+      accountId: "acct-42",
+      jiraIssue: "ENG-77",
+      sla: "breached",
+      slaDeadline: "2026-08-21T12:00:00.000Z",
+      lastCustomerTouchAt: "2026-08-20",
+      followUpDate: "2026-08-22",
+      resolutionEvidence: "Patch deployed and customer confirmed.",
+      handoff: "engineering",
+      confidence: 1.5,
+      provenance: ["zendesk:123", "pi:summary"],
+      sourceUrl: "https://pi.example/escalations/123",
+    }]}), "json") as {state: {records: Array<{
+      brand: string;
+      customer: string;
+      customerRef: string;
+      zendeskLinks: string[];
+      engineeringLinks: string[];
+      slaState: string;
+      slaDeadline: string;
+      lastCustomerTouch: string;
+      followUpDate: string;
+      resolutionEvidence: string;
+      handoffState: string;
+      confidence: number;
+      sourceRefs: string[];
+      title: string;
+    }>}};
+    let jsonRecord = jsonImport.state.records[0];
+    expect(jsonRecord).toMatchObject({
+      brand: "catalyst",
+      customer: "Acme Global",
+      customerRef: "acct-42",
+      zendeskLinks: ["https://acme.zendesk.com/agent/tickets/123", "ZD-123"],
+      engineeringLinks: ["ENG-77"],
+      slaState: "breached",
+      slaDeadline: "2026-08-21T12:00:00.000Z",
+      lastCustomerTouch: "2026-08-20",
+      followUpDate: "2026-08-22",
+      resolutionEvidence: "Patch deployed and customer confirmed.",
+      handoffState: "engineering",
+      confidence: 1,
+      sourceRefs: ["zendesk:123", "pi:summary", "https://pi.example/escalations/123"],
+    });
+    expect(jsonRecord.title).toContain("<script>");
+
+    let csvImport = await support.gadget.importText(
+        "subject,brand,ticket_url,native_link,account_ref,eng_issue,sla_state,confidence,source_ref\n" +
+        "Totango issue,totango,https://zd/t/999,https://native/t/999,account-9,GH-99,at risk,0.64,export:row-1",
+        "csv") as {state: {records: Array<{brand: string, customerRef: string, zendeskLinks: string[], engineeringLinks: string[], slaState: string, confidence: number, sourceRefs: string[]}>}};
+    let csvRecord = csvImport.state.records[0];
+    expect(csvRecord.brand).toBe("totango");
+    expect(csvRecord.customerRef).toBe("account-9");
+    expect(csvRecord.zendeskLinks).toEqual(["https://zd/t/999", "https://native/t/999"]);
+    expect(csvRecord.engineeringLinks).toEqual(["GH-99"]);
+    expect(csvRecord.slaState).toBe("at-risk");
+    expect(csvRecord.confidence).toBe(0.64);
+    expect(csvRecord.sourceRefs).toEqual(["export:row-1"]);
   });
 
   it("exercises sourceSnapshot with fake cursor/RPC stubs and disposes cursor results", async () => {

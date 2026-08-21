@@ -1,9 +1,12 @@
 const STATUSES = ["new", "investigating", "war-room", "waiting-customer", "at-risk", "resolved"];
 const SEVERITIES = ["sev1", "sev2", "sev3", "sev4"];
+const BRANDS = ["totango", "catalyst", "unison", "unspecified"];
+const SLA_STATES = ["unknown", "on-track", "at-risk", "breached", "met"];
+const HANDOFF_STATES = ["none", "support", "customer-success", "engineering", "product", "resolved"];
 
 let state = null;
 let selectedId = null;
-let filters = { query: "", severity: "all", status: "all" };
+let filters = { query: "", severity: "all", status: "all", brand: "all", sla: "all" };
 
 const root = document.createElement("main");
 root.className = "app-shell";
@@ -25,7 +28,7 @@ root.innerHTML = `
     .btn { border-radius: 999px; padding: 10px 15px; font-weight: 800; background: #e0f2fe; color: #082f49; box-shadow: 0 10px 30px #0002; }
     .btn.secondary { background: #ffffff1f; color: white; border: 1px solid #ffffff36; }
     .btn.danger { background: #fee2e2; color: #991b1b; }
-    .metrics { display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr)); gap: 12px; margin-top: 24px; }
+    .metrics { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 12px; margin-top: 24px; }
     .metric { background: #ffffff14; border: 1px solid #ffffff26; border-radius: 20px; padding: 16px; backdrop-filter: blur(12px); }
     .metric b { display: block; font-size: 30px; }
     .metric span { color: #bfdbfe; font-size: 13px; }
@@ -40,7 +43,7 @@ root.innerHTML = `
     .connected { background: #dcfce7; color: #166534; } .missing { background: #fef3c7; color: #92400e; } .skipped { background: #e0e7ff; color: #3730a3; } .unavailable { background: #fee2e2; color: #991b1b; }
     .connector p { margin: 0; color: #64748b; font-size: 13px; line-height: 1.4; }
     .skip { background: transparent; color: #2563eb; min-height: 32px; padding: 6px 8px; font-weight: 700; justify-self: start; }
-    .command { display: grid; grid-template-columns: 1fr 140px 140px; gap: 10px; padding: 16px; border-bottom: 1px solid #e5edf7; }
+    .command { display: grid; grid-template-columns: minmax(180px, 1fr) repeat(4, minmax(120px, 150px)); gap: 10px; padding: 16px; border-bottom: 1px solid #e5edf7; }
     .command input, .command select, .form-grid input, .form-grid select, .importer select, textarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 12px; padding: 10px 12px; background: white; color: #0f172a; }
     .board { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)); gap: 12px; padding: 16px; align-items:start; }
     .lane { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 20px; min-height: 260px; }
@@ -82,13 +85,15 @@ root.innerHTML = `
   </section>
   <section class="workspace">
     <aside class="panel" aria-labelledby="onboarding-title"><div class="panel-head"><h2 id="onboarding-title">Connection checklist</h2></div><div class="onboarding" id="connectors"></div><div class="importer"><h2>Manual import</h2><label>Import format<select id="import-format"><option value="json">JSON</option><option value="csv">CSV</option></select></label><label>Import text<textarea id="import-text" placeholder='[{"title":"Customer escalation","customer":"Example Co"}]'></textarea></label><button class="btn" id="import-button">Import records</button></div></aside>
-    <section class="panel" aria-labelledby="board-title"><div class="panel-head"><h2 id="board-title">Triage board</h2></div><div class="command"><input id="search" aria-label="Search escalations" placeholder="Search customers, owners, tags…"><select id="severity-filter" aria-label="Filter severity"><option value="all">All severities</option></select><select id="status-filter" aria-label="Filter status"><option value="all">All statuses</option></select></div><div class="board" id="board"></div></section>
+    <section class="panel" aria-labelledby="board-title"><div class="panel-head"><h2 id="board-title">Triage board</h2></div><div class="command"><input id="search" aria-label="Search escalations" placeholder="Search customers, owners, refs, tags…"><select id="severity-filter" aria-label="Filter severity"><option value="all">All severities</option></select><select id="status-filter" aria-label="Filter status"><option value="all">All statuses</option></select><select id="brand-filter" aria-label="Filter brand"><option value="all">All brands</option></select><select id="sla-filter" aria-label="Filter SLA state"><option value="all">All SLA states</option></select></div><div class="board" id="board"></div></section>
     <aside class="panel" aria-labelledby="detail-title"><div class="panel-head"><h2 id="detail-title">Record detail</h2></div><div id="detail" class="detail"></div></aside>
   </section>`;
 document.body.appendChild(root);
 
 for (let severity of SEVERITIES) document.querySelector("#severity-filter").append(new Option(severity.toUpperCase(), severity));
 for (let status of STATUSES) document.querySelector("#status-filter").append(new Option(status.replaceAll("-", " "), status));
+for (let brand of BRANDS) document.querySelector("#brand-filter").append(new Option(brand, brand));
+for (let sla of SLA_STATES) document.querySelector("#sla-filter").append(new Option(sla.replaceAll("-", " "), sla));
 
 function toast(message) {
   let el = document.createElement("div");
@@ -104,7 +109,9 @@ function visibleRecords() {
   return (state?.records || []).filter((record) => {
     if (filters.severity !== "all" && record.severity !== filters.severity) return false;
     if (filters.status !== "all" && record.status !== filters.status) return false;
-    return !q || [record.title, record.customer, record.owner, record.summary, ...(record.tags || [])].join(" ").toLowerCase().includes(q);
+    if (filters.brand !== "all" && record.brand !== filters.brand) return false;
+    if (filters.sla !== "all" && record.slaState !== filters.sla) return false;
+    return !q || [record.title, record.customer, record.customerRef, record.owner, record.summary, record.source, ...(record.tags || []), ...(record.sourceRefs || []), ...(record.zendeskLinks || []), ...(record.engineeringLinks || [])].join(" ").toLowerCase().includes(q);
   });
 }
 
@@ -116,9 +123,9 @@ function render() {
 }
 
 function renderMetrics() {
-  let m = state?.metrics || { total: 0, open: 0, sev1: 0, overdue: 0, avgImpact: 0 };
+  let m = state?.metrics || { total: 0, open: 0, sev1: 0, overdue: 0, breached: 0, followUpsDue: 0, avgConfidence: 0 };
   document.querySelector("#metrics").innerHTML = [
-    [m.total, "Total records"], [m.open, "Open escalations"], [m.sev1, "SEV1 now"], [m.overdue, "Past target"], [m.avgImpact, "Avg impact score"],
+    [m.total, "Total records"], [m.open, "Open escalations"], [m.sev1, "SEV1 now"], [m.overdue, "Past SLA"], [m.breached, "SLA breached"], [m.followUpsDue, "Follow-ups due"], [`${m.avgConfidence}%`, "Avg confidence"],
   ].map(([value, label]) => `<div class="metric"><b>${value}</b><span>${label}</span></div>`).join("");
 }
 
@@ -168,7 +175,7 @@ function ticket(record) {
   let button = document.createElement("button");
   button.className = `ticket ${record.severity}`;
   button.setAttribute("aria-current", String(record.id === selectedId));
-  button.innerHTML = `<div class="meta"><span class="badge ${record.severity === "sev1" ? "unavailable" : "missing"}">${escapeHtml(record.severity)}</span><span>${escapeHtml(String(record.status).replaceAll("-", " "))}</span></div><strong>${escapeHtml(record.title)}</strong><div class="meta"><span>${escapeHtml(record.customer)}</span><span>Owner: ${escapeHtml(record.owner)}</span><span>Impact ${escapeHtml(record.impact)}</span></div>`;
+  button.innerHTML = `<div class="meta"><span class="badge ${record.severity === "sev1" ? "unavailable" : "missing"}">${escapeHtml(record.severity)}</span><span>${escapeHtml(String(record.status).replaceAll("-", " "))}</span><span>${escapeHtml(record.brand || "unspecified")}</span></div><strong>${escapeHtml(record.title)}</strong><div class="meta"><span>${escapeHtml(record.customer)}</span><span>Owner: ${escapeHtml(record.owner)}</span><span>SLA ${escapeHtml(record.slaState || "unknown")}</span><span>Confidence ${Math.round(Number(record.confidence ?? 0.5) * 100)}%</span></div>`;
   button.addEventListener("click", () => { selectedId = record.id; render(); });
   return button;
 }
@@ -176,6 +183,10 @@ function ticket(record) {
 function selectedRecord() {
   if (selectedId === null) return null;
   return state?.records?.find((record) => record.id === selectedId) || state?.records?.[0] || null;
+}
+
+function listText(values) {
+  return (values || []).map(escapeHtml).join(", ") || "None";
 }
 
 function renderDetail(editing = false) {
@@ -188,7 +199,7 @@ function renderDetail(editing = false) {
     return;
   }
   selectedId = record.id;
-  detail.innerHTML = `<div class="detail-card"><h3>${escapeHtml(record.title)}</h3><p>${escapeHtml(record.summary || "No summary yet.")}</p><div class="tags">${(record.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div></div><div class="detail-card"><h3>Next best action</h3><p>${escapeHtml(record.nextStep || "Add a next step so the owner knows what to do next.")}</p></div><dl class="detail-card"><dt>Customer</dt><dd>${escapeHtml(record.customer)}</dd><dt>Owner</dt><dd>${escapeHtml(record.owner)}</dd><dt>Deadline</dt><dd>${escapeHtml(record.deadline || "Not set")}</dd><dt>Source</dt><dd>${escapeHtml(record.source)}</dd><dt>Links</dt><dd>${(record.links || []).map(escapeHtml).join(", ") || "None"}</dd></dl><div class="actions"><button class="btn" id="edit-record">Edit</button><button class="btn danger" id="delete-record">Delete</button></div>`;
+  detail.innerHTML = `<div class="detail-card"><h3>${escapeHtml(record.title)}</h3><p>${escapeHtml(record.summary || "No summary yet.")}</p><div class="tags">${(record.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div></div><div class="detail-card"><h3>Next best action</h3><p>${escapeHtml(record.nextStep || "Add a next step so the owner knows what to do next.")}</p></div><dl class="detail-card"><dt>Customer</dt><dd>${escapeHtml(record.customer)}${record.customerRef ? ` · ${escapeHtml(record.customerRef)}` : ""}</dd><dt>Brand</dt><dd>${escapeHtml(record.brand || "unspecified")}</dd><dt>Owner</dt><dd>${escapeHtml(record.owner)}</dd><dt>SLA</dt><dd>${escapeHtml(record.slaState || "unknown")} · ${escapeHtml(record.slaDeadline || record.deadline || "No deadline")}</dd><dt>Last customer touch</dt><dd>${escapeHtml(record.lastCustomerTouch || "Not recorded")}</dd><dt>Follow-up</dt><dd>${escapeHtml(record.followUpDate || "Not set")}</dd><dt>Handoff</dt><dd>${escapeHtml(record.handoffState || "none")}</dd><dt>Confidence</dt><dd>${Math.round(Number(record.confidence ?? 0.5) * 100)}%</dd><dt>Source</dt><dd>${escapeHtml(record.source)}</dd><dt>Source refs</dt><dd>${listText(record.sourceRefs)}</dd><dt>Zendesk / native links</dt><dd>${listText(record.zendeskLinks)}</dd><dt>Engineering links</dt><dd>${listText(record.engineeringLinks)}</dd><dt>Resolution evidence</dt><dd>${escapeHtml(record.resolutionEvidence || "Not recorded")}</dd><dt>Links</dt><dd>${listText(record.links)}</dd></dl><div class="actions"><button class="btn" id="edit-record">Edit</button><button class="btn danger" id="delete-record">Delete</button></div>`;
   detail.querySelector("#edit-record").addEventListener("click", () => renderDetail(true));
   detail.querySelector("#delete-record").addEventListener("click", async () => {
     state = await gadget.deleteRecord(record.id);
@@ -199,13 +210,14 @@ function renderDetail(editing = false) {
 }
 
 function formHtml(record) {
-  return `<form class="form-grid"><input type="hidden" name="id" value="${escapeAttr(record.id || "")}"><label class="wide">Title<input name="title" required value="${escapeAttr(record.title || "")}"></label><label>Customer<input name="customer" required value="${escapeAttr(record.customer || "")}"></label><label>Owner<input name="owner" value="${escapeAttr(record.owner || "")}"></label><label>Severity<select name="severity">${SEVERITIES.map((s) => `<option value="${s}" ${record.severity === s ? "selected" : ""}>${s.toUpperCase()}</option>`).join("")}</select></label><label>Status<select name="status">${STATUSES.map((s) => `<option value="${s}" ${record.status === s ? "selected" : ""}>${s.replaceAll("-", " ")}</option>`).join("")}</select></label><label>Deadline<input name="deadline" type="date" value="${escapeAttr(record.deadline || "")}"></label><label>Impact<input name="impact" type="number" min="0" max="100" value="${escapeAttr(record.impact ?? 50)}"></label><label class="wide">Summary<textarea name="summary">${escapeHtml(record.summary || "")}</textarea></label><label class="wide">Next step<textarea name="nextStep">${escapeHtml(record.nextStep || "")}</textarea></label><label class="wide">Tags (comma separated)<input name="tags" value="${escapeAttr((record.tags || []).join(", "))}"></label><label class="wide">Links (comma separated)<input name="links" value="${escapeAttr((record.links || []).join(", "))}"></label><div class="actions wide"><button class="btn" type="submit">Save escalation</button><button class="btn secondary" id="cancel-edit" type="button">Cancel</button></div></form>`;
+  return `<form class="form-grid"><input type="hidden" name="id" value="${escapeAttr(record.id || "")}"><label class="wide">Title<input name="title" required value="${escapeAttr(record.title || "")}"></label><label>Customer<input name="customer" required value="${escapeAttr(record.customer || "")}"></label><label>Customer/account ref<input name="customerRef" value="${escapeAttr(record.customerRef || "")}"></label><label>Brand<select name="brand">${BRANDS.map((s) => `<option value="${s}" ${record.brand === s ? "selected" : ""}>${s}</option>`).join("")}</select></label><label>Owner<input name="owner" value="${escapeAttr(record.owner || "")}"></label><label>Severity<select name="severity">${SEVERITIES.map((s) => `<option value="${s}" ${record.severity === s ? "selected" : ""}>${s.toUpperCase()}</option>`).join("")}</select></label><label>Status<select name="status">${STATUSES.map((s) => `<option value="${s}" ${record.status === s ? "selected" : ""}>${s.replaceAll("-", " ")}</option>`).join("")}</select></label><label>SLA state<select name="slaState">${SLA_STATES.map((s) => `<option value="${s}" ${record.slaState === s ? "selected" : ""}>${s.replaceAll("-", " ")}</option>`).join("")}</select></label><label>SLA deadline<input name="slaDeadline" type="date" value="${escapeAttr(record.slaDeadline || record.deadline || "")}"></label><label>Last customer touch<input name="lastCustomerTouch" type="date" value="${escapeAttr(record.lastCustomerTouch || "")}"></label><label>Follow-up date<input name="followUpDate" type="date" value="${escapeAttr(record.followUpDate || "")}"></label><label>Handoff<select name="handoffState">${HANDOFF_STATES.map((s) => `<option value="${s}" ${record.handoffState === s ? "selected" : ""}>${s.replaceAll("-", " ")}</option>`).join("")}</select></label><label>Confidence<input name="confidence" type="number" min="0" max="1" step="0.01" value="${escapeAttr(record.confidence ?? 0.5)}"></label><label>Impact<input name="impact" type="number" min="0" max="100" value="${escapeAttr(record.impact ?? 50)}"></label><label class="wide">Summary<textarea name="summary">${escapeHtml(record.summary || "")}</textarea></label><label class="wide">Next step<textarea name="nextStep">${escapeHtml(record.nextStep || "")}</textarea></label><label class="wide">Resolution evidence<textarea name="resolutionEvidence">${escapeHtml(record.resolutionEvidence || "")}</textarea></label><label class="wide">Source refs / provenance (comma separated)<input name="sourceRefs" value="${escapeAttr((record.sourceRefs || []).join(", "))}"></label><label class="wide">Zendesk / native links (comma separated)<input name="zendeskLinks" value="${escapeAttr((record.zendeskLinks || []).join(", "))}"></label><label class="wide">Engineering links (comma separated)<input name="engineeringLinks" value="${escapeAttr((record.engineeringLinks || []).join(", "))}"></label><label class="wide">Tags (comma separated)<input name="tags" value="${escapeAttr((record.tags || []).join(", "))}"></label><label class="wide">Links (comma separated)<input name="links" value="${escapeAttr((record.links || []).join(", "))}"></label><div class="actions wide"><button class="btn" type="submit">Save escalation</button><button class="btn secondary" id="cancel-edit" type="button">Cancel</button></div></form>`;
 }
 
 async function saveFromForm(event) {
   event.preventDefault();
   let data = Object.fromEntries(new FormData(event.currentTarget));
   data.impact = Number(data.impact);
+  data.confidence = Number(data.confidence);
   state = await gadget.saveRecord(data);
   selectedId = data.id || state.records[0]?.id;
   render();
@@ -233,6 +245,8 @@ document.querySelector("#import-button").addEventListener("click", async () => {
 document.querySelector("#search").addEventListener("input", (event) => { filters.query = event.target.value; renderBoard(); });
 document.querySelector("#severity-filter").addEventListener("change", (event) => { filters.severity = event.target.value; renderBoard(); });
 document.querySelector("#status-filter").addEventListener("change", (event) => { filters.status = event.target.value; renderBoard(); });
+document.querySelector("#brand-filter").addEventListener("change", (event) => { filters.brand = event.target.value; renderBoard(); });
+document.querySelector("#sla-filter").addEventListener("change", (event) => { filters.sla = event.target.value; renderBoard(); });
 
 state = await gadget.getState();
 selectedId = state.records[0]?.id || null;

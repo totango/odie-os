@@ -73,6 +73,11 @@ import type {
   WorkItemSummary,
   WorkItemTransition,
   WorkItemUpdateOptions,
+  ZendeskTicketMemoryEntry,
+  ZendeskTicketMemoryPartition,
+  ZendeskTicketMemorySearchRequest,
+  ZendeskTicketMemorySearchResult,
+  ZendeskTicketReadRequest,
 } from "./types.js";
 
 type TeamPiLogFields = { event?: string; vendorId?: string; accountId?: string; status?: number; error?: unknown };
@@ -89,6 +94,12 @@ const WORK_ITEM_FIELD_MAX = 2_000;
 const WORK_ITEM_BODY_MAX = 12_000;
 const WORK_ITEM_DESCRIPTION_MAX = 60_000;
 const WORK_ITEM_SAVED_VIEWS_MAX = 20;
+const ZENDESK_MEMORY_META_KEY = "zendeskTicketMemory:v2:meta";
+const ZENDESK_MEMORY_PARTITION_KEY_PREFIX = "zendeskTicketMemory:v2:partition:";
+const ZENDESK_MEMORY_MAX_PARTITIONS = 25;
+const ZENDESK_MEMORY_MAX_ENTRIES = 50;
+const ZENDESK_MEMORY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const ZENDESK_MEMORY_MAX_RESULTS = 25;
 const ACCOUNT_URL = "team-pi://account";
 const ACCOUNT_RESOURCE: SupportedResource = {
   urlPattern: ACCOUNT_URL,
@@ -105,6 +116,8 @@ type ApplyingAction = PendingAction & { claimedAt: number };
 type WorkItemProviderSearchResult =
   | { source: WorkItemProviderKind; page: WorkItemSearchPage }
   | { source: WorkItemProviderKind; error: WorkItemProviderError };
+type StoredZendeskTicketMemoryMeta = { partitions: { keyHash: string; lastUsedAt: number }[] };
+type StoredZendeskTicketMemoryEntry = Omit<ZendeskTicketMemoryEntry, "partition">;
 
 const PROVIDER_CATALOG_ENTRIES: AgentCatalogEntry[] = [
   { id: "provider:gmail", title: "Gmail", description: "Search and read Gmail messages available through Team PI." },
@@ -491,15 +504,7 @@ export class TeamPiWorkItemManagementApi extends RpcTarget implements WorkItemMa
   constructor(private readonly api: TeamPiApi, private readonly ref: WorkItemProviderRef) { super(); }
 
   async read(): Promise<WorkItemRead> {
-    const [detail, comments, activity, updateOptions, transitions, attachments] = await Promise.all([
-      this.#detail(),
-      this.api.workItemsComments(this.ref.source, this.ref.id).then(value => commentsFromEnvelope(this.ref.source, value)),
-      this.api.workItemsActivity(this.ref.source, this.ref.id).then(activityFromEnvelope),
-      this.api.workItemsUpdateOptions(this.ref.source, this.ref.id).then(value => updateOptionsFromEnvelope(this.ref, value)),
-      this.ref.source === "jira" ? this.api.workItemsTransitions(this.ref.id).then(transitionsFromEnvelope) : Promise.resolve([]),
-      this.api.workItemsAttachments(this.ref.source, this.ref.id).then(attachmentsFromEnvelope),
-    ]);
-    return { detail, comments, activity, updateOptions, transitions, attachments };
+    return readWorkItem(this.api, this.ref);
   }
 
   async readAttachment(id: string): Promise<WorkItemAttachmentContent> {
@@ -622,6 +627,40 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
   async startConnection(provider: TeamPiProvider): Promise<TeamPiQueuedAction> { const safe = safeProvider(provider); return this.queue({ kind: "startConnection", provider: safe }, `Start Team PI connection ${safe}`, `Start Team PI connection \`${escapeMd(safe)}\`.`); }
   async getActionResult(actionId: number): Promise<TeamPiActionResult> { return getStoredActionResult(this.kv, actionId); }
   async workItemsSearch(request: WorkItemSearchRequest): Promise<WorkItemSearchPage> { return this.read("Search Team PI Work Items", "Searched Jira and Zendesk Work Items through Team PI.", () => searchWorkItems(this.api, request)); }
+  async readZendeskTicket(request: ZendeskTicketReadRequest): Promise<WorkItemRead> {
+    const id = normalizeZendeskTicketId(request?.id);
+    const result = await this.read(
+      "Read Team PI Zendesk ticket Work Item",
+      `Read authoritative Zendesk ticket ${id} through Team PI Work Items.`,
+      () => readWorkItem(this.api, { source: "zendesk", id }),
+    );
+    try {
+      await rememberZendeskTicket(this.kv, result.detail.item);
+    } catch (error) {
+      logger.warn("team pi zendesk ticket memory update failed", {
+        event: "team_pi.zendesk_ticket_memory.update.failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return result;
+  }
+  async searchZendeskTicketMemory(request: ZendeskTicketMemorySearchRequest): Promise<ZendeskTicketMemorySearchResult> {
+    const search = await readZendeskTicketMemory(this.kv, request);
+    await this.approvalQueue.authorizeObservation({
+      title: "Search Team PI Zendesk ticket memory",
+      description: "Searched minimized local Zendesk ticket memory for one exact strict partition. Results are non-authoritative and require live read before use.",
+      prohibitAllSharing: true,
+    });
+    try {
+      touchZendeskTicketMemoryPartition(this.kv, search.keyHash, Date.now());
+    } catch (error) {
+      logger.warn("team pi zendesk ticket memory touch failed", {
+        event: "team_pi.zendesk_ticket_memory.touch.failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return { items: search.items };
+  }
   private async read<T>(title: string, description: string, fn: () => Promise<T>): Promise<T> { const result = await fn(); await this.approvalQueue.authorizeObservation({ title, description, prohibitAllSharing: true }); return result; }
   private async queue(action: PendingAction, title: string, description: string): Promise<TeamPiQueuedAction> {
     const actionId = (this.kv.get<number>("nextActionId") ?? 1);
@@ -825,6 +864,241 @@ async function searchWorkItems(api: TeamPiApi, request: WorkItemSearchRequest): 
   }
   if (errors.length > 0) out.errors = errors;
   return { ...out, items: out.items.slice(0, 100) };
+}
+
+async function readWorkItem(api: TeamPiApi, ref: WorkItemProviderRef): Promise<WorkItemRead> {
+  const [detail, comments, activity, updateOptions, transitions, attachments] = await Promise.all([
+    api.workItemsDetail(ref.source, ref.id).then(detailFromEnvelope),
+    api.workItemsComments(ref.source, ref.id).then(value => commentsFromEnvelope(ref.source, value)),
+    api.workItemsActivity(ref.source, ref.id).then(activityFromEnvelope),
+    api.workItemsUpdateOptions(ref.source, ref.id).then(value => updateOptionsFromEnvelope(ref, value)),
+    ref.source === "jira" ? api.workItemsTransitions(ref.id).then(transitionsFromEnvelope) : Promise.resolve([]),
+    api.workItemsAttachments(ref.source, ref.id).then(attachmentsFromEnvelope),
+  ]);
+  return { detail, comments, activity, updateOptions, transitions, attachments };
+}
+
+async function rememberZendeskTicket(kv: DurableObjectStorage["kv"], item: WorkItemSummary): Promise<void> {
+  if (item.source !== "zendesk") return;
+  const url = canonicalZendeskTicketUrl(item.url, item.id);
+  const partition = deriveZendeskPartition(item, url);
+  if (!partition) return;
+  const entry: StoredZendeskTicketMemoryEntry = {
+    id: normalizeZendeskTicketId(item.id),
+    ...(url ? { url } : {}),
+    title: boundCleanString(item.title, 300),
+    status: optionalCleanString(item.status, 80),
+    type: optionalCleanString(item.type, 80),
+    priority: optionalCleanString(item.priority, 80),
+    rememberedAt: Date.now(),
+  };
+  const keyHash = await zendeskPartitionHash(partition);
+  const partitionKey = zendeskPartitionStorageKey(keyHash);
+  const entries = zendeskMemoryEntriesFromStorage(kv.get<unknown>(partitionKey), entry.rememberedAt);
+  const nextEntries = [entry, ...entries.filter(existing => existing.id !== entry.id)]
+    .toSorted((a, b) => b.rememberedAt - a.rememberedAt)
+    .slice(0, ZENDESK_MEMORY_MAX_ENTRIES);
+  kv.put(partitionKey, nextEntries);
+  upsertZendeskMemoryMeta(kv, keyHash, entry.rememberedAt);
+}
+
+async function readZendeskTicketMemory(kv: DurableObjectStorage["kv"], request: ZendeskTicketMemorySearchRequest): Promise<ZendeskTicketMemorySearchResult & { keyHash: string }> {
+  const partition = normalizeZendeskPartition(request?.partition);
+  const keyHash = await zendeskPartitionHash(partition);
+  const entries = zendeskMemoryEntriesFromStorage(kv.get<unknown>(zendeskPartitionStorageKey(keyHash)), Date.now());
+  const query = optionalCleanString(request?.query, 200)?.toLowerCase();
+  const limit = typeof request?.limit === "number" && Number.isFinite(request.limit)
+    ? Math.max(1, Math.min(ZENDESK_MEMORY_MAX_RESULTS, Math.floor(request.limit)))
+    : ZENDESK_MEMORY_MAX_RESULTS;
+  return {
+    items: entries
+      .map(entry => ({ ...entry, partition }))
+      .filter(entry => !query || zendeskMemoryText(entry).includes(query))
+      .toSorted((a, b) => b.rememberedAt - a.rememberedAt)
+      .slice(0, limit),
+    keyHash,
+  };
+}
+
+function zendeskMemoryMetaFromStorage(value: unknown): StoredZendeskTicketMemoryMeta {
+  const rawPartitions = asRecord(value).partitions;
+  const partitions = Array.isArray(rawPartitions) ? rawPartitions : [];
+  return { partitions: partitions.map((part): { keyHash: string; lastUsedAt: number } | null => {
+    const obj = asRecord(part);
+    const keyHash = typeof obj.keyHash === "string" && /^[a-f0-9]{64}$/.test(obj.keyHash) ? obj.keyHash : "";
+    if (!keyHash) return null;
+    return { keyHash, lastUsedAt: numberOr(obj.lastUsedAt, 0) };
+  }).filter((part): part is { keyHash: string; lastUsedAt: number } => Boolean(part)) };
+}
+
+function zendeskMemoryEntriesFromStorage(value: unknown, now: number): StoredZendeskTicketMemoryEntry[] {
+  const minRememberedAt = now - ZENDESK_MEMORY_TTL_MS;
+  return (Array.isArray(value) ? value : [])
+    .map(zendeskMemoryEntryFromStorage)
+    .filter((entry): entry is StoredZendeskTicketMemoryEntry =>
+      entry !== null && entry.rememberedAt >= minRememberedAt)
+    .toSorted((a, b) => b.rememberedAt - a.rememberedAt)
+    .slice(0, ZENDESK_MEMORY_MAX_ENTRIES);
+}
+
+function zendeskMemoryEntryFromStorage(value: unknown): StoredZendeskTicketMemoryEntry | null {
+  try {
+    const obj = asRecord(value);
+    const url = canonicalZendeskTicketUrl(obj.url, obj.id);
+    return {
+      id: normalizeZendeskTicketId(obj.id),
+      ...(url ? { url } : {}),
+      title: requiredCleanString(obj.title, "Zendesk memory title", 300),
+      status: optionalCleanString(obj.status, 80),
+      type: optionalCleanString(obj.type, 80),
+      priority: optionalCleanString(obj.priority, 80),
+      rememberedAt: numberOr(obj.rememberedAt, 0),
+    };
+  } catch { return null; }
+}
+
+function upsertZendeskMemoryMeta(kv: DurableObjectStorage["kv"], keyHash: string, lastUsedAt: number): void {
+  const meta = zendeskMemoryMetaFromStorage(kv.get<unknown>(ZENDESK_MEMORY_META_KEY));
+  const checkedPartitions: { keyHash: string; lastUsedAt: number }[] = [];
+  for (const part of [{ keyHash, lastUsedAt }, ...meta.partitions.filter(existing => existing.keyHash !== keyHash)]) {
+    const partitionKey = zendeskPartitionStorageKey(part.keyHash);
+    const entries = zendeskMemoryEntriesFromStorage(kv.get<unknown>(partitionKey), lastUsedAt);
+    if (entries.length === 0) {
+      kv.delete(partitionKey);
+      continue;
+    }
+    kv.put(partitionKey, entries);
+    checkedPartitions.push(part);
+  }
+  const partitions = checkedPartitions
+    .toSorted((a, b) => b.lastUsedAt - a.lastUsedAt)
+    .slice(0, ZENDESK_MEMORY_MAX_PARTITIONS);
+  const keep = new Set(partitions.map(part => part.keyHash));
+  for (const evicted of meta.partitions) {
+    if (!keep.has(evicted.keyHash)) kv.delete(zendeskPartitionStorageKey(evicted.keyHash));
+  }
+  kv.put(ZENDESK_MEMORY_META_KEY, { partitions });
+}
+
+function touchZendeskTicketMemoryPartition(kv: DurableObjectStorage["kv"], keyHash: string, now: number): void {
+  const entries = zendeskMemoryEntriesFromStorage(kv.get<unknown>(zendeskPartitionStorageKey(keyHash)), now);
+  if (entries.length === 0) {
+    kv.delete(zendeskPartitionStorageKey(keyHash));
+    const meta = zendeskMemoryMetaFromStorage(kv.get<unknown>(ZENDESK_MEMORY_META_KEY));
+    kv.put(ZENDESK_MEMORY_META_KEY, { partitions: meta.partitions.filter(part => part.keyHash !== keyHash).slice(0, ZENDESK_MEMORY_MAX_PARTITIONS) });
+    return;
+  }
+  kv.put(zendeskPartitionStorageKey(keyHash), entries);
+  upsertZendeskMemoryMeta(kv, keyHash, now);
+}
+
+function zendeskPartitionStorageKey(keyHash: string): string {
+  return `${ZENDESK_MEMORY_PARTITION_KEY_PREFIX}${keyHash}`;
+}
+
+function deriveZendeskPartition(item: WorkItemSummary, canonicalUrl: string | undefined): ZendeskTicketMemoryPartition | null {
+  const fields = item.fields ?? {};
+  const authoritativeBrandId = optionalPartitionDimension(firstScalarField(fields, ["brandId", "brand_id", "brand"]));
+  const authoritativeAccountId = optionalPartitionDimension(firstScalarField(fields, ["accountId", "account_id", "organizationId", "organization_id", "account_ref"]));
+  const subdomain = subdomainFromCanonicalZendeskUrl(canonicalUrl);
+  if (!authoritativeBrandId || !authoritativeAccountId || !subdomain) return null;
+  return { brandId: authoritativeBrandId, accountId: authoritativeAccountId, subdomain };
+}
+
+function firstScalarField(fields: Record<string, string | number | boolean | null>, names: string[]): string | undefined {
+  for (const name of names) {
+    const value = fields[name];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  }
+  return undefined;
+}
+
+function normalizeZendeskPartition(value: unknown): ZendeskTicketMemoryPartition {
+  const obj = asRecord(value);
+  return {
+    brandId: requiredCleanString(obj.brandId, "Zendesk memory brandId", 120),
+    accountId: requiredCleanString(obj.accountId, "Zendesk memory accountId", 120),
+    subdomain: normalizeZendeskSubdomain(obj.subdomain),
+  };
+}
+
+function normalizeZendeskTicketId(value: unknown): string {
+  return requiredCleanString(value, "Zendesk ticket id", 180);
+}
+
+function normalizeZendeskSubdomain(value: unknown): string {
+  const subdomain = requiredCleanString(value, "Zendesk subdomain", 120).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*$/.test(subdomain)) throw new Error("Invalid Zendesk subdomain.");
+  return subdomain;
+}
+
+function optionalPartitionDimension(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  return requiredCleanString(value, "Zendesk memory partition dimension", 120);
+}
+
+function subdomainFromCanonicalZendeskUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let url: URL;
+  try { url = new URL(value); } catch { return undefined; }
+  const host = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" || !host.endsWith(".zendesk.com") || host === "zendesk.com") return undefined;
+  return normalizeZendeskSubdomain(host.slice(0, -".zendesk.com".length));
+}
+
+function canonicalZendeskTicketUrl(value: unknown, ticketIdValue: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || url.username || url.password || !host.endsWith(".zendesk.com") || host === "zendesk.com") return undefined;
+    const ticketId = normalizeZendeskTicketId(ticketIdValue);
+    if (!isRecognizedZendeskTicketPath(url.pathname, ticketId)) return undefined;
+    return boundString(`${url.protocol}//${url.host}${url.pathname}`, 500);
+  } catch { return undefined; }
+}
+
+function isRecognizedZendeskTicketPath(pathname: string, ticketId: string): boolean {
+  const parts = pathname.split("/").filter(Boolean).map(part => {
+    try { return decodeURIComponent(part); } catch { return part; }
+  });
+  for (let i = 0; i < parts.length - 1; i++) {
+    if ((parts[i] === "tickets" || parts[i] === "requests") && parts[i + 1] === ticketId) return true;
+  }
+  return false;
+}
+
+function requiredCleanString(value: unknown, name: string, max: number): string {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") throw new Error(`${name} is required.`);
+  const out = boundCleanString(String(value), max);
+  if (!out) throw new Error(`${name} is required.`);
+  return out;
+}
+
+function optionalCleanString(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return undefined;
+  const out = boundCleanString(String(value), max);
+  return out || undefined;
+}
+
+function boundCleanString(value: string, max: number): string {
+  const out = boundString(value.trim(), max);
+  if (/\p{C}/u.test(out)) throw new Error("Control characters are not allowed in Zendesk ticket memory fields.");
+  return out;
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function zendeskMemoryText(entry: ZendeskTicketMemoryEntry): string {
+  return [entry.id, entry.url, entry.title, entry.status, entry.type, entry.priority].filter(Boolean).join("\n").toLowerCase();
+}
+
+async function zendeskPartitionHash(partition: ZendeskTicketMemoryPartition): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(partition));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function commentsFromEnvelope(source: WorkItemProviderKind, value: unknown): WorkItemComment[] {

@@ -4,19 +4,33 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RpcStub } from "capnweb";
+import type { Overseer, SlashCommandRequest } from "@gadgets/workshop-shared/api";
 
 const testState = vi.hoisted(() => {
   const listModels = vi.fn<() => Promise<never[]>>(async () => []);
-  const newGadget = vi.fn<() => never>();
+  const updateProvisionalWorkspaceOrigin = vi.fn<(id: string, hub: string) => Promise<void>>(
+    async () => {},
+  );
+  const overseer = {
+    getMetadata: vi.fn<() => Promise<{ id: string }>>(async () => ({ id: "workspace-1" })),
+    newChat: vi.fn<() => Promise<number>>(async () => 7),
+    [Symbol.dispose]: vi.fn<() => void>(),
+  };
+  const newGadget = vi.fn<(hub?: string) => RpcStub<Overseer>>(
+    () => overseer as unknown as RpcStub<Overseer>,
+  );
   return {
     addToast: vi.fn<(toast: unknown) => void>(),
-    authenticatedApi: { listModels, newGadget },
+    authenticatedApi: { listModels, newGadget, updateProvisionalWorkspaceOrigin },
     currentUser: { id: "user-a", name: "User A" },
     listModels,
     navigate: vi.fn<(options: unknown) => void>(),
     newGadget,
+    overseer,
     seeds: [] as Array<{ text?: string; nonce?: number }>,
     draftStorageKeys: [] as Array<string | undefined>,
+    updateProvisionalWorkspaceOrigin,
   };
 });
 
@@ -37,14 +51,18 @@ vi.mock("./AuthContext", () => ({
 }));
 
 vi.mock("./ChatInterface", () => ({
-  ChatInput: ({ seedText, seedNonce, draftStorageKey }: {
+  ChatInput: ({ seedText, seedNonce, draftStorageKey, onSend }: {
     seedText?: string;
     seedNonce?: number;
     draftStorageKey?: string;
+    onSend?: (message: string | SlashCommandRequest, modelId: string | null) => Promise<void>;
   }) => {
     testState.seeds.push({ text: seedText, nonce: seedNonce });
     testState.draftStorageKeys.push(draftStorageKey);
-    return <textarea aria-label="Prompt" readOnly value={seedText ?? ""} />;
+    return <>
+      <textarea aria-label="Prompt" readOnly value={seedText ?? ""} />
+      <button onClick={() => onSend?.("Ship it", null)}>Send</button>
+    </>;
   },
 }));
 
@@ -53,6 +71,7 @@ vi.mock("./components/AppShell/HomeTaskSuggestions", () => ({ default: () => nul
 vi.mock("./useDocumentTitle", () => ({ useDocumentTitle: () => {} }));
 
 import { HomePageContent } from "./routes/index";
+import { HubProvider } from "./HubContext";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -81,6 +100,29 @@ describe("Home prompt route flow", () => {
     expect(Math.max(...testState.seeds.map(({ nonce }) => nonce ?? 0))).toBe(1);
     expect(testState.navigate).toHaveBeenCalledWith({ to: "/", search: {}, replace: true });
     expect(testState.newGadget).not.toHaveBeenCalled();
-    expect(testState.draftStorageKeys).toContain("gadgets:composer-draft:v1:user-a:home");
+    expect(testState.draftStorageKeys).toContain("gadgets:composer-draft:v1:user-a:home:ops");
+  });
+
+  it("submits the selected hub when creating and stamping the provisional workspace", async () => {
+    localStorage.setItem("odie:selected-hub", "support");
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(
+      <HubProvider enabledHubs={["ops", "support"]}>
+        <HomePageContent />
+      </HubProvider>,
+    ));
+    await act(async () => container!.querySelector("button")!.click());
+
+    expect(testState.newGadget).toHaveBeenCalledWith("support");
+    expect(testState.updateProvisionalWorkspaceOrigin).toHaveBeenCalledWith("workspace-1", "support");
+    expect(testState.overseer.newChat).toHaveBeenCalledWith("Ship it", null, undefined, undefined, undefined);
+    expect(testState.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id",
+      params: { id: "workspace-1" },
+      search: { chat: 7 },
+    });
   });
 });

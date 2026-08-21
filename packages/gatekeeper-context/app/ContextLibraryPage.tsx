@@ -304,6 +304,17 @@ function IconPickerButton({
 // Provenance for a row, framed as authorship: public collections are admin-published (and always
 // on), the rest are ones the user created.
 function CollectionProvenance({ source }: { source: EnabledCollectionInfo["source"] }) {
+  if (source === "bundled") {
+    return (
+      <span
+        className="flex w-52 items-center gap-1 whitespace-nowrap"
+        title="Bundled with this deployment and read-only"
+      >
+        <BookOpen size={11} />
+        Bundled read-only playbook
+      </span>
+    );
+  }
   const isPublic = source === "public";
   return (
     <span
@@ -1145,6 +1156,7 @@ function CollectionOverview({
 }) {
   const isPublic = metadata.visibility === "public";
   const isSynced = metadata.content.source === "git";
+  const isBundled = metadata.content.source === "bundled";
   return (
     <div className="ctx-scroll @container min-h-0 flex-1 overflow-auto">
       <div className="mx-auto max-w-[850px] px-8 py-10 sm:px-11 sm:py-12">
@@ -1161,7 +1173,7 @@ function CollectionOverview({
                 </p>
               </div>
             </div>
-            {canWrite && (
+            {canWrite && !isBundled && (
               <div className="flex shrink-0 items-center gap-2">
                 {isSynced && supportsGitCollections && (
                   <WorkshopButton
@@ -1216,12 +1228,12 @@ function CollectionOverview({
           <div className="mt-9 grid grid-cols-2 gap-x-8 gap-y-5 @xl:grid-cols-4">
             <MetaField label="Source">
               <span className="inline-flex items-center gap-1.5">
-                {isPublic ? <Buildings size={12} className="shrink-0" /> : <User size={12} className="shrink-0" />}
-                {isPublic ? "Your organization" : "You"}
+                {isBundled ? <BookOpen size={12} className="shrink-0" /> : isPublic ? <Buildings size={12} className="shrink-0" /> : <User size={12} className="shrink-0" />}
+                {isBundled ? "Bundled" : isPublic ? "Your organization" : "You"}
               </span>
             </MetaField>
             <MetaField label="Access">
-              {isPublic ? "Everyone (required)" : "Private to you"}
+              {isBundled ? "Everyone (read-only)" : isPublic ? "Everyone (required)" : "Private to you"}
             </MetaField>
             <MetaField label="Documents">{metadata.documentCount}</MetaField>
             <MetaField label={isSynced ? "Refreshed" : "Updated"} align="right">
@@ -1239,6 +1251,17 @@ function CollectionOverview({
             </p>
             <p className="mt-1 text-[13px] leading-5 tracking-[-0.2px] text-kumo-subtle">
               Git content is read-only and shows its most recently cached version.
+            </p>
+          </section>
+        )}
+
+        {isBundled && (
+          <section className="mt-8 rounded-xl border border-kumo-line bg-kumo-elevated/60 px-5 py-4">
+            <p className="text-[13px] font-medium tracking-[-0.2px] text-kumo-default">
+              Bundled read-only content
+            </p>
+            <p className="mt-1 text-[13px] leading-5 tracking-[-0.2px] text-kumo-subtle">
+              This collection is installed from the deployment bundle. It can be updated or retired only by shipping a new bundle.
             </p>
           </section>
         )}
@@ -2225,7 +2248,7 @@ function CollectionEditor({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
-  const canEditDocuments = canWrite && metadata?.content.source !== "git";
+  const canEditDocuments = canWrite && metadata?.content.source === "web";
 
   const loadDocs = useCallback(async () => {
     try {
@@ -2728,6 +2751,8 @@ function CollectionEditor({
                   ? supportsGitCollections
                     ? "No files yet. Mirror content from git, then refresh."
                     : "No Git content was cached before synchronization became unavailable."
+                  : metadata?.content.source === "bundled"
+                    ? "No bundled files were installed."
                   : canWrite ? "No files yet. Use + to create or upload skills or files." : "No files yet."}
               </p>
             ) : (

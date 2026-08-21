@@ -47,7 +47,7 @@ export async function loadEnabledContextCollections(
       title: collection.title,
       description: collection.description,
       icon: collection.icon,
-      source: "public",
+      source: collection.source ?? "public",
       lastUpdated: collection.lastUpdated,
     });
   }
@@ -105,6 +105,13 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     if (owns) return;
     if (isPublic && this.isAdmin) return;
     throw new Error("Collection not found or you don't have access.");
+  }
+
+  async #assertNotBundled(collectionId: string): Promise<void> {
+    let meta = await this.#collection(collectionId).getMetadata();
+    if (meta.content.source === "bundled") {
+      throw new Error("Bundled Context collections are read-only.");
+    }
   }
 
   #assertArtifactsAvailable(): void {
@@ -175,6 +182,7 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     title?: string; description?: string; icon?: string; branch?: string;
   }): Promise<void> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     if (options.branch !== undefined) this.#assertArtifactsAvailable();
     await this.#collection(collectionId).updateMetadata(options);
   }
@@ -185,30 +193,35 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     // stale-while-revalidate sync in the background, but they do not
     // have direct control over this.
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
     await this.#collection(collectionId).syncArtifactSource();
   }
 
   async createContextCollectionGitToken(collectionId: string): Promise<ContextGitTokenCreateResult> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
     return this.#collection(collectionId).createGitToken();
   }
 
   async listContextCollectionGitTokens(collectionId: string): Promise<ContextGitTokenList> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
     return this.#collection(collectionId).listGitTokens();
   }
 
   async revokeContextCollectionGitToken(collectionId: string, tokenId: string): Promise<boolean> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
     return this.#collection(collectionId).revokeGitToken(tokenId);
   }
 
   async deleteContextCollection(collectionId: string): Promise<void> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     await this.#collection(collectionId).deleteSelf();
   }
 
@@ -242,16 +255,19 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     description: string; body: string; contentType?: string;
   }): Promise<void> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     await this.#collection(collectionId).putContextDocument(path, doc);
   }
 
   async deleteContextDocument(collectionId: string, path: string): Promise<void> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     await this.#collection(collectionId).deleteContextDocument(path);
   }
 
   async moveContextDocument(collectionId: string, fromPath: string, toPath: string): Promise<void> {
     await this.#assertCanWrite(collectionId);
+    await this.#assertNotBundled(collectionId);
     await this.#collection(collectionId).moveContextDocument(fromPath, toPath);
   }
 
@@ -262,10 +278,12 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
   }
 
   async canWriteContextCollection(collectionId: string): Promise<boolean> {
-    let [owns, isPublic] = await Promise.all([
+    let [owns, isPublic, meta] = await Promise.all([
       this.#ownsPrivate(collectionId),
       this.#registry().isPublic(collectionId),
+      this.#collection(collectionId).getMetadata().catch(() => null),
     ]);
+    if (meta?.content.source === "bundled") return false;
     return owns || (isPublic && this.isAdmin);
   }
 }

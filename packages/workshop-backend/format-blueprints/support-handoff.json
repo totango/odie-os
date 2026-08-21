@@ -1,0 +1,17 @@
+{
+  "blueprintId": "format.support.handoff",
+  "title": "Support Handoff",
+  "description": "Use to transfer an active support case between owners or teams. Distinguish facts, customer claims, deductions, unknowns, next actions, and provenance so the receiver can continue safely.",
+  "output": {
+    "id": "document",
+    "noun": "Handoff",
+    "plural": "Handoffs",
+    "icon": "listChecks"
+  },
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 2
+}

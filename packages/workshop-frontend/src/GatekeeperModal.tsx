@@ -11,7 +11,7 @@ import {
   Sparkle,
   X,
 } from '@phosphor-icons/react'
-import { RpcStub } from 'capnweb'
+import { RpcPromise, RpcStub } from 'capnweb'
 import {
   AgentSpawnerConfig,
   AiChatAuthorInfo,
@@ -430,8 +430,8 @@ export default function GatekeeperModal({
         setAccounts(Array.from(accountMap.values()))
       },
     })
-    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber)
-    subscription.catch(error => {
+    const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber) as unknown as RpcPromise<{}>
+    subscription.catch((error: unknown) => {
       if (cancelled) return
       logRpcFailure('Failed to subscribe to connected accounts:', error)
     })

@@ -14,6 +14,8 @@ import type { GadgetMetadataWithTimestamps, OutputFormatOffer } from '@gadgets/w
 import { FormatGlyph } from '../format/FormatVisuals'
 import { createFromFormat } from '../format/useOutputFormats'
 import { useGatekeeperApps } from '../../useGatekeeperApps'
+import { useHub } from '../../HubContext'
+import { isSupportCuratedAsset, isSupportOrigin, rankForSelectedHub } from '../../supportCuration'
 
 // A ⌘K command palette: jump to a workspace or a primary destination. Because it's keyboard-driven
 // and opened many times a day, it deliberately has *no* open/close animation (instant feels faster
@@ -147,6 +149,7 @@ export default function CommandPalette({
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
   const gatekeeperApps = useGatekeeperApps()
+  const { hub } = useHub()
 
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
@@ -219,8 +222,8 @@ export default function CommandPalette({
   // Picking a format here behaves as it does anywhere else; see createFromFormat.
   const createFormat = useCallback(
     (format: OutputFormatOffer) =>
-      createFromFormat(authenticatedApi, navigate, toasts, format).catch(() => {}),
-    [authenticatedApi, navigate, toasts],
+      createFromFormat(authenticatedApi, navigate, toasts, format, hub).catch(() => {}),
+    [authenticatedApi, hub, navigate, toasts],
   )
 
   const { groups, flat } = useMemo(() => {
@@ -229,7 +232,12 @@ export default function CommandPalette({
 
     // One entry per standard format. "New workspace" remains the first action because it is the
     // general starting point; the format shortcuts follow it in the admin's configured order.
-    const formatCommands: Command[] = formats.map((format) => ({
+    const rankedFormats = rankForSelectedHub(formats, hub, (format) =>
+      isSupportCuratedAsset('format', format.blueprintId)
+      || isSupportCuratedAsset('format', format.output.id)
+      || isSupportCuratedAsset('format', format.output.noun),
+    )
+    const formatCommands: Command[] = rankedFormats.map((format) => ({
       id: `format-${format.blueprintId}`,
       label: `New ${format.output.noun}`,
       hint: 'Format',
@@ -275,8 +283,11 @@ export default function CommandPalette({
       },
     ]
 
-    const wsBase: Command[] = gadgets
-      .toSorted((a, b) => b.lastActive.getTime() - a.lastActive.getTime())
+    const wsBase: Command[] = rankForSelectedHub(
+      gadgets.toSorted((a, b) => b.lastActive.getTime() - a.lastActive.getTime()),
+      hub,
+      (g) => isSupportOrigin(g.originHubId),
+    )
       .map((g) => ({
         id: `ws-${g.id}`,
         label: g.title || 'Untitled workspace',
@@ -322,7 +333,7 @@ export default function CommandPalette({
     const groups = built.filter((g) => g.items.length > 0)
     const flat = groups.flatMap((g) => g.items)
     return { groups, flat }
-  }, [query, gadgets, blueprints, formats, gatekeeperApps, navigate, createFormat])
+  }, [query, gadgets, blueprints, formats, gatekeeperApps, hub, navigate, createFormat])
 
   // Keep the active index in range as the result set changes.
   useEffect(() => {

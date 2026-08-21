@@ -220,3 +220,34 @@ describe("workspace session across a user-DO-only reset", () => {
     expect(await gadget.getTitle()).toBe("post-reset gadget");
   });
 });
+
+describe("workspace origin hub metadata", () => {
+  it("stamps provisional workspaces and lists the origin after activity", async () => {
+    using publicApi = await connect();
+    const account = await createAccount(publicApi, "origin");
+    using authenticated = await publicApi.authenticate(account.token);
+    using workspace = await authenticated.newGadget("ops");
+    const metadata = await workspace.getMetadata();
+
+    await authenticated.updateProvisionalWorkspaceOrigin(metadata.id, "support");
+    expect((await authenticated.listGadgets()).map((g) => g.id)).not.toContain(metadata.id);
+
+    await workspace.newChat("hello", null);
+    const listed = (await authenticated.listGadgets()).find((g) => g.id === metadata.id);
+    expect(listed?.originHubId).toBe("support");
+    expect((await workspace.getMetadata()).originHubId).toBe("support");
+  });
+
+  it("keeps legacy unclassified workspaces visible", async () => {
+    using publicApi = await connect();
+    const account = await createAccount(publicApi, "legacyorigin");
+    using authenticated = await publicApi.authenticate(account.token);
+    using workspace = await authenticated.newGadget();
+    const metadata = await workspace.getMetadata();
+    await workspace.newChat("hello", null);
+
+    const listed = (await authenticated.listGadgets()).find((g) => g.id === metadata.id);
+    expect(listed).toBeDefined();
+    expect(listed?.originHubId).toBeUndefined();
+  });
+});

@@ -92,10 +92,10 @@ export function HomePageContent({ prompt }: HomeSearch) {
 
   const ensureProvisionalGadget = useCallback(() => {
     if (!provisionalOverseerRef.current) {
-      const overseer = authenticatedApi.newGadget();
+      const overseer = authenticatedApi.newGadget(hub);
       provisionalOverseerRef.current = { stub: overseer };
     }
-  }, [authenticatedApi]);
+  }, [authenticatedApi, hub]);
 
   useEffect(() => {
     return () => {
@@ -115,11 +115,11 @@ export function HomePageContent({ prompt }: HomeSearch) {
       try {
         ensureProvisionalGadget();
         const overseer = provisionalOverseerRef.current!.stub;
-        // Pipeline both independent calls in one batch, but settle both before releasing the stub.
-        const [chat, {id}] = await Promise.all([
-          overseer.newChat(message, modelId, capsules, attachments, formats),
-          overseer.getMetadata(),
-        ]);
+        const { id } = await overseer.getMetadata();
+        // Stamp the latest selected hub immediately before starting activity. This makes an already
+        // pre-created provisional workspace follow a last-second hub switch without authorizing by it.
+        await authenticatedApi.updateProvisionalWorkspaceOrigin(id, hub);
+        const chat = await overseer.newChat(message, modelId, capsules, attachments, formats);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
         // Open the conversation we just started.
@@ -138,7 +138,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
         throw err;
       }
     },
-    [ensureProvisionalGadget, navigate, toasts],
+    [authenticatedApi, ensureProvisionalGadget, hub, navigate, toasts],
   );
 
   const getOverseer = useCallback((): RpcStub<Overseer> => {
@@ -199,7 +199,7 @@ export function HomePageContent({ prompt }: HomeSearch) {
           seedText={seed?.text}
           seedNonce={seed?.nonce}
           draftStorageKey={currentUser
-            ? composerDraftStorageKey(currentUser.id, "home")
+            ? composerDraftStorageKey(currentUser.id, `home:${hub}`)
             : undefined}
         />
 

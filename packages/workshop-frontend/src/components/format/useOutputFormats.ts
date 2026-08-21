@@ -5,8 +5,10 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
-import type { Overseer, OutputFormatOffer } from '@gadgets/workshop-shared/api'
+import type { DeploymentHubId, Overseer, OutputFormatOffer } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
+import { useHub } from '../../HubContext'
+import { isSupportCuratedAsset, rankForSelectedHub } from '../../supportCuration'
 
 type AuthenticatedApiStub = ReturnType<typeof useAuthenticatedApi>['authenticatedApi']
 type Navigate = ReturnType<typeof useNavigate>
@@ -54,6 +56,7 @@ export async function createFromFormat(
   navigate: Navigate,
   toasts: Toasts,
   format: OutputFormatOffer,
+  originHubId?: DeploymentHubId,
 ): Promise<void> {
   if (format.requiresSetup) {
     navigate({ to: '/blueprint/$id', params: { id: format.blueprintId } })
@@ -65,7 +68,7 @@ export async function createFromFormat(
   // anywhere in the bundle is a parse error that fails the whole chunk.
   let overseer: RpcStub<Overseer> | undefined
   try {
-    overseer = await api.newGadgetFromBlueprint(format.blueprintId, {})
+    overseer = await api.newGadgetFromBlueprint(format.blueprintId, {}, originHubId)
     const { id } = await overseer.getMetadata()
     navigate({ to: '/workspace/$id', params: { id } })
   } catch (err) {
@@ -79,6 +82,7 @@ export async function createFromFormat(
 
 export function useOutputFormats(): OutputFormats {
   const { authenticatedApi } = useAuthenticatedApi()
+  const { hub } = useHub()
   const navigate = useNavigate()
   const toasts = useKumoToastManager()
   const [formats, setFormats] = useState<OutputFormatOffer[]>([])
@@ -88,7 +92,11 @@ export function useOutputFormats(): OutputFormats {
     let cancelled = false
     loadOutputFormats(authenticatedApi)
       .then((list) => {
-        if (!cancelled) setFormats(list)
+        if (!cancelled) setFormats(rankForSelectedHub(list, hub, (format) =>
+          isSupportCuratedAsset('format', format.blueprintId)
+          || isSupportCuratedAsset('format', format.output.id)
+          || isSupportCuratedAsset('format', format.output.noun),
+        ))
       })
       .catch((err) => {
         // Nothing else depends on this, so a failure is a missing shortcut, not an error.
@@ -97,18 +105,18 @@ export function useOutputFormats(): OutputFormats {
     return () => {
       cancelled = true
     }
-  }, [authenticatedApi])
+  }, [authenticatedApi, hub])
 
   const create = useCallback(async (format: OutputFormatOffer) => {
     setCreating(format.blueprintId)
     try {
-      await createFromFormat(authenticatedApi, navigate, toasts, format)
+      await createFromFormat(authenticatedApi, navigate, toasts, format, hub)
     } catch {
       // Already reported; clear the busy state so the row can be retried. On success the component
       // is navigating away, so it stays busy.
       setCreating(null)
     }
-  }, [authenticatedApi, navigate, toasts])
+  }, [authenticatedApi, hub, navigate, toasts])
 
   return { formats, creating, create }
 }
