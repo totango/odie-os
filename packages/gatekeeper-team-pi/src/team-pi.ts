@@ -60,7 +60,10 @@ import type {
   WorkItemProviderKind,
   WorkItemProviderRef,
   WorkItemRead,
+  WorkItemsCurrentUser,
   WorkItemsManagementApi,
+  WorkItemSavedView,
+  WorkItemSavedViewFilters,
   WorkItemSearchPage,
   WorkItemSearchRequest,
   WorkItemSourceStatus,
@@ -74,6 +77,7 @@ type TeamPiLogFields = { event?: string; vendorId?: string; accountId?: string; 
 
 const logger = createLogger<TeamPiLogFields>({ component: "gatekeeper.team-pi", vendorId: "team-pi" });
 const ICON = { url: "data:image/svg+xml," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'><rect width='256' height='256' rx='56' fill='#111827'/><text x='50%' y='54%' dominant-baseline='middle' text-anchor='middle' font-family='Arial' font-size='82' fill='white'>PI</text></svg>") };
+const WORK_ITEMS_ICON = { url: "data:image/svg+xml," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'><rect width='256' height='256' rx='56' fill='#0f172a'/><rect x='58' y='46' width='140' height='164' rx='18' fill='#f8fafc'/><path d='M90 42h76a18 18 0 0 1 18 18v10H72V60a18 18 0 0 1 18-18Z' fill='#38bdf8'/><path d='m82 110 14 14 28-32' fill='none' stroke='#10b981' stroke-width='13' stroke-linecap='round' stroke-linejoin='round'/><path d='M138 108h36M138 150h36M82 154l13 13 27-31' fill='none' stroke='#334155' stroke-width='12' stroke-linecap='round' stroke-linejoin='round'/></svg>") };
 const CONNECT_TIMEOUT_MS = 15 * 60 * 1000;
 const ACCESS_TOKEN_SAFETY_MS = 60_000;
 const ID_TOKEN_REFRESH_RETRY_MS = 5 * 60 * 1000;
@@ -81,6 +85,7 @@ const APPLYING_TIMEOUT_MS = 5 * 60 * 1000;
 const SKILL_INSTRUCTIONS_MAX_LENGTH = 12_000;
 const WORK_ITEM_FIELD_MAX = 2_000;
 const WORK_ITEM_BODY_MAX = 12_000;
+const WORK_ITEM_SAVED_VIEWS_MAX = 20;
 const ACCOUNT_URL = "team-pi://account";
 const ACCOUNT_RESOURCE: SupportedResource = {
   urlPattern: ACCOUNT_URL,
@@ -309,6 +314,29 @@ export class TeamPiAccount extends DurableObject<Env> {
 
   async describeIdentity(): Promise<StoredIdentity> { return this.ctx.storage.kv.get<StoredIdentity>("identity") ?? {}; }
 
+  async listSavedWorkItemViews(): Promise<WorkItemSavedView[]> {
+    return savedViewsFromStorage(this.ctx.storage.kv.get<unknown>("workItemSavedViews"));
+  }
+
+  async saveWorkItemView(view: WorkItemSavedView): Promise<WorkItemSavedView> {
+    const normalized = normalizeSavedView(view);
+    this.ctx.storage.transactionSync(() => {
+      const views = savedViewsFromStorage(this.ctx.storage.kv.get<unknown>("workItemSavedViews"))
+        .filter(existing => existing.id !== normalized.id);
+      views.push(normalized);
+      this.ctx.storage.kv.put("workItemSavedViews", views.slice(-WORK_ITEM_SAVED_VIEWS_MAX));
+    });
+    return normalized;
+  }
+
+  async deleteWorkItemView(id: string): Promise<void> {
+    const normalizedId = normalizeSavedViewId(id);
+    this.ctx.storage.transactionSync(() => {
+      const views = savedViewsFromStorage(this.ctx.storage.kv.get<unknown>("workItemSavedViews"));
+      this.ctx.storage.kv.put("workItemSavedViews", views.filter(view => view.id !== normalizedId));
+    });
+  }
+
   async revoke(): Promise<void> {
     const refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
     if (refreshToken) {
@@ -363,7 +391,7 @@ export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements Gatekeep
       uniqueName: identity.uniqueName,
       avatar: ICON,
       singleton: { tsType: "TeamPiSession" },
-      providesUi: { title: "Work Items", icon: ICON, adminOnly: true },
+      providesUi: { title: "Work Items", icon: WORK_ITEMS_ICON, adminOnly: true },
     };
   }
   async getAuthenticatedEmail(): Promise<string | null> { return null; }
@@ -399,7 +427,7 @@ export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements Gatekeep
     if (!context.isAdmin) throw new Error("Team PI Work Items management is available to admins only.");
     return {
       iframeHtml: APP_HTML,
-      ui: new RpcStub(new TeamPiWorkItemsManagementApi(this.#api())),
+      ui: new RpcStub(new TeamPiWorkItemsManagementApi(this.#api(), this.#account())),
     };
   }
   async revoke(): Promise<void> { await this.#account().revoke(); }
@@ -419,7 +447,27 @@ class TeamPiAccountConfiguratorUI extends RpcTarget implements TeamPiAccountConf
 
 @validateRpc()
 export class TeamPiWorkItemsManagementApi extends RpcTarget implements WorkItemsManagementApi {
-  constructor(private readonly api: TeamPiApi) { super(); }
+  constructor(private readonly api: TeamPiApi, private readonly account: DurableObjectStub<TeamPiAccount>) { super(); }
+
+  async getCurrentUser(): Promise<WorkItemsCurrentUser> {
+    const identity = await this.account.describeIdentity();
+    return {
+      displayName: optionalBoundString(identity.displayName, 200),
+      uniqueName: optionalBoundString(identity.uniqueName, 320),
+    };
+  }
+
+  async listSavedViews(): Promise<WorkItemSavedView[]> {
+    return this.account.listSavedWorkItemViews();
+  }
+
+  async saveSavedView(view: WorkItemSavedView): Promise<WorkItemSavedView> {
+    return this.account.saveWorkItemView(view);
+  }
+
+  async deleteSavedView(id: string): Promise<void> {
+    await this.account.deleteWorkItemView(id);
+  }
 
   async getSourceStatuses(): Promise<WorkItemSourceStatuses> {
     return sourceStatusesFromEnvelope(await this.api.workItemsSourceStatus());
@@ -895,6 +943,61 @@ function providerError(source: WorkItemProviderKind, error: unknown): WorkItemPr
     message: boundString(error instanceof Error ? error.message : String(error), 240),
     status: error instanceof TeamPiApiError ? error.status : undefined,
   };
+}
+
+function savedViewsFromStorage(value: unknown): WorkItemSavedView[] {
+  return (Array.isArray(value) ? value : [])
+    .map((view) => {
+      try { return normalizeSavedView(view); }
+      catch { return null; }
+    })
+    .filter((view): view is WorkItemSavedView => Boolean(view))
+    .slice(-WORK_ITEM_SAVED_VIEWS_MAX);
+}
+
+function normalizeSavedView(value: unknown): WorkItemSavedView {
+  const obj = asRecord(value);
+  const id = normalizeSavedViewId(obj.id);
+  const name = boundString(stringField(obj.name, "").trim(), 120);
+  if (!name) throw new Error("Saved Work Items view name is required.");
+  return {
+    id,
+    name,
+    query: boundString(stringField(obj.query, "").trim(), 300),
+    source: obj.source === "jira" || obj.source === "zendesk" || obj.source === "both" ? obj.source : "both",
+    filters: normalizeSavedViewFilters(obj.filters),
+    view: obj.view === "kanban" ? "kanban" : "list",
+    hiddenStatuses: normalizeSavedViewStringArray(obj.hiddenStatuses),
+  };
+}
+
+function normalizeSavedViewId(value: unknown): string {
+  const id = typeof value === "string" ? boundString(value.trim(), 120) : "";
+  if (!id || /[\r\n]/.test(id)) throw new Error("Saved Work Items view id is required.");
+  if (id.startsWith("builtin:")) throw new Error("Saved Work Items view id is reserved.");
+  return id;
+}
+
+function normalizeSavedViewFilters(value: unknown): WorkItemSavedViewFilters {
+  const obj = asRecord(value);
+  return {
+    status: normalizeSavedViewString(obj.status),
+    priority: normalizeSavedViewString(obj.priority),
+    type: normalizeSavedViewString(obj.type),
+    person: normalizeSavedViewString(obj.person),
+  };
+}
+
+function normalizeSavedViewString(value: unknown): string {
+  return typeof value === "string" ? boundString(value.trim(), 120) : "";
+}
+
+function normalizeSavedViewStringArray(value: unknown): string[] {
+  return (Array.isArray(value) ? value : [])
+    .filter((item): item is string => typeof item === "string")
+    .map(item => boundString(item.trim(), 120))
+    .filter(Boolean)
+    .slice(0, 25);
 }
 
 function workItemSourceOrNull(value: unknown): WorkItemProviderKind | null {

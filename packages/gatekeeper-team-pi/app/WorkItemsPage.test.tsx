@@ -13,10 +13,13 @@ import type {
   WorkItemsManagementApi,
 } from "../src/types";
 
+type SavedView = { id: string; name: string; query: string; source: "both" | "jira" | "zendesk"; filters: { status: string; priority: string; type: string; person: string }; view: "list" | "kanban"; hiddenStatuses: string[] };
+
 const statuses = {
   jira: { configured: true, connected: true },
   zendesk: { configured: true, connected: true },
 } as const;
+const EMPTY_TEST_FILTERS = { status: "", priority: "", type: "", person: "" };
 
 const jiraItem: WorkItemSummary = {
   source: "jira",
@@ -41,6 +44,15 @@ const zendeskItem: WorkItemSummary = {
   requester: "Grace",
   updatedAt: "2026-08-20T11:00:00Z",
   fields: { tags: "export" },
+};
+
+const jacobItem: WorkItemSummary = {
+  ...jiraItem,
+  id: "1003",
+  key: "ODIE-3",
+  title: "Jacob owned issue",
+  assignee: "Jacob Beck",
+  status: "In Progress",
 };
 
 let root: Root | undefined;
@@ -117,7 +129,7 @@ describe("WorkItemsPage", () => {
     const api = createApi({ items: [jiraItem, zendeskItem], itemApis: [first, second] });
     await render(api);
     await clickText("Jira login is slow");
-    expect(host.textContent).toContain("severity");
+    expect(host.textContent).toContain("Assignee");
     await clickText("Customer cannot export");
     expect(first.dispose).toHaveBeenCalledTimes(1);
     expect(host.textContent).toContain("Requester");
@@ -168,7 +180,7 @@ describe("WorkItemsPage", () => {
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
     });
-    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(host.querySelector('input[type="search"]'));
   });
 
   it("renders provider rich text and entities without unsafe HTML", async () => {
@@ -353,6 +365,97 @@ describe("WorkItemsPage", () => {
     });
     expect(host.textContent).toContain("Jira login is slow");
   });
+
+  it("defaults My work to the current user and tolerates email local-part vs display name", async () => {
+    const api = createApi({ items: [jiraItem, jacobItem], currentUser: { displayName: "Jacob Beck", uniqueName: "jacob.beck@example.com" } });
+    await render(api);
+    await act(async () => { await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 240)); });
+    expect(host.textContent).toContain("Jacob owned issue");
+    expect(host.textContent).not.toContain("Jira login is slow");
+    expect([...host.querySelectorAll<HTMLSelectElement>(".filter-select select")].at(3)?.value).toBe("jacob.beck@example.com");
+  });
+
+  it("applies, saves, and deletes durable custom views without prompts", async () => {
+    const saved: SavedView = { id: "custom:bugs", name: "Bugs", query: "login", source: "jira", filters: { ...EMPTY_TEST_FILTERS, type: "Bug" }, view: "kanban", hiddenStatuses: ["Done"] };
+    const api = createApi({ items: [jiraItem], savedViews: [saved] });
+    await render(api);
+    await clickText("Bugs");
+    expect(host.querySelector("[aria-label='Kanban column visibility']")).toBeTruthy();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 240)); });
+    expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "jira", query: "login" }));
+    await changeText(host.querySelector<HTMLInputElement>(".save-view-name input")!, "Urgent");
+    await clickText("Save view");
+    expect(api.saveSavedView).toHaveBeenCalledWith(expect.objectContaining({ name: "Urgent", view: "kanban" }));
+    await clickText("Delete");
+    expect(api.deleteSavedView).toHaveBeenCalled();
+    expect(host.querySelector<HTMLInputElement>('input[type="search"]')?.value).toBe("");
+    expect(host.querySelector("[aria-label='Kanban column visibility']")).toBeNull();
+  });
+
+  it("renders searchable kanban columns with accessible hide and show controls", async () => {
+    const api = createApi({ items: [jiraItem, jacobItem] });
+    await render(api, { initialRouteState: "view=kanban&q=issue" });
+    expect(host.textContent).toContain("To Do");
+    expect(host.textContent).toContain("In Progress");
+    const todoToggle = [...host.querySelectorAll<HTMLInputElement>(".kanban-controls input")].find((input) => input.parentElement?.textContent?.includes("To Do"))!;
+    await act(async () => { todoToggle.click(); });
+    expect(host.textContent).toContain("1 hidden");
+    expect(host.querySelector("input[type='search']")).toBeTruthy();
+  });
+
+  it("can restore a saved hidden kanban status absent from current results", async () => {
+    const api = createApi({ items: [jiraItem] });
+    await render(api, { initialRouteState: "view=kanban&hiddenStatuses=Done" });
+    const doneToggle = [...host.querySelectorAll<HTMLInputElement>(".kanban-controls input")]
+      .find((input) => input.parentElement?.textContent?.includes("Done"));
+    expect(doneToggle?.checked).toBe(false);
+    await act(async () => { doneToggle?.click(); });
+    expect(host.textContent).toContain("0 hidden");
+  });
+
+  it("preserves string identifiers during inline metadata editing", async () => {
+    const read = readFor(jiraItem);
+    read.updateOptions.allowedFields = ["assignee"];
+    const itemApi = createItemApi(read);
+    const api = createApi({ items: [jiraItem], itemApis: [itemApi] });
+    await render(api);
+    await clickText("Jira login is slow");
+    await clickText("Edit Assignee");
+    await changeText(host.querySelector<HTMLInputElement>('[aria-label="Assignee value"]')!, "12345");
+    const save = [...host.querySelectorAll<HTMLButtonElement>(".meta-chip.editable button")]
+      .find((button) => button.textContent === "Save")!;
+    await act(async () => { save.click(); await Promise.resolve(); });
+    expect(itemApi.updateFields).toHaveBeenCalledWith({ fields: { assignee: "12345" } });
+  });
+
+  it("edits description separately and omits unsafe description HTML", async () => {
+    const read = readFor({ ...jiraItem, fields: { description: "Hello <script>bad()</script> **world**" } });
+    read.updateOptions.allowedFields = ["description"];
+    const itemApi = createItemApi(read);
+    const api = createApi({ items: [jiraItem], itemApis: [itemApi] });
+    await render(api);
+    await clickText("Jira login is slow");
+    expect(host.querySelector(".description-section strong")?.textContent).toBe("world");
+    expect(host.querySelector("script")).toBeNull();
+    await clickText("Edit");
+    await changeText(host.querySelector<HTMLTextAreaElement>(".description-section textarea")!, "Updated description");
+    await clickText("Save description");
+    expect(itemApi.updateFields).toHaveBeenCalledWith({ fields: { description: "Updated description" } });
+  });
+
+  it("debounces opposite-source link search and selects suggestions before linking", async () => {
+    const itemApi = createItemApi(readFor(jiraItem));
+    const api = createApi({ items: [jiraItem], itemApis: [itemApi], search: async (request) => request.query ? { items: [zendeskItem, jiraItem], cursors: {}, hasMore: {} } : { items: [jiraItem], cursors: {}, hasMore: {} } });
+    await render(api);
+    await clickText("Jira login is slow");
+    await changeText(host.querySelector<HTMLInputElement>('[aria-label="Search or enter item ID/key to link"]')!, "export");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 280)); });
+    expect(host.textContent).toContain("Customer cannot export");
+    expect(host.querySelectorAll(".link-suggestions button")).toHaveLength(1);
+    await clickText("Customer cannot export");
+    await clickText("Create link");
+    expect(itemApi.linkTo).toHaveBeenCalledWith({ source: "zendesk", id: "222", key: undefined });
+  });
 });
 
 async function render(api: WorkItemsManagementApi, routeStateHost?: WorkItemsRouteStateHost) {
@@ -378,16 +481,25 @@ async function changeText(element: HTMLTextAreaElement | HTMLInputElement, value
   });
 }
 
-function createApi(options: { items?: WorkItemSummary[]; page?: WorkItemSearchPage; itemApis?: ReturnType<typeof createItemApi>[]; statuses?: WorkItemSourceStatuses | (() => WorkItemSourceStatuses | Promise<WorkItemSourceStatuses>); search?: WorkItemsManagementApi["search"] }): WorkItemsManagementApi & {
+function createApi(options: { items?: WorkItemSummary[]; page?: WorkItemSearchPage; itemApis?: ReturnType<typeof createItemApi>[]; statuses?: WorkItemSourceStatuses | (() => WorkItemSourceStatuses | Promise<WorkItemSourceStatuses>); search?: WorkItemsManagementApi["search"]; currentUser?: { displayName?: string; uniqueName?: string }; savedViews?: SavedView[] }): WorkItemsManagementApi & {
   getSourceStatuses: ReturnType<typeof vi.fn<WorkItemsManagementApi["getSourceStatuses"]>>;
   search: ReturnType<typeof vi.fn<WorkItemsManagementApi["search"]>>;
   item: ReturnType<typeof vi.fn<WorkItemsManagementApi["item"]>>;
+  getCurrentUser: ReturnType<typeof vi.fn<WorkItemsManagementApi["getCurrentUser"]>>;
+  listSavedViews: ReturnType<typeof vi.fn<WorkItemsManagementApi["listSavedViews"]>>;
+  saveSavedView: ReturnType<typeof vi.fn<WorkItemsManagementApi["saveSavedView"]>>;
+  deleteSavedView: ReturnType<typeof vi.fn<WorkItemsManagementApi["deleteSavedView"]>>;
 } {
   const queue = [...(options.itemApis ?? [])];
+  const views = [...(options.savedViews ?? [])];
   return {
     getSourceStatuses: vi.fn<WorkItemsManagementApi["getSourceStatuses"]>(async () => typeof options.statuses === "function" ? options.statuses() : options.statuses ?? statuses),
     search: vi.fn<WorkItemsManagementApi["search"]>(options.search ?? (async () => options.page ?? { items: options.items ?? [], cursors: {}, hasMore: {} })),
     item: vi.fn<WorkItemsManagementApi["item"]>(async () => queue.shift() ?? createItemApi(readFor(options.items?.[0] ?? jiraItem))),
+    getCurrentUser: vi.fn<WorkItemsManagementApi["getCurrentUser"]>(async () => options.currentUser ?? {}),
+    listSavedViews: vi.fn<WorkItemsManagementApi["listSavedViews"]>(async () => views),
+    saveSavedView: vi.fn<WorkItemsManagementApi["saveSavedView"]>(async (view) => { views.push(view); return view; }),
+    deleteSavedView: vi.fn<WorkItemsManagementApi["deleteSavedView"]>(async (id) => { const index = views.findIndex((view) => view.id === id); if (index >= 0) views.splice(index, 1); }),
   };
 }
 
