@@ -100,7 +100,7 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("- Empty: `env.EMPTY`");
     expect(message).not.toContain("- Empty: `env.EMPTY`\n{");
     expect(message).toContain("For customer, account, CSM, product-usage, or internal business questions");
-    expect(message).toContain("prefer the Totango Knowledge Graph resource when available");
+    expect(message).toContain("prefer the ODIE MCP resource when available");
     expect(message).toContain("say when an answer had to fall back to the public web");
     expect(message).not.toContain("prefer the Wren semantic query tools behind JARVIS");
     expect(message).toContain("engineering questions");

@@ -120,7 +120,7 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
     `the same vendor; a duplicate binding does not add methods. Explain the missing capability or ` +
     `use another relevant resource instead. For customer, account, CSM, product-usage, or internal ` +
     `business questions, prefer ` +
-    `the Totango Knowledge Graph resource when available, then other relevant internal resources, ` +
+    `the ODIE MCP resource when available, then other relevant internal resources, ` +
     `before using public web sources; say when an answer had to fall back to the public web. ` +
     wrenGuidance + `For ` +
     `engineering questions about the configured ODI repositories, prefer JARVIS repo_graph tools ` +

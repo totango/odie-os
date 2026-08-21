@@ -3,19 +3,31 @@ import type { ConnectedServer } from "@gadgets/mcp-shared/account";
 import type { ClassifiedTool } from "@gadgets/mcp-shared/tools";
 import { formatToolScope, type ToolScope } from "@gadgets/mcp-shared/scope";
 
-/** Stable vendor identifier for the first-party Totango Knowledge Graph connector. */
+/** Stable vendor identifier for the first-party ODIE MCP connector. */
 export const VENDOR_ID = "odie_kg";
 
 /** Stable server identifier used in generated session types. */
 export const ODIE_KG_SERVER_ID = "totango_kg";
 
 /** Human-facing connector and binding name. */
-export const ODIE_KG_DISPLAY_NAME = "Totango Knowledge Graph";
+export const ODIE_KG_DISPLAY_NAME = "ODIE MCP";
+
+/** The only ODIE MCP endpoint enabled for the hosted Odie deployment. */
+export const ODIE_KG_EU_ENDPOINT = "https://api-agents.unison.totango.com/api/mcp/odie";
 
 /** Least-privilege OAuth scopes requested from Agentic's Odie MCP resource. */
-export const ODIE_KG_OAUTH_SCOPE = "openid profile email mcp:odie:kg:read";
+export const ODIE_KG_OAUTH_SCOPE = [
+  "openid",
+  "profile",
+  "email",
+  "mcp:odie:kg:read",
+  "mcp:odie:exports:read",
+  "mcp:odie:skills:read",
+  "mcp:odie:customers:read",
+  "mcp:odie:public-api:read",
+].join(" ");
 
-/** Exact customer/internal knowledge tools exposed by this connector. */
+/** Exact read-only ODIE MCP tools exposed by this connector. */
 export const ODIE_KG_ALLOWED_TOOLS = [
   "odie-kg-status",
   "odie-kg-domains",
@@ -29,12 +41,36 @@ export const ODIE_KG_ALLOWED_TOOLS = [
   "odie-kg-paths",
   "odie-kg-communities",
   "odie-kg-document",
+  "get_customer_overview",
+  "get_customer_property",
+  "search_customer",
+  "get_customer_interaction",
+  "get_customer_prediction",
+  "get_segment",
+  "odie-skills-list",
+  "odie-export-status",
+  "odie-export-download",
+  "leviosa_public_list_property_definitions",
+  "leviosa_public_list_accounts",
+  "leviosa_public_get_account",
+  "leviosa_public_list_workflow_emails",
+  "leviosa_public_get_workflow_email",
+  "leviosa_public_list_account_health_snapshots",
+  "leviosa_public_list_notes",
+  "leviosa_public_get_note",
+  "leviosa_public_list_workflows",
+  "leviosa_public_get_workflow",
+  "leviosa_public_list_workflow_email_templates",
+  "leviosa_public_list_workflow_runs",
+  "leviosa_public_list_work_items",
+  "leviosa_public_get_work_item",
+  "leviosa_public_list_email_suppressions",
 ] as const;
 
-/** One validated deployment-owned Odie KG endpoint. */
+/** One validated deployment-owned ODIE MCP endpoint. */
 export type OdieKgConfig = { endpoint: string };
 
-/** Reads the configured Agentic Odie MCP endpoint, failing closed on an unexpected URL shape. */
+/** Reads the configured Agentic ODIE MCP endpoint, failing closed unless it is the EU endpoint. */
 export function readOdieKgConfig(env: Env): OdieKgConfig | null {
   const raw = env.ODIE_KG_MCP_URL?.trim();
   if (!raw) return null;
@@ -44,8 +80,7 @@ export function readOdieKgConfig(env: Env): OdieKgConfig | null {
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash ||
-      url.pathname !== "/api/mcp/odie") {
+  if (url.toString() !== ODIE_KG_EU_ENDPOINT) {
     return null;
   }
   return { endpoint: url.toString() };

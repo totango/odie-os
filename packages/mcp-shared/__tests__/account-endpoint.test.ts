@@ -122,6 +122,14 @@ class ScopedOAuthFlowAccount extends OAuthFlowAccount {
   }
 }
 
+class CompletionTrackingOAuthFlowAccount extends OAuthFlowAccount {
+  completedServers: ConnectedServer[] = [];
+
+  protected override connectionCompleted(server: ConnectedServer): void {
+    this.completedServers.push(server);
+  }
+}
+
 afterEach(() => vi.unstubAllGlobals());
 
 const server = (endpoint: string): ConnectedServer => ({
@@ -461,17 +469,22 @@ describe("connect initiation nonce", () => {
     });
 
     const nonce = "9".repeat(64);
-    const account = new OAuthFlowAccount(context as never, {});
+    const account = new CompletionTrackingOAuthFlowAccount(context as never, {});
     await account.setCallback({ complete } as never, nonce);
     const outcome = await account.beginConnect(nonce, server("https://mcp.example/mcp"));
     expect(outcome.kind).toBe("redirect");
+    expect(account.completedServers).toEqual([]);
     const state = new URL((outcome as { url: string }).url).searchParams.get("state")!;
     const oauthNonce = state.slice(state.indexOf(":") + 1);
 
-    const resumed = new OAuthFlowAccount(context as never, {});
+    const resumed = new CompletionTrackingOAuthFlowAccount(context as never, {});
     expect(await resumed.acceptAuthCode("authorization-code", oauthNonce)).toBe(true);
     expect(context.storage.kv.get<{ access_token: string }>("tokens")?.access_token)
       .toBe("access-token");
+    expect(resumed.completedServers).toEqual([expect.objectContaining({
+      endpoint: "https://mcp.example/mcp",
+      auth: "oauth",
+    })]);
     expect(complete).toHaveBeenCalledOnce();
     expect(await resumed.acceptAuthCode("authorization-code", oauthNonce)).toBe(false);
   });
