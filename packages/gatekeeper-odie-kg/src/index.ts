@@ -40,7 +40,7 @@ import type { McpLog, McpLogFields } from "@gadgets/mcp-shared/log";
 import { generateSessionTypes, sessionTypeName } from "@gadgets/mcp-shared/schema-to-ts";
 import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import { endpointTag, sameEndpoint, type ToolScope } from "@gadgets/mcp-shared/scope";
-import { classifyTool, type ServerTrust } from "@gadgets/mcp-shared/tools";
+import { classifyTool, type ClassifiedTool, type ServerTrust } from "@gadgets/mcp-shared/tools";
 import {
   McpGatekeeperUserBase,
   mcpGatekeeperUserContext,
@@ -54,6 +54,7 @@ import {
   odieKgServer,
   odieKgToolScope,
   readOdieKgConfig,
+  ODIE_KG_ALLOWED_TOOLS,
   ODIE_KG_DISPLAY_NAME,
   ODIE_KG_OAUTH_SCOPE,
   ODIE_KG_SERVER_ID,
@@ -71,6 +72,9 @@ const ODIE_KG_ICON: AvatarImage = {
     "<path d='M48 32h56v56H48V32Zm104 0h56v56h-56V32ZM48 168h56v56H48v-56Zm104 0h56v56h-56v-56ZM104 56h48v8h-48v-8Zm20 32h8v80h-8V88Zm-20 104h48v8h-48v-8Z'/>" +
     "</svg>"),
 };
+
+const ODIE_MCP_SCOPE_VERSION = 1;
+const ODIE_MCP_SCOPE_VERSION_KEY = "odieMcpScopeVersion";
 
 type OdieKgGatekeeperProps = McpGatekeeperUserProps & {
   endpoint: string;
@@ -101,7 +105,7 @@ async function continueConnect(
   const config = readOdieKgConfig(env);
   if (!config) {
     return htmlResponse(errorPageHtml(
-      "Totango Knowledge Graph is not configured",
+      "ODIE MCP is not configured",
       "Ask an administrator to configure the Agentic Odie MCP endpoint.",
     ), 503);
   }
@@ -109,7 +113,7 @@ async function continueConnect(
   try {
     outcome = await account.beginConnect(initiationNonce, odieKgServer(config));
   } catch (error) {
-    logger.warn("Totango KG connect failed", { event: "connect.failed", error });
+    logger.warn("ODIE MCP connect failed", { event: "connect.failed", error });
     return htmlResponse(errorPageHtml(
       "Could not connect",
       error instanceof Error ? error.message : String(error),
@@ -138,7 +142,7 @@ export default {
 /** First-party connector that starts one tenant-bound OAuth account per user. */
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
-  /** Describes the deployment-configured Totango KG connection. */
+  /** Describes the deployment-configured ODIE MCP connection. */
   async describe(): Promise<VendorDescription> {
     const config = readOdieKgConfig(this.env);
     return {
@@ -146,10 +150,10 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       url: "https://www.totango.com/",
       logo: ODIE_KG_ICON,
       color: "#5b4bdb",
-      tagline: config ? "Connect your tenant's customer knowledge" : "Not configured",
+      tagline: config ? "Connect your organization's customer context" : "Not configured",
       description:
-        "Use tenant-scoped customer, account, CSM, product-usage, and internal Totango knowledge " +
-        "as an always-available agent source after connecting once.",
+        "Use organization-bound Knowledge Graph, customer context, export retrieval, skill " +
+        "discovery, and supported Leviosa public data as an always-available read-only source.",
       providesAuth: config !== null,
     };
   }
@@ -159,7 +163,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     callback: Fetcher<GatekeeperConnectCallback>,
     _options?: GatekeeperConnectOptions,
   ): Promise<{ url: string }> {
-    if (!readOdieKgConfig(this.env)) throw new Error("Totango Knowledge Graph is not configured.");
+    if (!readOdieKgConfig(this.env)) throw new Error("ODIE MCP is not configured.");
     const exports = (this.ctx as ExportContext<unknown>).exports;
     const accountId = exports.OdieKgAccount.newUniqueId();
     const initiationNonce = generateNonce();
@@ -177,6 +181,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   async getTypeScriptTypes(): Promise<string> {
     return MCP_BASE_TYPES;
   }
+}
+
+function missingOdieMcpTools(tools: ClassifiedTool[]): string[] {
+  const available = new Set(tools.map(entry => entry.tool.name));
+  return ODIE_KG_ALLOWED_TOOLS.filter(name => !available.has(name));
 }
 
 /** Durable per-user owner of Agentic OAuth credentials and MCP transport state. */
@@ -198,16 +207,34 @@ export class OdieKgAccount extends McpAccountBase<Env> {
     return ODIE_KG_OAUTH_SCOPE;
   }
 
+  protected override connectionCompleted(server: ConnectedServer): void {
+    const configured = readOdieKgConfig(this.env)?.endpoint;
+    if (configured && sameEndpoint(server.endpoint, configured)) {
+      this.ctx.storage.kv.put(ODIE_MCP_SCOPE_VERSION_KEY, ODIE_MCP_SCOPE_VERSION);
+    }
+  }
+
+  /** Reports whether this account completed OAuth for the current ODIE MCP read-scope revision. */
+  hasCurrentScopeGrant(): boolean {
+    return this.ctx.storage.kv.get<number>(ODIE_MCP_SCOPE_VERSION_KEY) === ODIE_MCP_SCOPE_VERSION;
+  }
+
   /** Performs a live tenant/tool probe for required-connection health checks. */
   async getConnectionStatus(): Promise<ConnectionHealthStatus> {
     const config = readOdieKgConfig(this.env);
-    if (!config) return { state: "unavailable", message: "Totango Knowledge Graph is not configured." };
+    if (!config) return { state: "unavailable", message: "ODIE MCP is not configured." };
     try {
       const server = await this.getServer();
       if (!sameEndpoint(server.endpoint, config.endpoint)) {
         return {
           state: "unavailable",
-          message: "The Totango Knowledge Graph endpoint changed. Reconnect this account.",
+          message: "The ODIE MCP endpoint changed. Reconnect this account.",
+        };
+      }
+      if (!this.hasCurrentScopeGrant()) {
+        return {
+          state: "expired",
+          message: "Reconnect ODIE MCP to authorize the expanded read-only scopes.",
         };
       }
 
@@ -221,10 +248,10 @@ export class OdieKgAccount extends McpAccountBase<Env> {
         .map(tool => classifyTool(tool, "vetted"))
         .map(applyOdieKgToolPolicy)
         .filter(entry => entry !== null);
-      if (!tools.some(entry => entry.tool.name === "odie-kg-status")) {
+      if (missingOdieMcpTools(tools).length > 0) {
         return {
-          state: "unavailable",
-          message: "The Odie KG MCP resource did not expose the required status tool.",
+          state: "expired",
+          message: `Reconnect ODIE MCP to authorize all ${ODIE_KG_ALLOWED_TOOLS.length} read-only tools.`,
         };
       }
 
@@ -234,10 +261,10 @@ export class OdieKgAccount extends McpAccountBase<Env> {
         const message = mcpToolText(result);
         return message ? classifyOdieKgStatusError(message) : {
           state: "unavailable",
-          message: "The Totango Knowledge Graph status check failed. Try again or contact an administrator.",
+          message: "The ODIE MCP status check failed. Try again or contact an administrator.",
         };
       }
-      return { state: "healthy", message: "Totango Knowledge Graph is reachable and tenant-bound." };
+      return { state: "healthy", message: "ODIE MCP is reachable and organization-bound." };
     } catch (error) {
       return classifyOdieKgStatusError(error);
     }
@@ -256,7 +283,7 @@ export class OdieKgConnectionAccount implements ConnectionAccount {
     const configured = readOdieKgConfig(this.env)?.endpoint;
     if (!configured || !sameEndpoint(endpoint, this.endpoint) ||
         !sameEndpoint(configured, this.endpoint)) {
-      throw new Error("The Totango Knowledge Graph endpoint changed. Reconnect this account.");
+      throw new Error("The ODIE MCP endpoint changed. Reconnect this account.");
     }
   }
 
@@ -304,32 +331,52 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
   override async describe(): Promise<AccountDescription> {
     const base = await super.describe();
     const config = readOdieKgConfig(this.env);
-    const server = await this.#account().getServer();
-    const configured = config && sameEndpoint(server.endpoint, config.endpoint);
+    const account = this.#account();
+    const [server, hasCurrentScopeGrant] = await Promise.all([
+      account.getServer(),
+      account.hasCurrentScopeGrant(),
+    ]);
+    const configured = config && sameEndpoint(server.endpoint, config.endpoint) && hasCurrentScopeGrant;
     return {
       ...base,
       displayName: ODIE_KG_DISPLAY_NAME,
       avatar: ODIE_KG_ICON,
       singleton: configured ? {
         tsType: sessionTypeName(ODIE_KG_SERVER_ID, odieKgResourceUrl(config.endpoint)),
+        revisionedAuthority: true,
       } : undefined,
     };
   }
 
   /** Returns the owner-scoped fixed-read KG singleton class. */
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<unknown>>> {
+    return (await this.getSingletonGatekeeperAuthority()).class;
+  }
+
+  /** Returns the immutable facet revision for the current ODIE MCP read scope. */
+  async getSingletonGatekeeperAuthority(): Promise<{
+    key: string;
+    class: DurableObjectClass<Gatekeeper<unknown>>;
+  }> {
     const config = readOdieKgConfig(this.env);
-    if (!config) throw new Error("Totango Knowledge Graph is not configured.");
-    const server = await this.#account().getServer();
-    if (!sameEndpoint(server.endpoint, config.endpoint)) {
-      throw new Error("The Totango Knowledge Graph endpoint changed. Reconnect this account.");
+    if (!config) throw new Error("ODIE MCP is not configured.");
+    const account = this.#account();
+    const [server, hasCurrentScopeGrant] = await Promise.all([
+      account.getServer(),
+      account.hasCurrentScopeGrant(),
+    ]);
+    if (!sameEndpoint(server.endpoint, config.endpoint) || !hasCurrentScopeGrant) {
+      throw new Error("Reconnect ODIE MCP to authorize the current endpoint and read-only scopes.");
     }
     const props: OdieKgGatekeeperProps = {
       accountObjectId: this.ctx.props.accountObjectId,
       endpoint: config.endpoint,
       scope: odieKgToolScope(),
     };
-    return (this.ctx as ExportContext<McpGatekeeperUserProps>).exports.OdieKgGatekeeper({ props });
+    return {
+      key: `odie-mcp-read-v${ODIE_MCP_SCOPE_VERSION}:${endpointTag(config.endpoint)}`,
+      class: (this.ctx as ExportContext<McpGatekeeperUserProps>).exports.OdieKgGatekeeper({ props }),
+    };
   }
 
   /** This account is a singleton and exposes no separately grantable resources. */
@@ -339,12 +386,12 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
 
   /** Refuses attempts to mint URL-addressed facets from the singleton account. */
   getGatekeeperClassFor(_url: string): never {
-    throw new Error("Totango Knowledge Graph is an ambient singleton, not a URL resource.");
+    throw new Error("ODIE MCP is an ambient singleton, not a URL resource.");
   }
 
   /** This singleton has no resource configurator. */
   async startResourceConfigurator(_resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
-    throw new Error("Totango Knowledge Graph has no resource configurator.");
+    throw new Error("ODIE MCP has no resource configurator.");
   }
 
   /** Returns the required verifier token; the singleton itself refuses every observer. */
@@ -365,7 +412,7 @@ export class OdieKgVerifier extends WorkerEntrypoint<Env> implements GatekeeperU
   verify(): void {}
 }
 
-/** Owner-only facet exposing the exact customer/internal KG read surface. */
+/** Owner-only facet exposing the exact ODIE MCP read surface. */
 export class OdieKgGatekeeper
   extends McpFacetBase<Env, OdieKgGatekeeperProps, OdieKgSession> {
   protected get log() {
@@ -400,14 +447,14 @@ export class OdieKgGatekeeper
     return new OdieKgConnectionAccount(this.env, account, this.ctx.props.endpoint);
   }
 
-  /** Filters the remote catalog to the fixed KG reads and overrides remote annotations. */
+  /** Filters the remote catalog to fixed reads and overrides remote annotations. */
   override async tools() {
     const configured = readOdieKgConfig(this.env)?.endpoint;
     if (!configured || !sameEndpoint(configured, this.ctx.props.endpoint)) {
-      throw new Error("The Totango Knowledge Graph endpoint changed. Reconnect this account.");
+      throw new Error("The ODIE MCP endpoint changed. Reconnect this account.");
     }
     try {
-      return (await fetchTools(
+      const tools = (await fetchTools(
         this.env,
         this.account(),
         this.endpoint,
@@ -416,23 +463,30 @@ export class OdieKgGatekeeper
         .map(tool => classifyTool(tool, this.trust))
         .map(applyOdieKgToolPolicy)
         .filter(entry => entry !== null);
+      const missingTools = missingOdieMcpTools(tools);
+      if (missingTools.length > 0) {
+        throw new Error(
+          `ODIE MCP is missing ${missingTools.length} required read-only tool(s). Reconnect the account.`,
+        );
+      }
+      return tools;
     } catch (error) {
       const message = boundedErrorMessage(error);
       if (/reconnect the account|credential|authorization|401/i.test(message)) {
         throw new Error(
-          "Totango Knowledge Graph credentials are stale or expired. Reconnect the account, " +
+          "ODIE MCP credentials are stale or expired. Reconnect the account, " +
           "then try the TOTANGO_KG binding again.",
           { cause: error },
         );
       }
       if (/403|does not have access|refused/i.test(message)) {
         throw new Error(
-          "Totango Knowledge Graph refused access. Ask an administrator to grant the connected " +
-          "account access to the Odie KG MCP resource and tools.",
+          "ODIE MCP refused access. Ask an administrator to grant the connected account access " +
+          "to the required read scopes and tools.",
           { cause: error },
         );
       }
-      throw new Error("Could not load the Totango Knowledge Graph tool catalog. Try again later.", {
+      throw new Error("Could not load the ODIE MCP tool catalog. Try again later.", {
         cause: error,
       });
     }
@@ -460,7 +514,7 @@ export class OdieKgGatekeeper
     return {
       url: this.resourceUrl,
       title: ODIE_KG_DISPLAY_NAME,
-      snippet: `${tools.length} tenant-scoped customer and internal knowledge tools, all read-only.`,
+      snippet: `${tools.length} organization-bound ODIE MCP tools, all read-only.`,
       suggestedBindingName: "TOTANGO_KG",
       tsType: sessionTypeName(ODIE_KG_SERVER_ID, this.resourceUrl),
     };
@@ -489,21 +543,21 @@ export class OdieKgGatekeeper
       entries = (await this.tools()).map(entry => ({
         id: entry.tool.name,
         title: entry.tool.title ?? entry.tool.name,
-        description: entry.tool.description?.split(/\r?\n/)[0] ?? "Totango KG read tool.",
+        description: entry.tool.description?.split(/\r?\n/)[0] ?? "ODIE MCP read tool.",
       }));
     } catch (error) {
       unavailable = classifyOdieKgStatusError(error).message
-        ?? "The Totango Knowledge Graph is unavailable. Try again or contact an administrator.";
+        ?? "ODIE MCP is unavailable. Try again or contact an administrator.";
       entries = [{
-        id: "totango-kg-unavailable",
-        title: "Totango KG unavailable",
+        id: "odie-mcp-unavailable",
+        title: "ODIE MCP unavailable",
         description: unavailable,
       }];
     }
     const catalog = boundAgentCatalog(entries);
     await authorizer.authorizeObservation({
-      title: unavailable ? "Totango Knowledge Graph unavailable" : "Totango Knowledge Graph catalog",
-      description: unavailable ?? `Listed ${catalog.entries.length} tenant-scoped KG tool(s).`,
+      title: unavailable ? "ODIE MCP unavailable" : "ODIE MCP catalog",
+      description: unavailable ?? `Listed ${catalog.entries.length} organization-bound read tool(s).`,
     });
     return catalog;
   }
@@ -519,15 +573,15 @@ function classifyOdieKgStatusError(error: unknown): ConnectionHealthStatus {
   if (/403|does not have access|tenant|unbound|declined|refused/i.test(message)) {
     return {
       state: "unavailable",
-      message: "The Totango Knowledge Graph is not authorized for this tenant. Contact an administrator.",
+      message: "ODIE MCP is not authorized for this organization. Contact an administrator.",
     };
   }
   if (/401|credential|authorization|required authorization|reconnect the account/i.test(message)) {
-    return { state: "expired", message: "Reconnect Totango Knowledge Graph to continue." };
+    return { state: "expired", message: "Reconnect ODIE MCP to continue." };
   }
   return {
     state: "unavailable",
-    message: "The Totango Knowledge Graph is unavailable. Try again or contact an administrator.",
+    message: "ODIE MCP is unavailable. Try again or contact an administrator.",
   };
 }
 

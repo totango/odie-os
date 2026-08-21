@@ -19,7 +19,7 @@
   "vars": {
     "BASE_URL": "https://odie-os.odie-os.workers.dev/gatekeeper/odie-kg",
     "ODIE_KG_MCP_URL": "https://api-agents.unison.totango.com/api/mcp/odie",
-    "MCP_CLIENT_NAME": "Odie OS Totango Knowledge Graph",
+    "MCP_CLIENT_NAME": "ODIE MCP for Odie OS",
     "MCP_ALLOW_INSECURE": "false"
   },
   "observability": {

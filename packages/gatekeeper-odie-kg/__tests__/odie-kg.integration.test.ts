@@ -12,12 +12,26 @@ import {
   type Harness,
 } from "@gadgets/integration-tests/harness";
 import { NetworkInterceptor, type Handler } from "@gadgets/integration-tests/network-interceptor";
-import { ODIE_KG_ALLOWED_TOOLS, ODIE_KG_DISPLAY_NAME, VENDOR_ID } from "../src/config.js";
+import {
+  ODIE_KG_ALLOWED_TOOLS,
+  ODIE_KG_DISPLAY_NAME,
+  ODIE_KG_EU_ENDPOINT,
+  ODIE_KG_OAUTH_SCOPE,
+  VENDOR_ID,
+} from "../src/config.js";
 
 const ODIE_KG_DIR = new URL("..", import.meta.url).pathname;
 const ODIE_KG_BINDING = "ODIE_KG";
-const MCP_ENDPOINT = "https://odie.test/api/mcp/odie";
+const MCP_ENDPOINT = ODIE_KG_EU_ENDPOINT;
 const AUTH_ISSUER = "https://auth.test";
+const SIDE_EFFECTING_TOOLS = [
+  "odie-skill-run",
+  "odie-skill-create-draft",
+  "odie-skill-publish",
+  "odie-export-request",
+  "run_odie_skill",
+  "generate_brief",
+] as const;
 
 type JsonRpcRequest = {
   id?: number | string | null;
@@ -54,7 +68,11 @@ function allRemoteTools(scenario: RemoteScenario = {}) {
       inputSchema: { type: "object", additionalProperties: true },
       annotations: name === "odie-kg-status" ? {} : { readOnlyHint: true },
     })),
-    {name: "odie-export-request", title: "forbidden export", annotations: {readOnlyHint: false}},
+    ...SIDE_EFFECTING_TOOLS.map(name => ({
+      name,
+      title: `Forbidden action ${name}`,
+      annotations: {readOnlyHint: false},
+    })),
   ]).filter(tool => tool.name !== scenario.omitTool);
 }
 
@@ -77,7 +95,7 @@ function odieOauthAndMcpHandler(seen: string[]): Handler {
       if (body.method === "initialize") {
         return rpcResult(body.id, {
           protocolVersion: "2025-06-18",
-          serverInfo: { name: "Odie KG fixture", title: "Odie KG fixture" },
+          serverInfo: { name: "ODIE MCP fixture", title: "ODIE MCP fixture" },
           capabilities: { tools: {} },
         }, { headers: { "Mcp-Session-Id": "mcp-session-1" } });
       }
@@ -108,7 +126,7 @@ function odieOauthAndMcpHandler(seen: string[]): Handler {
       return json({
         resource: MCP_ENDPOINT,
         authorization_servers: [AUTH_ISSUER],
-        scopes_supported: ["openid", "profile", "email", "mcp:odie:kg:read", "mcp:odie:exports:write"],
+        scopes_supported: ODIE_KG_OAUTH_SCOPE.split(" "),
       });
     }
     if (url.href === `${AUTH_ISSUER}/.well-known/oauth-authorization-server`) {
@@ -210,14 +228,14 @@ async function connectOdieKgAccount(api: AuthenticatedApiStub) {
   callbackUrl.searchParams.set("state", authorizationUrl.searchParams.get("state")!);
   const callbackResponse = await harness.fetchWorker("gatekeeper-odie-kg", callbackUrl.toString());
   expect(callbackResponse.status).toBe(200);
-  const account = await waitFor("the Odie KG account to be connected", async () => {
+  const account = await waitFor("the ODIE MCP account to be connected", async () => {
     const accounts = await listConnectedAccounts(api);
     return accounts.find(candidate => candidate.vendorId === VENDOR_ID) ?? null;
   });
   return { account, authorizationUrl };
 }
 
-describe("Totango Knowledge Graph integration", () => {
+describe("ODIE MCP integration", () => {
   it("connects through OAuth and declares the tenant-bound ambient singleton", async () => {
     remoteScenario = {};
     await withSession(async publicApi => {
@@ -243,8 +261,7 @@ describe("Totango Knowledge Graph integration", () => {
 
       const { account, authorizationUrl } = await connectOdieKgAccount(api);
       expect(authorizationUrl.origin + authorizationUrl.pathname).toBe(`${AUTH_ISSUER}/authorize`);
-      expect(authorizationUrl.searchParams.get("scope"))
-        .toBe("openid profile email mcp:odie:kg:read");
+      expect(authorizationUrl.searchParams.get("scope")).toBe(ODIE_KG_OAUTH_SCOPE);
       expect(authorizationUrl.searchParams.get("client_id")).toBe("odie-test-client");
       expect(account.credentialsValid).toBe(true);
       expect(account.description.displayName).toBe(ODIE_KG_DISPLAY_NAME);
@@ -319,7 +336,7 @@ describe("Totango Knowledge Graph integration", () => {
         vendorId: VENDOR_ID,
         state: "unavailable",
         accountId: expect.any(Number),
-        message: expect.stringMatching(/not authorized for this tenant/i),
+        message: expect.stringMatching(/not authorized for this organization/i),
       })]);
       await expect(gatekeeper.describe()).resolves.toMatchObject({
         suggestedBindingName: "TOTANGO_KG",
@@ -341,17 +358,19 @@ describe("Totango Knowledge Graph integration", () => {
     });
   });
 
-  it("lists the granted KG tools when a generated call is missing from the remote catalog", async () => {
+  it("fails closed when the remote catalog omits any required read tool", async () => {
     remoteScenario = { omitTool: "odie-kg-query" };
     await withSession(async publicApi => {
       using api = await signUp(publicApi, nextUsernames("odiemissing")[0]);
-      await connectOdieKgAccount(api);
-      using overseer = await api.newGadget();
-      using gatekeeper = await overseer.getGatekeeperById(0);
-      using session = await gatekeeper.openSession() as unknown as McpSessionStub;
-
-      await expect(session.callTool("odie-kg-query", { question: "missing?" }))
-        .rejects.toThrow(/does not grant|grants only/);
+      const { account } = await connectOdieKgAccount(api);
+      await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
+        vendorId: VENDOR_ID,
+        accountId: account.id,
+        state: "expired",
+        message: expect.stringMatching(/all 36 read-only tools/i),
+      })]);
+      await expect(api.newGadget()).rejects
+        .toThrow(/required connections must be healthy/i);
     });
   });
 });
