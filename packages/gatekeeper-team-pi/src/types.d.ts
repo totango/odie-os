@@ -21,6 +21,58 @@ export type TeamPiCalendarOptions = { startIso: string; endIso: string; limit?: 
 /** Search options for Gmail, Chorus, Zendesk, and similar Team PI indexes. */
 export type TeamPiSearchOptions = { query: string; limit?: number; cursor?: string };
 
+/** Strict Zendesk memory partition. All dimensions are required to prevent cross-brand or cross-account recall. */
+export type ZendeskTicketMemoryPartition = {
+  /** Team PI or provider brand identifier. */
+  brandId: string;
+  /** Team PI customer/account/organization identifier. */
+  accountId: string;
+  /** Zendesk subdomain without `.zendesk.com`. */
+  subdomain: string;
+};
+
+/** Request for an authoritative live Zendesk ticket read. */
+export type ZendeskTicketReadRequest = {
+  /** Provider-native Zendesk ticket id accepted by Team PI Work Items routes. */
+  id: string;
+};
+
+/** Minimized non-authoritative Zendesk ticket memory entry stored after successful live reads. */
+export type ZendeskTicketMemoryEntry = {
+  /** Provider-native Zendesk ticket id. */
+  id: string;
+  /** Trusted HTTPS `*.zendesk.com` ticket URL, when present on the authoritative read. */
+  url?: string;
+  /** Bounded Zendesk ticket title or subject. */
+  title: string;
+  /** Bounded provider status. */
+  status?: string;
+  /** Bounded provider ticket type. */
+  type?: string;
+  /** Bounded provider priority. */
+  priority?: string;
+  /** Exact strict partition used for this memory entry. */
+  partition: ZendeskTicketMemoryPartition;
+  /** Unix epoch milliseconds when this minimized memory entry was last refreshed from a live read. */
+  rememberedAt: number;
+};
+
+/** Request for local Zendesk ticket memory search inside one exact strict partition. */
+export type ZendeskTicketMemorySearchRequest = {
+  /** Exact strict partition to search; memory never falls back to partial or fuzzy partition matching. */
+  partition: ZendeskTicketMemoryPartition;
+  /** Optional bounded lexical query matched against minimized memory fields only. */
+  query?: string;
+  /** Maximum entries to return, capped at 25. */
+  limit?: number;
+};
+
+/** Non-authoritative local Zendesk ticket memory search page. */
+export type ZendeskTicketMemorySearchResult = {
+  /** Minimized remembered tickets. These may be stale; call readZendeskTicket() before relying on current state. */
+  items: ZendeskTicketMemoryEntry[];
+};
+
 /** Minimal skill metadata exposed by Team PI. */
 export type TeamPiSkill = {
   id: string;
@@ -96,6 +148,21 @@ export interface TeamPiSession {
 
   /** Searches Jira and Zendesk Work Items as a private read-only observation. */
   workItemsSearch(request: WorkItemSearchRequest): Promise<WorkItemSearchPage>;
+
+  /**
+   * Reads the authoritative live Zendesk ticket Work Items model, including detail, comments,
+   * activity, update options, transitions, and attachment metadata. When the live ticket includes
+   * authoritative brand/account identifiers and a recognized Zendesk ticket URL, minimized
+   * non-authoritative memory may be refreshed for later recall.
+   */
+  readZendeskTicket(request: ZendeskTicketReadRequest): Promise<WorkItemRead>;
+
+  /**
+   * Searches non-authoritative minimized local Zendesk ticket memory for one exact strict
+   * partition. Results are stale hints only; call readZendeskTicket() before relying on current
+   * ticket state, comments, activity, attachments, assignees, requester, or arbitrary fields.
+   */
+  searchZendeskTicketMemory(request: ZendeskTicketMemorySearchRequest): Promise<ZendeskTicketMemorySearchResult>;
 }
 
 /** Team PI Work Items provider kind. */

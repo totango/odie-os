@@ -398,6 +398,11 @@ function configEnv(): Env {
   } as unknown as Env;
 }
 
+async function testSha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function fakeAccount(overrides: Partial<TeamPiAccount> = {}): DurableObjectStub<TeamPiAccount> {
   return {
     describeIdentity: async () => ({}),
@@ -704,6 +709,160 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       transitions: [{ id: "31", name: "Done", toStatus: "Done" }],
       attachments,
     });
+  });
+
+  it("reads authoritative Zendesk tickets through Work Items and then stores only minimized memory", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "12", title: "Login failing", url: "https://acme.zendesk.com/agent/tickets/12", status: "open", type: "incident", priority: "high", requester: "Customer", assignee: "Agent", description: { body: "secret description" }, fields: { brandId: "brand-1", account_id: "acct-1", raw: "ignored" } } }))
+      .mockResolvedValueOnce(response({ comments: [{ id: "c1", author: "Customer", body: "private comment" }] }))
+      .mockResolvedValueOnce(response({ activity: [{ id: "a1", type: "audit", author: "Agent", summary: "updated" }] }))
+      .mockResolvedValueOnce(response({ allowedFields: ["status"] }))
+      .mockResolvedValueOnce(response({ attachments: [{ id: "att-1", name: "screen.png", contentType: "image/png" }] }));
+    const kv = new Kv();
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await expect(session.readZendeskTicket({ id: "12" })).resolves.toMatchObject({
+      detail: { item: { source: "zendesk", id: "12", description: { body: "secret description" } } },
+      comments: [{ body: "private comment", public: true }],
+      activity: [{ summary: "updated" }],
+      updateOptions: { source: "zendesk", id: "12", allowedFields: ["status"] },
+      transitions: [],
+      attachments: [{ id: "att-1", name: "screen.png" }],
+    });
+    expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({ prohibitAllSharing: true }));
+    expect(vi.mocked(fetch).mock.calls.map(call => String(call[0]))).toEqual([
+      "https://team-pi.example/api/work-items/v1/items/zendesk/12",
+      "https://team-pi.example/api/work-items/v1/items/zendesk/12/comments",
+      "https://team-pi.example/api/work-items/v1/items/zendesk/12/activity",
+      "https://team-pi.example/api/work-items/v1/items/zendesk/12/update-options",
+      "https://team-pi.example/api/work-items/v1/items/zendesk/12/attachments",
+    ]);
+    const meta = kv.get<{ partitions: { keyHash: string; lastUsedAt: number }[] }>("zendeskTicketMemory:v2:meta");
+    expect(meta?.partitions).toHaveLength(1);
+    const entries = kv.get<unknown[]>(`zendeskTicketMemory:v2:partition:${meta?.partitions[0]?.keyHash}`);
+    expect(entries?.[0]).toEqual({
+      id: "12",
+      url: "https://acme.zendesk.com/agent/tickets/12",
+      title: "Login failing",
+      status: "open",
+      type: "incident",
+      priority: "high",
+      rememberedAt: expect.any(Number),
+    });
+    expect(JSON.stringify([meta, entries])).not.toMatch(/brand-1|acct-1|secret description|private comment|Customer|Agent|screen\.png|raw/);
+  });
+
+  it("skips memory when authoritative partition dimensions are incomplete", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "13", title: "No account fields", url: "https://acme.zendesk.com/agent/tickets/13", fields: {} } }))
+      .mockResolvedValueOnce(response({ comments: [] }))
+      .mockResolvedValueOnce(response({ activity: [] }))
+      .mockResolvedValueOnce(response({ allowedFields: [] }))
+      .mockResolvedValueOnce(response({ attachments: [] }))
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "14", title: "Incomplete", url: "https://acme.zendesk.com/agent/tickets/14", fields: { brandId: "brand-1" } } }))
+      .mockResolvedValueOnce(response({ comments: [] }))
+      .mockResolvedValueOnce(response({ activity: [] }))
+      .mockResolvedValueOnce(response({ allowedFields: [] }))
+      .mockResolvedValueOnce(response({ attachments: [] }));
+    const kv = new Kv();
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await session.readZendeskTicket({ id: "13" });
+    await session.readZendeskTicket({ id: "14" });
+
+    expect(kv.get("zendeskTicketMemory:v2:meta")).toBeUndefined();
+  });
+
+  it("canonicalizes remembered Zendesk URLs and requires a recognized ticket path for the ticket id", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "17", title: "Canonical", url: "https://acme.zendesk.com/agent/tickets/17?token=secret#fragment", fields: { brandId: "brand-1", account_id: "acct-1" } } }))
+      .mockResolvedValueOnce(response({ comments: [] })).mockResolvedValueOnce(response({ activity: [] })).mockResolvedValueOnce(response({ allowedFields: [] })).mockResolvedValueOnce(response({ attachments: [] }))
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "18", title: "Wrong path", url: "https://acme.zendesk.com/users/18?token=secret", fields: { brandId: "brand-1", account_id: "acct-1" } } }))
+      .mockResolvedValueOnce(response({ comments: [] })).mockResolvedValueOnce(response({ activity: [] })).mockResolvedValueOnce(response({ allowedFields: [] })).mockResolvedValueOnce(response({ attachments: [] }));
+    const kv = new Kv();
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await session.readZendeskTicket({ id: "17" });
+    await session.readZendeskTicket({ id: "18" });
+
+    const meta = kv.get<{ partitions: { keyHash: string }[] }>("zendeskTicketMemory:v2:meta");
+    const entries = kv.get<{ id: string; url?: string }[]>(`zendeskTicketMemory:v2:partition:${meta?.partitions[0]?.keyHash}`);
+    expect(entries).toEqual(expect.arrayContaining([expect.objectContaining({ id: "17", url: "https://acme.zendesk.com/agent/tickets/17" })]));
+    const wrongPath = entries?.find(entry => entry.id === "18");
+    expect(wrongPath).toBeUndefined();
+    expect(JSON.stringify(entries)).not.toMatch(/token=secret|fragment/);
+  });
+
+  it("searches Zendesk ticket memory by exact partition with lexical query and limits", async () => {
+    const kv = new Kv();
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "1", title: "Login broken", url: "https://acme.zendesk.com/agent/tickets/1", fields: { brand: "b1", organization_id: "a1" } } }))
+      .mockResolvedValueOnce(response({ comments: [] })).mockResolvedValueOnce(response({ activity: [] })).mockResolvedValueOnce(response({ allowedFields: [] })).mockResolvedValueOnce(response({ attachments: [] }))
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "2", title: "Billing question", url: "https://acme.zendesk.com/agent/tickets/2", fields: { brand: "b1", organization_id: "a1" } } }))
+      .mockResolvedValueOnce(response({ comments: [] })).mockResolvedValueOnce(response({ activity: [] })).mockResolvedValueOnce(response({ allowedFields: [] })).mockResolvedValueOnce(response({ attachments: [] }))
+      .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "3", title: "Login other account", url: "https://acme.zendesk.com/agent/tickets/3", fields: { brand: "b1", organization_id: "a2" } } }))
+      .mockResolvedValueOnce(response({ comments: [] })).mockResolvedValueOnce(response({ activity: [] })).mockResolvedValueOnce(response({ allowedFields: [] })).mockResolvedValueOnce(response({ attachments: [] }));
+    await session.readZendeskTicket({ id: "1" });
+    await session.readZendeskTicket({ id: "2" });
+    await session.readZendeskTicket({ id: "3" });
+    vi.mocked(fetch).mockClear();
+
+    await expect(session.searchZendeskTicketMemory({ partition: { brandId: "b1", accountId: "a1", subdomain: "acme" }, query: "login", limit: 1 })).resolves.toEqual({
+      items: [expect.objectContaining({ id: "1", title: "Login broken", partition: { brandId: "b1", accountId: "a1", subdomain: "acme" } })],
+    });
+    await expect(session.searchZendeskTicketMemory({ partition: { brandId: "b1", accountId: "a2", subdomain: "acme" }, query: "login" })).resolves.toEqual({
+      items: [expect.objectContaining({ id: "3", title: "Login other account" })],
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(approval.authorizeObservation).toHaveBeenCalledTimes(5);
+  });
+
+  it("enforces Zendesk ticket memory TTL, per-partition entry cap, and LRU partition cap", async () => {
+    const kv = new Kv();
+    const now = Date.now();
+    const searchedHash = await testSha256(JSON.stringify({ brandId: "missing", accountId: "a", subdomain: "acme" }));
+    const partitions = Array.from({ length: 27 }, (_, partitionIndex) => ({
+      keyHash: partitionIndex === 0 ? searchedHash : partitionIndex.toString(16).padStart(2, "0").repeat(32),
+      lastUsedAt: now - partitionIndex,
+    }));
+    for (const [partitionIndex, partition] of partitions.entries()) {
+      kv.put(`zendeskTicketMemory:v2:partition:${partition.keyHash}`, Array.from({ length: partitionIndex === 0 ? 105 : 1 }, (_, entryIndex) => ({
+        id: `${partitionIndex}-${entryIndex}`,
+        title: `Ticket ${entryIndex}`,
+        rememberedAt: entryIndex === 104 ? now - 31 * 24 * 60 * 60 * 1000 : now - entryIndex,
+      })));
+    }
+    kv.put("zendeskTicketMemory:v2:meta", { partitions });
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await session.searchZendeskTicketMemory({ partition: { brandId: "missing", accountId: "a", subdomain: "acme" } });
+
+    const meta = kv.get<{ partitions: { keyHash: string }[] }>("zendeskTicketMemory:v2:meta");
+    expect(meta?.partitions.length).toBeLessThanOrEqual(25);
+    const entries = kv.get<unknown[]>(`zendeskTicketMemory:v2:partition:${partitions[0]?.keyHash}`);
+    expect(entries?.length).toBe(50);
+    expect(JSON.stringify(entries)).not.toContain("0-104");
+    expect(kv.get(`zendeskTicketMemory:v2:partition:${partitions[26]?.keyHash}`)).toBeUndefined();
+  });
+
+  it("does not mutate Zendesk ticket memory search state before observation authorization", async () => {
+    const kv = new Kv();
+    const seededHash = await testSha256(JSON.stringify({ brandId: "b", accountId: "a", subdomain: "acme" }));
+    kv.put("zendeskTicketMemory:v2:meta", { partitions: [{ keyHash: seededHash, lastUsedAt: 1 }] });
+    kv.put(`zendeskTicketMemory:v2:partition:${seededHash}`, [{ id: "1", title: "Ticket", rememberedAt: Date.now() }]);
+    const before = JSON.stringify([...kv.values.entries()]);
+    const approval = { authorizeObservation: vi.fn().mockRejectedValue(new Error("denied")), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await expect(session.searchZendeskTicketMemory({ partition: { brandId: "b", accountId: "a", subdomain: "acme" } })).rejects.toThrow("denied");
+
+    expect(JSON.stringify([...kv.values.entries()])).toBe(before);
   });
 
   it("covers a customer/product issue query flow across discovery and provider reads", async () => {
