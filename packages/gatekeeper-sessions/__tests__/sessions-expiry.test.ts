@@ -213,6 +213,7 @@ describe("coding session terminal expiry", () => {
       "opencode",
     )).rejects.toThrow("not running");
 
+    expect(policies.configure).toHaveBeenCalledWith(expect.objectContaining({ sandboxId: "sandbox-1" }));
     expect(policies.storeTicket).not.toHaveBeenCalled();
   });
 

@@ -245,13 +245,43 @@ describe("coding session asynchronous startup", () => {
 
   it("records bounded startup failure after repeated alarm failures", async () => {
     const { policy, kv, registry, tools } = createPolicy();
-    createStartupSandbox();
+    const sandbox = createStartupSandbox();
     tools.prepareSessionStartup.mockRejectedValue(new Error("x".repeat(800)));
     kv.put("startup", startupRecord({ attempt: 2 }));
 
     await policy.alarm();
 
     expect(registry.startupFailed).toHaveBeenCalledWith("session-1", "sandbox-1", "x".repeat(500));
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+    expect(kv.get("startup")).toBeUndefined();
+  });
+
+  it("retains startup state when final sandbox destroy is unavailable", async () => {
+    const { policy, kv, tools } = createPolicy();
+    const sandbox = createStartupSandbox();
+    sandbox.destroy.mockRejectedValue(new Error("destroy unavailable"));
+    tools.prepareSessionStartup.mockRejectedValue(new Error("authorization failed"));
+    kv.put("startup", startupRecord({ attempt: 2 }));
+
+    await expect(policy.alarm()).rejects.toThrow("destroy unavailable");
+
+    expect(kv.get<any>("startup")).toMatchObject({ failureError: "authorization failed" });
+  });
+
+  it("continues retained failure cleanup without resuming startup phases", async () => {
+    const { policy, kv, registry, tools } = createPolicy();
+    const sandbox = createStartupSandbox();
+    sandbox.destroy.mockRejectedValueOnce(new Error("destroy unavailable"));
+    tools.prepareSessionStartup.mockRejectedValue(new Error("authorization failed"));
+    kv.put("startup", startupRecord({ attempt: 2 }));
+    await expect(policy.alarm()).rejects.toThrow("destroy unavailable");
+    tools.prepareSessionStartup.mockClear();
+    registry.startupFailed.mockClear();
+
+    await policy.alarm();
+
+    expect(tools.prepareSessionStartup).not.toHaveBeenCalled();
+    expect(registry.startupFailed).toHaveBeenCalledWith("session-1", "sandbox-1", "authorization failed");
     expect(kv.get("startup")).toBeUndefined();
   });
 
@@ -295,6 +325,77 @@ describe("coding session asynchronous startup", () => {
     await policy.alarm();
 
     expect(sandbox.destroy).toHaveBeenCalledOnce();
+    expect(kv.get("startup")).toBeUndefined();
+  });
+
+  it("retains stale-success startup state when old sandbox destroy fails", async () => {
+    const { policy, kv, registry } = createPolicy();
+    const sandbox = createStartupSandbox();
+    sandbox.destroy.mockRejectedValue(new Error("destroy unavailable"));
+    registry.startupSucceeded.mockResolvedValue(false);
+    kv.put("startup", startupRecord({ phase: "terminal" }));
+
+    await policy.alarm();
+
+    expect(kv.get<any>("startup")).toMatchObject({ phase: "terminal", attempt: 1 });
+  });
+
+  it("passes the sandbox generation fence to Workshop MCP tool methods", async () => {
+    const { policy, kv } = createPolicy();
+    const tools = policy.env.WORKSHOP_TOOLS as {
+      listTools: ReturnType<typeof vi.fn>;
+      callTool: ReturnType<typeof vi.fn>;
+      getActionResult: ReturnType<typeof vi.fn>;
+    };
+    tools.listTools = vi.fn(async () => []);
+    tools.callTool = vi.fn(async () => ({ content: [] }));
+    tools.getActionResult = vi.fn(async () => ({ content: [] }));
+
+    await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }));
+    await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "vendor__read", arguments: { a: 1 } } }),
+    }));
+    await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "workshop_action_result", arguments: { tool: "vendor__write", actionId: 7 } } }),
+    }));
+
+    const owner = kv.get<any>("policy").owner;
+    expect(tools.listTools).toHaveBeenCalledWith(owner, "session-1", "sandbox-1");
+    expect(tools.callTool).toHaveBeenCalledWith(owner, "session-1", "vendor__read", { a: 1 }, "sandbox-1");
+    expect(tools.getActionResult).toHaveBeenCalledWith(owner, "session-1", "vendor__write", 7, "sandbox-1");
+  });
+
+  it("rejects Workshop MCP requests without a sandbox generation", async () => {
+    const { policy, kv } = createPolicy();
+    const tools = policy.env.WORKSHOP_TOOLS as { listTools: ReturnType<typeof vi.fn> };
+    tools.listTools = vi.fn(async () => []);
+    kv.put("policy", {
+      sessionId: "session-1",
+      runtime: "opencode",
+      owner: { userId: "user-1", email: "user@example.com" },
+      repositories: ["jarvis"],
+    });
+
+    const response = await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }));
+
+    expect(await response.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code: -32603, message: "Workshop MCP sandboxId is not configured." },
+    });
+    expect(tools.listTools).not.toHaveBeenCalled();
   });
 
   it("retains terminal startup state when success finalization is unavailable", async () => {
@@ -318,6 +419,13 @@ describe("coding session asynchronous startup", () => {
       await expect(registry.startupSucceeded("session-1", "sandbox-1", "term-old")).resolves.toBe(false);
       expect(kv.get<StoredRecord>("session:session-1")?.terminalId).toBeUndefined();
     }
+  });
+
+  it("registry reports only the current running sandbox generation", () => {
+    const { registry } = createRegistryWith(startingRecord({ status: "running", terminalId: "term-1" }));
+
+    expect(registry.isCurrentSessionGeneration("session-1", "sandbox-1")).toBe(true);
+    expect(registry.isCurrentSessionGeneration("session-1", "sandbox-old")).toBe(false);
   });
 
   it("ticket alarm behavior remains isolated from startup state", async () => {
@@ -363,6 +471,24 @@ describe("coding session asynchronous startup", () => {
     expect(deleteAlarm).toHaveBeenCalledOnce();
   });
 
+  it("backfills a missing sandbox generation on a matching legacy policy", () => {
+    const { policy, kv } = createPolicy();
+    kv.put("policy", {
+      sessionId: "session-1",
+      owner: { userId: "user-1", email: "user@example.com" },
+      repositories: ["jarvis"],
+    });
+
+    policy.configure({
+      sessionId: "session-1",
+      sandboxId: "sandbox-1",
+      owner: { userId: "user-1", email: "user@example.com" },
+      repositories: ["jarvis"],
+    });
+
+    expect(kv.get<any>("policy")?.sandboxId).toBe("sandbox-1");
+  });
+
   it("cancels durable startup before destroying a starting sandbox", async () => {
     const { registry } = createRegistryWith(startingRecord());
     const cancelSessionStartup = vi.fn(async () => undefined);
@@ -380,6 +506,42 @@ describe("coding session asynchronous startup", () => {
 
     expect(cancelSessionStartup).toHaveBeenCalledWith("session-1", "sandbox-1");
     expect(cancelSessionStartup.mock.invocationCallOrder[0]).toBeLessThan(destroy.mock.invocationCallOrder[0]!);
+  });
+
+  it("logs startup cancellation failure but still destroys and stops the session", async () => {
+    const { registry, kv } = createRegistryWith(startingRecord());
+    const destroy = vi.fn(async () => undefined);
+    sandboxState.sandboxes.set("sandbox-1", { destroy });
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: {
+        idFromName: (id: string) => id,
+        get: () => ({ cancelSessionStartup: vi.fn(async () => { throw new Error("cancel failed"); }) }),
+      },
+    };
+
+    await registry.stopSession("session-1");
+
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(kv.get<StoredRecord>("session:session-1")).toMatchObject({ status: "stopped", terminalId: undefined });
+  });
+
+  it("marks a session failed when sandbox destruction prevents stopping", async () => {
+    const { registry, kv } = createRegistryWith(startingRecord({ status: "running", terminalId: "terminal-1" }));
+    sandboxState.sandboxes.set("sandbox-1", {
+      destroy: vi.fn(async () => { throw new Error("destroy failed"); }),
+    });
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+    };
+
+    await expect(registry.stopSession("session-1")).rejects.toThrow("destroy failed");
+
+    expect(kv.get<StoredRecord>("session:session-1")).toMatchObject({
+      status: "failed",
+      error: "destroy failed",
+      terminalId: "terminal-1",
+    });
   });
 
   it("resets retry accounting when startup advances to another phase", async () => {

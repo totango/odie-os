@@ -124,26 +124,26 @@ export class CodingSessionToolHostImpl
     return user.prepareCodingSessionStartup(repositories);
   }
 
-  async listTools(owner: CodingSessionOwner, sessionId: string) {
+  async listTools(owner: CodingSessionOwner, sessionId: string, sandboxId: string) {
     const user = this.#user(owner);
     await user.assertRequiredConnectionsHealthy();
-    return user.listCodingSessionTools(sessionId);
+    return user.listCodingSessionTools(sessionId, sandboxId);
   }
 
   async callTool(owner: CodingSessionOwner, sessionId: string, name: string,
-      args?: Record<string, unknown>)
+      args: Record<string, unknown> | undefined, sandboxId: string)
       : Promise<CodingSessionToolResult> {
     const user = this.#user(owner);
     await user.assertRequiredConnectionsHealthy();
-    return user.callCodingSessionTool(sessionId, name, args);
+    return user.callCodingSessionTool(sessionId, name, args, sandboxId);
   }
 
   async getActionResult(owner: CodingSessionOwner, sessionId: string, name: string,
-      actionId: number)
+      actionId: number, sandboxId: string)
       : Promise<CodingSessionToolResult> {
     const user = this.#user(owner);
     await user.assertRequiredConnectionsHealthy();
-    return user.getCodingSessionActionResult(sessionId, name, actionId);
+    return user.getCodingSessionActionResult(sessionId, name, actionId, sandboxId);
   }
 }
 

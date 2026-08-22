@@ -30,6 +30,21 @@ const OUTPUTS_BACKFILL_PAGE = 16;
 const CODING_SESSION_REPOSITORY_OWNER = "totango";
 const CODING_SESSION_REPOSITORY_OPTION_LIMIT = 50;
 
+/** Rejects missing, inactive, archived, or stale coding-session generations. */
+export async function assertCurrentCodingSessionGeneration(
+  service: Service<CodingSessionsService>,
+  owner: CodingSessionOwner,
+  sessionId: string,
+  sandboxId: string,
+): Promise<CodingSessionSummary> {
+  const session = await service.getSessionMetadata(owner, sessionId);
+  if (!session || session.status !== "running" || session.archivedAt ||
+      !await service.isCurrentSessionGeneration(owner, sessionId, sandboxId)) {
+    throw new Error("Coding session is not running.");
+  }
+  return session;
+}
+
 type ConnectedAccountRecord = {
   id: number;
   account: Fetcher<GatekeeperUser>;
@@ -1498,7 +1513,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Creates a coding session after enforcing a valid GitHub connection. */
   async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
     let {owner, service} = await this.#codingSessionsAccess(request.repositories);
-    return service.createSession(owner, request);
+    return service.createSession(owner, request, validateOpenCodeCustomization(this.storage.openCodeCustomization.get()));
   }
 
   /**
@@ -1532,7 +1547,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let session = await initial.service.getSession(initial.owner, sessionId);
     if (!session) throw new Error("Coding session was not found.");
     let {owner, service} = await this.#codingSessionsAccess(session.repositories);
-    return service.restartSession(owner, sessionId);
+    return service.restartSession(owner, sessionId, validateOpenCodeCustomization(this.storage.openCodeCustomization.get()));
   }
 
   /** Stops and archives an owned coding session even if its GitHub connection has expired. */
@@ -1629,8 +1644,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  async listCodingSessionTools(sessionId: string): Promise<CodingSessionTool[]> {
-    await this.#assertCodingSessionAccess(sessionId);
+  async listCodingSessionTools(sessionId: string, sandboxId: string): Promise<CodingSessionTool[]> {
+    await this.#assertCodingSessionAccess(sessionId, sandboxId);
     const catalogs = await Promise.all((await this.#codingSessionBindings()).map(async binding => {
       let session: McpSessionBase | undefined;
       try {
@@ -1654,9 +1669,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async callCodingSessionTool(
     sessionId: string,
     qualifiedName: string,
-    args?: Record<string, unknown>,
+    args: Record<string, unknown> | undefined,
+    sandboxId: string,
   ): Promise<CodingSessionToolResult> {
-    await this.#assertCodingSessionAccess(sessionId);
+    await this.#assertCodingSessionAccess(sessionId, sandboxId);
     const { binding, toolName } = await this.#resolveCodingSessionTool(qualifiedName);
     const session = await binding.facet.startSession(
       new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
@@ -1671,8 +1687,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     sessionId: string,
     qualifiedName: string,
     actionId: number,
+    sandboxId: string,
   ): Promise<CodingSessionToolResult> {
-    await this.#assertCodingSessionAccess(sessionId);
+    await this.#assertCodingSessionAccess(sessionId, sandboxId);
     const { binding } = await this.#resolveCodingSessionTool(qualifiedName);
     const record = [...this.storage.codingSessionActions.bySession.get(sessionId)].find(candidate =>
       candidate.bindingId === binding.id &&
@@ -1690,12 +1707,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async #assertCodingSessionAccess(sessionId: string): Promise<void> {
+  async #assertCodingSessionAccess(sessionId: string, sandboxId: string): Promise<void> {
     const { owner, service } = await this.#codingSessionsOwner();
-    const session = await service.getSessionMetadata(owner, sessionId);
-    if (!session || session.status !== "running" || session.archivedAt) {
-      throw new Error("Coding session is not running.");
-    }
+    const session = await assertCurrentCodingSessionGeneration(service, owner, sessionId, sandboxId);
     await this.#codingSessionsAccess(session.repositories);
   }
 

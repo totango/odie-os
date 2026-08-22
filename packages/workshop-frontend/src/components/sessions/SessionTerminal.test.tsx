@@ -128,6 +128,7 @@ async function renderTerminal() {
   })
   await act(async () => {})
   return {
+    container,
     async unmount() {
       await act(async () => root.unmount())
       container.remove()
@@ -206,6 +207,184 @@ describe('SessionTerminal', () => {
     await advance(60_000)
     expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(1)
     expect(testState.sockets).toHaveLength(1)
+
+    await rendered.unmount()
+  })
+
+  it('leaves fatal protocol errors disconnected and allows a manual reconnect with a fresh ticket', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => socket!.serverMessage(JSON.stringify({ type: 'ready', cursor: '' })))
+    expect(rendered.container.textContent).toContain('Terminal protocol error.')
+    expect(rendered.container.textContent).toContain('Disconnected')
+
+    await advance(60_000)
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(1)
+    expect(testState.sockets).toHaveLength(1)
+
+    const button = Array.from(rendered.container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect'))
+    expect(button).toBeTruthy()
+    await act(async () => button!.click())
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(2)
+    expect(testState.sockets).toHaveLength(2)
+    const reconnectUrl = new URL(testState.sockets[1]!.url)
+    expect(reconnectUrl.searchParams.get('ticket')).toBe('2')
+
+    await rendered.unmount()
+  })
+
+  it('auto-retries a failed manual reconnect after the previous terminal exited', async () => {
+    const rendered = await renderTerminal()
+    const api = testState.authenticatedApi
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => socket!.serverMessage(JSON.stringify({
+      type: 'exit', cursor: 'exit-cursor', exit: { code: 1 },
+    })))
+    api.mintCodingSessionAttachCapability.mockRejectedValueOnce(new Error('replacement not ready'))
+
+    const button = Array.from(rendered.container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect'))
+    expect(button).toBeTruthy()
+    await act(async () => button!.click())
+
+    expect(api.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(2)
+    expect(rendered.container.textContent).toContain('Disconnected')
+    await advance(1_000)
+
+    expect(api.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(3)
+    expect(testState.sockets).toHaveLength(2)
+    expect(new URL(testState.sockets[1]!.url).searchParams.get('cursor')).toBe('exit-cursor')
+
+    await rendered.unmount()
+  })
+
+  it('stops auto-retrying quickly stable connections at the reconnect cap but keeps manual reconnect available', async () => {
+    const rendered = await renderTerminal()
+
+    for (const delay of [1_000, 2_000, 4_000, 8_000, 8_000]) {
+      const socket = testState.sockets.at(-1)
+      expect(socket).toBeDefined()
+      await act(async () => {
+        socket!.serverMessage(JSON.stringify({ type: 'ready' }))
+        socket!.serverClose()
+      })
+      await advance(delay)
+    }
+
+    const cappedSocket = testState.sockets.at(-1)
+    expect(cappedSocket).toBeDefined()
+    await act(async () => {
+      cappedSocket!.serverMessage(JSON.stringify({ type: 'ready' }))
+      cappedSocket!.serverClose()
+    })
+    await advance(60_000)
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(6)
+    expect(testState.sockets).toHaveLength(6)
+    expect(rendered.container.textContent).toContain('Terminal connection was lost.')
+    expect(rendered.container.textContent).toContain('Disconnected')
+
+    const button = Array.from(rendered.container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect'))
+    expect(button).toBeTruthy()
+    await act(async () => button!.click())
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(7)
+    expect(testState.sockets).toHaveLength(7)
+    expect(new URL(testState.sockets[6]!.url).searchParams.get('ticket')).toBe('7')
+
+    await rendered.unmount()
+  })
+
+  it('does not send an uncommitted partial chunk cursor when reconnecting', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => {
+      socket!.serverMessage(JSON.stringify({ type: 'ready', cursor: 'ready-cursor' }))
+      socket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'partial-cursor' }))
+      socket!.serverClose()
+    })
+    await advance(1000)
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(2)
+    expect(testState.sockets).toHaveLength(2)
+    const reconnectUrl = new URL(testState.sockets[1]!.url)
+    expect(reconnectUrl.searchParams.get('ticket')).toBe('2')
+    expect(reconnectUrl.searchParams.get('cursor')).toBe('ready-cursor')
+
+    await rendered.unmount()
+  })
+
+  it('lets a manual reconnect supersede an auto reconnect already waiting for terminal operations', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => {
+      socket!.serverMessage(JSON.stringify({ type: 'ready' }))
+      socket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'chunk-cursor' }))
+      socket!.serverMessage(new Uint8Array([1, 2, 3]).buffer)
+      socket!.serverClose()
+    })
+    await advance(1_000)
+
+    expect(testState.terminalWriteCallbacks).toHaveLength(1)
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(1)
+
+    const button = Array.from(rendered.container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect'))
+    expect(button).toBeTruthy()
+    await act(async () => button!.click())
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      testState.terminalWriteCallbacks.shift()?.()
+      await Promise.resolve()
+    })
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(2)
+    expect(testState.sockets).toHaveLength(2)
+    expect(new URL(testState.sockets[1]!.url).searchParams.get('ticket')).toBe('2')
+
+    await rendered.unmount()
+  })
+
+  it('lets the latest manual reconnect supersede earlier manual clicks waiting for terminal operations', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => {
+      socket!.serverMessage(JSON.stringify({ type: 'ready' }))
+      socket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'chunk-cursor' }))
+      socket!.serverMessage(new Uint8Array([1, 2, 3]).buffer)
+      await vi.advanceTimersByTimeAsync(16)
+      socket!.serverMessage(JSON.stringify({ type: 'bogus' }))
+    })
+
+    expect(testState.terminalWriteCallbacks).toHaveLength(1)
+    expect(rendered.container.textContent).toContain('Terminal protocol error.')
+
+    const button = Array.from(rendered.container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect'))
+    expect(button).toBeTruthy()
+    await act(async () => button!.click())
+    await act(async () => button!.click())
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      testState.terminalWriteCallbacks.shift()?.()
+      await Promise.resolve()
+    })
+
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(2)
+    expect(testState.sockets).toHaveLength(2)
+    expect(new URL(testState.sockets[1]!.url).searchParams.get('ticket')).toBe('2')
 
     await rendered.unmount()
   })

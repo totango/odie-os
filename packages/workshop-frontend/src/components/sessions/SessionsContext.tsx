@@ -176,10 +176,13 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
   }, [github.state, refreshActivity])
 
   const activeSession = sessions.find((session) => session.id === activeId && !session.archivedAt)
+  const hasTransitionalOpenSession = sessions.some(
+    (session) => !session.archivedAt && (session.status === 'starting' || session.status === 'stopping'),
+  )
 
   useEffect(() => {
     if (github.state !== 'connected') return
-    if (activeSession?.status !== 'starting' && activeSession?.status !== 'stopping') return
+    if (!hasTransitionalOpenSession) return
     let cancelled = false
     let timer: number | undefined
     const poll = () => {
@@ -192,7 +195,7 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
       cancelled = true
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [activeSession?.status, github.state, refresh])
+  }, [github.state, hasTransitionalOpenSession, refresh])
 
   useEffect(() => {
     if (github.state !== 'connected') return
