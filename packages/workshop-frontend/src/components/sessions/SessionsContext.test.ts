@@ -263,6 +263,34 @@ describe('SessionsProvider responsiveness', () => {
     await rendered.unmount()
   })
 
+  it('polls non-active transitional session metadata without overlapping requests', async () => {
+    vi.useFakeTimers()
+    const api = createApi()
+    const transitionalSession = session({ id: 'session-2', status: 'starting' })
+    api.listCodingSessions.mockResolvedValueOnce([transitionalSession])
+    const poll = deferred<CodingSessionSummary[]>()
+    api.listCodingSessions.mockReturnValueOnce(poll.promise)
+    testState.authenticatedApi = api
+    const rendered = await renderProvider()
+
+    expect(rendered.context.activeSession).toBeUndefined()
+    expect(rendered.context.sessions.find((item) => item.id === 'session-2')?.status).toBe('starting')
+
+    await act(async () => vi.advanceTimersByTime(1_000))
+    expect(api.listCodingSessions).toHaveBeenCalledTimes(2)
+
+    await act(async () => vi.advanceTimersByTime(6_000))
+    expect(api.listCodingSessions).toHaveBeenCalledTimes(2)
+
+    api.listCodingSessions.mockResolvedValueOnce([session({ id: 'session-2', status: 'running' })])
+    await act(async () => poll.resolve([transitionalSession]))
+    expect(api.listCodingSessions).toHaveBeenCalledTimes(3)
+    await act(async () => {})
+    expect(rendered.context.sessions.find((item) => item.id === 'session-2')?.status).toBe('running')
+
+    await rendered.unmount()
+  })
+
   it('keeps loaded true during background refreshes', async () => {
     vi.useFakeTimers()
     const api = createApi()

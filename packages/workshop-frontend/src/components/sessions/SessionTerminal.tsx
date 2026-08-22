@@ -12,6 +12,7 @@ type PendingChunk = { byteLength: number; cursor: string }
 
 const MAX_RECONNECT_ATTEMPTS = 5
 const MAX_CURSOR_LENGTH = 1024
+const RECONNECT_STABILITY_WINDOW_MS = 5_000
 
 const TERMINAL_THEMES = {
   light: { background: '#ffffff', foreground: '#18181b', cursor: '#ff4801', selectionBackground: '#dbeafe' },
@@ -48,8 +49,10 @@ export default function SessionTerminal({
     let cancelled = false
     let socket: WebSocket | undefined
     let reconnectTimer: number | undefined
+    let reconnectStabilityTimer: number | undefined
     let reconnectAttempts = 0
     let connectionGeneration = 0
+    let reconnectRequestGeneration = 0
     let terminalExited = false
     let fatalProtocolError = false
     let cursor: string | undefined
@@ -115,6 +118,10 @@ export default function SessionTerminal({
 
     const scheduleReconnect = (message: string) => {
       if (cancelled || terminalExited || reconnectTimer !== undefined) return
+      if (reconnectStabilityTimer !== undefined) {
+        window.clearTimeout(reconnectStabilityTimer)
+        reconnectStabilityTimer = undefined
+      }
       setState('disconnected')
       if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
         setError(message)
@@ -125,9 +132,10 @@ export default function SessionTerminal({
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = undefined
         reconnectAttempts++
+        const reconnectRequest = ++reconnectRequestGeneration
         outputBatcher.flush()
         void terminalOperations.whenIdle().then(() => {
-          if (!cancelled) connect()
+          if (!cancelled && reconnectRequest === reconnectRequestGeneration) connect()
         })
       }, delay)
     }
@@ -135,6 +143,8 @@ export default function SessionTerminal({
     const connect = () => {
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       reconnectTimer = undefined
+      if (reconnectStabilityTimer !== undefined) window.clearTimeout(reconnectStabilityTimer)
+      reconnectStabilityTimer = undefined
       const generation = ++connectionGeneration
       socket?.close()
       socket = undefined
@@ -158,7 +168,12 @@ export default function SessionTerminal({
           if (cancelled || generation !== connectionGeneration) return
           const failProtocol = () => {
             fatalProtocolError = true
+            if (reconnectStabilityTimer !== undefined) {
+              window.clearTimeout(reconnectStabilityTimer)
+              reconnectStabilityTimer = undefined
+            }
             setError('Terminal protocol error.')
+            setState('disconnected')
             nextSocket.close()
           }
           if (event.data instanceof ArrayBuffer) {
@@ -201,7 +216,11 @@ export default function SessionTerminal({
                 if (!cancelled && readyCursor !== undefined) cursor = readyCursor
                 done()
               })
-              reconnectAttempts = 0
+              if (reconnectStabilityTimer !== undefined) window.clearTimeout(reconnectStabilityTimer)
+              reconnectStabilityTimer = window.setTimeout(() => {
+                reconnectStabilityTimer = undefined
+                reconnectAttempts = 0
+              }, RECONNECT_STABILITY_WINDOW_MS)
               setError(undefined)
               setState('connected')
               if (terminalKind === 'shell') setInteractive(true)
@@ -248,8 +267,14 @@ export default function SessionTerminal({
           }
         })
         nextSocket.addEventListener('close', () => {
-          if (!cancelled && generation === connectionGeneration && !terminalExited && !fatalProtocolError) {
-            scheduleReconnect('Terminal connection was lost.')
+          if (!cancelled && generation === connectionGeneration) {
+            if (reconnectStabilityTimer !== undefined) {
+              window.clearTimeout(reconnectStabilityTimer)
+              reconnectStabilityTimer = undefined
+            }
+            if (!terminalExited && !fatalProtocolError) {
+              scheduleReconnect('Terminal connection was lost.')
+            }
           }
         })
         nextSocket.addEventListener('error', () => {
@@ -267,14 +292,18 @@ export default function SessionTerminal({
     reconnectRef.current = () => {
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       reconnectTimer = undefined
+      if (reconnectStabilityTimer !== undefined) window.clearTimeout(reconnectStabilityTimer)
+      reconnectStabilityTimer = undefined
       connectionGeneration++
       socket?.close()
       socket = undefined
       reconnectAttempts = 0
+      terminalExited = false
       setError(undefined)
+      const reconnectRequest = ++reconnectRequestGeneration
       outputBatcher.flush()
       void terminalOperations.whenIdle().then(() => {
-        if (!cancelled) connect()
+        if (!cancelled && reconnectRequest === reconnectRequestGeneration) connect()
       })
     }
     connect()
@@ -286,6 +315,7 @@ export default function SessionTerminal({
       resizeObserver.disconnect()
       reconnectRef.current = () => {}
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
+      if (reconnectStabilityTimer !== undefined) window.clearTimeout(reconnectStabilityTimer)
       if (resizeFrame !== undefined) window.cancelAnimationFrame(resizeFrame)
       input.dispose()
       socket?.close()

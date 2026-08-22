@@ -88,14 +88,15 @@ export interface CodingSessionToolHost extends WorkerEntrypoint {
   ): Promise<OpenCodeUserCustomization>;
 
   /** Lists the current user's eligible connected MCP tools. */
-  listTools(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionTool[]>;
+  listTools(owner: CodingSessionOwner, sessionId: string, sandboxId: string): Promise<CodingSessionTool[]>;
 
   /** Calls one namespaced tool through its existing gatekeeper approval policy. */
   callTool(
     owner: CodingSessionOwner,
     sessionId: string,
     name: string,
-    args?: Record<string, unknown>,
+    args: Record<string, unknown> | undefined,
+    sandboxId: string,
   ): Promise<CodingSessionToolResult>;
 
   /** Collects the result of an approval-gated MCP action. */
@@ -104,6 +105,7 @@ export interface CodingSessionToolHost extends WorkerEntrypoint {
     sessionId: string,
     name: string,
     actionId: number,
+    sandboxId: string,
   ): Promise<CodingSessionToolResult>;
 }
 
@@ -124,10 +126,18 @@ export interface CodingSessionsService extends WorkerEntrypoint {
    */
   getSessionMetadata(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionSummary | undefined>;
 
+  /**
+   * Returns whether persisted registry metadata still maps the owned running session to the supplied
+   * sandbox generation, without contacting that sandbox. This private control-plane check lets the
+   * Workshop MCP host reject stale sandboxes during rolling deploys and restarts.
+   */
+  isCurrentSessionGeneration(owner: CodingSessionOwner, sessionId: string, sandboxId: string): Promise<boolean>;
+
   /** Creates a session after independently validating the repository allowlist. */
   createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
+    customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary>;
 
   /** Stops a session after verifying ownership. */
@@ -137,6 +147,7 @@ export interface CodingSessionsService extends WorkerEntrypoint {
   restartSession(
     owner: CodingSessionOwner,
     sessionId: string,
+    customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary>;
 
   /** Stops and archives a session after verifying ownership. */

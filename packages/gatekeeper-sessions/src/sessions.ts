@@ -110,6 +110,7 @@ type StartupRecord = {
   nextRepositoryIndex: number;
   completedRepositoryIndexes?: number[];
   cloneProcesses?: Array<{ repositoryIndex: number; processId: string }>;
+  failureError?: string;
   attempt: number;
   createdAt: number;
   updatedAt: number;
@@ -193,6 +194,13 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       if (JSON.stringify({ sessionId: existing.sessionId, owner: existing.owner, repositories: existing.repositories }) !==
           JSON.stringify({ sessionId: policy.sessionId, owner: policy.owner, repositories: policy.repositories })) {
         throw new Error("Coding session policy is immutable.");
+      }
+      // Policy DOs are keyed by container ID, so another sandbox generation must use another DO.
+      if (existing.sandboxId && policy.sandboxId && existing.sandboxId !== policy.sandboxId) {
+        throw new Error("Coding session policy is immutable.");
+      }
+      if (!existing.sandboxId && policy.sandboxId) {
+        this.ctx.storage.kv.put("policy", { ...existing, sandboxId: policy.sandboxId });
       }
       return;
     }
@@ -329,6 +337,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     if (message.method === "notifications/initialized") return new Response(null, { status: 202 });
     const policy = this.#policy();
     try {
+      const sandboxId = required(policy.sandboxId, "Workshop MCP sandboxId");
       if (message.method === "initialize") {
         return mcpResult(message.id, {
           protocolVersion: "2025-03-26",
@@ -338,7 +347,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       }
       if (message.method === "tools/list") {
         const tools = await this.env.WORKSHOP_TOOLS.listTools(
-          policy.owner, policy.sessionId) as unknown as CodingSessionTool[];
+          policy.owner, policy.sessionId, sandboxId) as unknown as CodingSessionTool[];
         return mcpResult(message.id, {
           tools: [
             ...tools.map(tool => ({
@@ -379,11 +388,11 @@ export class CodingSessionPolicy extends DurableObject<Env> {
           }
           result = await this.env.WORKSHOP_TOOLS.getActionResult(
             policy.owner, policy.sessionId, args.tool,
-            args.actionId as number) as unknown as CodingSessionToolResult;
+            args.actionId as number, sandboxId) as unknown as CodingSessionToolResult;
         } else {
           result = await this.env.WORKSHOP_TOOLS.callTool(
             policy.owner, policy.sessionId, params.name,
-            params.arguments as Record<string, unknown> | undefined) as unknown as CodingSessionToolResult;
+            params.arguments as Record<string, unknown> | undefined, sandboxId) as unknown as CodingSessionToolResult;
         }
         if (result.pendingActionId !== undefined) {
           result.content = [{
@@ -422,12 +431,20 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   }
 
   async #advanceStartup(startup: StartupRecord): Promise<void> {
+    if (startup.failureError !== undefined) {
+      await this.#finalizeStartupFailure(startup, startup.failureError);
+      return;
+    }
     try {
       await this.#advanceStartupOnce(startup);
     } catch (error) {
       const current = this.ctx.storage.kv.get<StartupRecord>("startup");
       const policy = this.#policy();
       if (!current) return;
+      if (current.failureError !== undefined) {
+        await this.#finalizeStartupFailure(current, current.failureError);
+        return;
+      }
       if (current.attempt + 1 < STARTUP_MAX_ATTEMPTS) {
         if (current.phase === "clone") await this.#stopCloneProcesses(current);
         this.#putStartup({
@@ -444,12 +461,9 @@ export class CodingSessionPolicy extends DurableObject<Env> {
         });
         return;
       }
-      await this.#registry().startupFailed(
-        policy.sessionId,
-        required(policy.sandboxId, "startup sandboxId"),
-        boundedError(error),
-      );
-      this.ctx.storage.kv.delete("startup");
+      const failed = { ...current, failureError: boundedError(error), updatedAt: Date.now() };
+      this.#putStartup(failed);
+      await this.#finalizeStartupFailure(failed, failed.failureError);
       logger.error("coding session startup failed", {
         event: "coding.session.startup.failed",
         sessionId: policy.sessionId,
@@ -457,6 +471,26 @@ export class CodingSessionPolicy extends DurableObject<Env> {
         error,
       });
     }
+  }
+
+  async #finalizeStartupFailure(startup: StartupRecord, error: string): Promise<void> {
+    const policy = this.#policy();
+    const sandboxId = required(policy.sandboxId, "startup sandboxId");
+    if (startup.phase === "clone") {
+      try {
+        await this.#stopCloneProcesses(startup);
+      } catch (stopError) {
+        logger.warn("coding session startup clone cleanup failed", {
+          event: "coding.session.startup.clone.cleanup.failed",
+          sessionId: policy.sessionId,
+          phase: startup.phase,
+          error: stopError,
+        });
+      }
+    }
+    await this.#registry().startupFailed(policy.sessionId, sandboxId, error);
+    await getSandbox(this.env.SESSION_SANDBOX, sandboxId).destroy();
+    this.ctx.storage.kv.delete("startup");
   }
 
   async #advanceStartupOnce(startup: StartupRecord): Promise<void> {
@@ -499,8 +533,8 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       policy.owner, policy.sessionId, policy.repositories);
     const terminal = await this.#runningOrCreatedPrimaryTerminal(sandboxId, runtime, policy.repositories, customization);
     const applied = await this.#registry().startupSucceeded(policy.sessionId, sandboxId, terminal.id);
-    this.ctx.storage.kv.delete("startup");
     if (!applied) await sandbox.destroy();
+    this.ctx.storage.kv.delete("startup");
   }
 
   async #advanceClone(startup: StartupRecord, repositories: CodingSessionRepository[]): Promise<void> {
@@ -635,10 +669,17 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return record && !record.archivedAt ? publicSummary(record) : undefined;
   }
 
+  /** Returns whether persisted metadata still points at the supplied running sandbox generation. */
+  isCurrentSessionGeneration(sessionId: string, sandboxId: string): boolean {
+    const record = this.#get(sessionId);
+    return !!record && !record.archivedAt && record.status === "running" && record.sandboxId === sandboxId;
+  }
+
   /** Creates and initializes one multi-repository coding session. */
   async createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
+    _customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
     const repositories = validateRepositories(request.repositories);
     if ([...this.#records()].filter(record =>
@@ -691,6 +732,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   async restartSession(
     sessionId: string,
     owner: CodingSessionOwner,
+    _customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
     const record = this.#get(sessionId);
     if (!record || record.archivedAt) throw new Error("Coding session was not found.");
@@ -742,11 +784,31 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   async stopSession(sessionId: string): Promise<void> {
     const record = this.#get(sessionId);
     if (!record || record.status === "stopped") return;
-    this.#put({ ...record, status: "stopping", lastActiveAt: new Date() });
+    const stopping: SessionRecord = { ...record, status: "stopping", lastActiveAt: new Date() };
+    this.#put(stopping);
     if (record.status === "starting") {
-      await policyForSandbox(this.env, record.sandboxId).cancelSessionStartup(record.id, record.sandboxId);
+      try {
+        await policyForSandbox(this.env, record.sandboxId).cancelSessionStartup(record.id, record.sandboxId);
+      } catch (error) {
+        logger.warn("coding session startup cancellation failed", {
+          event: "coding.session.startup.cancel.failed",
+          sessionId,
+          error,
+        });
+      }
     }
-    await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).destroy();
+    try {
+      await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).destroy();
+    } catch (error) {
+      const current = this.#get(sessionId);
+      if (current?.sandboxId === record.sandboxId && current.status === "stopping") {
+        this.#put({ ...stopping, status: "failed", error: boundedError(error), lastActiveAt: new Date() });
+      }
+      logger.error("coding session failed to stop", {
+        event: "coding.session.stop.failed", sessionId, error,
+      });
+      throw error;
+    }
     this.#put({
       ...record,
       status: "stopped",
@@ -788,6 +850,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (!primary) throw new Error("Coding session environment expired. Restart the session to continue.");
     await policyForSandbox(this.env, record.sandboxId).configure({
       sessionId: record.id,
+      sandboxId: record.sandboxId,
       owner,
       repositories: record.repositories,
     });
@@ -967,12 +1030,18 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     return registryFor(this.ctx, owner.userId).getSessionMetadata(sessionId);
   }
 
+  /** Checks persisted running session generation without contacting its sandbox. */
+  isCurrentSessionGeneration(owner: CodingSessionOwner, sessionId: string, sandboxId: string): Promise<boolean> {
+    return registryFor(this.ctx, owner.userId).isCurrentSessionGeneration(sessionId, sandboxId);
+  }
+
   /** Creates a session for the supplied authenticated owner. */
   createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
+    customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
-    return registryFor(this.ctx, owner.userId).createSession(owner, request);
+    return registryFor(this.ctx, owner.userId).createSession(owner, request, customization);
   }
 
   /** Stops a session for the supplied authenticated owner. */
@@ -984,8 +1053,9 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   restartSession(
     owner: CodingSessionOwner,
     sessionId: string,
+    customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
-    return registryFor(this.ctx, owner.userId).restartSession(sessionId, owner);
+    return registryFor(this.ctx, owner.userId).restartSession(sessionId, owner, customization);
   }
 
   /** Stops and archives a session for the supplied authenticated owner. */
