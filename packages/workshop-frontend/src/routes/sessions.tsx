@@ -46,7 +46,7 @@ export function SessionsPage() {
               <div className="truncate text-[13px] font-medium text-kumo-strong">{activeSession.title}</div>
               <div className="truncate text-[11px] text-kumo-subtle">{activeSession.repositories.join(' / ')}</div>
             </div>
-            <span className={`hidden text-[11px] md:inline ${activeSession.status === 'running' ? 'text-kumo-success' : 'text-kumo-danger'}`}>{activeSession.status}</span>
+            <span className={`hidden text-[11px] md:inline ${activeSession.status === 'running' ? 'text-kumo-success' : activeSession.status === 'starting' || activeSession.status === 'stopping' ? 'text-kumo-subtle' : 'text-kumo-danger'}`}>{activeSession.status}</span>
             <WorkshopButton
               title="Discards uncommitted sandbox changes and reclones repositories"
               aria-label="Restart environment"
@@ -87,7 +87,9 @@ export function SessionsPage() {
         <div className={`grid min-h-0 flex-1 ${sessionActivity.some((entry) => entry.state === 'pending') ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
           <div className="min-h-0">
             {activeSession.status === 'running' ? (
-              <SessionTerminal key={`${terminalKind}:${activeSession.lastActiveAt.valueOf()}`} sessionId={activeSession.id} terminalKind={terminalKind} runtime={activeSession.runtime} onSessionUnavailable={refresh} />
+              <SessionTerminal key={`${terminalKind}:${activeSession.id}:${activeSession.runtime}`} sessionId={activeSession.id} terminalKind={terminalKind} runtime={activeSession.runtime} onSessionUnavailable={refresh} />
+            ) : activeSession.status === 'starting' || activeSession.status === 'stopping' ? (
+              <SessionProgressPanel session={activeSession} />
             ) : (
               <SessionRecoveryPanel session={activeSession} onRestart={restartSession} />
             )}
@@ -101,6 +103,27 @@ export function SessionsPage() {
   }
 
   return <NewSessionPane />
+}
+
+function SessionProgressPanel({ session }: { session: { status: string } }) {
+  const copy = session.status === 'starting'
+    ? {
+        title: 'Starting environment',
+        body: 'Preparing this coding session sandbox. The terminal will connect automatically when it is ready.',
+      }
+    : {
+        title: 'Stopping environment',
+        body: 'Shutting down this coding session sandbox. The session status will update automatically.',
+      }
+  return (
+    <div className="flex h-full items-center justify-center bg-kumo-tint/30 px-6 text-center">
+      <div className="max-w-md rounded-2xl border border-kumo-line bg-kumo-base p-6 shadow-sm">
+        <div className="mx-auto h-10 w-10 rounded-full border-2 border-kumo-line border-t-kumo-brand animate-spin" aria-hidden="true" />
+        <h2 className="mt-4 text-lg font-semibold text-kumo-default">{copy.title}</h2>
+        <p className="mt-2 text-sm leading-6 text-kumo-subtle">{copy.body}</p>
+      </div>
+    </div>
+  )
 }
 
 function SessionRecoveryPanel({ session, onRestart }: { session: { id: string; status: string; error?: string }; onRestart: (id: string) => Promise<void> }) {

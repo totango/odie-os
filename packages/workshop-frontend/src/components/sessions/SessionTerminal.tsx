@@ -8,7 +8,10 @@ import { WorkshopButton } from '../WorkshopControls'
 import type { CodingSessionRuntime, CodingSessionTerminalKind } from '@gadgets/workshop-shared/api'
 import { OrderedTerminalOperationQueue, TerminalWriteBatcher } from './orderedTerminalOperations'
 
-type PendingChunk = { byteLength: number }
+type PendingChunk = { byteLength: number; cursor: string }
+
+const MAX_RECONNECT_ATTEMPTS = 5
+const MAX_CURSOR_LENGTH = 1024
 
 const TERMINAL_THEMES = {
   light: { background: '#ffffff', foreground: '#18181b', cursor: '#ff4801', selectionBackground: '#dbeafe' },
@@ -30,7 +33,7 @@ export default function SessionTerminal({
   const { resolvedThemeMode } = useTheme()
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal>(null)
-  const [attempt, setAttempt] = useState(0)
+  const reconnectRef = useRef<() => void>(() => {})
   const [state, setState] = useState<'connecting' | 'starting' | 'connected' | 'disconnected'>('connecting')
   const [interactive, setInteractive] = useState(false)
   const [error, setError] = useState<string>()
@@ -44,6 +47,12 @@ export default function SessionTerminal({
     setError(undefined)
     let cancelled = false
     let socket: WebSocket | undefined
+    let reconnectTimer: number | undefined
+    let reconnectAttempts = 0
+    let connectionGeneration = 0
+    let terminalExited = false
+    let fatalProtocolError = false
+    let cursor: string | undefined
     let pendingChunk: PendingChunk | undefined
     let resizeFrame: number | undefined
     let lastSize = ''
@@ -104,111 +113,186 @@ export default function SessionTerminal({
       (handle) => window.cancelAnimationFrame(handle),
     )
 
-    authenticatedApi.mintCodingSessionAttachCapability(sessionId, terminalKind).then((capability) => {
-      if (cancelled) return
-      const url = new URL(capability.url, window.location.href)
-      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-      socket = new WebSocket(url)
-      socket.binaryType = 'arraybuffer'
-      socket.addEventListener('open', () => {
-        if (cancelled) return
-        setState('starting')
-        sendSize()
-      })
-      socket.addEventListener('message', (event) => {
-        if (cancelled) return
-        if (event.data instanceof ArrayBuffer) {
-          const bytes = new Uint8Array(event.data)
-          if (!pendingChunk || bytes.byteLength !== pendingChunk.byteLength) {
+    const scheduleReconnect = (message: string) => {
+      if (cancelled || terminalExited || reconnectTimer !== undefined) return
+      setState('disconnected')
+      if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        setError(message)
+        onSessionUnavailable?.()
+        return
+      }
+      const delay = Math.min(1000 * 2 ** reconnectAttempts, 8000)
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined
+        reconnectAttempts++
+        outputBatcher.flush()
+        void terminalOperations.whenIdle().then(() => {
+          if (!cancelled) connect()
+        })
+      }, delay)
+    }
+
+    const connect = () => {
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
+      reconnectTimer = undefined
+      const generation = ++connectionGeneration
+      socket?.close()
+      socket = undefined
+      pendingChunk = undefined
+      fatalProtocolError = false
+      setState('connecting')
+      authenticatedApi.mintCodingSessionAttachCapability(sessionId, terminalKind).then((capability) => {
+        if (cancelled || generation !== connectionGeneration) return
+        const url = new URL(capability.url, window.location.href)
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+        if (cursor) url.searchParams.set('cursor', cursor)
+        const nextSocket = new WebSocket(url)
+        socket = nextSocket
+        nextSocket.binaryType = 'arraybuffer'
+        nextSocket.addEventListener('open', () => {
+          if (cancelled || generation !== connectionGeneration) return
+          setState('starting')
+          sendSize()
+        })
+        nextSocket.addEventListener('message', (event) => {
+          if (cancelled || generation !== connectionGeneration) return
+          const failProtocol = () => {
+            fatalProtocolError = true
             setError('Terminal protocol error.')
-            socket?.close()
-            return
+            nextSocket.close()
           }
-          outputBatcher.push(bytes)
-          if (!visibleOutputDetected) {
-            setState('connected')
-          }
-          pendingChunk = undefined
-          return
-        }
-        if (typeof event.data !== 'string') return
-        try {
-          const message = JSON.parse(event.data) as {
-            type?: string
-            byteLength?: number
-            message?: string
-            exit?: { code?: number }
-          }
-          if (pendingChunk && message.type !== 'chunk') {
-            setError('Terminal protocol error.')
-            socket?.close()
-            return
-          }
-          if (message.type === 'ready') {
-            setState('connected')
-            if (terminalKind === 'shell') setInteractive(true)
-            sendSize(true)
-            terminal.focus()
-          } else if (message.type === 'chunk' && typeof message.byteLength === 'number') {
-            if (pendingChunk || !Number.isSafeInteger(message.byteLength) || message.byteLength < 0) {
-              setError('Terminal protocol error.')
-              socket?.close()
+          if (event.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(event.data)
+            if (!pendingChunk || bytes.byteLength !== pendingChunk.byteLength) {
+              failProtocol()
               return
             }
-            pendingChunk = { byteLength: message.byteLength }
-          } else if (message.type === 'truncated') {
-            outputBatcher.flush()
-            terminalOperations.enqueue((done) => {
-              if (!cancelled) terminal.clear()
-              done()
+            const chunk = pendingChunk
+            outputBatcher.push(bytes, () => {
+              if (!cancelled) cursor = chunk.cursor
             })
-          } else if (message.type === 'error') {
-            setError(message.message ?? 'Terminal error.')
-          } else if (message.type === 'exit') {
-            setError(`Terminal exited${message.exit?.code === undefined ? '' : ` (${message.exit.code})`}.`)
-            setState('disconnected')
-            onSessionUnavailable?.()
-          } else {
-            setError('Terminal protocol error.')
-            socket?.close()
+            if (!visibleOutputDetected) {
+              setState('connected')
+            }
+            pendingChunk = undefined
+            return
           }
-        } catch {
-          setError('Terminal protocol error.')
-          socket?.close()
+          if (typeof event.data !== 'string') return
+          try {
+            const message = JSON.parse(event.data) as {
+              type?: string
+              byteLength?: number
+              cursor?: unknown
+              message?: string
+              exit?: { code?: number }
+            }
+            if (pendingChunk && message.type !== 'chunk') {
+              failProtocol()
+              return
+            }
+            if (message.type === 'ready') {
+              if (message.cursor !== undefined && !isTerminalCursor(message.cursor)) {
+                failProtocol()
+                return
+              }
+              const readyCursor = message.cursor
+              outputBatcher.flush()
+              terminalOperations.enqueue((done) => {
+                if (!cancelled && readyCursor !== undefined) cursor = readyCursor
+                done()
+              })
+              reconnectAttempts = 0
+              setError(undefined)
+              setState('connected')
+              if (terminalKind === 'shell') setInteractive(true)
+              sendSize(true)
+              terminal.focus()
+            } else if (message.type === 'chunk' && typeof message.byteLength === 'number') {
+              if (pendingChunk || !Number.isSafeInteger(message.byteLength) || message.byteLength < 0 ||
+                  !isTerminalCursor(message.cursor)) {
+                failProtocol()
+                return
+              }
+              pendingChunk = { byteLength: message.byteLength, cursor: message.cursor }
+            } else if (message.type === 'truncated') {
+              if (message.cursor !== undefined && !isTerminalCursor(message.cursor)) {
+                failProtocol()
+                return
+              }
+              const truncatedCursor = message.cursor
+              outputBatcher.flush()
+              terminalOperations.enqueue((done) => {
+                if (!cancelled) {
+                  terminal.clear()
+                  cursor = truncatedCursor
+                }
+                done()
+              })
+            } else if (message.type === 'error') {
+              setError(message.message ?? 'Terminal error.')
+            } else if (message.type === 'exit') {
+              if (!isTerminalCursor(message.cursor)) {
+                failProtocol()
+                return
+              }
+              cursor = message.cursor
+              terminalExited = true
+              setError(`Terminal exited${message.exit?.code === undefined ? '' : ` (${message.exit.code})`}.`)
+              setState('disconnected')
+              onSessionUnavailable?.()
+            } else {
+              failProtocol()
+            }
+          } catch {
+            failProtocol()
+          }
+        })
+        nextSocket.addEventListener('close', () => {
+          if (!cancelled && generation === connectionGeneration && !terminalExited && !fatalProtocolError) {
+            scheduleReconnect('Terminal connection was lost.')
+          }
+        })
+        nextSocket.addEventListener('error', () => {
+          if (!cancelled && generation === connectionGeneration) {
+            setError('Terminal connection failed.')
+          }
+        })
+      }).catch((caught: unknown) => {
+        if (!cancelled && generation === connectionGeneration) {
+          scheduleReconnect(caught instanceof Error ? caught.message : 'Could not attach to terminal.')
         }
       })
-      socket.addEventListener('close', () => {
-        if (!cancelled) {
-          setState('disconnected')
-          onSessionUnavailable?.()
-        }
+    }
+
+    reconnectRef.current = () => {
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
+      reconnectTimer = undefined
+      connectionGeneration++
+      socket?.close()
+      socket = undefined
+      reconnectAttempts = 0
+      setError(undefined)
+      outputBatcher.flush()
+      void terminalOperations.whenIdle().then(() => {
+        if (!cancelled) connect()
       })
-      socket.addEventListener('error', () => {
-        if (!cancelled) {
-          setError('Terminal connection failed.')
-          onSessionUnavailable?.()
-        }
-      })
-    }).catch((caught: unknown) => {
-      if (!cancelled) {
-        setError(caught instanceof Error ? caught.message : 'Could not attach to terminal.')
-        setState('disconnected')
-        onSessionUnavailable?.()
-      }
-    })
+    }
+    connect()
 
     return () => {
       cancelled = true
       outputBatcher.cancel()
       terminalOperations.cancel()
       resizeObserver.disconnect()
+      reconnectRef.current = () => {}
+      if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer)
       if (resizeFrame !== undefined) window.cancelAnimationFrame(resizeFrame)
       input.dispose()
       socket?.close()
       terminal.dispose()
       terminalRef.current = null
     }
-  }, [authenticatedApi, attempt, onSessionUnavailable, sessionId, terminalKind]) // Theme updates are applied without reconnecting below.
+  }, [authenticatedApi, onSessionUnavailable, sessionId, terminalKind]) // Theme updates are applied without reconnecting below.
 
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_THEMES[resolvedThemeMode]
@@ -219,7 +303,7 @@ export default function SessionTerminal({
       <div className="flex h-10 items-center justify-between border-b border-kumo-line px-3 text-[12px] text-kumo-subtle">
         <span>{state === 'connected' ? 'Connected' : state === 'starting' ? 'Starting terminal…' : state === 'connecting' ? 'Connecting…' : 'Disconnected'}</span>
         {state === 'disconnected' && (
-          <WorkshopButton onClick={() => { setError(undefined); setInteractive(false); setState('connecting'); setAttempt((value) => value + 1) }}>
+          <WorkshopButton onClick={() => reconnectRef.current()}>
             Reconnect
           </WorkshopButton>
         )}
@@ -245,4 +329,8 @@ function terminalHasVisibleContent(terminal: Terminal): boolean {
     if (buffer.getLine(lineIndex)?.translateToString(true).trim()) return true
   }
   return false
+}
+
+function isTerminalCursor(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_CURSOR_LENGTH
 }

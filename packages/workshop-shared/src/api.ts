@@ -534,7 +534,7 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Resolve UI feature flags for the authenticated user. */
   getUiFeatureFlags(): Promise<UiFeatureFlags>;
 
-  /** Lists coding sessions owned by this user after verifying a live GitHub connection. */
+  /** Lists coding sessions owned by this user. */
   listCodingSessions(): Promise<CodingSessionSummary[]>;
 
   /** Searches Totango repositories the connected GitHub user can push to for Coding Sessions. */
