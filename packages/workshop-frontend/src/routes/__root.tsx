@@ -183,7 +183,7 @@ function AuthenticatedShell({
             <Outlet />
           </main>
         ) : (
-          <SessionsProvider>
+          <SessionsProvider loadRepositories={pathname === '/sessions'}>
             <AppShell>
               <Outlet />
             </AppShell>

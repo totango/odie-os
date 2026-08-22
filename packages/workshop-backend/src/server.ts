@@ -114,6 +114,16 @@ export class CodingSessionToolHostImpl
     return wrapDoStubForTelemetry(users.get(users.idFromString(owner.userId)));
   }
 
+  async prepareSessionStartup(
+    owner: CodingSessionOwner,
+    _sessionId: string,
+    repositories: string[],
+  ): Promise<OpenCodeUserCustomization> {
+    const user = this.#user(owner);
+    await user.assertRequiredConnectionsHealthy();
+    return user.prepareCodingSessionStartup(repositories);
+  }
+
   async listTools(owner: CodingSessionOwner, sessionId: string) {
     const user = this.#user(owner);
     await user.assertRequiredConnectionsHealthy();

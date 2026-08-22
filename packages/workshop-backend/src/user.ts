@@ -1498,7 +1498,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** Creates a coding session after enforcing a valid GitHub connection. */
   async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
     let {owner, service} = await this.#codingSessionsAccess(request.repositories);
-    return service.createSession(owner, request, this.storage.openCodeCustomization.get());
+    return service.createSession(owner, request);
+  }
+
+  /**
+   * Private Sessions-worker callback that rechecks live startup authorization and returns current
+   * bounded OpenCode customization for immediate alarm-time materialization.
+   */
+  async prepareCodingSessionStartup(repositories: string[]): Promise<OpenCodeUserCustomization> {
+    await this.#codingSessionsAccess(repositories);
+    return this.storage.openCodeCustomization.get();
   }
 
   /** Reads the OpenCode customization persisted for this account. */
@@ -1519,11 +1528,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** Rebuilds an owned coding session after rechecking repository access. */
   async restartCodingSession(sessionId: string): Promise<CodingSessionSummary> {
-    let initial = await this.#codingSessionsAccess();
-    let session = (await initial.service.listSessions(initial.owner)).find(item => item.id === sessionId);
+    let initial = await this.#codingSessionsOwner();
+    let session = await initial.service.getSession(initial.owner, sessionId);
     if (!session) throw new Error("Coding session was not found.");
     let {owner, service} = await this.#codingSessionsAccess(session.repositories);
-    return service.restartSession(owner, sessionId, this.storage.openCodeCustomization.get());
+    return service.restartSession(owner, sessionId);
   }
 
   /** Stops and archives an owned coding session even if its GitHub connection has expired. */
@@ -1537,8 +1546,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     sessionId: string,
     terminal?: CodingSessionTerminalKind,
   ): Promise<CodingSessionAttachCapability> {
-    let initial = await this.#codingSessionsAccess();
-    let session = (await initial.service.listSessions(initial.owner)).find(item => item.id === sessionId);
+    let initial = await this.#codingSessionsOwner();
+    let session = await initial.service.getSession(initial.owner, sessionId);
     if (!session) throw new Error("Coding session was not found.");
     let {owner, service} = await this.#codingSessionsAccess(session.repositories);
     return service.mintAttachCapability(owner, sessionId, terminal);
@@ -1682,11 +1691,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async #assertCodingSessionAccess(sessionId: string): Promise<void> {
-    const { owner, service } = await this.#codingSessionsAccess();
-    if (!(await service.listSessions(owner)).some(session =>
-      session.id === sessionId && session.status === "running" && !session.archivedAt)) {
+    const { owner, service } = await this.#codingSessionsOwner();
+    const session = await service.getSessionMetadata(owner, sessionId);
+    if (!session || session.status !== "running" || session.archivedAt) {
       throw new Error("Coding session is not running.");
     }
+    await this.#codingSessionsAccess(session.repositories);
   }
 
   async #codingSessionBindings(): Promise<CodingSessionMcpBinding[]> {

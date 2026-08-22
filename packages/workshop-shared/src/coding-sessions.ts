@@ -76,6 +76,17 @@ export interface CodingSessionActivity {
 
 /** Narrow owner-bound capability used by the Sessions worker to serve Workshop MCP. */
 export interface CodingSessionToolHost extends WorkerEntrypoint {
+  /**
+   * Revalidates startup authority for the current user and returns ephemeral OpenCode
+   * customization for immediate materialization. This private control-plane call is made only by
+   * the Sessions worker's startup alarm, never by public clients.
+   */
+  prepareSessionStartup(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    repositories: CodingSessionRepository[],
+  ): Promise<OpenCodeUserCustomization>;
+
   /** Lists the current user's eligible connected MCP tools. */
   listTools(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionTool[]>;
 
@@ -101,11 +112,22 @@ export interface CodingSessionsService extends WorkerEntrypoint {
   /** Lists sessions owned by the authenticated Workshop user. */
   listSessions(owner: CodingSessionOwner): Promise<CodingSessionSummary[]>;
 
+  /**
+   * Retrieves one non-archived session owned by the authenticated Workshop user and reconciles its
+   * live runtime metadata without exposing sandbox or terminal identifiers.
+   */
+  getSession(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionSummary | undefined>;
+
+  /**
+   * Retrieves persisted metadata for one non-archived owned session without contacting its sandbox.
+   * This avoids re-entering a sandbox while authorizing an outbound tool call from that sandbox.
+   */
+  getSessionMetadata(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionSummary | undefined>;
+
   /** Creates a session after independently validating the repository allowlist. */
   createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
-    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary>;
 
   /** Stops a session after verifying ownership. */
@@ -115,7 +137,6 @@ export interface CodingSessionsService extends WorkerEntrypoint {
   restartSession(
     owner: CodingSessionOwner,
     sessionId: string,
-    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary>;
 
   /** Stops and archives a session after verifying ownership. */

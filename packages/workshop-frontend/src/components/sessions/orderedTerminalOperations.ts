@@ -11,6 +11,7 @@ type OrderedTerminalOperation = (done: () => void) => void
  */
 export class OrderedTerminalOperationQueue {
   private readonly operations: OrderedTerminalOperation[] = []
+  private readonly idleWaiters: Array<() => void> = []
   private running = false
   private cancelled = false
 
@@ -25,12 +26,26 @@ export class OrderedTerminalOperationQueue {
   cancel(): void {
     this.cancelled = true
     this.operations.length = 0
+    for (const resolve of this.idleWaiters.splice(0)) resolve()
+  }
+
+  /** Resolves after all operations currently ahead of the waiter have completed. */
+  whenIdle(): Promise<void> {
+    if (!this.running && this.operations.length === 0) return Promise.resolve()
+    return new Promise((resolve) => { this.idleWaiters.push(resolve) })
   }
 
   private runNext(): void {
-    if (this.cancelled || this.running) return
+    if (this.cancelled) {
+      for (const resolve of this.idleWaiters.splice(0)) resolve()
+      return
+    }
+    if (this.running) return
     const operation = this.operations.shift()
-    if (!operation) return
+    if (!operation) {
+      this.resolveIdle()
+      return
+    }
 
     this.running = true
     let completed = false
@@ -46,6 +61,11 @@ export class OrderedTerminalOperationQueue {
     } catch {
       done()
     }
+  }
+
+  private resolveIdle(): void {
+    if (this.running || this.operations.length > 0) return
+    for (const resolve of this.idleWaiters.splice(0)) resolve()
   }
 }
 
@@ -69,6 +89,7 @@ export function enqueueTerminalWriteFrame(
 /** Coalesces adjacent WebSocket frames while preserving ordering around control operations. */
 export class TerminalWriteBatcher {
   private readonly chunks: Uint8Array[] = []
+  private readonly committed: Array<() => void> = []
   private byteLength = 0
   private scheduled: number | undefined
 
@@ -80,8 +101,9 @@ export class TerminalWriteBatcher {
   ) {}
 
   /** Add output to the current browser-frame batch. */
-  push(bytes: Uint8Array): void {
+  push(bytes: Uint8Array, committed?: () => void): void {
     this.chunks.push(bytes)
+    if (committed) this.committed.push(committed)
     this.byteLength += bytes.byteLength
     if (this.byteLength >= MAX_TERMINAL_WRITE_CHUNK_BYTES) {
       this.flush()
@@ -113,6 +135,13 @@ export class TerminalWriteBatcher {
     this.chunks.length = 0
     this.byteLength = 0
     enqueueTerminalWriteFrame(this.queue, bytes, this.write)
+    const committed = this.committed.splice(0)
+    if (committed.length > 0) {
+      this.queue.enqueue((done) => {
+        for (const commit of committed) commit()
+        done()
+      })
+    }
   }
 
   /** Discard output that has not yet been enqueued. */
@@ -120,6 +149,7 @@ export class TerminalWriteBatcher {
     if (this.scheduled !== undefined) this.cancelScheduled(this.scheduled)
     this.scheduled = undefined
     this.chunks.length = 0
+    this.committed.length = 0
     this.byteLength = 0
   }
 }

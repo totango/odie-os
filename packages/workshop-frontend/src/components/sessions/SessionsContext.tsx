@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { CodingSessionRepository, CodingSessionRepositoryOption, CodingSessionRuntime, CodingSessionSummary } from '@gadgets/workshop-shared/api'
 import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sessions'
 import { useAuthenticatedApi } from '../../AuthContext'
@@ -86,7 +86,7 @@ export async function openGitHubAccountPopup(
 
 const SessionsContext = createContext<SessionsContextValue | null>(null)
 
-export function SessionsProvider({ children }: { children: ReactNode }) {
+export function SessionsProvider({ children, loadRepositories = false }: { children: ReactNode; loadRepositories?: boolean }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const github = useGitHubConnection()
   const [sessions, setSessions] = useState<CodingSessionSummary[]>([])
@@ -101,22 +101,56 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
   const [repositorySearch, setRepositorySearch] = useState('')
   const [repositoryOptions, setRepositoryOptions] = useState<CodingSessionRepositoryOption[]>([])
   const [repositoryLoading, setRepositoryLoading] = useState(false)
+  const sessionRefreshSequence = useRef(0)
+  const sessionRefreshInFlight = useRef(false)
+  const sessionRefreshPending = useRef(false)
+  const activityRefreshSequence = useRef(0)
+  const activityRefreshInFlight = useRef(false)
+  const activityRefreshPending = useRef(false)
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback((options?: { background?: boolean }) => {
+    void options
+    if (sessionRefreshInFlight.current) {
+      sessionRefreshPending.current = true
+      return
+    }
+    const requestId = ++sessionRefreshSequence.current
+    sessionRefreshInFlight.current = true
     setError(undefined)
-    setLoaded(false)
     authenticatedApi.listCodingSessions().then((items) => {
+      if (requestId !== sessionRefreshSequence.current) return
       setSessions(items)
       setLoaded(true)
       setActiveId((current) => items.some((session) => session.id === current && !session.archivedAt) ? current : undefined)
     }).catch((caught: unknown) => {
+      if (requestId !== sessionRefreshSequence.current) return
       setError(caught instanceof Error ? caught.message : 'Could not load coding sessions.')
       setLoaded(true)
+    }).finally(() => {
+      sessionRefreshInFlight.current = false
+      if (sessionRefreshPending.current) {
+        sessionRefreshPending.current = false
+        refresh({ background: true })
+      }
     })
   }, [authenticatedApi])
 
   const refreshActivity = useCallback(() => {
-    authenticatedApi.listCodingSessionActivity().then(setActivity).catch(() => {})
+    if (activityRefreshInFlight.current) {
+      activityRefreshPending.current = true
+      return
+    }
+    const requestId = ++activityRefreshSequence.current
+    activityRefreshInFlight.current = true
+    authenticatedApi.listCodingSessionActivity().then((items) => {
+      if (requestId === activityRefreshSequence.current) setActivity(items)
+    }).catch(() => {}).finally(() => {
+      activityRefreshInFlight.current = false
+      if (activityRefreshPending.current) {
+        activityRefreshPending.current = false
+        refreshActivity()
+      }
+    })
   }, [authenticatedApi])
 
   useEffect(() => {
@@ -127,12 +161,42 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (github.state !== 'connected') return
-    const timer = window.setInterval(refreshActivity, 3_000)
-    return () => window.clearInterval(timer)
+    let cancelled = false
+    let timer: number | undefined
+    const poll = () => {
+      if (cancelled) return
+      refreshActivity()
+      timer = window.setTimeout(poll, 3_000)
+    }
+    timer = window.setTimeout(poll, 3_000)
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
   }, [github.state, refreshActivity])
+
+  const activeSession = sessions.find((session) => session.id === activeId && !session.archivedAt)
 
   useEffect(() => {
     if (github.state !== 'connected') return
+    if (activeSession?.status !== 'starting' && activeSession?.status !== 'stopping') return
+    let cancelled = false
+    let timer: number | undefined
+    const poll = () => {
+      if (cancelled) return
+      refresh({ background: true })
+      timer = window.setTimeout(poll, 2_000)
+    }
+    timer = window.setTimeout(poll, 1_000)
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [activeSession?.status, github.state, refresh])
+
+  useEffect(() => {
+    if (github.state !== 'connected') return
+    if (!loadRepositories) return
     let cancelled = false
     const timer = window.setTimeout(() => {
       setRepositoryLoading(true)
@@ -148,7 +212,7 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
       })
     }, 180)
     return () => { cancelled = true; window.clearTimeout(timer) }
-  }, [authenticatedApi, github.state, repositorySearch])
+  }, [authenticatedApi, github.state, loadRepositories, repositorySearch])
 
   const connect = useCallback(async () => {
     await openGitHubAccountPopup(authenticatedApi, { kind: 'connect' })
@@ -164,8 +228,9 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
     setError(undefined)
     try {
       const session = await authenticatedApi.createCodingSession({ title, repositories, runtime })
+      sessionRefreshSequence.current += 1
       setSessions((current) => [session, ...current])
-      if (session.status === 'running') setActiveId(session.id)
+      setActiveId(session.id)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not create coding session.')
     } finally {
@@ -174,17 +239,19 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
   }, [authenticatedApi, repositories, runtime, title])
 
   const stopSession = useCallback(async (id: string) => {
+    sessionRefreshSequence.current += 1
+    setSessions((current) => current.map((item) => item.id === id ? { ...item, status: 'stopping' } : item))
     await authenticatedApi.stopCodingSession(id)
-    if (activeId === id) setActiveId(undefined)
-    refresh()
-  }, [activeId, authenticatedApi, refresh])
+    refresh({ background: true })
+  }, [authenticatedApi, refresh])
 
   const restartSession = useCallback(async (id: string) => {
     setError(undefined)
     try {
       const session = await authenticatedApi.restartCodingSession(id)
+      sessionRefreshSequence.current += 1
       setSessions((current) => current.map((item) => item.id === id ? session : item))
-      if (session.status !== 'running') setActiveId(undefined)
+      setActiveId(session.id)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not restart coding session.')
     }
@@ -201,13 +268,13 @@ export function SessionsProvider({ children }: { children: ReactNode }) {
     try {
       if (decision === 'approve') await authenticatedApi.approveCodingSessionAction(id)
       else await authenticatedApi.rejectCodingSessionAction(id)
+      activityRefreshSequence.current += 1
       refreshActivity()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not resolve tool action.')
     }
   }, [authenticatedApi, refreshActivity])
 
-  const activeSession = sessions.find((session) => session.id === activeId && !session.archivedAt)
   const availableRepositoryNames = new Set(repositoryOptions.map((option) => option.repository))
   const availablePresets = CODING_SESSION_PRESETS.filter((preset) => preset.repositories.every((repo) => availableRepositoryNames.has(repo)))
 

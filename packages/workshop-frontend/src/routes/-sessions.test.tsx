@@ -8,6 +8,7 @@ import type { CodingSessionRepository, CodingSessionRuntime, CodingSessionSummar
 
 const testState = vi.hoisted(() => ({
   piEnabled: false,
+  terminalMounts: 0,
   terminalProps: vi.fn<(props: unknown) => void>(),
   context: {
     github: { state: 'missing' } as
@@ -45,9 +46,16 @@ vi.mock('../useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
 vi.mock('../components/sessions/SessionsContext', () => ({
   useSessionsContext: () => testState.context,
 }))
-vi.mock('../components/sessions/SessionTerminal', () => ({
-  default: (props: unknown) => { testState.terminalProps(props); return null },
-}))
+vi.mock('../components/sessions/SessionTerminal', async () => {
+  const React = await vi.importActual<typeof import('react')>('react')
+  return {
+    default: (props: unknown) => {
+      const [mountId] = React.useState(() => ++testState.terminalMounts)
+      testState.terminalProps({ ...(props as object), mountId })
+      return null
+    },
+  }
+})
 vi.mock('../FeatureFlagsContext', () => ({
   useUiFeatureFlag: () => ({ enabled: testState.piEnabled, loading: false }),
 }))
@@ -69,6 +77,7 @@ describe('SessionsPage locked Code setup', () => {
     testState.context.activeSession = undefined
     testState.context.runtime = 'opencode'
     testState.context.refresh.mockClear()
+    testState.terminalMounts = 0
     testState.piEnabled = false
   })
 
@@ -194,5 +203,91 @@ describe('SessionsPage locked Code setup', () => {
 
     await act(async () => button!.click())
     expect(testState.context.restartSession).toHaveBeenCalledWith('session-1')
+  })
+
+  it('shows a neutral progress panel while an active session is starting', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1',
+      title: 'Starting repair',
+      repositories: ['jarvis'],
+      runtime: 'opencode',
+      status: 'starting',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('Starting environment')
+    expect(rendered.textContent).not.toContain('Environment needs restart')
+    expect(testState.terminalProps).not.toHaveBeenCalled()
+  })
+
+  it('shows a neutral progress panel while an active session is stopping', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1',
+      title: 'Stopping repair',
+      repositories: ['jarvis'],
+      runtime: 'opencode',
+      status: 'stopping',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+
+    expect(rendered.textContent).toContain('Stopping environment')
+    expect(rendered.textContent).not.toContain('Environment needs restart')
+    expect(testState.terminalProps).not.toHaveBeenCalled()
+  })
+
+  it('transitions from starting progress to the terminal when refreshed state becomes running', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1',
+      title: 'Starting repair',
+      repositories: ['jarvis'],
+      runtime: 'opencode',
+      status: 'starting',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+    const rendered = await render()
+    expect(rendered.textContent).toContain('Starting environment')
+
+    testState.context.activeSession = { ...testState.context.activeSession, status: 'running' } as CodingSessionSummary
+    await act(async () => root!.render(<SessionsPage />))
+
+    expect(rendered.textContent).not.toContain('Starting environment')
+    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-1' }))
+  })
+
+  it('does not remount a running terminal when only lastActiveAt changes', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1',
+      title: 'Pi repair',
+      repositories: ['jarvis'],
+      runtime: 'pi',
+      status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+    await render()
+    const firstProps = testState.terminalProps.mock.calls.at(-1)?.[0]
+    expect(firstProps).toBeDefined()
+    const firstMountId = (firstProps as { mountId: number }).mountId
+
+    testState.context.activeSession = {
+      ...testState.context.activeSession,
+      lastActiveAt: new Date('2026-08-18T00:05:00Z'),
+    } as CodingSessionSummary
+    await act(async () => root!.render(<SessionsPage />))
+
+    const latestProps = testState.terminalProps.mock.calls.at(-1)?.[0]
+    expect(latestProps).toBeDefined()
+    expect((latestProps as { mountId: number }).mountId).toBe(firstMountId)
   })
 })

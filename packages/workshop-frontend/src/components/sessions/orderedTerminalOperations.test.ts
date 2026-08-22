@@ -83,6 +83,21 @@ describe('OrderedTerminalOperationQueue', () => {
 
     expect(events).toEqual(['write:start'])
   })
+
+  it('waits for queued terminal parsing before reporting idle', async () => {
+    const queue = new OrderedTerminalOperationQueue()
+    let finishWrite: (() => void) | undefined
+    let idle = false
+    queue.enqueue((done) => { finishWrite = done })
+
+    const waiting = queue.whenIdle().then(() => { idle = true })
+    await Promise.resolve()
+    expect(idle).toBe(false)
+
+    finishWrite?.()
+    await waiting
+    expect(idle).toBe(true)
+  })
 })
 
 describe('TerminalWriteBatcher', () => {
@@ -122,6 +137,25 @@ describe('TerminalWriteBatcher', () => {
     runScheduled()
 
     expect(writes).toEqual([])
+  })
+
+  it('commits a replay cursor only after its terminal write completes', () => {
+    const queue = new OrderedTerminalOperationQueue()
+    const events: string[] = []
+    let finishWrite: (() => void) | undefined
+    const batcher = new TerminalWriteBatcher(
+      queue,
+      (_chunk, done) => { events.push('write'); finishWrite = done },
+      () => 1,
+      () => {},
+    )
+
+    batcher.push(new Uint8Array([1]), () => { events.push('cursor') })
+    batcher.flush()
+
+    expect(events).toEqual(['write'])
+    finishWrite?.()
+    expect(events).toEqual(['write', 'cursor'])
   })
 })
 

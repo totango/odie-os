@@ -50,6 +50,9 @@ const MAX_SESSIONS_PER_USER = 5;
 const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
 const OPENCODE_CONFIG_DIR = "/workspace/.odie-opencode";
+const STARTUP_ALARM_DELAY_MS = 1_000;
+const STARTUP_MAX_ATTEMPTS = 3;
+const STARTUP_CLONE_CONCURRENCY = 2;
 
 type SessionsLogFields = {
   sessionId?: string;
@@ -58,6 +61,9 @@ type SessionsLogFields = {
   startupDurationMs?: number;
   mcpMethod?: string;
   status?: number;
+  phase?: string;
+  terminalKind?: CodingSessionTerminalKind;
+  reason?: string;
 };
 
 const logger = createLogger<SessionsLogFields>({ component: "gatekeeper.sessions" });
@@ -91,8 +97,46 @@ type AttachTicket = {
 
 type SessionPolicy = {
   sessionId: string;
+  sandboxId?: string;
+  runtime?: CodingSessionRuntime;
   owner: CodingSessionOwner;
   repositories: CodingSessionRepository[];
+};
+
+type StartupPhase = "authorize" | "clone" | "materialize" | "terminal";
+
+type StartupRecord = {
+  phase: StartupPhase;
+  nextRepositoryIndex: number;
+  completedRepositoryIndexes?: number[];
+  cloneProcesses?: Array<{ repositoryIndex: number; processId: string }>;
+  attempt: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type StartupProcess = {
+  id: string;
+  kill(signal?: number): Promise<void>;
+  waitForExit(options?: { timeout?: number }): Promise<{ code: number; timedOut?: boolean }>;
+  status(): Promise<
+    | { state: "running" }
+    | { state: "exited"; exit: { code: number; timedOut?: boolean } }
+    | { state: "error" }
+  >;
+};
+
+type StartupTerminalOptions = Parameters<InstanceType<typeof CodingSessionSandbox>["createTerminal"]>[0];
+
+type StartupSandbox = {
+  configureGitHubAuth(token: string): Promise<void>;
+  destroy(): Promise<void>;
+  exec(command: string[], options?: { timeout?: number; cwd?: string; env?: Record<string, string> }): Promise<StartupProcess>;
+  getProcess(id: string): Promise<StartupProcess | null>;
+  createTerminal(options: StartupTerminalOptions): Promise<Terminal>;
+  listTerminals(): Promise<Terminal[]>;
+  mkdir(path: string, options?: { recursive?: boolean }): Promise<unknown>;
+  writeFile(path: string, content: string): Promise<unknown>;
 };
 
 /** Isolated Linux environment used by one coding session. */
@@ -155,6 +199,25 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     this.ctx.storage.kv.put("policy", policy);
   }
 
+  /** Persists bounded startup progress and schedules the first asynchronous startup alarm. */
+  async startSessionStartup(record: StartupRecord): Promise<void> {
+    this.ctx.storage.kv.put("startup", record);
+    try {
+      await this.ctx.storage.setAlarm(Date.now() + 1);
+    } catch (error) {
+      this.ctx.storage.kv.delete("startup");
+      throw error;
+    }
+  }
+
+  /** Cancels asynchronous startup for the configured session generation. */
+  async cancelSessionStartup(sessionId: string, sandboxId: string): Promise<void> {
+    const policy = this.#policy();
+    if (policy.sessionId !== sessionId || policy.sandboxId !== sandboxId) return;
+    this.ctx.storage.kv.delete("startup");
+    await this.ctx.storage.deleteAlarm();
+  }
+
   /** Stores a short-lived terminal ticket in a token-addressed policy object. */
   async storeTicket(ticket: AttachTicket): Promise<void> {
     this.ctx.storage.kv.put("ticket", ticket);
@@ -169,8 +232,13 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     return ticket;
   }
 
-  /** Deletes expired one-time ticket state. */
-  alarm(): void {
+  /** Dispatches isolated ticket expiry or bounded asynchronous session startup work. */
+  async alarm(): Promise<void> {
+    const startup = this.ctx.storage.kv.get<StartupRecord>("startup");
+    if (startup) {
+      await this.#advanceStartup(startup);
+      return;
+    }
     this.ctx.storage.kv.delete("ticket");
   }
 
@@ -352,6 +420,195 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     this.ctx.storage.kv.put("githubToken", result);
     return result.token;
   }
+
+  async #advanceStartup(startup: StartupRecord): Promise<void> {
+    try {
+      await this.#advanceStartupOnce(startup);
+    } catch (error) {
+      const current = this.ctx.storage.kv.get<StartupRecord>("startup");
+      const policy = this.#policy();
+      if (!current) return;
+      if (current.attempt + 1 < STARTUP_MAX_ATTEMPTS) {
+        if (current.phase === "clone") await this.#stopCloneProcesses(current);
+        this.#putStartup({
+          ...current,
+          attempt: current.attempt + 1,
+          ...(current.phase === "clone" ? { nextRepositoryIndex: 0, cloneProcesses: undefined } : {}),
+        });
+        await this.#scheduleStartup();
+        logger.warn("coding session startup phase will retry", {
+          event: "coding.session.startup.retry",
+          sessionId: policy.sessionId,
+          phase: startup.phase,
+          error,
+        });
+        return;
+      }
+      await this.#registry().startupFailed(
+        policy.sessionId,
+        required(policy.sandboxId, "startup sandboxId"),
+        boundedError(error),
+      );
+      this.ctx.storage.kv.delete("startup");
+      logger.error("coding session startup failed", {
+        event: "coding.session.startup.failed",
+        sessionId: policy.sessionId,
+        phase: startup.phase,
+        error,
+      });
+    }
+  }
+
+  async #advanceStartupOnce(startup: StartupRecord): Promise<void> {
+    const policy = this.#policy();
+    const sandboxId = required(policy.sandboxId, "startup sandboxId");
+    const runtime = codingSessionRuntime(policy.runtime);
+    const sandbox = getSandbox(this.env.SESSION_SANDBOX, sandboxId) as unknown as StartupSandbox;
+    if (startup.phase === "authorize") {
+      await this.env.WORKSHOP_TOOLS.prepareSessionStartup(policy.owner, policy.sessionId, policy.repositories);
+      await sandbox.configureGitHubAuth(await this.#installationToken(policy.repositories));
+      this.#putStartup({
+        ...startup,
+        phase: "clone",
+        nextRepositoryIndex: 0,
+        completedRepositoryIndexes: [],
+        cloneProcesses: [],
+        attempt: 0,
+        updatedAt: Date.now(),
+      });
+      await this.#scheduleStartup(1);
+      return;
+    }
+
+    if (startup.phase === "clone") {
+      await this.#advanceClone(startup, policy.repositories);
+      return;
+    }
+
+    if (startup.phase === "materialize") {
+      const customization = await this.env.WORKSHOP_TOOLS.prepareSessionStartup(
+        policy.owner, policy.sessionId, policy.repositories);
+      if (runtime === "opencode") await materializeOpenCodeCustomization(sandbox, customization);
+      else await materializePiRuntime(sandbox, this.env);
+      this.#putStartup({ ...startup, phase: "terminal", attempt: 0, updatedAt: Date.now() });
+      await this.#scheduleStartup(1);
+      return;
+    }
+
+    const customization = await this.env.WORKSHOP_TOOLS.prepareSessionStartup(
+      policy.owner, policy.sessionId, policy.repositories);
+    const terminal = await this.#runningOrCreatedPrimaryTerminal(sandboxId, runtime, policy.repositories, customization);
+    const applied = await this.#registry().startupSucceeded(policy.sessionId, sandboxId, terminal.id);
+    this.ctx.storage.kv.delete("startup");
+    if (!applied) await sandbox.destroy();
+  }
+
+  async #advanceClone(startup: StartupRecord, repositories: CodingSessionRepository[]): Promise<void> {
+    const sandbox = getSandbox(this.env.SESSION_SANDBOX, required(this.#policy().sandboxId, "startup sandboxId")) as unknown as StartupSandbox;
+    const completed = new Set(startup.completedRepositoryIndexes ?? []);
+    const active: NonNullable<StartupRecord["cloneProcesses"]> = [];
+    let nextRepositoryIndex = startup.nextRepositoryIndex;
+
+    for (const clone of startup.cloneProcesses ?? []) {
+      if (completed.has(clone.repositoryIndex)) continue;
+      const repository = repositories[clone.repositoryIndex];
+      if (!repository) throw new Error("Invalid repository clone checkpoint.");
+      const process = await sandbox.getProcess(clone.processId);
+      if (!process) {
+        if (await repositoryReady(sandbox, repository)) {
+          completed.add(clone.repositoryIndex);
+          continue;
+        }
+        nextRepositoryIndex = Math.min(nextRepositoryIndex, clone.repositoryIndex);
+        continue;
+      }
+      const status = await process.status();
+      if (status.state === "running") {
+        active.push(clone);
+        continue;
+      }
+      if (status.state === "error" || status.exit.code !== 0 || !(await repositoryReady(sandbox, repository))) {
+        throw new Error(`Failed to clone ${repository}.`);
+      }
+      completed.add(clone.repositoryIndex);
+    }
+
+    while (active.length < STARTUP_CLONE_CONCURRENCY && nextRepositoryIndex < repositories.length) {
+      const repositoryIndex = nextRepositoryIndex++;
+      if (completed.has(repositoryIndex) || active.some(clone => clone.repositoryIndex === repositoryIndex)) continue;
+      const repository = repositories[repositoryIndex]!;
+      if (await repositoryReady(sandbox, repository)) {
+        completed.add(repositoryIndex);
+        continue;
+      }
+      await waitForOk(await sandbox.exec(["rm", "-rf", `/workspace/${repository}`], { timeout: 30_000 }), 35_000);
+      const process = await sandbox.exec([
+        "git", "clone", "--depth=1", "--filter=blob:none",
+        `${GITHUB_ORIGIN}/totango/${repository}.git`, `/workspace/${repository}`,
+      ], { timeout: 120_000 });
+      active.push({ repositoryIndex, processId: process.id });
+    }
+
+    if (completed.size >= repositories.length) {
+      this.#putStartup({
+        ...startup,
+        phase: "materialize",
+        nextRepositoryIndex: repositories.length,
+        completedRepositoryIndexes: [...completed].toSorted((a, b) => a - b),
+        cloneProcesses: undefined,
+        attempt: 0,
+        updatedAt: Date.now(),
+      });
+      await this.#scheduleStartup(1);
+      return;
+    }
+
+    this.#putStartup({
+      ...startup,
+      nextRepositoryIndex,
+      completedRepositoryIndexes: [...completed].toSorted((a, b) => a - b),
+      cloneProcesses: active,
+      updatedAt: Date.now(),
+    });
+    await this.#scheduleStartup();
+  }
+
+  async #runningOrCreatedPrimaryTerminal(
+    sandboxId: string,
+    runtime: CodingSessionRuntime,
+    repositories: CodingSessionRepository[],
+    customization: OpenCodeUserCustomization,
+  ): Promise<Terminal> {
+    const sandbox = getSandbox(this.env.SESSION_SANDBOX, sandboxId) as unknown as StartupSandbox;
+    const options = primaryTerminalOptions(runtime, repositories[0]!, this.env, customization);
+    const existing = await matchingRunningTerminals(sandbox, options.command, options.cwd);
+    if (existing.length > 0) {
+      for (const duplicate of existing.slice(1)) await duplicate.terminate();
+      return existing[0]!;
+    }
+    return sandbox.createTerminal(options);
+  }
+
+  async #stopCloneProcesses(startup: StartupRecord): Promise<void> {
+    const sandboxId = required(this.#policy().sandboxId, "startup sandboxId");
+    const sandbox = getSandbox(this.env.SESSION_SANDBOX, sandboxId) as unknown as StartupSandbox;
+    await Promise.allSettled((startup.cloneProcesses ?? []).map(async ({ processId }) => {
+      const process = await sandbox.getProcess(processId);
+      if (process) await process.kill(15);
+    }));
+  }
+
+  #putStartup(startup: StartupRecord): void {
+    this.ctx.storage.kv.put("startup", startup);
+  }
+
+  #scheduleStartup(delayMs = STARTUP_ALARM_DELAY_MS): Promise<void> {
+    return this.ctx.storage.setAlarm(Date.now() + delayMs);
+  }
+
+  #registry(): DurableObjectStub<CodingSessionRegistry> {
+    return registryFor(this.ctx as unknown as ExecutionContext, this.#policy().owner.userId);
+  }
 }
 
 /** Per-user registry for coding-session lifecycle and terminal metadata. */
@@ -360,18 +617,28 @@ export class CodingSessionRegistry extends DurableObject<Env> {
 
   /** Lists this user's sessions newest first. */
   async listSessions(): Promise<CodingSessionSummary[]> {
-    for (const record of this.#records()) {
-      if (record.status === "running") await this.#runningPrimaryTerminal(record);
-    }
     return [...this.#records()].map(publicSummary)
       .toSorted((a, b) => b.createdAt.valueOf() - a.createdAt.valueOf());
+  }
+
+  /** Retrieves and reconciles one non-archived session without exposing internal runtime handles. */
+  async getSession(sessionId: string): Promise<CodingSessionSummary | undefined> {
+    const record = this.#get(sessionId);
+    if (!record || record.archivedAt) return undefined;
+    if (record.status === "running") await this.#runningPrimaryTerminal(record);
+    return publicSummary(this.#get(sessionId) ?? record);
+  }
+
+  /** Retrieves one non-archived session from persisted metadata without contacting its sandbox. */
+  getSessionMetadata(sessionId: string): CodingSessionSummary | undefined {
+    const record = this.#get(sessionId);
+    return record && !record.archivedAt ? publicSummary(record) : undefined;
   }
 
   /** Creates and initializes one multi-repository coding session. */
   async createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
-    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
     const repositories = validateRepositories(request.repositories);
     if ([...this.#records()].filter(record =>
@@ -400,23 +667,21 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     this.#put(record);
 
     try {
-      record = await this.#start(record, owner, customization);
-      logger.info("coding session started", {
-        event: "coding.session.started",
+      await this.#scheduleStart(record, owner);
+      logger.info("coding session startup scheduled", {
+        event: "coding.session.start.scheduled",
         sessionId: id,
         userId: owner.userId,
         repositoryCount: repositories.length,
       });
     } catch (error) {
-      const current = this.#get(id);
-      if (!current) throw error;
-      if (current.sandboxId !== record.sandboxId || current.status !== "starting") {
-        return publicSummary(current);
-      }
       record = { ...record, status: "failed", error: boundedError(error), lastActiveAt: new Date() };
       this.#put(record);
-      logger.error("coding session failed to start", {
-        event: "coding.session.start.failed", sessionId: id, userId: owner.userId, error,
+      logger.error("coding session startup could not be scheduled", {
+        event: "coding.session.start.schedule.failed",
+        sessionId: id,
+        userId: owner.userId,
+        error,
       });
     }
     return publicSummary(record);
@@ -426,7 +691,6 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   async restartSession(
     sessionId: string,
     owner: CodingSessionOwner,
-    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
     const record = this.#get(sessionId);
     if (!record || record.archivedAt) throw new Error("Coding session was not found.");
@@ -458,7 +722,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       };
       this.#put(starting);
       operation = starting;
-      return publicSummary(await this.#start(starting, owner, customization));
+      await this.#scheduleStart(starting, owner);
+      return publicSummary(starting);
     } catch (error) {
       const current = this.#get(sessionId);
       if (current?.sandboxId !== operation.sandboxId || current.status !== operation.status) {
@@ -478,6 +743,9 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     const record = this.#get(sessionId);
     if (!record || record.status === "stopped") return;
     this.#put({ ...record, status: "stopping", lastActiveAt: new Date() });
+    if (record.status === "starting") {
+      await policyForSandbox(this.env, record.sandboxId).cancelSessionStartup(record.id, record.sandboxId);
+    }
     await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).destroy();
     this.#put({
       ...record,
@@ -625,56 +893,54 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     this.ctx.storage.kv.put(`session:${record.id}`, record);
   }
 
-  async #start(
-    record: SessionRecord,
-    owner: CodingSessionOwner,
-    customization: OpenCodeUserCustomization,
-  ): Promise<SessionRecord> {
-    const startedAt = Date.now();
+  async #scheduleStart(record: SessionRecord, owner: CodingSessionOwner): Promise<void> {
     const runtime = codingSessionRuntime(record.runtime);
     assertRuntimeConfigured(this.env, runtime);
     const policy = policyForSandbox(this.env, record.sandboxId);
-    await policy.configure({ sessionId: record.id, owner, repositories: record.repositories });
-    const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
-    const token = await policy.getInstallationToken();
-    await sandbox.configureGitHubAuth(token);
-    for (const repository of record.repositories) {
-      const clone = await sandbox.exec([
-        "git", "clone", "--depth=1", "--filter=blob:none",
-        `${GITHUB_ORIGIN}/totango/${repository}.git`, `/workspace/${repository}`,
-      ], { timeout: 120_000 });
-      const exit = await clone.waitForExit({ timeout: 125_000 });
-      if (exit.code !== 0 || exit.timedOut) throw new Error(`Failed to clone ${repository}.`);
-    }
-    if (runtime === "opencode") await materializeOpenCodeCustomization(sandbox, customization);
-    else await materializePiRuntime(sandbox, this.env);
-    const terminal = await sandbox.createTerminal({
-      command: runtime === "opencode"
-        ? openCodeCommand(record.repositories[0])
-        : piCommand(),
-      cwd: `/workspace/${record.repositories[0]}`,
-      env: runtime === "opencode"
-        ? opencodeEnvironment(this.env, customization)
-        : piEnvironment(),
-      cols: 120,
-      rows: 40,
-      bufferSize: 1024 * 1024,
+    await policy.configure({
+      sessionId: record.id,
+      sandboxId: record.sandboxId,
+      runtime,
+      owner,
+      repositories: record.repositories,
     });
-    const current = this.#get(record.id);
-    if (!current || current.sandboxId !== record.sandboxId || current.status !== "starting") {
-      await sandbox.destroy();
-      throw new Error("Coding session startup was cancelled.");
-    }
-    const running = { ...record, status: "running" as const, terminalId: terminal.id, lastActiveAt: new Date() };
+    const now = Date.now();
+    await policy.startSessionStartup({
+      phase: "authorize",
+      nextRepositoryIndex: 0,
+      attempt: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  /** Applies successful asynchronous startup only to the current starting generation. */
+  async startupSucceeded(sessionId: string, sandboxId: string, terminalId: string): Promise<boolean> {
+    const current = this.#get(sessionId);
+    if (!current || current.archivedAt || current.sandboxId !== sandboxId || current.status !== "starting") return false;
+    const running = { ...current, status: "running" as const, terminalId, lastActiveAt: new Date() };
     this.#put(running);
     logger.info("coding session environment ready", {
       event: "coding.session.environment.ready",
-      sessionId: record.id,
-      userId: owner.userId,
-      repositoryCount: record.repositories.length,
-      startupDurationMs: Date.now() - startedAt,
+      sessionId,
+      repositoryCount: current.repositories.length,
     });
-    return running;
+    return true;
+  }
+
+  /** Applies asynchronous startup failure only to the current starting generation. */
+  startupFailed(sessionId: string, sandboxId: string, error: string): boolean {
+    const current = this.#get(sessionId);
+    if (!current || current.archivedAt || current.sandboxId !== sandboxId || current.status !== "starting") return false;
+    this.#put({
+      ...current,
+      status: "failed",
+      terminalId: undefined,
+      shellTerminalId: undefined,
+      error,
+      lastActiveAt: new Date(),
+    });
+    return true;
   }
 }
 
@@ -691,13 +957,22 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     return registryFor(this.ctx, owner.userId).listSessions();
   }
 
+  /** Retrieves one session for the supplied authenticated owner. */
+  getSession(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionSummary | undefined> {
+    return registryFor(this.ctx, owner.userId).getSession(sessionId);
+  }
+
+  /** Retrieves one owned session from persisted metadata without contacting its sandbox. */
+  getSessionMetadata(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionSummary | undefined> {
+    return registryFor(this.ctx, owner.userId).getSessionMetadata(sessionId);
+  }
+
   /** Creates a session for the supplied authenticated owner. */
   createSession(
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
-    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
-    return registryFor(this.ctx, owner.userId).createSession(owner, request, customization);
+    return registryFor(this.ctx, owner.userId).createSession(owner, request);
   }
 
   /** Stops a session for the supplied authenticated owner. */
@@ -709,9 +984,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   restartSession(
     owner: CodingSessionOwner,
     sessionId: string,
-    customization: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
-    return registryFor(this.ctx, owner.userId).restartSession(sessionId, owner, customization);
+    return registryFor(this.ctx, owner.userId).restartSession(sessionId, owner);
   }
 
   /** Stops and archives a session for the supplied authenticated owner. */
@@ -740,24 +1014,62 @@ async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Pr
   if (request.headers.get("Origin") !== expectedOrigin) {
     return new Response("Origin is not allowed", { status: 403 });
   }
+  const cursor = url.searchParams.get("cursor") ?? undefined;
+  if (cursor && cursor.length > 1024) return new Response("Invalid terminal cursor", { status: 400 });
 
   const ticket = await (await ticketFor(env, match[1])).consumeTicket(Date.now());
-  if (!ticket) return new Response("Attachment capability is invalid or expired", { status: 403 });
-  const terminal = await getSandbox(env.SESSION_SANDBOX, ticket.sandboxId).getTerminal(ticket.terminalId);
-  if (!terminal) {
-    if (ticket.terminalKind === "opencode") {
-      await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session environment expired. Restart the session to continue.");
-    }
-    return new Response("Terminal is no longer available", { status: 410 });
+  if (!ticket) {
+    logger.warn("coding session terminal attach rejected", {
+      event: "coding.session.terminal.attach.rejected",
+      status: 403,
+      reason: "invalid_ticket",
+    });
+    return new Response("Attachment capability is invalid or expired", { status: 403 });
   }
-  const snapshot = await terminal.getSnapshot();
-  if (snapshot.status !== "running") {
-    if (ticket.terminalKind === "opencode") {
-      await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session terminal exited. Restart the session to continue.");
+  try {
+    const terminal = await getSandbox(env.SESSION_SANDBOX, ticket.sandboxId).getTerminal(ticket.terminalId);
+    if (!terminal) {
+      if (ticket.terminalKind === "opencode") {
+        await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session environment expired. Restart the session to continue.");
+      }
+      logger.warn("coding session terminal attach failed", {
+        event: "coding.session.terminal.attach.failed",
+        sessionId: ticket.sessionId,
+        terminalKind: ticket.terminalKind,
+        status: 410,
+        reason: "terminal_missing",
+      });
+      return new Response("Terminal is no longer available", { status: 410 });
     }
-    return new Response("Terminal is no longer available", { status: 410 });
+    const snapshot = await terminal.getSnapshot();
+    if (snapshot.status !== "running") {
+      if (ticket.terminalKind === "opencode") {
+        await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session terminal exited. Restart the session to continue.");
+      }
+      logger.warn("coding session terminal attach failed", {
+        event: "coding.session.terminal.attach.failed",
+        sessionId: ticket.sessionId,
+        terminalKind: ticket.terminalKind,
+        status: 410,
+        reason: `terminal_${snapshot.status}`,
+      });
+      return new Response("Terminal is no longer available", { status: 410 });
+    }
+    logger.debug("coding session terminal attaching", {
+      event: "coding.session.terminal.attach",
+      sessionId: ticket.sessionId,
+      terminalKind: ticket.terminalKind,
+    });
+    return terminal.connect(request, { cursor, cols: 120, rows: 40 });
+  } catch (error) {
+    logger.error("coding session terminal attach failed", {
+      event: "coding.session.terminal.attach.failed",
+      sessionId: ticket.sessionId,
+      terminalKind: ticket.terminalKind,
+      error,
+    });
+    return new Response("Terminal connection failed", { status: 502 });
   }
-  return terminal.connect(request, { cols: 120, rows: 40 });
 }
 
 export default { fetch: handleHttp };
@@ -790,6 +1102,62 @@ function publicSummary(record: SessionRecord): CodingSessionSummary {
     ...summary
   } = record;
   return { ...summary, runtime: codingSessionRuntime(record.runtime) };
+}
+
+function primaryTerminalOptions(
+  runtime: CodingSessionRuntime,
+  repository: CodingSessionRepository,
+  env: Env,
+  customization: OpenCodeUserCustomization,
+): StartupTerminalOptions {
+  return {
+    command: runtime === "opencode" ? openCodeCommand(repository) : piCommand(),
+    cwd: `/workspace/${repository}`,
+    env: runtime === "opencode" ? opencodeEnvironment(env, customization) : piEnvironment(),
+    cols: 120,
+    rows: 40,
+    bufferSize: 1024 * 1024,
+  };
+}
+
+async function repositoryReady(
+  sandbox: Pick<StartupSandbox, "exec">,
+  repository: CodingSessionRepository,
+): Promise<boolean> {
+  try {
+    const check = await sandbox.exec([
+      "git", "-C", `/workspace/${repository}`, "rev-parse", "--verify", "HEAD",
+    ], { timeout: 10_000 });
+    const exit = await check.waitForExit({ timeout: 15_000 });
+    return exit.code === 0 && !exit.timedOut;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForOk(process: StartupProcess, timeout: number): Promise<void> {
+  const exit = await process.waitForExit({ timeout });
+  if (exit.code !== 0 || exit.timedOut) throw new Error("Startup command failed.");
+}
+
+async function matchingRunningTerminals(
+  sandbox: Pick<StartupSandbox, "listTerminals">,
+  command: readonly string[],
+  cwd: string | undefined,
+): Promise<Terminal[]> {
+  const terminals = await sandbox.listTerminals();
+  const result: Terminal[] = [];
+  for (const terminal of terminals) {
+    const snapshot = await terminal.getSnapshot();
+    if (snapshot.status === "running" && snapshot.cwd === cwd && arraysEqual(snapshot.command, command)) {
+      result.push(terminal);
+    }
+  }
+  return result;
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function assertRuntimeConfigured(env: Env, runtime: CodingSessionRuntime): void {
