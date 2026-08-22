@@ -159,9 +159,6 @@ updates:
     cooldown:
       default-days: 7 # github-actions supports default-days only
     rebase-strategy: "disabled"
-    ignore:
-      # Pinned to known / tested release.
-      - dependency-name: "ask-bonk/ask-bonk"
     groups:
       github-actions:
         patterns:
