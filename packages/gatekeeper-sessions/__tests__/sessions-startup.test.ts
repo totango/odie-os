@@ -489,6 +489,17 @@ describe("coding session asynchronous startup", () => {
     expect(kv.get<any>("policy")?.sandboxId).toBe("sandbox-1");
   });
 
+  it("rejects a different sandbox generation routed to the same policy object", () => {
+    const { policy } = createPolicy();
+
+    expect(() => policy.configure({
+      sessionId: "session-1",
+      sandboxId: "sandbox-2",
+      owner: { userId: "user-1", email: "user@example.com" },
+      repositories: ["jarvis"],
+    })).toThrow("Coding session policy is immutable.");
+  });
+
   it("cancels durable startup before destroying a starting sandbox", async () => {
     const { registry } = createRegistryWith(startingRecord());
     const cancelSessionStartup = vi.fn(async () => undefined);

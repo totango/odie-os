@@ -195,6 +195,10 @@ export class CodingSessionPolicy extends DurableObject<Env> {
           JSON.stringify({ sessionId: policy.sessionId, owner: policy.owner, repositories: policy.repositories })) {
         throw new Error("Coding session policy is immutable.");
       }
+      // Policy DOs are keyed by container ID, so another sandbox generation must use another DO.
+      if (existing.sandboxId && policy.sandboxId && existing.sandboxId !== policy.sandboxId) {
+        throw new Error("Coding session policy is immutable.");
+      }
       if (!existing.sandboxId && policy.sandboxId) {
         this.ctx.storage.kv.put("policy", { ...existing, sandboxId: policy.sandboxId });
       }
