@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, type CodingSessionAttachCapability, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
@@ -1504,6 +1504,27 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return service.listSessions(owner);
   }
 
+  /** Reads the development catalog for a currently authorized coding-session user. */
+  async getCodingSessionDevelopmentCatalog(): Promise<CodingSessionDevelopmentCatalog> {
+    let {owner, service} = await this.#codingSessionsAccess();
+    return service.getDevelopmentCatalog(owner);
+  }
+
+  /** Preflights a coding session after re-authorizing every requested repository. */
+  async preflightCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionDevelopmentPlan> {
+    let {owner, service} = await this.#codingSessionsAccess(request.repositories);
+    return service.preflightSession(owner, request);
+  }
+
+  /** Reads development status after verifying ownership and current repository authority. */
+  async getCodingSessionDevelopmentStatus(sessionId: string): Promise<CodingSessionDevelopmentStatus> {
+    let initial = await this.#codingSessionsOwner();
+    let session = await initial.service.getSession(initial.owner, sessionId);
+    if (!session) throw new Error("Coding session was not found.");
+    let {owner, service} = await this.#codingSessionsAccess(session.repositories);
+    return service.getDevelopmentStatus(owner, sessionId);
+  }
+
   /** Lists Totango repositories the connected GitHub account can push to. */
   async listCodingSessionRepositoryOptions(query?: string): Promise<CodingSessionRepositoryOption[]> {
     const verifier = await this.#githubVerifierForCodingSessions();
@@ -1581,6 +1602,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!session) throw new Error("Coding session was not found.");
     let {owner, service} = await this.#codingSessionsAccess(session.repositories);
     return service.mintEditorCapability(owner, sessionId);
+  }
+
+  /** Mints an application capability after verifying ownership and current repository authority. */
+  async mintCodingSessionApplicationCapability(
+    sessionId: string,
+    applicationId: string,
+  ): Promise<CodingSessionApplicationCapability> {
+    let initial = await this.#codingSessionsOwner();
+    let session = await initial.service.getSession(initial.owner, sessionId);
+    if (!session) throw new Error("Coding session was not found.");
+    let {owner, service} = await this.#codingSessionsAccess(session.repositories);
+    return service.mintApplicationCapability(owner, sessionId, applicationId);
   }
 
   /** Lists coding-session observations and actions newest first. */
