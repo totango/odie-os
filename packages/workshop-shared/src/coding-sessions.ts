@@ -2,6 +2,7 @@ import type { WorkerEntrypoint } from "cloudflare:workers";
 import type { ActionDescription, ObservationDescription } from "./gatekeeper.js";
 import type {
   CodingSessionAttachCapability,
+  CodingSessionEditorCapability,
   CodingSessionRepository,
   CodingSessionSummary,
   CodingSessionTerminalKind,
@@ -111,6 +112,9 @@ export interface CodingSessionToolHost extends WorkerEntrypoint {
 
 /** Private control-plane RPC implemented by the Sessions service. */
 export interface CodingSessionsService extends WorkerEntrypoint {
+  /** Reports whether a separate-origin browser VS Code runtime is configured. */
+  editorAvailable(): Promise<boolean>;
+
   /** Lists sessions owned by the authenticated Workshop user. */
   listSessions(owner: CodingSessionOwner): Promise<CodingSessionSummary[]>;
 
@@ -159,6 +163,9 @@ export interface CodingSessionsService extends WorkerEntrypoint {
     sessionId: string,
     terminal?: CodingSessionTerminalKind,
   ): Promise<CodingSessionAttachCapability>;
+
+  /** Mints a generation-bound browser VS Code capability after verifying ownership. */
+  mintEditorCapability(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionEditorCapability>;
 }
 
 /** Returns whether a value is a canonical GitHub repository name accepted by Coding Sessions. */

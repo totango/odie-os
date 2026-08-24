@@ -6,6 +6,7 @@ import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   type CodingSessionAttachCapability,
+  type CodingSessionEditorCapability,
   type CodingSessionRepository,
   type CodingSessionRuntime,
   type CodingSessionSummary,
@@ -52,6 +53,8 @@ import {
 export { ContainerProxy };
 
 const ATTACH_TTL_MS = 60_000;
+const EDITOR_CAPABILITY_TTL_MS = 30 * 60 * 1_000;
+const EDITOR_PORT = 13_337;
 const MAX_SESSIONS_PER_USER = 5;
 const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
@@ -81,6 +84,7 @@ interface Env extends GitHubAppEnv {
   SESSION_POLICIES: DurableObjectNamespace<CodingSessionPolicy>;
   WORKSHOP_TOOLS: Service<CodingSessionToolHost>;
   BASE_URL?: string;
+  EDITOR_BASE_URL?: string;
   SESSION_ALLOWED_ORIGIN?: string;
   TEAM_PI_CODEX_BASE_URL?: string;
   TEAM_PI_CODEX_HMAC_SECRET?: string;
@@ -94,6 +98,7 @@ type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
   sandboxId: string;
   terminalId?: string;
   shellTerminalId?: string;
+  editorProcessId?: string;
 };
 
 type AttachTicket = {
@@ -102,6 +107,13 @@ type AttachTicket = {
   userId: string;
   sessionId: string;
   terminalKind: CodingSessionTerminalKind;
+  expiresAt: number;
+};
+
+type EditorTicket = {
+  sandboxId: string;
+  userId: string;
+  sessionId: string;
   expiresAt: number;
 };
 
@@ -250,6 +262,19 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     return ticket;
   }
 
+  /** Stores a reusable but short-lived browser-editor ticket. */
+  async storeEditorTicket(ticket: EditorTicket): Promise<void> {
+    this.ctx.storage.kv.put("editorTicket", ticket);
+    await this.ctx.storage.setAlarm(ticket.expiresAt);
+  }
+
+  /** Reads a browser-editor ticket without consuming it. */
+  getEditorTicket(now: number): EditorTicket | null {
+    const ticket = this.ctx.storage.kv.get<EditorTicket>("editorTicket");
+    if (!ticket || ticket.expiresAt < now) return null;
+    return ticket;
+  }
+
   /** Dispatches isolated ticket expiry or bounded asynchronous session startup work. */
   async alarm(): Promise<void> {
     const startup = this.ctx.storage.kv.get<StartupRecord>("startup");
@@ -258,6 +283,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       return;
     }
     this.ctx.storage.kv.delete("ticket");
+    this.ctx.storage.kv.delete("editorTicket");
   }
 
   /** Mints or reuses a GitHub token scoped to this session's repositories. */
@@ -657,6 +683,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 /** Per-user registry for coding-session lifecycle and terminal metadata. */
 export class CodingSessionRegistry extends DurableObject<Env> {
   readonly #shellTerminalCreations = new Map<string, Promise<string>>();
+  readonly #editorProcessCreations = new Map<string, Promise<string>>();
 
   /** Lists this user's sessions newest first. */
   async listSessions(): Promise<CodingSessionSummary[]> {
@@ -756,6 +783,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       error: undefined,
       terminalId: undefined,
       shellTerminalId: undefined,
+      editorProcessId: undefined,
       lastActiveAt: new Date(),
     };
     this.#put(stopping);
@@ -824,6 +852,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       status: "stopped",
       terminalId: undefined,
       shellTerminalId: undefined,
+      editorProcessId: undefined,
       lastActiveAt: new Date(),
     });
   }
@@ -839,6 +868,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       status: "stopped",
       terminalId: undefined,
       shellTerminalId: undefined,
+      editorProcessId: undefined,
       archivedAt: new Date(),
       lastActiveAt: new Date(),
     });
@@ -920,6 +950,111 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return { url: `${baseUrl}/attach/${token}`, expiresAt };
   }
 
+  /** Starts browser VS Code if needed and mints a capability bound to this sandbox generation. */
+  async mintEditorCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+  ): Promise<CodingSessionEditorCapability> {
+    const baseUrl = requiredEditorBaseUrl(this.env.EDITOR_BASE_URL);
+    required(this.env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
+    const record = this.#get(sessionId);
+    if (!record || record.status !== "running" || !record.terminalId) {
+      throw new Error("Coding session is not running.");
+    }
+    const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
+    if (!(await this.#runningPrimaryTerminal(record))) {
+      throw new Error("Coding session environment expired. Restart the session to continue.");
+    }
+    await policyForSandbox(this.env, record.sandboxId).configure({
+      sessionId: record.id,
+      sandboxId: record.sandboxId,
+      owner,
+      repositories: record.repositories,
+    });
+
+    let creation = this.#editorProcessCreations.get(sessionId);
+    if (!creation) {
+      creation = (async () => {
+        const persistedProcessId = record.editorProcessId;
+        const existing = persistedProcessId ? await sandbox.getProcess(persistedProcessId) : null;
+        const existingStatus = existing ? await existing.status() : null;
+        if (persistedProcessId && existing && existingStatus?.state === "running") {
+          return persistedProcessId;
+        }
+        const userDataDir = "/workspace/.odie-code-server/user-data";
+        await sandbox.mkdir(`${userDataDir}/User`, { recursive: true });
+        await sandbox.writeFile(`${userDataDir}/User/settings.json`, JSON.stringify({
+          "extensions.autoCheckUpdates": false,
+          "extensions.autoUpdate": false,
+          "telemetry.telemetryLevel": "off",
+          "update.mode": "none",
+        }));
+        const process = await sandbox.exec([
+          "code-server",
+          "--bind-addr", `0.0.0.0:${EDITOR_PORT}`,
+          "--auth", "none",
+          "--disable-telemetry",
+          "--disable-update-check",
+          "--disable-workspace-trust",
+          "--extensions-dir", "/opt/odie-code-server/extensions",
+          "--user-data-dir", userDataDir,
+          "/workspace",
+        ], {
+          cwd: "/workspace",
+          env: {
+            CS_DISABLE_GETTING_STARTED_OVERRIDE: "1",
+            EXTENSIONS_GALLERY: "{}",
+            VSCODE_PROXY_URI: "./proxy/{{port}}",
+          },
+        });
+        try {
+          await process.waitForPort(EDITOR_PORT, {
+            mode: "http", path: "/", status: { min: 200, max: 399 }, timeout: 30_000,
+          });
+        } catch (error) {
+          await process.kill(15).catch(() => undefined);
+          throw error;
+        }
+        const stillRunning = this.#get(sessionId);
+        if (!stillRunning || stillRunning.status !== "running" ||
+            stillRunning.sandboxId !== record.sandboxId) {
+          await process.kill(15).catch(() => undefined);
+          throw new Error("Coding session is not running.");
+        }
+        this.#put({ ...stillRunning, editorProcessId: process.id });
+        return process.id;
+      })();
+      this.#editorProcessCreations.set(sessionId, creation);
+    }
+    let processId: string;
+    try {
+      processId = await creation;
+    } finally {
+      if (this.#editorProcessCreations.get(sessionId) === creation) {
+        this.#editorProcessCreations.delete(sessionId);
+      }
+    }
+
+    const current = this.#get(sessionId);
+    if (!current || current.status !== "running" || current.sandboxId !== record.sandboxId) {
+      throw new Error("Coding session is not running.");
+    }
+    const token = await editorCapabilityToken(this.env);
+    const expiresAt = new Date(Date.now() + EDITOR_CAPABILITY_TTL_MS);
+    await (await editorTicketFor(this.env, token)).storeEditorTicket({
+      sandboxId: record.sandboxId,
+      userId: owner.userId,
+      sessionId: record.id,
+      expiresAt: expiresAt.valueOf(),
+    });
+    const latest = this.#get(sessionId);
+    if (!latest || latest.status !== "running" || latest.sandboxId !== record.sandboxId) {
+      throw new Error("Coding session is not running.");
+    }
+    this.#put({ ...latest, editorProcessId: processId, lastActiveAt: new Date() });
+    return { url: `${baseUrl}/c/${token}/`, expiresAt };
+  }
+
   /** Records that the persisted primary terminal can no longer serve this session. */
   markTerminalUnavailable(sessionId: string, sandboxId: string, terminalId: string | undefined, reason: string): void {
     const record = this.#get(sessionId);
@@ -930,6 +1065,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       status: "failed",
       terminalId: undefined,
       shellTerminalId: undefined,
+      editorProcessId: undefined,
       error: reason,
       lastActiveAt: new Date(),
     });
@@ -1010,6 +1146,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       status: "failed",
       terminalId: undefined,
       shellTerminalId: undefined,
+      editorProcessId: undefined,
       error,
       lastActiveAt: new Date(),
     });
@@ -1023,6 +1160,17 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   /** Deliberately fails connector discovery because Sessions is a Workshop feature, not a connector. */
   async describe(): Promise<VendorDescription> {
     throw new Error("Coding Sessions is an internal Workshop service, not a connector.");
+  }
+
+  /** Reports whether this deployment can mint separate-origin browser editor capabilities. */
+  editorAvailable(): Promise<boolean> {
+    try {
+      requiredEditorBaseUrl(this.env.EDITOR_BASE_URL);
+      required(this.env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
+      return Promise.resolve(true);
+    } catch {
+      return Promise.resolve(false);
+    }
   }
 
   /** Lists sessions for the supplied authenticated owner. */
@@ -1081,10 +1229,20 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   ): Promise<CodingSessionAttachCapability> {
     return registryFor(this.ctx, owner.userId).mintAttachCapability(owner, sessionId, terminal);
   }
+
+  /** Mints a browser VS Code capability for the supplied authenticated owner. */
+  mintEditorCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+  ): Promise<CodingSessionEditorCapability> {
+    return registryFor(this.ctx, owner.userId).mintEditorCapability(owner, sessionId);
+  }
 }
 
 async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
+  const editorMatch = /^\/c\/([A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43})(\/.*)$/.exec(url.pathname);
+  if (editorMatch) return handleEditorHttp(request, env, ctx, editorMatch[1]!, editorMatch[2]!);
   const match = /^\/gatekeeper\/sessions\/attach\/([^/]+)$/.exec(url.pathname);
   if (!match) return new Response("Not found", { status: 404 });
   if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -1152,6 +1310,82 @@ async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Pr
   }
 }
 
+async function handleEditorHttp(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  token: string,
+  path: string,
+): Promise<Response> {
+  let editorBaseUrl: string;
+  try {
+    editorBaseUrl = requiredEditorBaseUrl(env.EDITOR_BASE_URL);
+  } catch {
+    return new Response("Browser editor is not configured", { status: 404 });
+  }
+  const expectedOrigin = new URL(editorBaseUrl).origin;
+  if (new URL(request.url).origin !== expectedOrigin) {
+    return new Response("Editor capability is not accepted on this origin", { status: 403 });
+  }
+  const requestOrigin = request.headers.get("Origin");
+  if (requestOrigin && requestOrigin !== expectedOrigin) {
+    return new Response("Origin is not allowed", { status: 403 });
+  }
+  if (!(await validEditorCapabilityToken(env, token))) {
+    return new Response("Editor capability is invalid or expired", { status: 403 });
+  }
+  const ticket = await (await editorTicketFor(env, token)).getEditorTicket(Date.now());
+  if (!ticket) return new Response("Editor capability is invalid or expired", { status: 403 });
+  if (!(await registryFor(ctx, ticket.userId).isCurrentSessionGeneration(
+    ticket.sessionId, ticket.sandboxId))) {
+    return new Response("Editor session is no longer available", { status: 410 });
+  }
+
+  const prefix = `/c/${token}/`;
+  const target = new URL(`http://localhost:${EDITOR_PORT}${path}`);
+  target.search = new URL(request.url).search;
+  const headers = new Headers(request.headers);
+  headers.set("Host", new URL(editorBaseUrl).host);
+  headers.set("X-Forwarded-Host", new URL(editorBaseUrl).host);
+  headers.set("X-Forwarded-Proto", "https");
+  headers.set("X-Forwarded-Prefix", prefix.slice(0, -1));
+  const proxyRequest = new Request(target, {
+    method: request.method,
+    headers,
+    body: request.body,
+    redirect: "manual",
+  });
+  const sandbox = getSandbox(env.SESSION_SANDBOX, ticket.sandboxId);
+  try {
+    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      return await sandbox.wsConnect(proxyRequest, EDITOR_PORT);
+    }
+    const response = await sandbox.containerFetch(proxyRequest, EDITOR_PORT);
+    const responseHeaders = new Headers(response.headers);
+    const location = responseHeaders.get("Location");
+    if (location) {
+      responseHeaders.set("Location", rewriteEditorLocation(location, expectedOrigin, prefix));
+    }
+    responseHeaders.set("Cache-Control", "private, no-store");
+    responseHeaders.set("Referrer-Policy", "no-referrer");
+    responseHeaders.set("X-Content-Type-Options", "nosniff");
+    if (path === "/") responseHeaders.set("X-Frame-Options", "DENY");
+    responseHeaders.set("Service-Worker-Allowed", prefix);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+  } catch (error) {
+    logger.error("browser editor proxy failed", {
+      event: "coding.session.editor.proxy.failed",
+      sessionId: ticket.sessionId,
+      error,
+    });
+    return new Response("Browser editor is unavailable", { status: 502 });
+  }
+}
+
 export default { fetch: handleHttp };
 
 function registryFor(ctx: ExecutionContext, userId: string): DurableObjectStub<CodingSessionRegistry> {
@@ -1174,6 +1408,11 @@ async function ticketFor(env: Env, token: string): Promise<DurableObjectStub<Cod
   return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`ticket:${digest}`));
 }
 
+async function editorTicketFor(env: Env, token: string): Promise<DurableObjectStub<CodingSessionPolicy>> {
+  const digest = await sha256Hex(new TextEncoder().encode(token));
+  return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`editor-ticket:${digest}`));
+}
+
 function storedSessionRuntime(record: SessionRecord): CodingSessionRuntime {
   return record.primeAgent ? "prime-agent" : codingSessionRuntime(record.runtime);
 }
@@ -1183,6 +1422,7 @@ function publicSummary(record: SessionRecord): CodingSessionSummary {
     sandboxId: _sandboxId,
     terminalId: _terminalId,
     shellTerminalId: _shellTerminalId,
+    editorProcessId: _editorProcessId,
     primeAgent: _primeAgent,
     ...summary
   } = record;
@@ -1381,8 +1621,62 @@ function required(value: string | undefined, name: string): string {
   return value;
 }
 
+function rewriteEditorLocation(location: string, editorOrigin: string, prefix: string): string {
+  if (location.startsWith("//")) return location;
+  if (location.startsWith(prefix)) return location;
+  if (location.startsWith("/")) return `${prefix}${location.slice(1)}`;
+  let absolute: URL;
+  try {
+    absolute = new URL(location);
+  } catch {
+    return location;
+  }
+  const internalOrigin = `http://localhost:${EDITOR_PORT}`;
+  if (absolute.origin !== internalOrigin && absolute.origin !== editorOrigin) return location;
+  if (absolute.pathname.startsWith(prefix)) return location;
+  return `${prefix}${absolute.pathname.slice(1)}${absolute.search}${absolute.hash}`;
+}
+
+function requiredEditorBaseUrl(value: string | undefined): string {
+  const configured = new URL(required(value, "EDITOR_BASE_URL"));
+  if (configured.protocol !== "https:" || configured.username || configured.password ||
+      configured.search || configured.hash || configured.pathname !== "/") {
+    throw new Error("EDITOR_BASE_URL must be an HTTPS origin.");
+  }
+  return configured.origin;
+}
+
 function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
+}
+
+async function editorCapabilityToken(env: Env): Promise<string> {
+  const nonce = randomToken();
+  const signature = await hmacBase64Url(
+    required(env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET"),
+    `odie-editor-v1:${nonce}`,
+  );
+  return `${nonce}.${signature}`;
+}
+
+async function validEditorCapabilityToken(env: Env, token: string): Promise<boolean> {
+  const [nonce, signature, extra] = token.split(".");
+  if (extra !== undefined || !nonce || !signature) return false;
+  let expected: string;
+  try {
+    expected = await hmacBase64Url(
+      required(env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET"),
+      `odie-editor-v1:${nonce}`,
+    );
+  } catch {
+    return false;
+  }
+  if (signature.length !== expected.length) return false;
+  let difference = 0;
+  for (let index = 0; index < expected.length; index++) {
+    difference |= signature.charCodeAt(index) ^ expected.charCodeAt(index);
+  }
+  return difference === 0;
 }
 
 function randomToken(): string {

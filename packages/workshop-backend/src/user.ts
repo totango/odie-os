@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, type CodingSessionAttachCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, type CodingSessionAttachCapability, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
@@ -1492,6 +1492,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return { owner: { userId: this.ctx.id.toString(), email: profile.id }, service };
   }
 
+  /** Reports whether this deployment has browser VS Code configured. */
+  async codingSessionEditorAvailable(): Promise<boolean> {
+    let {service} = await this.#codingSessionsOwner();
+    return service.editorAvailable();
+  }
+
   /** Lists owned coding sessions even when GitHub credentials need reconnection. */
   async listCodingSessions(): Promise<CodingSessionSummary[]> {
     let {owner, service} = await this.#codingSessionsOwner();
@@ -1566,6 +1572,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!session) throw new Error("Coding session was not found.");
     let {owner, service} = await this.#codingSessionsAccess(session.repositories);
     return service.mintAttachCapability(owner, sessionId, terminal);
+  }
+
+  /** Mints a browser VS Code capability after re-authorizing every session repository. */
+  async mintCodingSessionEditorCapability(sessionId: string): Promise<CodingSessionEditorCapability> {
+    let initial = await this.#codingSessionsOwner();
+    let session = await initial.service.getSession(initial.owner, sessionId);
+    if (!session) throw new Error("Coding session was not found.");
+    let {owner, service} = await this.#codingSessionsAccess(session.repositories);
+    return service.mintEditorCapability(owner, sessionId);
   }
 
   /** Lists coding-session observations and actions newest first. */
