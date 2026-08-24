@@ -12,8 +12,6 @@ import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloud
 import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
 
-// Flip only after the Prime-capable coding-session image is pinned in production.
-const PRIME_AGENT_CODING_SESSIONS_AVAILABLE = false;
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
@@ -311,9 +309,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async #assertCodingSessionRuntimeEnabled(runtime: "pi" | "prime-agent"): Promise<void> {
-    if (runtime === "prime-agent" && !PRIME_AGENT_CODING_SESSIONS_AVAILABLE) {
-      throw new Error("Prime Agent coding sessions are not available yet.");
-    }
     const flags = await resolveUiFeatureFlags(this.env, this.#userId.name!);
     if (!flags["pi-coding-session-runtime"]) {
       const label = runtime === "pi" ? "Pi" : "Prime Agent";

@@ -23,9 +23,6 @@ import { useUiFeatureFlag } from '../FeatureFlagsContext'
 
 export const Route = createFileRoute('/sessions')({ component: SessionsPage })
 
-// Flip only after the Prime-capable coding-session image is pinned in production.
-const PRIME_AGENT_CODING_SESSIONS_AVAILABLE = false
-
 function runtimeLabel(runtime: CodingSessionRuntime): string {
   if (runtime === 'pi') return 'Pi'
   if (runtime === 'prime-agent') return 'Prime Agent'
@@ -296,9 +293,7 @@ function NewSessionPane() {
                 ['opencode', 'OpenCode', 'Established runtime with your account plugins and skills.'],
                 ['pi', 'Pi', 'Focused runtime using Team PI and Workshop tools.'],
                 ['prime-agent', 'Prime Agent', 'IPython-based runtime using shared Codex and Workshop tools.'],
-              ] as const)
-                .filter(([value]) => value !== 'prime-agent' || PRIME_AGENT_CODING_SESSIONS_AVAILABLE)
-                .map(([value, label, description]) => (
+              ] as const).map(([value, label, description]) => (
                 <button
                   key={value}
                   type="button"
