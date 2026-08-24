@@ -1,7 +1,11 @@
 import type { WorkerEntrypoint } from "cloudflare:workers";
 import type { ActionDescription, ObservationDescription } from "./gatekeeper.js";
 import type {
+  CodingSessionApplicationCapability,
   CodingSessionAttachCapability,
+  CodingSessionDevelopmentCatalog,
+  CodingSessionDevelopmentPlan,
+  CodingSessionDevelopmentStatus,
   CodingSessionEditorCapability,
   CodingSessionRepository,
   CodingSessionSummary,
@@ -118,6 +122,21 @@ export interface CodingSessionsService extends WorkerEntrypoint {
   /** Lists sessions owned by the authenticated Workshop user. */
   listSessions(owner: CodingSessionOwner): Promise<CodingSessionSummary[]>;
 
+  /** Returns the display-safe development-stack catalog available to the authenticated owner. */
+  getDevelopmentCatalog(owner: CodingSessionOwner): Promise<CodingSessionDevelopmentCatalog>;
+
+  /** Checks one create request without reserving capacity or creating a sandbox generation. */
+  preflightSession(
+    owner: CodingSessionOwner,
+    request: CreateCodingSessionRequest,
+  ): Promise<CodingSessionDevelopmentPlan>;
+
+  /** Returns persisted component and application lifecycle for one owned session. */
+  getDevelopmentStatus(
+    owner: CodingSessionOwner,
+    sessionId: string,
+  ): Promise<CodingSessionDevelopmentStatus>;
+
   /**
    * Retrieves one non-archived session owned by the authenticated Workshop user and reconciles its
    * live runtime metadata without exposing sandbox or terminal identifiers.
@@ -166,6 +185,13 @@ export interface CodingSessionsService extends WorkerEntrypoint {
 
   /** Mints a generation-bound browser VS Code capability after verifying ownership. */
   mintEditorCapability(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionEditorCapability>;
+
+  /** Mints a generation-bound capability for one reviewed application after verifying ownership. */
+  mintApplicationCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    applicationId: string,
+  ): Promise<CodingSessionApplicationCapability>;
 }
 
 /** Returns whether a value is a canonical GitHub repository name accepted by Coding Sessions. */
