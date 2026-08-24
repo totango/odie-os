@@ -5,7 +5,11 @@ import type { OutboundHandlerContext } from "@cloudflare/containers";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import {
+  type CodingSessionApplicationCapability,
   type CodingSessionAttachCapability,
+  type CodingSessionDevelopmentCatalog,
+  type CodingSessionDevelopmentPlan,
+  type CodingSessionDevelopmentStatus,
   type CodingSessionEditorCapability,
   type CodingSessionRepository,
   type CodingSessionRuntime,
@@ -32,6 +36,8 @@ import {
   WORKSHOP_MCP_HOST,
   validateWorkshopMcpRequestTarget,
 } from "./mcp-policy.js";
+import { DEVELOPMENT_CATALOG, publicDevelopmentCatalog } from "./development-catalog.js";
+import { planDevelopmentStack } from "./development-planner.js";
 import { validateRepositories } from "./policy.js";
 import {
   assertRuntimeEnabled,
@@ -692,6 +698,37 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       .toSorted((a, b) => b.createdAt.valueOf() - a.createdAt.valueOf());
   }
 
+  /** Plans a development stack from persisted capacity metadata without contacting a sandbox. */
+  preflightSession(request: CreateCodingSessionRequest): CodingSessionDevelopmentPlan {
+    const active = [...this.#records()].filter(record =>
+      !record.archivedAt && ["starting", "running", "stopping"].includes(record.status)).length;
+    return planDevelopmentStack(DEVELOPMENT_CATALOG, request, {
+      "standard-1": { available: active < MAX_SESSIONS_PER_USER, active, limit: MAX_SESSIONS_PER_USER },
+      "standard-3": { available: false, active: 0, limit: 0 },
+      "standard-4": { available: false, active: 0, limit: 0 },
+    });
+  }
+
+  /** Returns an empty compatible lifecycle snapshot for a historical terminal-only session. */
+  getDevelopmentStatus(sessionId: string): CodingSessionDevelopmentStatus {
+    const record = this.#get(sessionId);
+    if (!record || record.archivedAt) throw new Error("Coding session was not found.");
+    return {
+      sessionId,
+      generation: 0,
+      components: [],
+      applications: [],
+      updatedAt: record.lastActiveAt,
+    };
+  }
+
+  /** Rejects application previews until the reviewed preview gateway is available. */
+  mintApplicationCapability(sessionId: string, _applicationId: string): CodingSessionApplicationCapability {
+    const record = this.#get(sessionId);
+    if (!record || record.archivedAt) throw new Error("Coding session was not found.");
+    throw new Error("Coding session application previews are not available yet.");
+  }
+
   /** Retrieves and reconciles one non-archived session without exposing internal runtime handles. */
   async getSession(sessionId: string): Promise<CodingSessionSummary | undefined> {
     const record = this.#get(sessionId);
@@ -719,6 +756,10 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     _customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
     const repositories = validateRepositories(request.repositories);
+    if (request.developmentStack !== undefined) {
+      const plan = this.preflightSession({ ...request, repositories });
+      if (!plan.canCreate) throw new Error(plan.issues[0]?.message ?? "Development stack is unavailable.");
+    }
     if ([...this.#records()].filter(record =>
       !record.archivedAt && ["starting", "running", "stopping"].includes(record.status)).length >= MAX_SESSIONS_PER_USER) {
       throw new Error(`A user may have at most ${MAX_SESSIONS_PER_USER} active coding sessions.`);
@@ -1187,6 +1228,27 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     return registryFor(this.ctx, owner.userId).listSessions();
   }
 
+  /** Returns the display-safe server-owned development catalog. */
+  getDevelopmentCatalog(_owner: CodingSessionOwner): Promise<CodingSessionDevelopmentCatalog> {
+    return Promise.resolve(publicDevelopmentCatalog());
+  }
+
+  /** Checks a development request without reserving capacity or contacting a sandbox. */
+  preflightSession(
+    owner: CodingSessionOwner,
+    request: CreateCodingSessionRequest,
+  ): Promise<CodingSessionDevelopmentPlan> {
+    return registryFor(this.ctx, owner.userId).preflightSession(request);
+  }
+
+  /** Returns persisted development lifecycle for one owned session. */
+  getDevelopmentStatus(
+    owner: CodingSessionOwner,
+    sessionId: string,
+  ): Promise<CodingSessionDevelopmentStatus> {
+    return registryFor(this.ctx, owner.userId).getDevelopmentStatus(sessionId);
+  }
+
   /** Retrieves one session for the supplied authenticated owner. */
   getSession(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionSummary | undefined> {
     return registryFor(this.ctx, owner.userId).getSession(sessionId);
@@ -1245,6 +1307,15 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     sessionId: string,
   ): Promise<CodingSessionEditorCapability> {
     return registryFor(this.ctx, owner.userId).mintEditorCapability(owner, sessionId);
+  }
+
+  /** Rejects application preview minting until the preview gateway is available. */
+  mintApplicationCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    applicationId: string,
+  ): Promise<CodingSessionApplicationCapability> {
+    return registryFor(this.ctx, owner.userId).mintApplicationCapability(sessionId, applicationId);
   }
 }
 

@@ -359,12 +359,17 @@ export type CodingSessionDevelopmentComponentStatus =
 /** Reviewed execution location used by one development-stack component. */
 export type CodingSessionDevelopmentExecution = "sandbox" | "external";
 
+/** Authority conveyed by one reviewed browser-facing development application. */
+export type CodingSessionDevelopmentApplicationAuthority = "application" | "management";
+
 /** One browser-facing application declared by a reviewed development-stack component. */
 export interface CodingSessionDevelopmentApplication {
-  /** Stable application identifier, unique within the component. */
+  /** Stable catalog-global application identifier used when minting its capability. */
   id: string;
   /** User-visible application name. */
   title: string;
+  /** Authority classification shown before the application is opened. */
+  authority: CodingSessionDevelopmentApplicationAuthority;
   /** Optional user-visible explanation of the application. */
   description?: string;
 }
@@ -389,7 +394,7 @@ export interface CodingSessionDevelopmentComponent {
   requiredRepositories: CodingSessionRepository[];
   /** Reviewed component dependencies that the server adds to a plan. */
   dependencyIds: string[];
-  /** Smallest container tier on which this component may run. */
+  /** Smallest coding-sandbox tier required alongside this component, including external components. */
   minimumTier: CodingSessionInstanceTier;
   /** Browser-facing applications this component can make available. */
   applications: CodingSessionDevelopmentApplication[];
@@ -411,7 +416,7 @@ export interface CodingSessionDevelopmentProfile {
   unavailableReason?: string;
   /** Reviewed components selected by this profile before dependency expansion. */
   componentIds: string[];
-  /** Smallest container tier on which this profile may run. */
+  /** Smallest coding-sandbox tier required alongside this profile, including external profiles. */
   minimumTier: CodingSessionInstanceTier;
 }
 
@@ -461,13 +466,13 @@ export interface CodingSessionDevelopmentPlanIssue {
   repository?: CodingSessionRepository;
 }
 
-/** Current deployment capacity for the tier selected by a development plan. */
+/** Current admission-capacity snapshot for the tier selected by a development plan. */
 export interface CodingSessionDevelopmentCapacity {
   /** Whether a new generation could currently be admitted to this tier. */
   available: boolean;
-  /** Number of active or reserved generations counted against this tier. */
+  /** Number of active or reserved generations counted in the selected admission scope. */
   active: number;
-  /** Server-enforced concurrent-generation limit for this tier. */
+  /** Server-enforced concurrent-generation limit in the selected admission scope. */
   limit: number;
 }
 
@@ -485,7 +490,7 @@ export interface CodingSessionDevelopmentPlan {
   minimumTier: CodingSessionInstanceTier;
   /** Tier the server would use if this request were created now. */
   selectedTier: CodingSessionInstanceTier;
-  /** Informational capacity snapshot for the selected tier. */
+  /** Informational admission-capacity snapshot for the selected tier. */
   capacity: CodingSessionDevelopmentCapacity;
   /** Problems that prevent or qualify creation of this plan. */
   issues: CodingSessionDevelopmentPlanIssue[];
