@@ -51,6 +51,11 @@ type SessionsContextValue = {
   refresh: () => void
   refreshActivity: () => void
   create: () => Promise<void>
+  prepareSession: (title: string, initialInput: string) => void
+  preparedInput?: string
+  clearPreparedSession: () => void
+  initialInput?: string
+  markInitialInputSent: (sessionId: string) => void
   stopSession: (id: string) => Promise<void>
   restartSession: (id: string) => Promise<void>
   archiveSession: (id: string) => Promise<void>
@@ -94,6 +99,8 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
   const [error, setError] = useState<string>()
   const [creating, setCreating] = useState(false)
   const [title, setTitle] = useState('Coordinated code change')
+  const [launchInput, setLaunchInput] = useState<string>()
+  const [pendingInitialInput, setPendingInitialInput] = useState<{ sessionId: string; input: string }>()
   const [runtime, setRuntime] = useState<CodingSessionRuntime>('opencode')
   const [repositories, setRepositories] = useState<CodingSessionRepository[]>([])
   const [activeId, setActiveId] = useState<string>()
@@ -101,6 +108,7 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
   const [repositorySearch, setRepositorySearch] = useState('')
   const [repositoryOptions, setRepositoryOptions] = useState<CodingSessionRepositoryOption[]>([])
   const [repositoryLoading, setRepositoryLoading] = useState(false)
+  const creatingRef = useRef(false)
   const sessionRefreshSequence = useRef(0)
   const sessionRefreshInFlight = useRef(false)
   const sessionRefreshPending = useRef(false)
@@ -225,21 +233,39 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
     await openGitHubAccountPopup(authenticatedApi, { kind: 'reconnect', accountId })
   }, [authenticatedApi])
 
+  const prepareSession = useCallback((nextTitle: string, initialInput: string) => {
+    setTitle(nextTitle)
+    setLaunchInput(initialInput)
+    setActiveId(undefined)
+  }, [])
+
+  const clearPreparedSession = useCallback(() => setLaunchInput(undefined), [])
+
+  const markInitialInputSent = useCallback((sessionId: string) => {
+    setPendingInitialInput((current) => current?.sessionId === sessionId ? undefined : current)
+  }, [])
+
   const create = useCallback(async () => {
-    if (!repositories.length) return
+    if (creatingRef.current || !repositories.length) return
+    creatingRef.current = true
     setCreating(true)
     setError(undefined)
     try {
       const session = await authenticatedApi.createCodingSession({ title, repositories, runtime })
       sessionRefreshSequence.current += 1
       setSessions((current) => [session, ...current])
+      if (launchInput) {
+        setPendingInitialInput({ sessionId: session.id, input: launchInput })
+        setLaunchInput(undefined)
+      }
       setActiveId(session.id)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not create coding session.')
     } finally {
+      creatingRef.current = false
       setCreating(false)
     }
-  }, [authenticatedApi, repositories, runtime, title])
+  }, [authenticatedApi, launchInput, repositories, runtime, title])
 
   const stopSession = useCallback(async (id: string) => {
     sessionRefreshSequence.current += 1
@@ -307,6 +333,13 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
     refresh,
     refreshActivity,
     create,
+    prepareSession,
+    preparedInput: launchInput,
+    clearPreparedSession,
+    initialInput: pendingInitialInput && pendingInitialInput.sessionId === activeId
+      ? pendingInitialInput.input
+      : undefined,
+    markInitialInputSent,
     stopSession,
     restartSession,
     archiveSession,
@@ -315,8 +348,10 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
     reconnect,
   }), [
     activeId, activeSession, activity, archiveSession, availablePresets, connect, create, creating, error,
-    github, loaded, reconnect, refresh, refreshActivity, repositories, repositoryLoading, repositoryOptions,
-    repositorySearch, resolveActivity, restartSession, runtime, sessions, stopSession, title,
+    clearPreparedSession, github, launchInput, loaded, markInitialInputSent, pendingInitialInput, prepareSession,
+    reconnect, refresh, refreshActivity,
+    repositories, repositoryLoading, repositoryOptions, repositorySearch, resolveActivity, restartSession,
+    runtime, sessions, stopSession, title,
   ])
 
   return <SessionsContext.Provider value={value}>{children}</SessionsContext.Provider>
