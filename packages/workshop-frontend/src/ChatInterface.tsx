@@ -124,6 +124,9 @@ import OutOfCreditsModal from "./components/billing/OutOfCreditsModal";
 import { useSlashCommandPicker } from "./components/chat/SlashCommandPicker";
 import { formatFullTimestamp } from "./utils/formatTimestamp";
 import { copyToClipboard } from "./clipboard";
+import WorkItemDrawer from "./WorkItemDrawer";
+import { useGatekeeperApps } from "./useGatekeeperApps";
+import { workItemTargetFromUrl, type WorkItemTarget } from "./workItemNavigation";
 import {
   composerDraftStorageKey,
   decorateComposerDraft,
@@ -132,6 +135,11 @@ import {
   writeComposerDraft,
   type StoredComposerDraft,
 } from "./composerDraft";
+
+/** Chooses the outer chat layout so an open Work Item reflows beside chat in every chat-list mode. */
+export function chatInterfaceLayoutDirection(sidebarMode: boolean, workItemOpen: boolean): "flex-row" | "flex-col" {
+  return sidebarMode || workItemOpen ? "flex-row" : "flex-col";
+}
 
 export interface StreamingProposedChanges {
   updates: Uint8Array[];
@@ -1169,6 +1177,7 @@ function FormatMention({ format }: { format: MessageFormatRef }) {
 
 function getMarkdownComponents(
   mentionsByToken?: Map<string, Mention>,
+  onOpenWorkItem?: (target: WorkItemTarget) => void,
 ): Components {
   return {
     table: ({ node: _node, children, ...props }) => (
@@ -1192,12 +1201,25 @@ function getMarkdownComponents(
         return <>{children}</>;
       }
 
+      const workItemTarget = onOpenWorkItem ? workItemTargetFromUrl(safeHref) : null;
       return (
         <a
           {...props}
           href={safeHref}
-          target="_blank"
-          rel="noopener noreferrer"
+          target={workItemTarget ? undefined : "_blank"}
+          rel={workItemTarget ? undefined : "noopener noreferrer"}
+          onClick={workItemTarget ? (event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+              window.open(safeHref, "_blank", "noopener,noreferrer");
+              return;
+            }
+            onOpenWorkItem?.(workItemTarget);
+          } : undefined}
+          aria-label={workItemTarget
+            ? `Open ${workItemTarget.key ?? workItemTarget.id} in Work Items`
+            : props["aria-label"]}
         >
           {children}
         </a>
@@ -1215,10 +1237,11 @@ const MARKDOWN_COMPONENTS_NO_CAPSULES = getMarkdownComponents();
  * `whitespace-pre-wrap` wrapper at the user-message render site renders it as a hard break.
  */
 export const MarkdownMessage = memo(function MarkdownMessage(
-  { message, capsules, formats }: {
+  { message, capsules, formats, onOpenWorkItem }: {
     message: string;
     capsules?: CapsuleSpecifier[];
     formats?: MessageFormatRef[];
+    onOpenWorkItem?: (target: WorkItemTarget) => void;
   },
 ): ReactNode {
   const tokenizedMessage = useMemo(
@@ -1228,10 +1251,10 @@ export const MarkdownMessage = memo(function MarkdownMessage(
     [capsules, formats, message],
   );
   const components = useMemo(
-    () => tokenizedMessage
-      ? getMarkdownComponents(tokenizedMessage.mentionsByToken)
+    () => tokenizedMessage || onOpenWorkItem
+      ? getMarkdownComponents(tokenizedMessage?.mentionsByToken, onOpenWorkItem)
       : MARKDOWN_COMPONENTS_NO_CAPSULES,
-    [tokenizedMessage],
+    [onOpenWorkItem, tokenizedMessage],
   );
   const remarkPlugins = useMemo(
     () => tokenizedMessage
@@ -4466,6 +4489,8 @@ function ChatInterface({
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
   const { currentUser } = useAuthenticatedApi();
+  const workItemsApp = useGatekeeperApps().find((app) => app.vendorId === "team-pi");
+  const [openWorkItem, setOpenWorkItem] = useState<WorkItemTarget | null>(null);
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
@@ -6877,7 +6902,7 @@ function ChatInterface({
   // ─── main render ─────────────────────────────────────────────────────────────
   return (
     <div
-      className={`flex h-full bg-kumo-base ${sidebarMode ? "flex-row" : "flex-col"}`}
+      className={`relative flex h-full bg-kumo-base ${chatInterfaceLayoutDirection(sidebarMode === true, openWorkItem !== null)}`}
     >
       {/* ── Sidebar mode: conversations list on the left ───────────────────── */}
       {sidebarMode && (
@@ -6905,7 +6930,7 @@ function ChatInterface({
       {!sidebarMode && selectedChatId === null ? (
         chatListPanel
       ) : selectedChatId !== null ? (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Tab bar — in sidebar mode, show Chat / Connections tabs */}
           {sidebarMode && (
             <div className="flex h-12 flex-shrink-0 items-center gap-5 border-b border-kumo-line px-4">
@@ -7361,6 +7386,7 @@ function ChatInterface({
                                     message={msg.message}
                                     capsules={msg.capsules}
                                     formats={msg.formats}
+                                    onOpenWorkItem={workItemsApp ? setOpenWorkItem : undefined}
                                   />
                                 </div>
                               )}
@@ -7735,7 +7761,10 @@ function ChatInterface({
 
                           {currentProvisionalState?.text && (
                             <div className={`text-[14px] leading-[22px] tracking-[-0.25px] text-kumo-default ${styles.markdownContent}`}>
-                              <MarkdownMessage message={currentProvisionalState.text} />
+                              <MarkdownMessage
+                                message={currentProvisionalState.text}
+                                onOpenWorkItem={workItemsApp ? setOpenWorkItem : undefined}
+                              />
                             </div>
                           )}
 
@@ -7931,6 +7960,14 @@ function ChatInterface({
           )}
         </div>
       ) : null}
+
+      {openWorkItem && workItemsApp && (
+        <WorkItemDrawer
+          appId={workItemsApp.id}
+          target={openWorkItem}
+          onClose={() => setOpenWorkItem(null)}
+        />
+      )}
 
       <DeleteConfirmationDialog
         open={deleteTarget !== null}

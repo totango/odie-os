@@ -37,6 +37,7 @@ const listGadgets = vi.fn<() => Promise<{ id: string; title: string }[]>>(async 
   { id: WORKSPACE_ID, title: "Daily Brief" },
 ]);
 const authenticatedApi = { listGadgets };
+const requestCodingSession = vi.fn<(target: { source: "jira" | "zendesk"; id: string; key?: string }, title: string) => void>();
 
 vi.mock("./AuthContext", () => ({
   useAuthenticatedApi: () => ({ authenticatedApi }),
@@ -50,6 +51,8 @@ interface TestHost extends RpcTarget {
   openWorkspace(workspaceId: string, gadgetId?: number): Promise<void>;
   resolveWorkspaceTitles(ids: string[]): Promise<(string | null)[]>;
   openPrompt(prompt: string): Promise<void>;
+  codingSessionAvailable(): Promise<boolean>;
+  requestCodingSession(source: "jira" | "zendesk", id: string, key: string | undefined, title: string): Promise<void>;
   getRouteState(): Promise<string>;
   setRouteState(value: string): Promise<void>;
 }
@@ -67,6 +70,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
 
   beforeEach(() => {
     listGadgets.mockClear();
+    requestCodingSession.mockClear();
   });
 
   afterEach(async () => {
@@ -82,7 +86,12 @@ describe("SandboxedGatekeeperApp navigation", () => {
       ui: new RpcStub(new EmptyUi()),
     } as unknown as GatekeeperUiFrame;
     const rootRoute = createRootRoute({
-      component: () => <SandboxedGatekeeperApp frame={frame} gatekeeperVendorId="scheduler" />,
+      component: () => <SandboxedGatekeeperApp
+        frame={frame}
+        gatekeeperVendorId="team-pi"
+        codingSessionAvailable
+        onRequestCodingSession={requestCodingSession}
+      />,
     });
     const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/" });
     const gadgetRoute = createRoute({
@@ -156,6 +165,51 @@ describe("SandboxedGatekeeperApp navigation", () => {
       await vi.waitFor(() => expect(router.state.location.pathname).toBe("/"));
     });
     expect(router.state.location.search).toEqual({ prompt: "Create a daily brief." });
+
+    await expect(host.codingSessionAvailable()).resolves.toBe(true);
+    await host.requestCodingSession("jira", "1001", "ai-3540", "  Work on AI-3540  ");
+    expect(requestCodingSession).toHaveBeenCalledWith(
+      { source: "jira", id: "1001", key: "AI-3540" },
+      "Work on AI-3540",
+    );
+    await expect(host.requestCodingSession("jira", "1001", "AI-3540", "bad\ntitle")).rejects.toThrow(
+      "Invalid coding session title",
+    );
+  });
+
+  it("does not expose Work Item Code handoffs to other gatekeeper apps", async () => {
+    const frame = {
+      iframeHtml: "<!doctype html><title>Other app</title>",
+      ui: new RpcStub(new EmptyUi()),
+    } as unknown as GatekeeperUiFrame;
+    const rootRoute = createRootRoute({
+      component: () => <SandboxedGatekeeperApp
+        frame={frame}
+        gatekeeperVendorId="scheduler"
+        codingSessionAvailable
+        onRequestCodingSession={requestCodingSession}
+      />,
+    });
+    const router = createRouter({
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+      routeTree: rootRoute.addChildren([createRoute({ getParentRoute: () => rootRoute, path: "/" })]),
+    });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(<RouterProvider router={router} />));
+
+    const iframe = container.querySelector("iframe")!;
+    const { port1, port2 } = new MessageChannel();
+    host = newMessagePortRpcSession<TestHost>(port1);
+    window.dispatchEvent(new MessageEvent("message", {
+      data: { type: "handshake" }, origin: "null", source: iframe.contentWindow, ports: [port2],
+    }));
+
+    await expect(host.codingSessionAvailable()).resolves.toBe(false);
+    await expect(host.requestCodingSession("jira", "1001", "AI-3540", "Work on AI-3540"))
+      .rejects.toThrow("not available to this app");
+    expect(requestCodingSession).not.toHaveBeenCalled();
   });
 
   it("bridges bounded route state without allowing iframe-controlled route changes", async () => {
@@ -207,6 +261,9 @@ describe("SandboxedGatekeeperApp navigation", () => {
     }));
 
     await expect(host.getRouteState()).resolves.toBe("source=jira&q=login");
+    await expect(host.codingSessionAvailable()).resolves.toBe(false);
+    await expect(host.requestCodingSession("jira", "1001", "AI-3540", "Work on AI-3540"))
+      .rejects.toThrow("not available to this app");
 
     await act(async () => {
       await host!.setRouteState("source=zendesk&q=refund");

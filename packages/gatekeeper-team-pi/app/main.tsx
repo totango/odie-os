@@ -23,6 +23,8 @@ interface HostCapability extends RpcTarget {
   subscribeTheme(receiver: GatekeeperAppThemeReceiver): Promise<GatekeeperAppTheme>;
   getRouteState(): Promise<string>;
   setRouteState(value: string): Promise<void>;
+  codingSessionAvailable(): Promise<boolean>;
+  requestCodingSession(source: "jira" | "zendesk", id: string, key: string | undefined, title: string): Promise<void>;
 }
 
 async function main() {
@@ -34,7 +36,10 @@ async function main() {
   const iframe = new AppIframe();
   const host = newMessagePortRpcSession<HostCapability>(port1, iframe);
   host.subscribeTheme(iframe).then(applyAppTheme).catch(() => {});
-  const initialRouteState = await host.getRouteState().catch(() => "");
+  const [initialRouteState, codingSessionAvailable] = await Promise.all([
+    host.getRouteState().catch(() => ""),
+    host.codingSessionAvailable().catch(() => false),
+  ]);
 
   createRoot(root, {
     onUncaughtError: (error) => reportIssue("team-pi-work-items.react-root", error, {
@@ -50,6 +55,10 @@ async function main() {
             <WorkItemsRouteStateProvider value={{
               initialRouteState,
               setRouteState: (value) => { void host.setRouteState(value).catch(() => {}); },
+              codingSessionAvailable,
+              requestCodingSession: (target, title) => {
+                void host.requestCodingSession(target.source, target.id, target.key, title).catch(() => {});
+              },
             }}>
               <WorkItemsPage />
             </WorkItemsRouteStateProvider>

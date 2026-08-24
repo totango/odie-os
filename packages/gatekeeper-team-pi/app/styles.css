@@ -124,8 +124,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .detail-resize-handle { position: absolute; inset: 0 auto 0 -5px; width: 10px; cursor: ew-resize; touch-action: none; }
 .detail-resize-handle::after { content: ""; position: absolute; top: 12px; bottom: 12px; left: 4px; width: 2px; border-radius: 99px; background: transparent; }
 .detail-resize-handle:hover::after, .detail-resize-handle:focus-visible::after { background: var(--color-kumo-brand); }
-.detail-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.detail-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.detail-toolbar-actions { display: flex; align-items: center; gap: 6px; }
 .back-button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--text-color-kumo-subtle); font-size: 13px; }
+.coding-session-button { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--color-kumo-line); border-radius: 8px; background: var(--color-kumo-control); color: var(--text-color-kumo-default); padding: 6px 9px; font-size: 12px; font-weight: 600; }
+.coding-session-button:hover { border-color: var(--color-kumo-brand); color: var(--color-kumo-brand); }
 .detail-kicker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .detail-kicker a { color: var(--text-color-kumo-link); font-size: 12px; }
 .detail-header h2 { margin: 10px 0 14px; font-size: 21px; line-height: 1.25; letter-spacing: -0.02em; }

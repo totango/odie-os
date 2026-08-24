@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { WorkItemsManagementApi } from "../src/types";
+import type { WorkItemProviderRef, WorkItemsManagementApi } from "../src/types";
 
 const WorkItemsApiContext = createContext<WorkItemsManagementApi | null>(null);
 const WorkItemsRouteStateContext = createContext<WorkItemsRouteStateHost | null>(null);
@@ -7,6 +7,8 @@ const WorkItemsRouteStateContext = createContext<WorkItemsRouteStateHost | null>
 export type WorkItemsRouteStateHost = {
   initialRouteState?: string;
   setRouteState?: (value: string) => void;
+  codingSessionAvailable?: boolean;
+  requestCodingSession?: (target: WorkItemProviderRef, title: string) => void;
 };
 
 export const WorkItemsApiProvider = WorkItemsApiContext.Provider;

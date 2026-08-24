@@ -90,6 +90,24 @@ describe("WorkItemsPage", () => {
     expect(api.search).toHaveBeenLastCalledWith(expect.objectContaining({ source: "jira", query: "host" }));
   });
 
+  it("opens an initial selected item and offers Code when GitHub access is available", async () => {
+    const requestCodingSession = vi.fn<(target: { source: "jira" | "zendesk"; id: string; key?: string }, title: string) => void>();
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(readFor(jiraItem))] });
+    await render(api, {
+      initialRouteState: "selected=jira%3A1001%3AODIE-1",
+      codingSessionAvailable: true,
+      requestCodingSession,
+    });
+
+    expect(api.item).toHaveBeenCalledWith({ source: "jira", id: "1001", key: "ODIE-1" });
+    expect(host.querySelector('[role="dialog"]')).toBeTruthy();
+    await clickText("Start coding session");
+    expect(requestCodingSession).toHaveBeenCalledWith(
+      { source: "jira", id: "1001", key: "ODIE-1" },
+      "Work on ODIE-1: Jira login is slow",
+    );
+  });
+
   it("sends query state changes to the host route state bridge", async () => {
     const setRouteState = vi.fn<(value: string) => void>();
     const api = createApi({ items: [jiraItem] });

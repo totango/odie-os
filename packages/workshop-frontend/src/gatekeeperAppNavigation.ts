@@ -32,3 +32,17 @@ export function normalizeGatekeeperAppPrompt(value: string): string {
   }
   return prompt;
 }
+
+
+export const MAX_GATEKEEPER_APP_CODING_SESSION_TITLE_LENGTH = 120;
+
+/** Validates a coding-session title before a sandboxed gatekeeper app can open the Code screen. */
+export function normalizeGatekeeperAppCodingSessionTitle(value: string): string {
+  if (typeof value !== "string") throw new TypeError("Coding session title must be text.");
+  const title = value.trim();
+  if (!title) throw new TypeError("Coding session title cannot be empty.");
+  if (title.length > MAX_GATEKEEPER_APP_CODING_SESSION_TITLE_LENGTH || /[\r\n]/.test(title)) {
+    throw new RangeError("Invalid coding session title.");
+  }
+  return title;
+}

@@ -32,7 +32,20 @@ function runtimeLabel(runtime: CodingSessionRuntime): string {
 export function SessionsPage() {
   useDocumentTitle('Code')
   const sessions = useSessionsContext()
-  const { github, activeSession, error, activity, resolveActivity, restartSession, stopSession, archiveSession, setActiveId, refresh } = sessions
+  const {
+    github,
+    activeSession,
+    error,
+    activity,
+    initialInput,
+    markInitialInputSent,
+    resolveActivity,
+    restartSession,
+    stopSession,
+    archiveSession,
+    setActiveId,
+    refresh,
+  } = sessions
   const [terminalKind, setTerminalKind] = useState<'opencode' | 'shell'>('opencode')
 
   if (github.state === 'loading') return <CenteredMessage>Checking GitHub connection…</CenteredMessage>
@@ -93,7 +106,15 @@ export function SessionsPage() {
         <div className={`grid min-h-0 flex-1 ${sessionActivity.some((entry) => entry.state === 'pending') ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
           <div className="min-h-0">
             {activeSession.status === 'running' ? (
-              <SessionTerminal key={`${terminalKind}:${activeSession.id}:${activeSession.runtime}`} sessionId={activeSession.id} terminalKind={terminalKind} runtime={activeSession.runtime} onSessionUnavailable={refresh} />
+              <SessionTerminal
+                key={`${terminalKind}:${activeSession.id}:${activeSession.runtime}`}
+                sessionId={activeSession.id}
+                terminalKind={terminalKind}
+                runtime={activeSession.runtime}
+                initialInput={initialInput}
+                onInitialInputSent={() => markInitialInputSent(activeSession.id)}
+                onSessionUnavailable={refresh}
+              />
             ) : activeSession.status === 'starting' || activeSession.status === 'stopping' ? (
               <SessionProgressPanel session={activeSession} />
             ) : (
@@ -247,6 +268,8 @@ function NewSessionPane() {
     setRuntime,
     creating,
     create,
+    preparedInput,
+    clearPreparedSession,
     error,
   } = useSessionsContext()
 
@@ -269,6 +292,20 @@ function NewSessionPane() {
         <div className="flex items-center gap-2 text-sm font-semibold text-kumo-default"><Plus size={15} /> New session</div>
         <p className="mt-1 text-xs text-kumo-subtle">Choose repositories from connected GitHub, then open the coding terminal.</p>
         {error && <div className="mt-5 rounded-lg border border-kumo-danger bg-kumo-danger-tint px-4 py-3 text-sm text-kumo-danger">{error}</div>}
+
+        {preparedInput && (
+          <div className="mt-5 rounded-xl border border-kumo-brand/30 bg-kumo-brand/5 p-4" role="status">
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-semibold text-kumo-default">Work Item context</div>
+                <p className="mt-1 text-xs leading-5 text-kumo-subtle">{preparedInput}</p>
+              </div>
+              <WorkshopIconButton aria-label="Remove Work Item context" onClick={clearPreparedSession}>
+                <X size={14} />
+              </WorkshopIconButton>
+            </div>
+          </div>
+        )}
 
         {availablePresets.length > 0 && (
           <div className="mt-6 grid gap-3 sm:grid-cols-3">

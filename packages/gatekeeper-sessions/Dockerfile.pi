@@ -13,6 +13,12 @@ COPY --from=uv /uv /uvx /bin/
 COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs /opt/odie-pi/
 COPY pi-image/prime-kernel-requirements.txt /opt/odie-prime-agent/requirements.txt
 
+# Prime Agent uses ripgrep for fast model-driven repository search. Install it in the image because
+# coding sessions run offline and cannot satisfy the CLI's best-effort package-manager fallback.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
 # Package lifecycle scripts stay disabled. ZeroMQ runs its pinned native installer explicitly. The
 # Prime kernel uses a pinned uv image, exact Python version, and hash-locked Python dependencies.
 RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
@@ -29,6 +35,7 @@ RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
     && opencode --version \
     && pi --version \
     && prime-agent --version \
+    && rg --version \
     && test "$(node -p "require('/opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" = "$PI_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/prime-agent/package.json').version")" = "$PRIME_AGENT_VERSION" \

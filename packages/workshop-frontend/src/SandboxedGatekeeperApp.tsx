@@ -14,10 +14,12 @@ import { useServerConfig } from './ServerConfigContext'
 import { forwardTrustedFrameError } from './errorReporting'
 import { useAuthenticatedApi } from './AuthContext'
 import {
+  normalizeGatekeeperAppCodingSessionTitle,
   normalizeGatekeeperAppPrompt,
   parseGatekeeperAppWorkspaceTarget,
   type GatekeeperAppWorkspaceTarget,
 } from './gatekeeperAppNavigation'
+import { normalizeWorkItemTarget, type WorkItemTarget } from './workItemNavigation'
 
 // The content-pane rect, in viewport coordinates, that the app pins its page to while the iframe
 // is full-viewport.
@@ -35,6 +37,7 @@ type OpenTarget = (target: GatekeeperAppWorkspaceTarget) => void
 // can no longer see. Deliberately a lookup, not an enumeration: the app learns nothing new.
 type ResolveWorkspaceTitles = (ids: string[]) => Promise<(string | null)[]>
 type OpenPrompt = (prompt: string) => void
+type RequestCodingSession = (target: WorkItemTarget, title: string) => void
 type RouteStateSetter = (value: string) => void
 
 type OverlayState = 'full' | null
@@ -102,6 +105,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
   readonly #present: PresentController
   readonly #openTarget: OpenTarget
   readonly #openPrompt: OpenPrompt
+  readonly #codingSessionAvailable: () => boolean
+  readonly #codingSessionRequestAllowed: boolean
+  readonly #requestCodingSession: RequestCodingSession
   readonly #resolveWorkspaceTitles: ResolveWorkspaceTitles
   readonly #getRouteState: () => string
   readonly #setRouteState: RouteStateSetter
@@ -119,6 +125,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
     theme: GatekeeperAppTheme,
     openTarget: OpenTarget,
     openPrompt: OpenPrompt,
+    codingSessionAvailable: () => boolean,
+    codingSessionRequestAllowed: boolean,
+    requestCodingSession: RequestCodingSession,
     resolveWorkspaceTitles: ResolveWorkspaceTitles,
     getRouteState: () => string,
     setRouteState: RouteStateSetter,
@@ -137,6 +146,9 @@ class GatekeeperAppHostImpl extends RpcTarget {
     this.#present = present
     this.#openTarget = openTarget
     this.#openPrompt = openPrompt
+    this.#codingSessionAvailable = codingSessionAvailable
+    this.#codingSessionRequestAllowed = codingSessionRequestAllowed
+    this.#requestCodingSession = requestCodingSession
     this.#resolveWorkspaceTitles = resolveWorkspaceTitles
     this.#getRouteState = getRouteState
     this.#setRouteState = setRouteState
@@ -163,6 +175,20 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   openPrompt(prompt: string): void {
     this.#openPrompt(normalizeGatekeeperAppPrompt(prompt))
+  }
+
+  codingSessionAvailable(): boolean {
+    return this.#codingSessionRequestAllowed && this.#codingSessionAvailable()
+  }
+
+  requestCodingSession(source: unknown, id: unknown, key: unknown, title: string): void {
+    if (!this.#codingSessionRequestAllowed || !this.#codingSessionAvailable()) {
+      throw new Error('Coding-session requests are not available to this app.')
+    }
+    this.#requestCodingSession(
+      normalizeWorkItemTarget(source, id, key),
+      normalizeGatekeeperAppCodingSessionTitle(title),
+    )
   }
 
   getRouteState(): string {
@@ -248,11 +274,20 @@ class GatekeeperAppHostImpl extends RpcTarget {
  * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
  * The iframe fills its parent container.
  */
-export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, routeState, setRouteState }: {
+export default function SandboxedGatekeeperApp({
+  frame,
+  gatekeeperVendorId,
+  routeState,
+  setRouteState,
+  codingSessionAvailable = false,
+  onRequestCodingSession,
+}: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
   routeState?: string,
   setRouteState?: RouteStateSetter,
+  codingSessionAvailable?: boolean,
+  onRequestCodingSession?: RequestCodingSession,
 }) {
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
@@ -263,8 +298,12 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, rout
   const invalidatedRef = useRef(false)
   const routeStateRef = useRef('')
   const setRouteStateRef = useRef<RouteStateSetter>(() => {})
+  const codingSessionAvailableRef = useRef(false)
+  const requestCodingSessionRef = useRef<RequestCodingSession>(() => {})
   routeStateRef.current = normalizeGatekeeperAppRouteState(routeState) ?? ''
   setRouteStateRef.current = setRouteState ?? (() => {})
+  codingSessionAvailableRef.current = codingSessionAvailable
+  requestCodingSessionRef.current = onRequestCodingSession ?? (() => {})
   const [overlay, setOverlay] = useState<OverlayState>(null)
   const overlayRef = useRef<OverlayState>(null)
   // Push the Workshop's resolved light/dark mode and deployment accent whenever either changes.
@@ -362,6 +401,9 @@ export default function SandboxedGatekeeperApp({ frame, gatekeeperVendorId, rout
         themeRef.current,
         openTarget,
         openPrompt,
+        () => codingSessionAvailableRef.current,
+        gatekeeperVendorId === 'team-pi',
+        (target, title) => requestCodingSessionRef.current(target, title),
         resolveWorkspaceTitles,
         () => routeStateRef.current,
         (value) => setRouteStateRef.current(value),

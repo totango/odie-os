@@ -220,6 +220,55 @@ describe('SessionsProvider responsiveness', () => {
     await rendered.unmount()
   })
 
+  it('guards against duplicate create requests before the creating render commits', async () => {
+    const api = createApi()
+    const pending = deferred<CodingSessionSummary>()
+    api.createCodingSession.mockReturnValue(pending.promise)
+    testState.authenticatedApi = api
+    const rendered = await renderProvider()
+
+    await act(async () => rendered.context.setRepositories(['jarvis']))
+    let first!: Promise<void>
+    let second!: Promise<void>
+    await act(async () => {
+      first = rendered.context.create()
+      second = rendered.context.create()
+      await Promise.resolve()
+    })
+    expect(api.createCodingSession).toHaveBeenCalledOnce()
+    await act(async () => pending.resolve(session({ status: 'starting' })))
+    await Promise.all([first, second])
+
+    await rendered.unmount()
+  })
+
+  it('carries a prepared Work Item prompt into the newly created terminal once', async () => {
+    const api = createApi()
+    testState.authenticatedApi = api
+    const rendered = await renderProvider()
+
+    await act(async () => {
+      rendered.context.prepareSession('Work on AI-3540', 'Read AI-3540 before making changes.')
+      rendered.context.setRepositories(['jarvis'])
+    })
+    expect(rendered.context.preparedInput).toBe('Read AI-3540 before making changes.')
+    await act(async () => rendered.context.create())
+
+    expect(api.createCodingSession).toHaveBeenCalledWith({
+      title: 'Work on AI-3540',
+      repositories: ['jarvis'],
+      runtime: 'opencode',
+    })
+    expect(rendered.context.preparedInput).toBeUndefined()
+    expect(rendered.context.initialInput).toBe('Read AI-3540 before making changes.')
+    await act(async () => rendered.context.markInitialInputSent('another-session'))
+    expect(rendered.context.initialInput).toBe('Read AI-3540 before making changes.')
+    await act(async () => rendered.context.markInitialInputSent('session-1'))
+    expect(rendered.context.initialInput).toBeUndefined()
+
+    await rendered.unmount()
+  })
+
   it('does not let an older session refresh clear a newer starting session', async () => {
     const api = createApi()
     const initialList = deferred<CodingSessionSummary[]>()

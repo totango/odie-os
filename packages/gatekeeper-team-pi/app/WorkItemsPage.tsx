@@ -10,6 +10,7 @@ import {
   MagnifyingGlass,
   PencilSimple,
   Ticket,
+  TerminalWindow,
   Trash,
   WarningCircle,
   X,
@@ -523,6 +524,8 @@ export default function WorkItemsPage({
         mutationEpoch={selectEpoch.current}
         onMutated={handleMutated}
         rootApi={api}
+        codingSessionAvailable={routeStateHost?.codingSessionAvailable === true}
+        onRequestCodingSession={routeStateHost?.requestCodingSession}
       />
     </main>
   );
@@ -590,8 +593,10 @@ function DetailPanel(props: {
   mutationEpoch: number;
   onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void;
   rootApi: WorkItemsManagementApi;
+  codingSessionAvailable: boolean;
+  onRequestCodingSession?: (target: WorkItemProviderRef, title: string) => void;
 }) {
-  const { selected, read, loading, error, tab, setTab, notice, backButtonRef, onClose, onRetry, mutationEpoch, onMutated, rootApi } = props;
+  const { selected, read, loading, error, tab, setTab, notice, backButtonRef, onClose, onRetry, mutationEpoch, onMutated, rootApi, codingSessionAvailable, onRequestCodingSession } = props;
   const [width, setWidth] = useState(DETAIL_WIDTH.default);
   const dragStart = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const detailRef = useRef<HTMLElement>(null);
@@ -666,7 +671,17 @@ function DetailPanel(props: {
     />
     <div className="detail-toolbar">
       <button ref={backButtonRef} data-detail-back className="back-button" type="button" onClick={onClose}><ArrowLeft size={16} /> Back</button>
-      <button className="icon-button" type="button" aria-label="Close detail" onClick={onClose}><X size={16} /></button>
+      <div className="detail-toolbar-actions">
+        {item && codingSessionAvailable && onRequestCodingSession && (
+          <button className="coding-session-button" type="button" onClick={() => onRequestCodingSession(
+            { source: item.source, id: item.id, key: item.key },
+            codingSessionTitle(item),
+          )}>
+            <TerminalWindow size={15} /> Start coding session
+          </button>
+        )}
+        <button className="icon-button" type="button" aria-label="Close detail" onClick={onClose}><X size={16} /></button>
+      </div>
     </div>
     {loading && !read ? <DetailSkeleton /> : error ? <div className="detail-error" role="alert"><WarningCircle size={18} /><p>{error}</p><button onClick={onRetry}>Retry</button></div> : item && read ? <>
       <header className="detail-header">
@@ -1063,5 +1078,8 @@ function scrollRowIntoView(item: WorkItemSummary | undefined, refs: Map<string, 
   if (typeof node?.scrollIntoView === "function") node.scrollIntoView({ block: "nearest" });
 }
 function safeMessage(caught: unknown): string { return (caught instanceof Error ? caught.message : String(caught || "Unknown error")).slice(0, 300); }
+function codingSessionTitle(item: WorkItemSummary): string {
+  return `Work on ${item.key ?? `${labelSource(item.source)} ${item.id}`}: ${item.title}`.replace(/[\r\n]+/g, " ").slice(0, 120);
+}
 function fullDate(value?: string) { if (!value) return "—"; const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }); }
 function relativeDate(value?: string) { if (!value) return "—"; const date = new Date(value).valueOf(); if (Number.isNaN(date)) return value; const diff = Date.now() - date; const abs = Math.abs(diff); const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }); if (abs < 60_000) return "just now"; if (abs < 3_600_000) return rtf.format(Math.round(-diff / 60_000), "minute"); if (abs < 86_400_000) return rtf.format(Math.round(-diff / 3_600_000), "hour"); return rtf.format(Math.round(-diff / 86_400_000), "day"); }

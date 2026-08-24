@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_GATEKEEPER_APP_CODING_SESSION_TITLE_LENGTH,
   MAX_GATEKEEPER_APP_PROMPT_LENGTH,
+  normalizeGatekeeperAppCodingSessionTitle,
   normalizeGatekeeperAppPrompt,
   parseGatekeeperAppWorkspaceTarget,
 } from "./gatekeeperAppNavigation";
@@ -44,5 +46,15 @@ describe("normalizeGatekeeperAppPrompt", () => {
     expect(() =>
       normalizeGatekeeperAppPrompt("x".repeat(MAX_GATEKEEPER_APP_PROMPT_LENGTH + 1)),
     ).toThrow("too long");
+  });
+});
+
+
+describe("normalizeGatekeeperAppCodingSessionTitle", () => {
+  it("trims bounded titles and rejects unsafe values", () => {
+    expect(normalizeGatekeeperAppCodingSessionTitle("  Work on AI-3540  ")).toBe("Work on AI-3540");
+    expect(() => normalizeGatekeeperAppCodingSessionTitle("bad\ntitle")).toThrow("Invalid coding session title");
+    expect(() => normalizeGatekeeperAppCodingSessionTitle("x".repeat(MAX_GATEKEEPER_APP_CODING_SESSION_TITLE_LENGTH + 1)))
+      .toThrow("Invalid coding session title");
   });
 });

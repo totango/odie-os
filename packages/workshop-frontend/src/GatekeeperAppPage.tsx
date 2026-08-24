@@ -1,9 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from '@tanstack/react-router'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
 import SandboxedGatekeeperApp from './SandboxedGatekeeperApp'
 import { reportIssue } from './errorReporting'
 import { useGatekeeperApps } from './useGatekeeperApps'
+import { useSessionsContext } from './components/sessions/SessionsContext'
+import { codingSessionInputForWorkItem, type WorkItemTarget } from './workItemNavigation'
 
 // The frame's `ui` is an RPC stub at runtime; dispose it to release the server-side capability.
 function disposeFrame(frame: GatekeeperUiFrame | null) {
@@ -24,6 +27,8 @@ export default function GatekeeperAppPage({
   setRouteState?: (value: string) => void,
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
+  const navigate = useNavigate()
+  const sessions = useSessionsContext()
   const app = useGatekeeperApps().find((candidate) => candidate.id === appId)
   const gatekeeperVendorId = app?.vendorId ?? appId
   // Wrap the frame in an object: it holds a `ui` RPC stub, and we never want useState's setter to
@@ -63,6 +68,11 @@ export default function GatekeeperAppPage({
     }
   }, [authenticatedApi, appId, gatekeeperVendorId])
 
+  const requestCodingSession = useCallback((target: WorkItemTarget, title: string) => {
+    sessions.prepareSession(title, codingSessionInputForWorkItem(target))
+    void navigate({ to: '/sessions' })
+  }, [navigate, sessions])
+
   if (error) {
     return (
       <div className="mx-auto max-w-md px-4 py-16 text-center text-sm text-kumo-subtle">{error}</div>
@@ -80,6 +90,8 @@ export default function GatekeeperAppPage({
         gatekeeperVendorId={gatekeeperVendorId}
         routeState={routeState}
         setRouteState={setRouteState}
+        codingSessionAvailable={sessions.github.state === 'connected'}
+        onRequestCodingSession={requestCodingSession}
       />
     </div>
   )

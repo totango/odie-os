@@ -135,6 +135,9 @@ async function renderTerminal(
   await act(async () => {})
   return {
     container,
+    async rerender(nextProps: Partial<React.ComponentProps<typeof SessionTerminal>>) {
+      await act(async () => root.render(createElement(SessionTerminal, { sessionId: 'session-1', ...nextProps })))
+    },
     async unmount() {
       await act(async () => root.unmount())
       container.remove()
@@ -182,6 +185,37 @@ describe('SessionTerminal', () => {
     await act(async () => socket!.serverMessage(JSON.stringify({ type: 'ready' })))
     expect(socket!.send).toHaveBeenCalledTimes(1)
 
+    await rendered.unmount()
+  })
+
+  it('submits a prepared Work Item prompt once when the coding agent is ready', async () => {
+    const onInitialInputSent = vi.fn<() => void>()
+    const rendered = await renderTerminal({
+      initialInput: 'Start working on Jira issue AI-3540.',
+      onInitialInputSent,
+    })
+    const socket = testState.sockets[0]!
+
+    await act(async () => socket.serverOpen())
+    await act(async () => socket.serverMessage(JSON.stringify({ type: 'ready' })))
+
+    expect(socket.send).toHaveBeenCalledTimes(2)
+    expect(new TextDecoder().decode(socket.send.mock.calls[1]![0] as Uint8Array))
+      .toBe('Start working on Jira issue AI-3540.\r')
+    expect(onInitialInputSent).toHaveBeenCalledOnce()
+
+    await rendered.rerender({ onInitialInputSent })
+    expect(testState.sockets).toHaveLength(1)
+    await act(async () => socket.serverMessage(JSON.stringify({ type: 'ready' })))
+    expect(socket.send).toHaveBeenCalledTimes(2)
+
+    await act(async () => socket.serverClose())
+    await advance(1000)
+    const reconnect = testState.sockets[1]!
+    await act(async () => reconnect.serverOpen())
+    await act(async () => reconnect.serverMessage(JSON.stringify({ type: 'ready' })))
+    expect(reconnect.send).toHaveBeenCalledTimes(1)
+    expect(onInitialInputSent).toHaveBeenCalledOnce()
     await rendered.unmount()
   })
 

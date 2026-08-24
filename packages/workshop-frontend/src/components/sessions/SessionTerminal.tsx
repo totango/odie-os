@@ -23,11 +23,15 @@ export default function SessionTerminal({
   sessionId,
   terminalKind = 'opencode',
   runtime = 'opencode',
+  initialInput,
+  onInitialInputSent,
   onSessionUnavailable,
 }: {
   sessionId: string
   terminalKind?: CodingSessionTerminalKind
   runtime?: CodingSessionRuntime
+  initialInput?: string
+  onInitialInputSent?: () => void
   onSessionUnavailable?: () => void
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
@@ -35,6 +39,10 @@ export default function SessionTerminal({
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal>(null)
   const reconnectRef = useRef<() => void>(() => {})
+  const initialInputRef = useRef(initialInput)
+  const onInitialInputSentRef = useRef(onInitialInputSent)
+  initialInputRef.current = initialInput
+  onInitialInputSentRef.current = onInitialInputSent
   const [state, setState] = useState<'connecting' | 'starting' | 'connected' | 'disconnected'>('connecting')
   const [interactive, setInteractive] = useState(false)
   const [error, setError] = useState<string>()
@@ -60,6 +68,7 @@ export default function SessionTerminal({
     let resizeFrame: number | undefined
     let lastSize = ''
     let visibleOutputDetected = false
+    let initialInputSent = false
     const inputEncoder = new TextEncoder()
     const terminalOperations = new OrderedTerminalOperationQueue()
     const terminal = new Terminal({
@@ -230,6 +239,16 @@ export default function SessionTerminal({
               if (terminalKind === 'shell') setInteractive(true)
               sendSize()
               terminal.focus()
+              const preparedInput = initialInputRef.current
+              if (terminalKind === 'opencode' && preparedInput && !initialInputSent && nextSocket.readyState === WebSocket.OPEN) {
+                // This handoff is intentionally best-effort and at-most-once for this mounted
+                // terminal. The PTY protocol has no input acknowledgement, so never retry it on a
+                // reconnect where a duplicate could start the same work twice.
+                initialInputSent = true
+                initialInputRef.current = undefined
+                nextSocket.send(inputEncoder.encode(`${preparedInput}\r`))
+                onInitialInputSentRef.current?.()
+              }
             } else if (message.type === 'chunk' && typeof message.byteLength === 'number') {
               if (pendingChunk || !Number.isSafeInteger(message.byteLength) || message.byteLength < 0 ||
                   !isTerminalCursor(message.cursor)) {
@@ -335,7 +354,7 @@ export default function SessionTerminal({
       terminal.dispose()
       terminalRef.current = null
     }
-  }, [authenticatedApi, onSessionUnavailable, sessionId, terminalKind]) // Theme updates are applied without reconnecting below.
+  }, [authenticatedApi, onSessionUnavailable, sessionId, terminalKind]) // Theme and prepared input updates are applied without reconnecting below.
 
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_THEMES[resolvedThemeMode]
