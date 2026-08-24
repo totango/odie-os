@@ -27,6 +27,7 @@ const OPENCODE_COMMAND = [
 
 type StoredRecord = Omit<CodingSessionSummary, "runtime"> & {
   runtime?: CodingSessionSummary["runtime"];
+  primeAgent?: true;
   sandboxId: string;
   terminalId?: string;
   shellTerminalId?: string;
@@ -185,6 +186,35 @@ describe("coding session asynchronous startup", () => {
     expect(tools.prepareSessionStartup).not.toHaveBeenCalled();
   });
 
+  it("stores Prime sessions in a rollback-readable Pi record while exposing Prime publicly", async () => {
+    const kv = createKv();
+    const policy = { configure: vi.fn(), startSessionStartup: vi.fn(async () => undefined) };
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      env: Record<string, unknown>;
+      ctx: { storage: { kv: typeof kv } };
+    };
+    registry.env = {
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+      WORKSHOP_TOOLS: { prepareSessionStartup: vi.fn() },
+      CODING_SESSION_PI_RUNTIME_ENABLED: "true",
+      TEAM_PI_CODEX_BASE_URL: "https://team-pi-proxy.unison.totango.com/api/odie",
+      TEAM_PI_CODEX_HMAC_SECRET: "worker-secret",
+    };
+    registry.ctx = { storage: { kv } };
+
+    const summary = await registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Prime", repositories: ["jarvis"], runtime: "prime-agent" },
+    );
+
+    expect(summary.runtime).toBe("prime-agent");
+    expect(kv.get<StoredRecord>(`session:${summary.id}`)).toMatchObject({
+      runtime: "pi", primeAgent: true,
+    });
+    expect(policy.configure).toHaveBeenCalledWith(expect.objectContaining({ runtime: "prime-agent" }));
+  });
+
   it("rolls back startup state when its alarm cannot be scheduled", async () => {
     const { policy, kv, setAlarm } = createPolicy();
     setAlarm.mockRejectedValueOnce(new Error("alarm unavailable"));
@@ -241,6 +271,44 @@ describe("coding session asynchronous startup", () => {
     await policy.alarm();
     expect(registry.startupSucceeded).toHaveBeenCalledWith("session-1", "sandbox-1", "term-primary");
     expect(kv.get("startup")).toBeUndefined();
+  });
+
+  it("materializes and launches Prime Agent without exposing relay credentials", async () => {
+    const { policy, kv } = createPolicy();
+    const sandbox = createStartupSandbox();
+    policy.env.TEAM_PI_CODEX_BASE_URL = "https://team-pi-proxy.unison.totango.com/api/odie";
+    policy.env.TEAM_PI_CODEX_HMAC_SECRET = "worker-only-secret";
+    kv.put("policy", {
+      sessionId: "session-1",
+      sandboxId: "sandbox-1",
+      runtime: "prime-agent",
+      owner: { userId: "user-1", email: "user@example.com" },
+      repositories: ["jarvis"],
+    });
+    kv.put("startup", startupRecord({ runtime: "prime-agent", phase: "materialize" }));
+
+    await policy.alarm();
+
+    expect(sandbox.mkdir).toHaveBeenCalledWith("/workspace/.odie-prime-agent", { recursive: true });
+    const written = sandbox.writeFile.mock.calls.map(([file, content]) => [file, String(content)]);
+    expect(written.map(([file]) => file)).toEqual([
+      "/workspace/.odie-prime-agent/odie-runtime.ts",
+      "/workspace/.odie-prime-agent/settings.json",
+    ]);
+    expect(JSON.stringify(written)).not.toContain("worker-only-secret");
+
+    await policy.alarm();
+
+    expect(sandbox.createTerminal).toHaveBeenCalledWith(expect.objectContaining({
+      command: expect.arrayContaining(["/usr/local/bin/prime-agent", "--offline"]),
+      cwd: "/workspace/jarvis",
+      env: expect.objectContaining({
+        PRIME_AGENT_CODING_AGENT_DIR: "/workspace/.odie-prime-agent",
+        PRIME_AGENT_KERNEL_PYTHON: "/opt/odie-prime-agent/kernel-venv/bin/python",
+      }),
+      bufferSize: 256 * 1024,
+    }));
+    expect(JSON.stringify(sandbox.createTerminal.mock.calls)).not.toContain("worker-only-secret");
   });
 
   it("records bounded startup failure after repeated alarm failures", async () => {

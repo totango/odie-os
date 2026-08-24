@@ -90,6 +90,10 @@ class MockWebSocket {
     this.listeners.set(type, listeners)
   }
 
+  serverOpen() {
+    this.dispatch('open')
+  }
+
   serverMessage(data: unknown) {
     this.dispatch('message', { data })
   }
@@ -119,12 +123,14 @@ function createApi() {
   }
 }
 
-async function renderTerminal() {
+async function renderTerminal(
+  props: Partial<React.ComponentProps<typeof SessionTerminal>> = {},
+) {
   const container = document.createElement('div')
   document.body.append(container)
   const root: Root = createRoot(container)
   await act(async () => {
-    root.render(createElement(SessionTerminal, { sessionId: 'session-1' }))
+    root.render(createElement(SessionTerminal, { sessionId: 'session-1', ...props }))
   })
   await act(async () => {})
   return {
@@ -162,6 +168,23 @@ afterEach(() => {
 })
 
 describe('SessionTerminal', () => {
+  it('sends one initial resize instead of redrawing again on ready', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => socket!.serverOpen())
+    expect(socket!.send).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(socket!.send.mock.calls[0]![0] as string)).toEqual({
+      type: 'resize', cols: 80, rows: 24,
+    })
+
+    await act(async () => socket!.serverMessage(JSON.stringify({ type: 'ready' })))
+    expect(socket!.send).toHaveBeenCalledTimes(1)
+
+    await rendered.unmount()
+  })
+
   it('reconnects with a delivered chunk cursor only after the terminal write callback commits it', async () => {
     const rendered = await renderTerminal()
     const api = testState.authenticatedApi
@@ -172,6 +195,8 @@ describe('SessionTerminal', () => {
     firstSocket!.serverMessage(JSON.stringify({ type: 'ready' }))
     firstSocket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'chunk-cursor' }))
     firstSocket!.serverMessage(new Uint8Array([1, 2, 3]).buffer)
+    // Interactive output reaches xterm without waiting for requestAnimationFrame.
+    expect(testState.terminalWriteCallbacks).toHaveLength(1)
     firstSocket!.serverClose()
 
     await advance(1000)
@@ -259,6 +284,59 @@ describe('SessionTerminal', () => {
     expect(testState.sockets).toHaveLength(2)
     expect(new URL(testState.sockets[1]!.url).searchParams.get('cursor')).toBe('exit-cursor')
 
+    await rendered.unmount()
+  })
+
+  it('commits an exit cursor after pending output before manually reconnecting', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => {
+      socket!.serverMessage(JSON.stringify({ type: 'ready' }))
+      socket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'chunk-cursor' }))
+      socket!.serverMessage(new Uint8Array([1, 2, 3]).buffer)
+      socket!.serverMessage(JSON.stringify({ type: 'exit', cursor: 'exit-cursor', exit: { code: 0 } }))
+    })
+
+    const button = Array.from(rendered.container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect'))
+    expect(button).toBeTruthy()
+    await act(async () => button!.click())
+    expect(testState.authenticatedApi.mintCodingSessionAttachCapability).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      testState.terminalWriteCallbacks.shift()?.()
+      await Promise.resolve()
+    })
+
+    expect(testState.sockets).toHaveLength(2)
+    expect(new URL(testState.sockets[1]!.url).searchParams.get('cursor')).toBe('exit-cursor')
+
+    await rendered.unmount()
+  })
+
+  it('reports an exited session only after its final output write completes', async () => {
+    const onSessionUnavailable = vi.fn<() => void>()
+    const rendered = await renderTerminal({ onSessionUnavailable })
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => {
+      socket!.serverMessage(JSON.stringify({ type: 'ready' }))
+      socket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'chunk-cursor' }))
+      socket!.serverMessage(new Uint8Array([1, 2, 3]).buffer)
+      socket!.serverMessage(JSON.stringify({ type: 'exit', cursor: 'exit-cursor', exit: { code: 0 } }))
+      await Promise.resolve()
+    })
+
+    expect(onSessionUnavailable).not.toHaveBeenCalled()
+
+    await act(async () => {
+      testState.terminalWriteCallbacks.shift()?.()
+      await Promise.resolve()
+    })
+
+    expect(onSessionUnavailable).toHaveBeenCalledOnce()
     await rendered.unmount()
   })
 

@@ -1,0 +1,17 @@
+ipykernel
+dill
+mcp>=2,<3
+nest-asyncio
+tyro
+requests
+httpx
+pyyaml
+tomli
+python-dotenv
+pandas
+numpy
+scipy
+beautifulsoup4
+lxml
+pydantic
+hatchling

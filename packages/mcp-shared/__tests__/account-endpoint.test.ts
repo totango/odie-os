@@ -95,6 +95,16 @@ class UnconfiguredTokenAccount extends McpAccountBase<AccountEnv> {
   }
 }
 
+class ReconnectingAccount extends McpAccountBase<AccountEnv> {
+  protected baseUrl(): string { return "https://gatekeeper.example"; }
+  protected log(): never { return testLog as never; }
+  protected mintAccount(): never { return {} as never; }
+  protected override staticToken(): string { return "configured-token"; }
+  protected override async probe(): Promise<never> {
+    return { serverInfo: { name: "Acme" } } as never;
+  }
+}
+
 class AuthChallengeAccount extends McpAccountBase<AccountEnv> {
   protected baseUrl(): string { return "https://gatekeeper.example"; }
   protected log(): never { return testLog as never; }
@@ -156,6 +166,25 @@ describe("connect initiation nonce", () => {
     await expect(first).rejects.toThrow("stop test probe");
     // The request still owns the claim, so a transient failure reopens the already-rendered form.
     expect(account.isWaiting(nonce)).toBe(true);
+  });
+
+  it("does not expose a refreshable access-token expiry to Workshop on reconnect", async () => {
+    const context = fakeContext();
+    const credentialsRestored = vi.fn(async () => undefined);
+    const connected = { ...server("https://a.example/mcp"), auth: "token" as const };
+    context.storage.kv.put("server", connected);
+    context.storage.kv.put("tokens", {
+      access_token: "short-lived", token_type: "Bearer", expiresAt: Date.now() + 60_000,
+    });
+    context.storage.kv.put("callback", { credentialsRestored });
+    const account = new ReconnectingAccount(context as never, {});
+    const nonce = "b".repeat(64);
+    await account.prepareReconnect(nonce);
+
+    await expect(account.beginConnect(nonce, null)).resolves.toEqual({ kind: "done" });
+
+    expect(credentialsRestored).toHaveBeenCalledOnce();
+    expect(credentialsRestored.mock.calls[0]).toEqual([]);
   });
 
   it("does not hand current credentials to a facet for the pre-repoint endpoint", async () => {

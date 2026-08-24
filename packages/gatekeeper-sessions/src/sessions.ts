@@ -41,6 +41,12 @@ import {
   piCommand,
   piEnvironment,
   piExtensionSource,
+  PRIME_AGENT_CONFIG_DIR,
+  PRIME_AGENT_EXTENSION_PATH,
+  primeAgentCommand,
+  primeAgentEnvironment,
+  primeAgentExtensionSource,
+  primeAgentSettings,
 } from "./runtime.js";
 
 export { ContainerProxy };
@@ -53,6 +59,8 @@ const OPENCODE_CONFIG_DIR = "/workspace/.odie-opencode";
 const STARTUP_ALARM_DELAY_MS = 1_000;
 const STARTUP_MAX_ATTEMPTS = 3;
 const STARTUP_CLONE_CONCURRENCY = 2;
+// Bound attach/reconnect replay so fresh input is not queued behind a large TUI history.
+const TERMINAL_REPLAY_BUFFER_SIZE = 256 * 1024;
 
 type SessionsLogFields = {
   sessionId?: string;
@@ -81,6 +89,8 @@ interface Env extends GitHubAppEnv {
 
 type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
   runtime?: CodingSessionRuntime;
+  /** Keeps old deployments able to read Prime records as Pi during the rollout rollback window. */
+  primeAgent?: true;
   sandboxId: string;
   terminalId?: string;
   shellTerminalId?: string;
@@ -522,8 +532,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     if (startup.phase === "materialize") {
       const customization = await this.env.WORKSHOP_TOOLS.prepareSessionStartup(
         policy.owner, policy.sessionId, policy.repositories);
-      if (runtime === "opencode") await materializeOpenCodeCustomization(sandbox, customization);
-      else await materializePiRuntime(sandbox, this.env);
+      await materializeRuntime(sandbox, this.env, runtime, customization);
       this.#putStartup({ ...startup, phase: "terminal", attempt: 0, updatedAt: Date.now() });
       await this.#scheduleStartup(1);
       return;
@@ -699,7 +708,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       id,
       title,
       repositories,
-      runtime,
+      runtime: runtime === "prime-agent" ? "pi" : runtime,
+      primeAgent: runtime === "prime-agent" ? true : undefined,
       status: "starting",
       createdAt: now,
       lastActiveAt: now,
@@ -739,7 +749,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (record.status === "starting" || record.status === "stopping") {
       throw new Error("Coding session is already changing state.");
     }
-    assertRuntimeConfigured(this.env, codingSessionRuntime(record.runtime));
+    assertRuntimeConfigured(this.env, storedSessionRuntime(record));
     const stopping: SessionRecord = {
       ...record,
       status: "stopping",
@@ -865,7 +875,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
             cwd: `/workspace/${record.repositories[0]}`,
             cols: 120,
             rows: 40,
-            bufferSize: 1024 * 1024,
+            bufferSize: TERMINAL_REPLAY_BUFFER_SIZE,
           }).then(created => created.id);
           this.#shellTerminalCreations.set(sessionId, creation);
         }
@@ -957,7 +967,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   }
 
   async #scheduleStart(record: SessionRecord, owner: CodingSessionOwner): Promise<void> {
-    const runtime = codingSessionRuntime(record.runtime);
+    const runtime = storedSessionRuntime(record);
     assertRuntimeConfigured(this.env, runtime);
     const policy = policyForSandbox(this.env, record.sandboxId);
     await policy.configure({
@@ -1164,14 +1174,19 @@ async function ticketFor(env: Env, token: string): Promise<DurableObjectStub<Cod
   return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`ticket:${digest}`));
 }
 
+function storedSessionRuntime(record: SessionRecord): CodingSessionRuntime {
+  return record.primeAgent ? "prime-agent" : codingSessionRuntime(record.runtime);
+}
+
 function publicSummary(record: SessionRecord): CodingSessionSummary {
   const {
     sandboxId: _sandboxId,
     terminalId: _terminalId,
     shellTerminalId: _shellTerminalId,
+    primeAgent: _primeAgent,
     ...summary
   } = record;
-  return { ...summary, runtime: codingSessionRuntime(record.runtime) };
+  return { ...summary, runtime: storedSessionRuntime(record) };
 }
 
 function primaryTerminalOptions(
@@ -1180,13 +1195,23 @@ function primaryTerminalOptions(
   env: Env,
   customization: OpenCodeUserCustomization,
 ): StartupTerminalOptions {
+  const command = runtime === "opencode"
+    ? openCodeCommand(repository)
+    : runtime === "pi"
+      ? piCommand()
+      : primeAgentCommand();
+  const runtimeEnv = runtime === "opencode"
+    ? opencodeEnvironment(env, customization)
+    : runtime === "pi"
+      ? piEnvironment()
+      : primeAgentEnvironment();
   return {
-    command: runtime === "opencode" ? openCodeCommand(repository) : piCommand(),
+    command,
     cwd: `/workspace/${repository}`,
-    env: runtime === "opencode" ? opencodeEnvironment(env, customization) : piEnvironment(),
+    env: runtimeEnv,
     cols: 120,
     rows: 40,
-    bufferSize: 1024 * 1024,
+    bufferSize: TERMINAL_REPLAY_BUFFER_SIZE,
   };
 }
 
@@ -1232,7 +1257,7 @@ function arraysEqual(left: readonly string[], right: readonly string[]): boolean
 
 function assertRuntimeConfigured(env: Env, runtime: CodingSessionRuntime): void {
   assertRuntimeEnabled(runtime, env.CODING_SESSION_PI_RUNTIME_ENABLED);
-  if (runtime !== "pi") return;
+  if (runtime === "opencode") return;
   required(env.TEAM_PI_CODEX_BASE_URL, "TEAM_PI_CODEX_BASE_URL");
   required(env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
 }
@@ -1292,6 +1317,27 @@ async function materializePiRuntime(
   const baseUrl = required(env.TEAM_PI_CODEX_BASE_URL, "TEAM_PI_CODEX_BASE_URL");
   await sandbox.mkdir(PI_CONFIG_DIR, { recursive: true });
   await sandbox.writeFile(PI_EXTENSION_PATH, piExtensionSource(baseUrl));
+}
+
+async function materializePrimeAgentRuntime(
+  sandbox: Parameters<typeof materializePiRuntime>[0],
+  env: Env,
+): Promise<void> {
+  const baseUrl = required(env.TEAM_PI_CODEX_BASE_URL, "TEAM_PI_CODEX_BASE_URL");
+  await sandbox.mkdir(PRIME_AGENT_CONFIG_DIR, { recursive: true });
+  await sandbox.writeFile(PRIME_AGENT_EXTENSION_PATH, primeAgentExtensionSource(baseUrl));
+  await sandbox.writeFile(`${PRIME_AGENT_CONFIG_DIR}/settings.json`, JSON.stringify(primeAgentSettings()));
+}
+
+async function materializeRuntime(
+  sandbox: Parameters<typeof materializeOpenCodeCustomization>[0],
+  env: Env,
+  runtime: CodingSessionRuntime,
+  customization: OpenCodeUserCustomization,
+): Promise<void> {
+  if (runtime === "opencode") return materializeOpenCodeCustomization(sandbox, customization);
+  if (runtime === "pi") return materializePiRuntime(sandbox, env);
+  return materializePrimeAgentRuntime(sandbox, env);
 }
 
 async function materializeOpenCodeCustomization(

@@ -6,6 +6,10 @@ import {
   piCommand,
   piEnvironment,
   piExtensionSource,
+  primeAgentCommand,
+  primeAgentEnvironment,
+  primeAgentExtensionSource,
+  primeAgentSettings,
 } from "../src/runtime.js";
 
 describe("coding session runtimes", () => {
@@ -13,6 +17,7 @@ describe("coding session runtimes", () => {
     expect(codingSessionRuntime(undefined)).toBe("opencode");
     expect(codingSessionRuntime("opencode")).toBe("opencode");
     expect(codingSessionRuntime("pi")).toBe("pi");
+    expect(codingSessionRuntime("prime-agent")).toBe("prime-agent");
     expect(() => codingSessionRuntime("other")).toThrow("Invalid coding session runtime");
   });
 
@@ -20,6 +25,8 @@ describe("coding session runtimes", () => {
     expect(() => assertRuntimeEnabled("pi", undefined)).toThrow("not enabled");
     expect(() => assertRuntimeEnabled("pi", "false")).toThrow("not enabled");
     expect(() => assertRuntimeEnabled("pi", "true")).not.toThrow();
+    expect(() => assertRuntimeEnabled("prime-agent", undefined)).toThrow("Prime Agent");
+    expect(() => assertRuntimeEnabled("prime-agent", "true")).not.toThrow();
     expect(() => assertRuntimeEnabled("opencode", undefined)).not.toThrow();
   });
 
@@ -51,6 +58,28 @@ describe("coding session runtimes", () => {
     });
   });
 
+  it("starts Prime Agent with the managed Codex provider and isolated config", () => {
+    expect(primeAgentCommand()).toEqual([
+      "/usr/local/bin/prime-agent",
+      "--offline",
+      "--provider", "odie-team-pi",
+      "--model", "gpt-5.6-sol",
+      "--models", "odie-team-pi/gpt-5.6-sol",
+      "--no-extensions",
+      "--extension", "/workspace/.odie-prime-agent/odie-runtime.ts",
+      "--no-skills",
+      "--no-prompt-templates",
+      "--no-themes",
+      "--no-context-files",
+    ]);
+    expect(primeAgentEnvironment()).toEqual({
+      PRIME_AGENT_CODING_AGENT_DIR: "/workspace/.odie-prime-agent",
+      PRIME_AGENT_KERNEL_PYTHON: "/opt/odie-prime-agent/kernel-venv/bin/python",
+      PRIME_AGENT_TELEMETRY: "0",
+      PI_OFFLINE: "1",
+    });
+  });
+
   it("starts OpenCode with pinned Valhalla commands and skills copied from the image", () => {
     expect(openCodeCommand("odie-os")).toEqual([
       "/bin/bash",
@@ -72,5 +101,19 @@ describe("coding session runtimes", () => {
     expect(source).toContain('hostConfigDiscovery: "off"');
     expect(source).toContain("scriptMode: false");
     expect(source).not.toContain("TEAM_PI_CODEX_HMAC_SECRET");
+  });
+
+  it("routes Prime Agent through shared Codex without exposing relay credentials", () => {
+    const source = primeAgentExtensionSource("https://team-pi-proxy.example.com/api/odie");
+
+    expect(source).toContain('baseUrl: "https://team-pi-proxy.example.com/api/odie/codex"');
+    expect(source).toContain('apiKey: "synthetic"');
+    expect(source).not.toContain("TEAM_PI_CODEX_HMAC_SECRET");
+    expect(primeAgentSettings()).toEqual({
+      telemetry: { enabled: false },
+      mcpServers: {
+        workshop: { type: "http", url: "https://workshop-mcp.internal/mcp" },
+      },
+    });
   });
 });

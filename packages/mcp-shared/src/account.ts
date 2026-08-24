@@ -660,8 +660,9 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
 
     if (this.ctx.storage.kv.get<boolean>("reconnecting")) {
       this.ctx.storage.kv.delete("reconnecting");
-      const expiresAt = this.ctx.storage.kv.get<OAuthTokens>("tokens")?.expiresAt;
-      await callback.credentialsRestored(expiresAt ? new Date(expiresAt) : undefined);
+      // The account refreshes short-lived access tokens itself. Passing their expiry to the
+      // Workshop would block the account before it can perform that refresh.
+      await callback.credentialsRestored();
     } else {
       await callback.complete(this.mintAccount());
     }
