@@ -85,6 +85,7 @@ interface Env extends GitHubAppEnv {
   WORKSHOP_TOOLS: Service<CodingSessionToolHost>;
   BASE_URL?: string;
   EDITOR_BASE_URL?: string;
+  EDITOR_CAPABILITY_HMAC_SECRET?: string;
   SESSION_ALLOWED_ORIGIN?: string;
   TEAM_PI_CODEX_BASE_URL?: string;
   TEAM_PI_CODEX_HMAC_SECRET?: string;
@@ -956,7 +957,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     sessionId: string,
   ): Promise<CodingSessionEditorCapability> {
     const baseUrl = requiredEditorBaseUrl(this.env.EDITOR_BASE_URL);
-    required(this.env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
+    required(this.env.EDITOR_CAPABILITY_HMAC_SECRET, "EDITOR_CAPABILITY_HMAC_SECRET");
     const record = this.#get(sessionId);
     if (!record || record.status !== "running" || !record.terminalId) {
       throw new Error("Coding session is not running.");
@@ -1012,13 +1013,21 @@ export class CodingSessionRegistry extends DurableObject<Env> {
             mode: "http", path: "/", status: { min: 200, max: 399 }, timeout: 30_000,
           });
         } catch (error) {
-          await process.kill(15).catch(() => undefined);
+          if (!(await stopProcess(process))) {
+            await sandbox.destroy().catch(() => undefined);
+            this.markTerminalUnavailable(
+              sessionId,
+              record.sandboxId,
+              record.terminalId,
+              "Browser VS Code failed to stop. Restart the session to continue.",
+            );
+          }
           throw error;
         }
         const stillRunning = this.#get(sessionId);
         if (!stillRunning || stillRunning.status !== "running" ||
             stillRunning.sandboxId !== record.sandboxId) {
-          await process.kill(15).catch(() => undefined);
+          await stopProcess(process);
           throw new Error("Coding session is not running.");
         }
         this.#put({ ...stillRunning, editorProcessId: process.id });
@@ -1166,7 +1175,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   editorAvailable(): Promise<boolean> {
     try {
       requiredEditorBaseUrl(this.env.EDITOR_BASE_URL);
-      required(this.env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
+      required(this.env.EDITOR_CAPABILITY_HMAC_SECRET, "EDITOR_CAPABILITY_HMAC_SECRET");
       return Promise.resolve(true);
     } catch {
       return Promise.resolve(false);
@@ -1470,6 +1479,15 @@ async function repositoryReady(
   }
 }
 
+async function stopProcess(process: StartupProcess): Promise<boolean> {
+  await process.kill(15).catch(() => undefined);
+  const graceful = await process.waitForExit({ timeout: 5_000 }).catch(() => null);
+  if (graceful && !graceful.timedOut) return true;
+  await process.kill(9).catch(() => undefined);
+  const forced = await process.waitForExit({ timeout: 5_000 }).catch(() => null);
+  return !!forced && !forced.timedOut;
+}
+
 async function waitForOk(process: StartupProcess, timeout: number): Promise<void> {
   const exit = await process.waitForExit({ timeout });
   if (exit.code !== 0 || exit.timedOut) throw new Error("Startup command failed.");
@@ -1622,19 +1640,27 @@ function required(value: string | undefined, name: string): string {
 }
 
 function rewriteEditorLocation(location: string, editorOrigin: string, prefix: string): string {
-  if (location.startsWith("//")) return location;
   if (location.startsWith(prefix)) return location;
-  if (location.startsWith("/")) return `${prefix}${location.slice(1)}`;
+  if (location.startsWith("/") && !location.startsWith("//")) {
+    return `${prefix}${location.slice(1)}`;
+  }
   let absolute: URL;
   try {
-    absolute = new URL(location);
+    absolute = location.startsWith("//") ? new URL(location, editorOrigin) : new URL(location);
   } catch {
     return location;
   }
-  const internalOrigin = `http://localhost:${EDITOR_PORT}`;
-  if (absolute.origin !== internalOrigin && absolute.origin !== editorOrigin) return location;
-  if (absolute.pathname.startsWith(prefix)) return location;
-  return `${prefix}${absolute.pathname.slice(1)}${absolute.search}${absolute.hash}`;
+  const editor = new URL(editorOrigin);
+  const isEditorOrigin = absolute.origin === editor.origin;
+  const isInternalOrigin = absolute.hostname === "localhost" && absolute.port === String(EDITOR_PORT);
+  if (!isEditorOrigin && !isInternalOrigin) return location;
+  if (isEditorOrigin && !location.startsWith("//") && absolute.pathname.startsWith(prefix)) {
+    return location;
+  }
+  const pathname = absolute.pathname.startsWith(prefix)
+    ? absolute.pathname
+    : `${prefix}${absolute.pathname.slice(1)}`;
+  return `${pathname}${absolute.search}${absolute.hash}`;
 }
 
 function requiredEditorBaseUrl(value: string | undefined): string {
@@ -1653,7 +1679,7 @@ function ensureTrailingSlash(value: string): string {
 async function editorCapabilityToken(env: Env): Promise<string> {
   const nonce = randomToken();
   const signature = await hmacBase64Url(
-    required(env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET"),
+    required(env.EDITOR_CAPABILITY_HMAC_SECRET, "EDITOR_CAPABILITY_HMAC_SECRET"),
     `odie-editor-v1:${nonce}`,
   );
   return `${nonce}.${signature}`;
@@ -1665,7 +1691,7 @@ async function validEditorCapabilityToken(env: Env, token: string): Promise<bool
   let expected: string;
   try {
     expected = await hmacBase64Url(
-      required(env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET"),
+      required(env.EDITOR_CAPABILITY_HMAC_SECRET, "EDITOR_CAPABILITY_HMAC_SECRET"),
       `odie-editor-v1:${nonce}`,
     );
   } catch {

@@ -41,7 +41,7 @@ function createRegistry(record: StoredRecord) {
   };
   registry.env = {
     EDITOR_BASE_URL: "https://editor.example.workers.dev",
-    TEAM_PI_CODEX_HMAC_SECRET: "editor-test-secret",
+    EDITOR_CAPABILITY_HMAC_SECRET: "editor-test-secret",
     SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
     SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policies },
   };
@@ -75,7 +75,7 @@ describe("coding session browser editor capability", () => {
     await expect(vendor.editorAvailable()).resolves.toBe(false);
     vendor.env = {
       EDITOR_BASE_URL: "https://editor.example.workers.dev",
-      TEAM_PI_CODEX_HMAC_SECRET: "editor-test-secret",
+      EDITOR_CAPABILITY_HMAC_SECRET: "editor-test-secret",
     };
     await expect(vendor.editorAvailable()).resolves.toBe(true);
   });
@@ -134,6 +134,9 @@ describe("coding session browser editor capability", () => {
       id: "editor-failed",
       waitForPort: vi.fn(async () => { throw new Error("not ready"); }),
       kill: vi.fn(async () => {}),
+      waitForExit: vi.fn()
+        .mockResolvedValueOnce({ code: 143, timedOut: true })
+        .mockResolvedValueOnce({ code: 137, timedOut: false }),
     };
     const healthy = { id: "editor-healthy", waitForPort: vi.fn(), kill: vi.fn() };
     const sandbox = {
@@ -150,7 +153,8 @@ describe("coding session browser editor capability", () => {
     const owner = { userId: "user-1", email: "user@example.com" };
 
     await expect(registry.mintEditorCapability(owner, "session-1")).rejects.toThrow("not ready");
-    expect(failed.kill).toHaveBeenCalledWith(15);
+    expect(failed.kill.mock.calls).toEqual([[15], [9]]);
+    expect(failed.waitForExit).toHaveBeenCalledTimes(2);
     await expect(registry.mintEditorCapability(owner, "session-1")).resolves.toBeDefined();
     expect(sandbox.exec).toHaveBeenCalledTimes(2);
   });

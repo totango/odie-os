@@ -144,7 +144,7 @@ describe("coding session browser editor HTTP gateway", () => {
       `https://workshop.example.test/c/${token}/`,
     ), {
       EDITOR_BASE_URL: editorOrigin,
-      TEAM_PI_CODEX_HMAC_SECRET: secret,
+      EDITOR_CAPABILITY_HMAC_SECRET: secret,
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ getEditorTicket }) },
     } as any, { exports: {} } as any);
 
@@ -159,7 +159,7 @@ describe("coding session browser editor HTTP gateway", () => {
       `${editorOrigin}/c/${forged}/`,
     ), {
       EDITOR_BASE_URL: editorOrigin,
-      TEAM_PI_CODEX_HMAC_SECRET: secret,
+      EDITOR_CAPABILITY_HMAC_SECRET: secret,
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ getEditorTicket }) },
     } as any, { exports: {} } as any);
 
@@ -189,7 +189,7 @@ describe("coding session browser editor HTTP gateway", () => {
       { headers: { Origin: editorOrigin } },
     ), {
       EDITOR_BASE_URL: editorOrigin,
-      TEAM_PI_CODEX_HMAC_SECRET: secret,
+      EDITOR_CAPABILITY_HMAC_SECRET: secret,
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ getEditorTicket }) },
       SESSION_SANDBOX: {},
     } as any, {
@@ -209,6 +209,48 @@ describe("coding session browser editor HTTP gateway", () => {
     expect(isCurrentSessionGeneration).toHaveBeenCalledWith("session-1", "sandbox-1");
   });
 
+  it("keeps every internal redirect behind the editor capability prefix", async () => {
+    const getEditorTicket = vi.fn(() => ({
+      sandboxId: "sandbox-1", userId: "user-1", sessionId: "session-1", expiresAt: Date.now() + 60_000,
+    }));
+    const locations = [
+      "//editor.example.workers.dev/public",
+      "//localhost:13337/internal",
+      `http://localhost:13337/c/${token}/already?x=1`,
+      "//external.example.test/leave",
+    ];
+    const containerFetch = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { Location: locations.shift()! },
+    }));
+    sandboxState.sandboxes.set("sandbox-1", { containerFetch });
+    const env = {
+      EDITOR_BASE_URL: editorOrigin,
+      EDITOR_CAPABILITY_HMAC_SECRET: secret,
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ getEditorTicket }) },
+      SESSION_SANDBOX: {},
+    } as any;
+    const ctx = { exports: { CodingSessionRegistry: {
+      idFromName: (id: string) => id,
+      get: () => ({ isCurrentSessionGeneration: vi.fn(() => true) }),
+    } } } as any;
+
+    const results = [];
+    for (let index = 0; index < 4; index++) {
+      const response = await sessions.default.fetch(
+        new Request(`${editorOrigin}/c/${token}/redirect-${index}`), env, ctx,
+      );
+      results.push(response.headers.get("Location"));
+    }
+
+    expect(results).toEqual([
+      `/c/${token}/public`,
+      `/c/${token}/internal`,
+      `/c/${token}/already?x=1`,
+      "//external.example.test/leave",
+    ]);
+  });
+
   it("turns editor WebSocket transport failures into a bounded gateway error", async () => {
     const getEditorTicket = vi.fn(() => ({
       sandboxId: "sandbox-1", userId: "user-1", sessionId: "session-1", expiresAt: Date.now() + 60_000,
@@ -221,7 +263,7 @@ describe("coding session browser editor HTTP gateway", () => {
       { headers: { Upgrade: "websocket", Origin: editorOrigin } },
     ), {
       EDITOR_BASE_URL: editorOrigin,
-      TEAM_PI_CODEX_HMAC_SECRET: secret,
+      EDITOR_CAPABILITY_HMAC_SECRET: secret,
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ getEditorTicket }) },
       SESSION_SANDBOX: {},
     } as any, {
@@ -248,7 +290,7 @@ describe("coding session browser editor HTTP gateway", () => {
       `${editorOrigin}/c/${token}/`,
     ), {
       EDITOR_BASE_URL: editorOrigin,
-      TEAM_PI_CODEX_HMAC_SECRET: secret,
+      EDITOR_CAPABILITY_HMAC_SECRET: secret,
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ getEditorTicket }) },
       SESSION_SANDBOX: {},
     } as any, {

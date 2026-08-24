@@ -60,7 +60,6 @@ RUN apt-get update \
     && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python.vsix \
     && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-go.vsix \
     && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-rust-analyzer.vsix \
-    && chmod -R a-w /opt/odie-code-server/extensions \
     && rm -f /tmp/code-server.tar.gz /tmp/*.vsix
 
 # Package lifecycle scripts stay disabled. ZeroMQ runs its pinned native installer explicitly. The
