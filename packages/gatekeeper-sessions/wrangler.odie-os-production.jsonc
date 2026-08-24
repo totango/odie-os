@@ -9,10 +9,11 @@
   "compatibility_date": "2026-02-02",
   "compatibility_flags": ["nodejs_compat", "allow_irrevocable_stub_storage", "global_fetch_strictly_public"],
   "rules": [{ "type": "Text", "globs": ["**/*.txt"], "fallthrough": false }],
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
   "vars": {
     "BASE_URL": "https://odie-os.odie-os.workers.dev/gatekeeper/sessions",
+    "EDITOR_BASE_URL": "https://odie-os-gk-sessions.odie-os.workers.dev",
     "SESSION_ALLOWED_ORIGIN": "https://odie-os.odie-os.workers.dev",
     "CODING_SESSION_PI_RUNTIME_ENABLED": "true"
   },
