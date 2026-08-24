@@ -316,7 +316,7 @@ describe('SessionTerminal', () => {
   })
 
   it('reports an exited session only after its final output write completes', async () => {
-    const onSessionUnavailable = vi.fn()
+    const onSessionUnavailable = vi.fn<() => void>()
     const rendered = await renderTerminal({ onSessionUnavailable })
     const socket = testState.sockets[0]
     expect(socket).toBeDefined()
