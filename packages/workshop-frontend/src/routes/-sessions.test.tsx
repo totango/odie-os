@@ -8,6 +8,7 @@ import type { CodingSessionRepository, CodingSessionRuntime, CodingSessionSummar
 
 const testState = vi.hoisted(() => ({
   piEnabled: false,
+  piLoading: false,
   terminalMounts: 0,
   terminalProps: vi.fn<(props: unknown) => void>(),
   context: {
@@ -35,7 +36,7 @@ const testState = vi.hoisted(() => ({
     repositoryLoading: false,
     title: 'Fix Jarvis',
     setTitle: vi.fn<(title: string) => void>(),
-    runtime: 'opencode' as 'opencode' | 'pi',
+    runtime: 'opencode' as CodingSessionRuntime,
     setRuntime: vi.fn<(runtime: CodingSessionRuntime) => void>(),
     creating: false,
     create: vi.fn<() => Promise<void>>(async () => {}),
@@ -57,7 +58,7 @@ vi.mock('../components/sessions/SessionTerminal', async () => {
   }
 })
 vi.mock('../FeatureFlagsContext', () => ({
-  useUiFeatureFlag: () => ({ enabled: testState.piEnabled, loading: false }),
+  useUiFeatureFlag: () => ({ enabled: testState.piEnabled, loading: testState.piLoading }),
 }))
 
 import { SessionsPage } from './sessions'
@@ -79,6 +80,7 @@ describe('SessionsPage locked Code setup', () => {
     testState.context.refresh.mockClear()
     testState.terminalMounts = 0
     testState.piEnabled = false
+    testState.piLoading = false
   })
 
   async function render() {
@@ -119,7 +121,7 @@ describe('SessionsPage locked Code setup', () => {
     expect(testState.context.connect).not.toHaveBeenCalled()
   })
 
-  it('offers Pi only when the rollout flag is enabled', async () => {
+  it('offers Pi but keeps Prime Agent hidden until its image is pinned', async () => {
     testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
     let rendered = await render()
 
@@ -134,10 +136,32 @@ describe('SessionsPage locked Code setup', () => {
 
     expect(rendered.textContent).toContain('Coding agent')
     const piButton = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.startsWith('Pi'))
+    const primeButton = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.startsWith('Prime Agent'))
     expect(piButton).toBeTruthy()
+    expect(primeButton).toBeUndefined()
 
     await act(async () => piButton!.click())
     expect(testState.context.setRuntime).toHaveBeenCalledWith('pi')
+    expect(testState.context.setRuntime).not.toHaveBeenCalledWith('prime-agent')
+  })
+
+  it('resets an alternate runtime when the coding-runtime flag is disabled', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.runtime = 'prime-agent'
+
+    await render()
+
+    expect(testState.context.setRuntime).toHaveBeenCalledWith('opencode')
+  })
+
+  it('preserves an alternate runtime while the rollout flag is loading', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.runtime = 'prime-agent'
+    testState.piLoading = true
+
+    await render()
+
+    expect(testState.context.setRuntime).not.toHaveBeenCalled()
   })
 
   it('labels the primary terminal with the persisted runtime', async () => {
@@ -159,6 +183,23 @@ describe('SessionsPage locked Code setup', () => {
     expect(terminalMode?.textContent).toContain('Shell')
     expect(terminalMode?.textContent).not.toContain('OpenCode')
     expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'pi' }))
+  })
+
+  it('labels the primary terminal for a persisted Prime Agent session', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-prime',
+      title: 'Prime repair',
+      repositories: ['jarvis'],
+      runtime: 'prime-agent',
+      status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+    expect(rendered.querySelector('[aria-label="Terminal mode"]')?.textContent).toContain('Prime Agent')
+    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'prime-agent' }))
   })
 
   it('refreshes sessions when the terminal reports the environment is unavailable', async () => {

@@ -1,21 +1,37 @@
+FROM ghcr.io/astral-sh/uv@sha256:4c55b48c2750a257fa631f31d8362445d9f880ba219d871c33153b165a83c81a AS uv
+
 FROM docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os"
 
 ARG PI_VERSION=0.84.2
 ARG PI_MCP_ADAPTER_VERSION=2.26.0
+ARG PRIME_AGENT_VERSION=0.8.0
 ARG VALHALLA_VERSION=0.3.0
 
+COPY --from=uv /uv /uvx /bin/
 COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs /opt/odie-pi/
+COPY pi-image/prime-kernel-requirements.txt /opt/odie-prime-agent/requirements.txt
 
-# Lifecycle scripts stay disabled; the reviewed lockfile is the complete runtime dependency set.
+# Package lifecycle scripts stay disabled. ZeroMQ runs its pinned native installer explicitly. The
+# Prime kernel uses a pinned uv image, exact Python version, and hash-locked Python dependencies.
 RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
+    && node /opt/odie-pi/node_modules/zeromq/script/install.js \
+    && node -e 'require("/opt/odie-pi/node_modules/zeromq")' \
+    && UV_PYTHON_INSTALL_DIR=/opt/odie-prime-agent/python uv python install 3.11.14 \
+    && UV_PYTHON_INSTALL_DIR=/opt/odie-prime-agent/python uv venv --python 3.11.14 /opt/odie-prime-agent/kernel-venv \
+    && uv pip install --python /opt/odie-prime-agent/kernel-venv/bin/python --require-hashes --no-deps -r /opt/odie-prime-agent/requirements.txt \
+    && uv pip install --python /opt/odie-prime-agent/kernel-venv/bin/python --no-deps --no-build-isolation /opt/odie-pi/node_modules/prime-agent/dist/prime-agent-runtime \
+    && /opt/odie-prime-agent/kernel-venv/bin/python -m IPython -c 'import ipykernel, rlm, rlm.mcp; assert 6 * 7 == 42' \
     && node /opt/odie-pi/build-valhalla-opencode.mjs \
     && ln -s /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi \
+    && ln -s /opt/odie-pi/node_modules/prime-agent/dist/bundle/cli.js /usr/local/bin/prime-agent \
     && opencode --version \
     && pi --version \
+    && prime-agent --version \
     && test "$(node -p "require('/opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" = "$PI_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
+    && test "$(node -p "require('/opt/odie-pi/node_modules/prime-agent/package.json').version")" = "$PRIME_AGENT_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/@howlerops/valhalla/package.json').version")" = "$VALHALLA_VERSION" \
     && test "$(find /opt/odie-pi/node_modules/@howlerops/valhalla/pi/prompts -name '*.md' -type f | wc -l)" = "7" \
     && test "$(find /opt/odie-valhalla/opencode/command -name '*.md' -type f | wc -l)" = "8" \
@@ -25,4 +41,4 @@ RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
       --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))'
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os" \
-      org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, Valhalla, and pi-mcp-adapter"
+      org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, Prime Agent, Valhalla, and pi-mcp-adapter"

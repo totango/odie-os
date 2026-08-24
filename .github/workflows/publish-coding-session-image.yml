@@ -16,6 +16,7 @@ env:
   IMAGE: ghcr.io/totango/odie-os-coding-session
   PI_VERSION: "0.84.2"
   PI_MCP_ADAPTER_VERSION: "2.26.0"
+  PRIME_AGENT_VERSION: "0.8.0"
   VALHALLA_VERSION: "0.3.0"
 
 jobs:
@@ -61,6 +62,7 @@ jobs:
               --platform linux/amd64 \
               --build-arg "PI_VERSION=$PI_VERSION" \
               --build-arg "PI_MCP_ADAPTER_VERSION=$PI_MCP_ADAPTER_VERSION" \
+              --build-arg "PRIME_AGENT_VERSION=$PRIME_AGENT_VERSION" \
               --build-arg "VALHALLA_VERSION=$VALHALLA_VERSION" \
               --tag "$IMAGE:$TAG" \
               --file packages/gatekeeper-sessions/Dockerfile.pi \

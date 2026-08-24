@@ -341,7 +341,7 @@ export interface CodingSessionRepositoryOption {
 export type CodingSessionStatus = "starting" | "running" | "stopping" | "stopped" | "failed";
 
 /** Coding agent runtime selected for a coding session. */
-export type CodingSessionRuntime = "opencode" | "pi";
+export type CodingSessionRuntime = "opencode" | "pi" | "prime-agent";
 
 /** User-visible metadata for a coding session. */
 export interface CodingSessionSummary {

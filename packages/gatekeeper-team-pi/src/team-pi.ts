@@ -380,9 +380,15 @@ export class TeamPiAccount extends DurableObject<Env> {
       else this.ctx.storage.kv.delete("idTokenExpiresAt");
       this.ctx.storage.kv.put("identity", claims.identity);
     } else {
-      this.ctx.storage.kv.delete("idToken");
-      this.ctx.storage.kv.delete("idTokenExpiresAt");
-      this.ctx.storage.kv.delete("identity");
+      const existingIdToken = this.ctx.storage.kv.get<string>("idToken");
+      const existingIdTokenExpiresAt = this.ctx.storage.kv.get<number>("idTokenExpiresAt") ?? 0;
+      // Auth0 may omit id_token from an otherwise successful access-token refresh. Keep a
+      // still-valid identity token rather than turning that success into an early reconnect.
+      if (!existingIdToken || Date.now() >= existingIdTokenExpiresAt - ACCESS_TOKEN_SAFETY_MS) {
+        this.ctx.storage.kv.delete("idToken");
+        this.ctx.storage.kv.delete("idTokenExpiresAt");
+        this.ctx.storage.kv.delete("identity");
+      }
     }
   }
 
