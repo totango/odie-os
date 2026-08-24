@@ -19,7 +19,7 @@
   "containers": [
     {
       "class_name": "CodingSessionSandbox",
-      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:5d1c934f7b7994cafba530b8e1f8588552c75982f18bd91b7c50ada945d402ab",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b047ff2c12233daa00cb33f6ac9fb074e9a6cdd97b97900564c042c043803e0a",
       "instance_type": "standard-1",
       "max_instances": 20
     }

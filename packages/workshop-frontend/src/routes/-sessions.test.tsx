@@ -121,7 +121,7 @@ describe('SessionsPage locked Code setup', () => {
     expect(testState.context.connect).not.toHaveBeenCalled()
   })
 
-  it('offers Pi but keeps Prime Agent hidden until its image is pinned', async () => {
+  it('offers Pi and Prime Agent only when the coding-runtime flag is enabled', async () => {
     testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
     let rendered = await render()
 
@@ -138,11 +138,12 @@ describe('SessionsPage locked Code setup', () => {
     const piButton = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.startsWith('Pi'))
     const primeButton = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.startsWith('Prime Agent'))
     expect(piButton).toBeTruthy()
-    expect(primeButton).toBeUndefined()
+    expect(primeButton).toBeTruthy()
 
     await act(async () => piButton!.click())
+    await act(async () => primeButton!.click())
     expect(testState.context.setRuntime).toHaveBeenCalledWith('pi')
-    expect(testState.context.setRuntime).not.toHaveBeenCalledWith('prime-agent')
+    expect(testState.context.setRuntime).toHaveBeenCalledWith('prime-agent')
   })
 
   it('resets an alternate runtime when the coding-runtime flag is disabled', async () => {
