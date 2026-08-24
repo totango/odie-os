@@ -149,6 +149,29 @@ describe("Team PI token refresh and API isolation", () => {
     expect(kv.get("identity")).toBeUndefined();
   });
 
+  it("preserves a still-valid ID token when access-token refresh omits one", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({
+      access_token: "fresh-access",
+      refresh_token: "fresh-refresh",
+      expires_in: 3600,
+    }));
+    const kv = new Kv();
+    kv.put("refreshToken", "old-refresh");
+    kv.put("accessTokenExpiresAt", 0);
+    kv.put("idToken", "valid-id");
+    kv.put("idTokenExpiresAt", Date.now() + 60 * 60 * 1000);
+    kv.put("identity", { uniqueName: "user@totango.com" });
+    const account = new TeamPiAccount({} as never, configEnv());
+    (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv } };
+
+    await expect(account.getApiCredentials()).resolves.toEqual({
+      accessToken: "fresh-access",
+      idToken: "valid-id",
+    });
+    expect(kv.get("identity")).toEqual({ uniqueName: "user@totango.com" });
+  });
+
   it("requires a fresh ID token instead of forwarding an expired identity", async () => {
     const kv = new Kv();
     kv.put("accessToken", "valid-access");

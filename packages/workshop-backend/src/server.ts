@@ -307,10 +307,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return resolveUiFeatureFlags(this.env, this.#userId.name!);
   }
 
-  async #assertPiCodingSessionsEnabled(): Promise<void> {
+  async #assertCodingSessionRuntimeEnabled(runtime: "pi" | "prime-agent"): Promise<void> {
     const flags = await resolveUiFeatureFlags(this.env, this.#userId.name!);
     if (!flags["pi-coding-session-runtime"]) {
-      throw new Error("Pi coding sessions are not enabled for this account.");
+      const label = runtime === "pi" ? "Pi" : "Prime Agent";
+      throw new Error(`${label} coding sessions are not enabled for this account.`);
     }
   }
 
@@ -328,7 +329,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
     await this.#assertRequiredConnectionsHealthy();
-    if (request.runtime === "pi") await this.#assertPiCodingSessionsEnabled();
+    if (request.runtime && request.runtime !== "opencode") await this.#assertCodingSessionRuntimeEnabled(request.runtime);
     return this.#user.createCodingSession(request);
   }
 
@@ -347,7 +348,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async restartCodingSession(sessionId: string): Promise<CodingSessionSummary> {
     await this.#assertRequiredConnectionsHealthy();
     const session = (await this.#user.listCodingSessions()).find(({ id }) => id === sessionId);
-    if (session?.runtime === "pi") await this.#assertPiCodingSessionsEnabled();
+    if (session?.runtime && session.runtime !== "opencode") await this.#assertCodingSessionRuntimeEnabled(session.runtime);
     return this.#user.restartCodingSession(sessionId);
   }
 

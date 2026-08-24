@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   Archive,
   ArrowClockwise,
@@ -13,7 +13,7 @@ import {
   TerminalWindow,
   X,
 } from '@phosphor-icons/react'
-import type { CodingSessionRepository } from '@gadgets/workshop-shared/api'
+import type { CodingSessionRepository, CodingSessionRuntime } from '@gadgets/workshop-shared/api'
 import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sessions'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from '../components/WorkshopControls'
@@ -22,6 +22,12 @@ import { useSessionsContext } from '../components/sessions/SessionsContext'
 import { useUiFeatureFlag } from '../FeatureFlagsContext'
 
 export const Route = createFileRoute('/sessions')({ component: SessionsPage })
+
+function runtimeLabel(runtime: CodingSessionRuntime): string {
+  if (runtime === 'pi') return 'Pi'
+  if (runtime === 'prime-agent') return 'Prime Agent'
+  return 'OpenCode'
+}
 
 export function SessionsPage() {
   useDocumentTitle('Code')
@@ -77,7 +83,7 @@ export function SessionsPage() {
                 aria-pressed={terminalKind === kind}
                 className={`rounded px-2 py-1 capitalize ${terminalKind === kind ? 'bg-kumo-base text-kumo-strong shadow-sm' : 'text-kumo-subtle hover:text-kumo-default'}`}
               >
-                {kind === 'opencode' ? (activeSession.runtime === 'pi' ? 'Pi' : 'OpenCode') : 'Shell'}
+                {kind === 'opencode' ? runtimeLabel(activeSession.runtime) : 'Shell'}
               </button>
             ))}
             </div>
@@ -213,7 +219,7 @@ function CodeSetupScreen() {
             <h2 className="text-sm font-semibold text-kumo-default">After setup</h2>
             <ul className="mt-4 space-y-3 text-sm leading-5 text-kumo-subtle">
               <li className="flex gap-2"><Check size={15} className="mt-0.5 shrink-0 text-kumo-success" /> Pick one or more repositories.</li>
-              <li className="flex gap-2"><Check size={15} className="mt-0.5 shrink-0 text-kumo-success" /> Open a terminal with OpenCode and shell access.</li>
+              <li className="flex gap-2"><Check size={15} className="mt-0.5 shrink-0 text-kumo-success" /> Open a coding-agent terminal with shell access.</li>
               <li className="flex gap-2"><Check size={15} className="mt-0.5 shrink-0 text-kumo-success" /> Review tool approvals before changes leave the sandbox.</li>
             </ul>
           </aside>
@@ -224,7 +230,7 @@ function CodeSetupScreen() {
 }
 
 function NewSessionPane() {
-  const { enabled: piEnabled } = useUiFeatureFlag('pi-coding-session-runtime')
+  const { enabled: piEnabled, loading: piLoading } = useUiFeatureFlag('pi-coding-session-runtime')
   const {
     activity,
     resolveActivity,
@@ -243,6 +249,12 @@ function NewSessionPane() {
     create,
     error,
   } = useSessionsContext()
+
+  useEffect(() => {
+    if (runtime !== 'opencode' && !piLoading && !piEnabled) {
+      setRuntime('opencode')
+    }
+  }, [piEnabled, piLoading, runtime, setRuntime])
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-kumo-tint/30">
@@ -276,10 +288,11 @@ function NewSessionPane() {
         {piEnabled && (
           <div className="mt-7">
             <div className="text-[11px] font-medium uppercase tracking-wider text-kumo-subtle">Coding agent</div>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2" role="group" aria-label="Coding agent runtime">
+            <div className="mt-2 grid gap-2 sm:grid-cols-3" role="group" aria-label="Coding agent runtime">
               {([
                 ['opencode', 'OpenCode', 'Established runtime with your account plugins and skills.'],
                 ['pi', 'Pi', 'Focused runtime using Team PI and Workshop tools.'],
+                ['prime-agent', 'Prime Agent', 'IPython-based runtime using shared Codex and Workshop tools.'],
               ] as const).map(([value, label, description]) => (
                 <button
                   key={value}

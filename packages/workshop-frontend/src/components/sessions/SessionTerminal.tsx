@@ -38,7 +38,7 @@ export default function SessionTerminal({
   const [state, setState] = useState<'connecting' | 'starting' | 'connected' | 'disconnected'>('connecting')
   const [interactive, setInteractive] = useState(false)
   const [error, setError] = useState<string>()
-  const terminalLabel = terminalKind === 'shell' ? 'Shell' : runtime === 'pi' ? 'Pi' : 'OpenCode'
+  const terminalLabel = terminalKind === 'shell' ? 'Shell' : runtime === 'pi' ? 'Pi' : runtime === 'prime-agent' ? 'Prime Agent' : 'OpenCode'
 
   useEffect(() => {
     const host = hostRef.current
@@ -158,6 +158,7 @@ export default function SessionTerminal({
         if (cursor) url.searchParams.set('cursor', cursor)
         const nextSocket = new WebSocket(url)
         socket = nextSocket
+        lastSize = ''
         nextSocket.binaryType = 'arraybuffer'
         nextSocket.addEventListener('open', () => {
           if (cancelled || generation !== connectionGeneration) return
@@ -186,6 +187,9 @@ export default function SessionTerminal({
             outputBatcher.push(bytes, () => {
               if (!cancelled) cursor = chunk.cursor
             })
+            // Do not hold interactive echo until the next animation frame.
+            // xterm already batches normal output and fast-paths writes after user input.
+            outputBatcher.flush()
             if (!visibleOutputDetected) {
               setState('connected')
             }
@@ -224,7 +228,7 @@ export default function SessionTerminal({
               setError(undefined)
               setState('connected')
               if (terminalKind === 'shell') setInteractive(true)
-              sendSize(true)
+              sendSize()
               terminal.focus()
             } else if (message.type === 'chunk' && typeof message.byteLength === 'number') {
               if (pendingChunk || !Number.isSafeInteger(message.byteLength) || message.byteLength < 0 ||
@@ -254,11 +258,20 @@ export default function SessionTerminal({
                 failProtocol()
                 return
               }
-              cursor = message.cursor
+              const exitCursor = message.cursor
+              outputBatcher.flush()
+              terminalOperations.enqueue((done) => {
+                if (!cancelled) cursor = exitCursor
+                done()
+              })
               terminalExited = true
               setError(`Terminal exited${message.exit?.code === undefined ? '' : ` (${message.exit.code})`}.`)
               setState('disconnected')
-              onSessionUnavailable?.()
+              void terminalOperations.whenIdle().then(() => {
+                if (!cancelled && generation === connectionGeneration && terminalExited) {
+                  onSessionUnavailable?.()
+                }
+              })
             } else {
               failProtocol()
             }
