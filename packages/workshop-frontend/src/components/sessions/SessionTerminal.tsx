@@ -39,6 +39,9 @@ export default function SessionTerminal({
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal>(null)
   const reconnectRef = useRef<() => void>(() => {})
+  const runtimeRef = useRef(runtime)
+  const followLatestRef = useRef<() => void>(() => {})
+  runtimeRef.current = runtime
   const initialInputRef = useRef(initialInput)
   const onInitialInputSentRef = useRef(onInitialInputSent)
   initialInputRef.current = initialInput
@@ -75,6 +78,7 @@ export default function SessionTerminal({
       cursorBlink: true,
       convertEol: true,
       scrollback: 5000,
+      scrollOnUserInput: true,
       allowProposedApi: false,
       theme: TERMINAL_THEMES[resolvedThemeMode],
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
@@ -106,6 +110,14 @@ export default function SessionTerminal({
       if (socket?.readyState !== WebSocket.OPEN) return
       socket.send(inputEncoder.encode(data))
     })
+    followLatestRef.current = () => {
+      terminal.scrollToBottom()
+      if (terminalKind === 'opencode' && runtimeRef.current === 'prime-agent' &&
+          socket?.readyState === WebSocket.OPEN) {
+        // Prime Agent documents Ctrl+Shift+Down as its explicit "resume following output" command.
+        socket.send(inputEncoder.encode('\x1b[1;6B'))
+      }
+    }
 
     const writeOutput = (bytes: Uint8Array, done: () => void) => {
       terminal.write(bytes, () => {
@@ -353,8 +365,10 @@ export default function SessionTerminal({
       socket?.close()
       terminal.dispose()
       terminalRef.current = null
+      followLatestRef.current = () => {}
     }
   }, [authenticatedApi, onSessionUnavailable, sessionId, terminalKind]) // Theme and prepared input updates are applied without reconnecting below.
+
 
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_THEMES[resolvedThemeMode]
@@ -363,12 +377,34 @@ export default function SessionTerminal({
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden bg-kumo-base">
       <div className="flex h-10 items-center justify-between border-b border-kumo-line px-3 text-[12px] text-kumo-subtle">
-        <span>{state === 'connected' ? 'Connected' : state === 'starting' ? 'Starting terminal…' : state === 'connecting' ? 'Connecting…' : 'Disconnected'}</span>
-        {state === 'disconnected' && (
-          <WorkshopButton onClick={() => reconnectRef.current()}>
-            Reconnect
-          </WorkshopButton>
-        )}
+        <span
+          aria-live="polite"
+          title="PTY connectivity only. Agent running or idle state is shown inside the terminal."
+          className="flex items-center gap-1.5"
+        >
+          {state === 'connected' && <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-kumo-success" />}
+          {state === 'connected' ? 'Live connection' : state === 'starting' ? 'Starting terminal…' : state === 'connecting' ? 'Connecting…' : 'Disconnected'}
+          {state === 'connected' && <span className="sr-only">PTY connectivity only; agent running or idle state is shown inside the terminal.</span>}
+        </span>
+        <div className="flex items-center gap-2">
+          {state === 'connected' && (
+            <WorkshopButton
+              title={runtime === 'prime-agent' && terminalKind === 'opencode'
+                ? "Sends Prime Agent's documented Ctrl+Shift+Down command to resume following output"
+                : 'Scroll to the latest terminal output'}
+              onClick={() => followLatestRef.current()}
+            >
+              {runtime === 'prime-agent' && terminalKind === 'opencode'
+                ? 'Resume Prime Agent output'
+                : 'Follow latest'}
+            </WorkshopButton>
+          )}
+          {state === 'disconnected' && (
+            <WorkshopButton onClick={() => reconnectRef.current()}>
+              Reconnect
+            </WorkshopButton>
+          )}
+        </div>
       </div>
       {error && <div className="border-b border-kumo-danger/20 bg-kumo-danger/10 px-3 py-2 text-xs text-kumo-danger">{error}</div>}
       <div className="relative min-h-0 flex-1">

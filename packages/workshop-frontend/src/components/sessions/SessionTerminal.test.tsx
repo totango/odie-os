@@ -8,6 +8,7 @@ const testState = vi.hoisted(() => ({
   authenticatedApi: undefined as unknown as { mintCodingSessionAttachCapability: ReturnType<typeof vi.fn> },
   terminalWriteCallbacks: [] as Array<() => void>,
   sockets: [] as MockWebSocket[],
+  scrollToBottom: vi.fn<() => void>(),
 }))
 
 vi.mock('@xterm/xterm', () => ({
@@ -30,6 +31,7 @@ vi.mock('@xterm/xterm', () => ({
     loadAddon() {}
     open() {}
     focus() {}
+    scrollToBottom() { testState.scrollToBottom() }
     clear() {}
     dispose() {}
     onData() { return { dispose() {} } }
@@ -56,8 +58,13 @@ vi.mock('../../ThemeContext', () => ({
 }))
 
 vi.mock('../WorkshopControls', () => ({
-  WorkshopButton: ({ children, onClick }: { children: React.ReactNode; onClick: () => void }) => (
-    <button type="button" onClick={onClick}>{children}</button>
+  WorkshopButton: ({ children, onClick, disabled, title }: {
+    children: React.ReactNode
+    onClick: () => void
+    disabled?: boolean
+    title?: string
+  }) => (
+    <button type="button" onClick={onClick} disabled={disabled} title={title}>{children}</button>
   ),
 }))
 
@@ -156,6 +163,7 @@ beforeEach(() => {
   testState.authenticatedApi = createApi()
   testState.terminalWriteCallbacks = []
   testState.sockets = []
+  testState.scrollToBottom.mockClear()
   vi.stubGlobal('WebSocket', MockWebSocket)
   vi.stubGlobal('ResizeObserver', MockResizeObserver)
   vi.stubGlobal('requestAnimationFrame', vi.fn<(callback: FrameRequestCallback) => number>((callback) => {
@@ -171,6 +179,24 @@ afterEach(() => {
 })
 
 describe('SessionTerminal', () => {
+
+  it('shows a live status and follows the latest Prime Agent TUI output', async () => {
+    const rendered = await renderTerminal({ runtime: 'prime-agent', terminalKind: 'opencode' })
+    const socket = testState.sockets[0]!
+    await act(async () => socket.serverOpen())
+    await act(async () => socket.serverMessage(JSON.stringify({ type: 'ready' })))
+
+    expect(rendered.container.textContent).toContain('Live connection')
+    expect(rendered.container.querySelector('[title^="PTY connectivity"]')).toBeTruthy()
+    const follow = Array.from(rendered.container.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Resume Prime Agent output'))
+    expect(follow).toBeTruthy()
+    await act(async () => follow!.click())
+
+    expect(testState.scrollToBottom).toHaveBeenCalledOnce()
+    expect(new TextDecoder().decode(socket.send.mock.calls.at(-1)?.[0] as Uint8Array)).toBe('\x1b[1;6B')
+    await rendered.unmount()
+  })
+
   it('sends one initial resize instead of redrawing again on ready', async () => {
     const rendered = await renderTerminal()
     const socket = testState.sockets[0]
