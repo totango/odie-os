@@ -125,6 +125,16 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID"
           test -n "$CLOUDFLARE_API_TOKEN"
 
+      - name: Sync browser editor capability secret
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          EDITOR_CAPABILITY_HMAC_SECRET: ${{ secrets.EDITOR_CAPABILITY_HMAC_SECRET }}
+        run: |
+          test -n "$EDITOR_CAPABILITY_HMAC_SECRET"
+          printf '%s' "$EDITOR_CAPABILITY_HMAC_SECRET" \
+            | wrangler secret put EDITOR_CAPABILITY_HMAC_SECRET --name odie-os-gk-sessions
+
       - name: Verify required Worker secrets
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -143,7 +153,7 @@ jobs:
           }
           require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN
-          require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET
+          require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET EDITOR_CAPABILITY_HMAC_SECRET
           require_secrets odie-os-backend CF_AI_GATEWAY_API_TOKEN TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET TEAM_PI_CODEX_MODELS
 
       - name: Deploy prebuilt workers

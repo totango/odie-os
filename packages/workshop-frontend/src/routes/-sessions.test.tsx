@@ -11,6 +11,13 @@ const testState = vi.hoisted(() => ({
   piLoading: false,
   terminalMounts: 0,
   terminalProps: vi.fn<(props: unknown) => void>(),
+  authenticatedApi: {
+    codingSessionEditorAvailable: vi.fn<() => Promise<boolean>>(async () => true),
+    mintCodingSessionEditorCapability: vi.fn<() => Promise<{ url: string; expiresAt: Date }>>(async () => ({
+      url: 'https://odie-os-gk-sessions.example.workers.dev/c/test-token/',
+      expiresAt: new Date(Date.now() + 60_000),
+    })),
+  },
   context: {
     github: { state: 'missing' } as
       | { state: 'missing' }
@@ -44,6 +51,9 @@ const testState = vi.hoisted(() => ({
 }))
 
 vi.mock('../useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
+vi.mock('../AuthContext', () => ({
+  useAuthenticatedApi: () => ({ authenticatedApi: testState.authenticatedApi }),
+}))
 vi.mock('../components/sessions/SessionsContext', () => ({
   useSessionsContext: () => testState.context,
 }))
@@ -304,6 +314,40 @@ describe('SessionsPage locked Code setup', () => {
 
     expect(rendered.textContent).not.toContain('Starting environment')
     expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-1' }))
+  })
+
+  it('hides browser VS Code when the deployment has no separate editor origin', async () => {
+    testState.authenticatedApi.codingSessionEditorAvailable.mockResolvedValueOnce(false)
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1', title: 'Repair', repositories: ['jarvis'], runtime: 'opencode', status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'), lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+
+    expect(rendered.querySelector('[aria-label="Open browser VS Code"]')).toBeNull()
+  })
+
+  it('opens a generation-bound browser VS Code capability on its separate origin', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-1', title: 'Editor repair', repositories: ['jarvis'], runtime: 'prime-agent', status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'), lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+    const replace = vi.fn<(url: string) => void>()
+    const popup = { opener: window, location: { replace }, close: vi.fn<() => void>() }
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+
+    const rendered = await render()
+    const button = rendered.querySelector<HTMLButtonElement>('[aria-label="Open browser VS Code"]')
+    expect(button).toBeTruthy()
+    await act(async () => button!.click())
+
+    expect(window.open).toHaveBeenCalledWith('about:blank', '_blank')
+    expect(popup.opener).toBeNull()
+    expect(testState.authenticatedApi.mintCodingSessionEditorCapability).toHaveBeenCalledWith('session-1')
+    expect(replace).toHaveBeenCalledWith('https://odie-os-gk-sessions.example.workers.dev/c/test-token/')
   })
 
   it('does not remount a running terminal when only lastActiveAt changes', async () => {

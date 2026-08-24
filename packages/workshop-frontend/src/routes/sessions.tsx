@@ -5,6 +5,7 @@ import {
   ArrowClockwise,
   ArrowLeft,
   Check,
+  Code,
   GithubLogo,
   MagnifyingGlass,
   Plus,
@@ -16,6 +17,7 @@ import {
 import type { CodingSessionRepository, CodingSessionRuntime } from '@gadgets/workshop-shared/api'
 import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sessions'
 import { useDocumentTitle } from '../useDocumentTitle'
+import { useAuthenticatedApi } from '../AuthContext'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from '../components/WorkshopControls'
 import SessionTerminal from '../components/sessions/SessionTerminal'
 import { useSessionsContext } from '../components/sessions/SessionsContext'
@@ -31,6 +33,7 @@ function runtimeLabel(runtime: CodingSessionRuntime): string {
 
 export function SessionsPage() {
   useDocumentTitle('Code')
+  const { authenticatedApi } = useAuthenticatedApi()
   const sessions = useSessionsContext()
   const {
     github,
@@ -47,6 +50,38 @@ export function SessionsPage() {
     refresh,
   } = sessions
   const [terminalKind, setTerminalKind] = useState<'opencode' | 'shell'>('opencode')
+  const [editorAvailable, setEditorAvailable] = useState(false)
+  const [editorBusy, setEditorBusy] = useState(false)
+  const [editorError, setEditorError] = useState<string>()
+
+  useEffect(() => {
+    let cancelled = false
+    void authenticatedApi.codingSessionEditorAvailable()
+      .then((available) => { if (!cancelled) setEditorAvailable(available) })
+      .catch(() => { if (!cancelled) setEditorAvailable(false) })
+    return () => { cancelled = true }
+  }, [authenticatedApi])
+
+  const openEditor = async (sessionId: string) => {
+    if (editorBusy) return
+    const popup = window.open('about:blank', '_blank')
+    if (!popup) {
+      setEditorError('Allow pop-ups to open browser VS Code.')
+      return
+    }
+    popup.opener = null
+    setEditorBusy(true)
+    setEditorError(undefined)
+    try {
+      const capability = await authenticatedApi.mintCodingSessionEditorCapability(sessionId)
+      popup.location.replace(capability.url)
+    } catch (caught) {
+      popup.close()
+      setEditorError(caught instanceof Error ? caught.message : 'Could not open browser VS Code.')
+    } finally {
+      setEditorBusy(false)
+    }
+  }
 
   if (github.state === 'loading') return <CenteredMessage>Checking GitHub connection…</CenteredMessage>
   if (github.state === 'missing' || github.state === 'expired') return <CodeSetupScreen />
@@ -66,6 +101,16 @@ export function SessionsPage() {
               <div className="truncate text-[11px] text-kumo-subtle">{activeSession.repositories.join(' / ')}</div>
             </div>
             <span className={`hidden text-[11px] md:inline ${activeSession.status === 'running' ? 'text-kumo-success' : activeSession.status === 'starting' || activeSession.status === 'stopping' ? 'text-kumo-subtle' : 'text-kumo-danger'}`}>{activeSession.status}</span>
+            {activeSession.status === 'running' && editorAvailable && (
+              <WorkshopButton
+                title="Open browser VS Code with preinstalled development extensions"
+                aria-label="Open browser VS Code"
+                disabled={editorBusy}
+                onClick={() => void openEditor(activeSession.id)}
+              >
+                <Code size={13} /> <span className="hidden md:inline">VS Code</span>
+              </WorkshopButton>
+            )}
             <WorkshopButton
               title="Discards uncommitted sandbox changes and reclones repositories"
               aria-label="Restart environment"
@@ -102,7 +147,7 @@ export function SessionsPage() {
             </div>
           </div>
         </div>
-        {error && <div className="border-b border-kumo-danger/20 bg-kumo-danger-tint px-3 py-2 text-xs text-kumo-danger">{error}</div>}
+        {(error || editorError) && <div role="alert" className="border-b border-kumo-danger/20 bg-kumo-danger-tint px-3 py-2 text-xs text-kumo-danger">{editorError ?? error}</div>}
         <div className={`grid min-h-0 flex-1 ${sessionActivity.some((entry) => entry.state === 'pending') ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
           <div className="min-h-0">
             {activeSession.status === 'running' ? (

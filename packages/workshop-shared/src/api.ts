@@ -410,6 +410,14 @@ export interface CodingSessionAttachCapability {
 /** Terminal process exposed by an owned running coding session. */
 export type CodingSessionTerminalKind = "opencode" | "shell";
 
+/** Short-lived capability for opening browser VS Code in one running session generation. */
+export interface CodingSessionEditorCapability {
+  /** Separate-origin URL containing an unguessable generation-bound editor capability. */
+  url: string;
+  /** Time after which new HTTP requests and WebSocket handshakes require a freshly minted URL. */
+  expiresAt: Date;
+}
+
 /** Stable error codes attached to expected failures from `AuthenticatedApi.openGadget()`. */
 export const OPEN_GADGET_ERROR_CODES = {
   workspaceNotFound: "WORKSPACE_NOT_FOUND",
@@ -534,6 +542,9 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Resolve UI feature flags for the authenticated user. */
   getUiFeatureFlags(): Promise<UiFeatureFlags>;
 
+  /** Reports whether this deployment has a separate-origin browser VS Code runtime configured. */
+  codingSessionEditorAvailable(): Promise<boolean>;
+
   /** Lists coding sessions owned by this user. */
   listCodingSessions(): Promise<CodingSessionSummary[]>;
 
@@ -563,6 +574,9 @@ export interface AuthenticatedApi extends RpcTarget {
     sessionId: string,
     terminal?: CodingSessionTerminalKind,
   ): Promise<CodingSessionAttachCapability>;
+
+  /** Mints a generation-bound capability for browser VS Code in an owned running session. */
+  mintCodingSessionEditorCapability(sessionId: string): Promise<CodingSessionEditorCapability>;
 
   /** Lists coding-session tool activity, optionally narrowed to one session. */
   listCodingSessionActivity(sessionId?: string): Promise<import("./coding-sessions.js").CodingSessionActivity[]>;

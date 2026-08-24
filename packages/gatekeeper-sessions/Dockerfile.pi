@@ -8,6 +8,37 @@ ARG PI_VERSION=0.84.2
 ARG PI_MCP_ADAPTER_VERSION=2.26.0
 ARG PRIME_AGENT_VERSION=0.8.0
 ARG VALHALLA_VERSION=0.3.0
+ARG CODE_SERVER_VERSION=4.133.0
+
+# Browser VS Code and its reviewed baseline extensions are fetched only at image build time. Every
+# artifact is version and digest pinned; repository recommendations never authorize online installs.
+ADD --checksum=sha256:a4e0f8f8c76e7de8e7424289f74e507af4c97bfe104c3e8ee272b8cc7b46c6f1 \
+    https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/code-server-${CODE_SERVER_VERSION}-linux-amd64.tar.gz \
+    /tmp/code-server.tar.gz
+ADD --checksum=sha256:ca5334d46f6a39079e751ef4601bfc9f86bc3a46483e87291ec609239d161308 \
+    https://open-vsx.org/api/dbaeumer/vscode-eslint/3.0.34/file/dbaeumer.vscode-eslint-3.0.34.vsix \
+    /tmp/vscode-eslint.vsix
+ADD --checksum=sha256:fb730ea4306d09cdc0a3aaa9e9baae28058cc97a4fbfce8b056b377a0639a9fe \
+    https://open-vsx.org/api/esbenp/prettier-vscode/12.4.0/file/esbenp.prettier-vscode-12.4.0.vsix \
+    /tmp/prettier-vscode.vsix
+ADD --checksum=sha256:842bf9abd3eb24ace6bc482127ed8ae44a6759036dfaa4055c78599662bf45de \
+    https://open-vsx.org/api/redhat/vscode-yaml/1.25.2026082008/file/redhat.vscode-yaml-1.25.2026082008.vsix \
+    /tmp/vscode-yaml.vsix
+ADD --checksum=sha256:c7744af4bf72978f5792624a71c80e2b622a1118574fada3a903d70ac03d5bca \
+    https://open-vsx.org/api/ms-python/debugpy/linux-x64/2026.6.0/file/ms-python.debugpy-2026.6.0@linux-x64.vsix \
+    /tmp/vscode-python-debugpy.vsix
+ADD --checksum=sha256:d9d96596a096d22c2ba0022c402165e0252af59cab46b78e443588e2cbed98dc \
+    https://open-vsx.org/api/ms-python/vscode-python-envs/1.36.0/file/ms-python.vscode-python-envs-1.36.0.vsix \
+    /tmp/vscode-python-envs.vsix
+ADD --checksum=sha256:232aeafb01f069824fdd92d3e628c1c442bbcfa1d3cc945ff97076340bb2b4a6 \
+    https://open-vsx.org/api/ms-python/python/2026.4.0/file/ms-python.python-2026.4.0.vsix \
+    /tmp/vscode-python.vsix
+ADD --checksum=sha256:9f5959fb17ba0a8dbd804387ddda50975fcaa9dd5267aa33eaaa89912072aacb \
+    https://open-vsx.org/api/golang/Go/0.56.0/file/golang.Go-0.56.0.vsix \
+    /tmp/vscode-go.vsix
+ADD --checksum=sha256:207c80dd995e103c271fae8c8ffb8528d86c15ab0c4eef1be23ba1792e5b115c \
+    https://open-vsx.org/api/rust-lang/rust-analyzer/0.4.3024/file/rust-lang.rust-analyzer-0.4.3024.vsix \
+    /tmp/vscode-rust-analyzer.vsix
 
 COPY --from=uv /uv /uvx /bin/
 COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs /opt/odie-pi/
@@ -17,7 +48,19 @@ COPY pi-image/prime-kernel-requirements.txt /opt/odie-prime-agent/requirements.t
 # coding sessions run offline and cannot satisfy the CLI's best-effort package-manager fallback.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ripgrep \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/odie-code-server/extensions \
+    && tar -xzf /tmp/code-server.tar.gz -C /opt/odie-code-server --strip-components=1 \
+    && ln -s /opt/odie-code-server/bin/code-server /usr/local/bin/code-server \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-eslint.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/prettier-vscode.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-yaml.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python-debugpy.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python-envs.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-go.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-rust-analyzer.vsix \
+    && rm -f /tmp/code-server.tar.gz /tmp/*.vsix
 
 # Package lifecycle scripts stay disabled. ZeroMQ runs its pinned native installer explicitly. The
 # Prime kernel uses a pinned uv image, exact Python version, and hash-locked Python dependencies.
@@ -36,6 +79,8 @@ RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
     && pi --version \
     && prime-agent --version \
     && rg --version \
+    && test "$(node -p "require('/opt/odie-code-server/package.json').version")" = "$CODE_SERVER_VERSION" \
+    && test "$(code-server --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" = "65e3a533e0df9f58a8f81ba5ac430cea826cae6eb507dccdc93498228783c068" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" = "$PI_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/prime-agent/package.json').version")" = "$PRIME_AGENT_VERSION" \
@@ -48,4 +93,4 @@ RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
       --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))'
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os" \
-      org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, Prime Agent, Valhalla, and pi-mcp-adapter"
+      org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, Prime Agent, browser VS Code, Valhalla, and pi-mcp-adapter"

@@ -18,6 +18,7 @@ env:
   PI_MCP_ADAPTER_VERSION: "2.26.0"
   PRIME_AGENT_VERSION: "0.8.0"
   VALHALLA_VERSION: "0.3.0"
+  CODE_SERVER_VERSION: "4.133.0"
 
 jobs:
   publish:
@@ -64,6 +65,7 @@ jobs:
               --build-arg "PI_MCP_ADAPTER_VERSION=$PI_MCP_ADAPTER_VERSION" \
               --build-arg "PRIME_AGENT_VERSION=$PRIME_AGENT_VERSION" \
               --build-arg "VALHALLA_VERSION=$VALHALLA_VERSION" \
+              --build-arg "CODE_SERVER_VERSION=$CODE_SERVER_VERSION" \
               --tag "$IMAGE:$TAG" \
               --file packages/gatekeeper-sessions/Dockerfile.pi \
               --provenance=mode=max \
