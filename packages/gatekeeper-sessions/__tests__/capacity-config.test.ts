@@ -39,6 +39,8 @@ const expectedBindings = [
   ["SESSION_SANDBOX_STANDARD_4", "CodingSessionSandboxStandard4"],
   ["SESSION_CAPACITY", "CodingSessionCapacity"],
   ["SESSION_POLICIES", "CodingSessionPolicy"],
+  ["SESSION_APPLICATION_PREVIEWS", "CodingSessionApplicationPreview"],
+  ["SESSION_REGISTRIES", "CodingSessionRegistry"],
 ] as const;
 
 describe.each([
@@ -66,17 +68,18 @@ describe.each([
     ));
   });
 
-  it("binds every active class but keeps the registry unbound", () => {
+  it("binds the preview relay and its direct generation-check registry", () => {
     expect(config.durable_objects.bindings).toEqual(expectedBindings.map(
       ([name, class_name]) => ({ name, class_name })
     ));
-    expect(config.durable_objects.bindings).not.toContainEqual(
-      expect.objectContaining({ class_name: "CodingSessionRegistry" })
-    );
   });
 
-  it("adds the capacity classes in one append-only migration", () => {
-    expect(config.migrations.at(-1)).toEqual({
+  it("keeps cookie-isolation verification absent from checked deployment configuration", () => {
+    expect(config.vars?.APPLICATION_PREVIEW_COOKIE_ISOLATION_VERIFIED).toBeUndefined();
+  });
+
+  it("keeps capacity migration v3 and adds only the preview relay in v4", () => {
+    expect(config.migrations.at(-2)).toEqual({
       tag: "v3",
       new_sqlite_classes: [
         "CodingSessionSandboxStandard2",
@@ -84,6 +87,10 @@ describe.each([
         "CodingSessionSandboxStandard4",
         "CodingSessionCapacity",
       ],
+    });
+    expect(config.migrations.at(-1)).toEqual({
+      tag: "v4",
+      new_sqlite_classes: ["CodingSessionApplicationPreview"],
     });
   });
 });

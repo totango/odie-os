@@ -133,6 +133,32 @@ let editorSignatureBinary = "";
 for (const byte of editorSignatureBytes) editorSignatureBinary += String.fromCharCode(byte);
 const editorToken = `${editorNonce}.${btoa(editorSignatureBinary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
 
+describe("disabled application preview routing", () => {
+  it("does not claim existing editor or terminal attachment routes", async () => {
+    const getByName = vi.fn();
+    const env = {
+      APPLICATION_PREVIEW_ENABLED: "false",
+      APPLICATION_PREVIEW_DOMAIN: "sessions.example.test",
+      APPLICATION_PREVIEW_CAPABILITY_HMAC_SECRET: "capability-secret",
+      APPLICATION_PREVIEW_INGRESS_SECRET: "ingress-secret",
+      SESSION_APPLICATION_PREVIEWS: { getByName },
+    } as any;
+    const ctx = { exports: {} } as any;
+
+    const editorResponse = await sessions.default.fetch(
+      new Request(`https://example.test/c/${editorToken}/`), env, ctx,
+    );
+    const attachResponse = await sessions.default.fetch(
+      new Request("https://example.test/gatekeeper/sessions/attach/token"), env, ctx,
+    );
+
+    expect(editorResponse.status).toBe(404);
+    expect(await editorResponse.text()).toBe("Browser editor is not configured");
+    expect(attachResponse.status).toBe(426);
+    expect(await attachResponse.text()).toBe("WebSocket upgrade required");
+    expect(getByName).not.toHaveBeenCalled();
+  });
+});
 
 describe("coding session browser editor HTTP gateway", () => {
   const secret = editorSecret;

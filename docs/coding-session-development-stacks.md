@@ -172,7 +172,22 @@ The minimal connector/landing profile needs integrations Postgres, Timescale, Re
 
 ## Preview and port-forwarding boundary
 
-Do not reuse a browser VS Code token as a general preview token. A preview receives a narrower record containing owner, session, sandbox generation, component, port, expiry, and revocation state. Authenticate every ordinary HTTP request and every WebSocket or SSE handshake. Handshake validation cannot revoke an established long-lived stream. Unlike the current pass-through editor proxy, the preview ingress therefore needs a Durable Object or equivalent stateful relay that terminates WebSockets, owns cancellable SSE streams, and forcibly closes them on expiry, revocation, generation change, and shutdown.
+> Foundation status: the Sessions Worker contains a disabled application-preview relay foundation.
+> It has no public minting or catalog activation. Production sets
+> `APPLICATION_PREVIEW_ENABLED=false`, and missing domain/HMAC/CloudFront ingress secrets also fail
+> closed before Durable Object allocation. A separate
+> `APPLICATION_PREVIEW_COOKIE_ISOLATION_VERIFIED=true` gate is also required but deliberately absent
+> from every checked Wrangler config and hosted input. A later rollout may use the proposed wildcard
+> shape `*.sessions.dev-unison.totango.com`, but that suffix is not approved for activation and no
+> DNS, certificate, CloudFront distribution, or enabled route is provisioned by this foundation. Before enablement, a production-shaped workerd or staging
+> test must prove the real Sandbox upgrade response, relay WebSocket, HTTP/SSE cancellation, and
+> generation revocation together; Node transport shims are foundation coverage, not rollout closure.
+
+Unique wildcard subdomains isolate origins, but they do not isolate the browser's registrable site. Rewriting an upstream `Set-Cookie` to be host-only prevents a server response from widening cookie scope, but malicious preview JavaScript can still use `document.cookie` with an allowed parent `Domain`. More broadly, every preview anywhere under `*.totango.com` is same-site with trusted Totango production properties. `SameSite=Lax` or `Strict` is therefore not a CSRF boundary: untrusted preview JavaScript and forms can make same-site requests and attempt cookie-tossing toward `.totango.com`. The proposed Totango suffix is forbidden for user-authored previews, not merely awaiting sibling-cookie validation, and the Worker rejects Totango parent domains even if its flags are supplied.
+
+Adding only the nested `sessions.dev-unison.totango.com` suffix to the Public Suffix List would still be insufficient because a child could target `dev-unison.totango.com` or `totango.com`. Activation requires a dedicated registrable domain with no trusted applications or cookies, used only for untrusted previews, where each capability host is directly below a browser-enforced PSL boundary, the dedicated apex itself is accepted in the PSL private section, and every broader ancestor is already a public suffix, or an equivalently proven per-host registrable boundary. Until that independent domain and browser behavior are proven, the cookie-isolation verification flag must remain absent.
+
+Do not reuse a browser VS Code token as a general preview token. A preview receives a narrower record containing owner, session, sandbox generation, component, port, expiry, and revocation state. Authenticate every ordinary HTTP request and every WebSocket or SSE handshake. Handshake validation cannot revoke an established long-lived stream. Unlike the current pass-through editor proxy, the preview ingress therefore needs a Durable Object or equivalent stateful relay that terminates WebSockets, owns cancellable SSE streams, and forcibly closes them on expiry, revocation, generation change, and shutdown. The Sandbox-side WebSocket is an ordinary outgoing socket and cannot be reconstructed after Durable Object restart, so an outbound-pinned preview connection may close and reconnect before the capability's 30-minute TTL; the relay does not promise one full-TTL WebSocket transport. Registry lookup is the generation authority and fails closed: an RPC error revokes the relay because availability cannot substitute for proof of the exact current generation.
 
 Use a unique hostname per preview, such as:
 

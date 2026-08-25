@@ -42,7 +42,9 @@
       { "name": "SESSION_SANDBOX_STANDARD_3", "class_name": "CodingSessionSandboxStandard3" },
       { "name": "SESSION_SANDBOX_STANDARD_4", "class_name": "CodingSessionSandboxStandard4" },
       { "name": "SESSION_CAPACITY", "class_name": "CodingSessionCapacity" },
-      { "name": "SESSION_POLICIES", "class_name": "CodingSessionPolicy" }
+      { "name": "SESSION_POLICIES", "class_name": "CodingSessionPolicy" },
+      { "name": "SESSION_APPLICATION_PREVIEWS", "class_name": "CodingSessionApplicationPreview" },
+      { "name": "SESSION_REGISTRIES", "class_name": "CodingSessionRegistry" }
     ]
   },
   "services": [
@@ -69,6 +71,10 @@
         "CodingSessionSandboxStandard4",
         "CodingSessionCapacity"
       ]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["CodingSessionApplicationPreview"]
     }
   ],
   "observability": {
