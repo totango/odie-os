@@ -202,16 +202,40 @@ test("worker entries carry the deploy contract", () => {
     "TEAM_PI_CODEX_BASE_URL",
     "TEAM_PI_CODEX_HMAC_SECRET",
   ]);
-  assert.deepEqual(sessions.bindings.find((binding) => binding.name === "SESSION_SANDBOX"), {
-    type: "durable_object_namespace",
-    name: "SESSION_SANDBOX",
-    class_name: "CodingSessionSandbox",
-  });
-  assert.deepEqual(sessions.bindings.find((binding) => binding.name === "SESSION_POLICIES"), {
-    type: "durable_object_namespace",
-    name: "SESSION_POLICIES",
-    class_name: "CodingSessionPolicy",
-  });
+  const sessionDurableObjects = sessions.bindings.filter(
+      (binding) => binding.type === "durable_object_namespace");
+  assert.deepEqual(sessionDurableObjects, [
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_SANDBOX",
+      class_name: "CodingSessionSandbox",
+    },
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_SANDBOX_STANDARD_2",
+      class_name: "CodingSessionSandboxStandard2",
+    },
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_SANDBOX_STANDARD_3",
+      class_name: "CodingSessionSandboxStandard3",
+    },
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_SANDBOX_STANDARD_4",
+      class_name: "CodingSessionSandboxStandard4",
+    },
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_CAPACITY",
+      class_name: "CodingSessionCapacity",
+    },
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_POLICIES",
+      class_name: "CodingSessionPolicy",
+    },
+  ]);
   assert.deepEqual(sessions.bindings.find((binding) => binding.name === "WORKSHOP_TOOLS"), {
     type: "service",
     name: "WORKSHOP_TOOLS",
@@ -219,12 +243,43 @@ test("worker entries carry the deploy contract", () => {
     entrypoint: "CodingSessionToolHostImpl",
   });
   assert.ok(!sessions.bindings.some((binding) => binding.class_name === "CodingSessionRegistry"));
-  assert.deepEqual(sessions.containers, [{
-    class_name: "CodingSessionSandbox",
-    image: "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
-    instance_type: "standard-1",
-    max_instances: 20,
-  }]);
+  const sessionImage =
+      "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60";
+  assert.deepEqual(sessions.containers, [
+    {
+      class_name: "CodingSessionSandbox",
+      image: sessionImage,
+      instance_type: "standard-1",
+      max_instances: 20,
+    },
+    {
+      class_name: "CodingSessionSandboxStandard2",
+      image: sessionImage,
+      instance_type: "standard-2",
+      max_instances: 8,
+    },
+    {
+      class_name: "CodingSessionSandboxStandard3",
+      image: sessionImage,
+      instance_type: "standard-3",
+      max_instances: 4,
+    },
+    {
+      class_name: "CodingSessionSandboxStandard4",
+      image: sessionImage,
+      instance_type: "standard-4",
+      max_instances: 2,
+    },
+  ]);
+  assert.deepEqual(sessions.migrations.at(-1), {
+    tag: "v3",
+    new_sqlite_classes: [
+      "CodingSessionSandboxStandard2",
+      "CodingSessionSandboxStandard3",
+      "CodingSessionSandboxStandard4",
+      "CodingSessionCapacity",
+    ],
+  });
 
   // Ambient gatekeepers are preinstalled on every core deploy; preinstalls must take no
   // secret inputs (nobody is around to supply them). Both also declare an account-level agent

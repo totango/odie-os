@@ -1,0 +1,88 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { CAPACITY_LIMITS } from "../src/capacity.js";
+
+interface WranglerConfig {
+  containers: Array<{
+    class_name: string;
+    image: string;
+    instance_type: string;
+    max_instances: number;
+  }>;
+  durable_objects: {
+    bindings: Array<{ name: string; class_name: string }>;
+  };
+  migrations: Array<{
+    tag: string;
+    new_sqlite_classes?: string[];
+  }>;
+}
+
+function readConfig(name: string): WranglerConfig {
+  return JSON.parse(
+    readFileSync(new URL(`../${name}`, import.meta.url), "utf8")
+  ) as WranglerConfig;
+}
+
+const expectedClasses = [
+  ["CodingSessionSandbox", "standard-1", 20],
+  ["CodingSessionSandboxStandard2", "standard-2", CAPACITY_LIMITS["standard-2"].global],
+  ["CodingSessionSandboxStandard3", "standard-3", CAPACITY_LIMITS["standard-3"].global],
+  ["CodingSessionSandboxStandard4", "standard-4", CAPACITY_LIMITS["standard-4"].global],
+] as const;
+
+const expectedBindings = [
+  ["SESSION_SANDBOX", "CodingSessionSandbox"],
+  ["SESSION_SANDBOX_STANDARD_2", "CodingSessionSandboxStandard2"],
+  ["SESSION_SANDBOX_STANDARD_3", "CodingSessionSandboxStandard3"],
+  ["SESSION_SANDBOX_STANDARD_4", "CodingSessionSandboxStandard4"],
+  ["SESSION_CAPACITY", "CodingSessionCapacity"],
+  ["SESSION_POLICIES", "CodingSessionPolicy"],
+] as const;
+
+describe.each([
+  [
+    "release",
+    "wrangler.jsonc",
+    "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+  ],
+  [
+    "Odie production",
+    "wrangler.odie-os-production.jsonc",
+    "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:979d98dc7984919191d87f6389fc1701c28a92cb3e46a995edd310d45fa13567",
+  ],
+])("%s capacity config", (_label, file, image) => {
+  const config = readConfig(file);
+
+  it("keeps every sandbox size on the pinned image with its pool limit", () => {
+    expect(config.containers).toEqual(expectedClasses.map(
+      ([class_name, instance_type, max_instances]) => ({
+        class_name,
+        image,
+        instance_type,
+        max_instances,
+      })
+    ));
+  });
+
+  it("binds every active class but keeps the registry unbound", () => {
+    expect(config.durable_objects.bindings).toEqual(expectedBindings.map(
+      ([name, class_name]) => ({ name, class_name })
+    ));
+    expect(config.durable_objects.bindings).not.toContainEqual(
+      expect.objectContaining({ class_name: "CodingSessionRegistry" })
+    );
+  });
+
+  it("adds the capacity classes in one append-only migration", () => {
+    expect(config.migrations.at(-1)).toEqual({
+      tag: "v3",
+      new_sqlite_classes: [
+        "CodingSessionSandboxStandard2",
+        "CodingSessionSandboxStandard3",
+        "CodingSessionSandboxStandard4",
+        "CodingSessionCapacity",
+      ],
+    });
+  });
+});

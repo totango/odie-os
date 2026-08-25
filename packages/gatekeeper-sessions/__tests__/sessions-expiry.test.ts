@@ -72,6 +72,10 @@ function runningRecord(overrides: Partial<StoredRecord> = {}): StoredRecord {
   };
 }
 
+function runningTerminal(id: string) {
+  return { id, getSnapshot: vi.fn(async () => ({ id, command: ["bash"], status: "running" })) };
+}
+
 describe("coding session terminal expiry", () => {
   beforeEach(() => {
     sandboxState.sandboxes.clear();
@@ -235,4 +239,42 @@ describe("coding session terminal expiry", () => {
     expect(namespace.get).toHaveBeenCalledWith("id:user-1");
     expect(stub.getSession).toHaveBeenCalledWith("session-1");
   });
+
+  it("does not reuse an old-generation shell creation promise for a replacement sandbox", async () => {
+    let finishOldShell!: (value: { id: string }) => void;
+    const oldCreate = vi.fn(() => new Promise<{ id: string }>(resolve => { finishOldShell = resolve; }));
+    const newCreate = vi.fn(async () => ({ id: "shell-new" }));
+    sandboxState.sandboxes.set("sandbox-1", {
+      getTerminal: vi.fn(async () => runningTerminal("term-old")),
+      createTerminal: oldCreate,
+    });
+    sandboxState.sandboxes.set("sandbox-2", {
+      getTerminal: vi.fn(async () => runningTerminal("term-new")),
+      createTerminal: newCreate,
+    });
+    const oldRecord = runningRecord({
+      terminalId: "term-old", sandboxId: "sandbox-1",
+      generation: 1,
+      development: { catalogRevision: 1, componentIds: [], instanceTier: "standard-1" },
+    } as any);
+    const { registry, kv, policies } = createRegistry(oldRecord);
+    const owner = { userId: "user-1", email: "user@example.com" };
+
+    const oldMint = registry.mintAttachCapability(owner, "session-1", "shell");
+    while (!oldCreate.mock.calls.length) await Promise.resolve();
+    kv.put("session:session-1", runningRecord({
+      terminalId: "term-new", sandboxId: "sandbox-2",
+      generation: 2,
+      development: { catalogRevision: 1, componentIds: [], instanceTier: "standard-1" },
+    } as any));
+
+    await expect(registry.mintAttachCapability(owner, "session-1", "shell")).resolves.toHaveProperty("url");
+    expect(newCreate).toHaveBeenCalledOnce();
+    expect(policies.storeTicket).toHaveBeenCalledWith(expect.objectContaining({
+      sandboxId: "sandbox-2", generation: 2, terminalId: "shell-new",
+    }));
+    finishOldShell({ id: "shell-old" });
+    await expect(oldMint).rejects.toThrow("not running");
+  });
+
 });
