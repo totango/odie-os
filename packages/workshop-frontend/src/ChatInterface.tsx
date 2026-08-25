@@ -5438,7 +5438,7 @@ function ChatInterface({
           startAfter,
         );
 
-        subscriptionRef.current = subscription;
+        subscriptionRef.current = subscription as unknown as RpcStub<{}>;
 
         if (isMounted) {
           setIsSubscribed(true);
