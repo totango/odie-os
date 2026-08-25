@@ -74,6 +74,7 @@ function createPolicy() {
     ctx: { storage: { kv: typeof kv; setAlarm: typeof setAlarm; deleteAlarm: typeof deleteAlarm }; id: { toString(): string }; exports: { CodingSessionRegistry: typeof namespace } };
   };
   policy.env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
     SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
     WORKSHOP_TOOLS: tools,
     GITHUB_APP_ID: "1",
@@ -178,10 +179,16 @@ describe("coding session asynchronous startup", () => {
   it("accepts omitted legacy preflight but rejects an explicitly empty development selection before create", async () => {
     const kv = createKv();
     const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
-      ctx: { storage: { kv: typeof kv } };
+      ctx: { storage: any };
     };
-    registry.ctx = { storage: { kv } };
+    registry.ctx = { storage: {
+      kv,
+      setAlarm: vi.fn(async () => undefined),
+      deleteAlarm: vi.fn(async () => undefined),
+      transactionSync: (callback: () => unknown) => callback(),
+    } };
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_CAPACITY: { getByName: () => ({ snapshot: vi.fn(async () => ({ available: true, active: 0, limit: 1 })) }) },
     };
 
@@ -203,12 +210,32 @@ describe("coding session asynchronous startup", () => {
     expect(kv.values.size).toBe(0);
   });
 
+  it("fails closed before writing when a development plan reaches writer-disabled mode", async () => {
+    const kv = createKv();
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      env: Record<string, unknown>; ctx: { storage: any };
+    };
+    registry.env = { CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "false" };
+    registry.ctx = { storage: { kv } };
+    vi.spyOn(registry, "preflightSession").mockResolvedValue({
+      catalogRevision: 1, selection: { componentIds: ["x"] }, resolvedComponentIds: ["x"],
+      selectedTier: "standard-1", capacity: { available: true, active: 0, limit: 1 },
+      issues: [], canCreate: true,
+    } as any);
+
+    await expect(registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Dark", repositories: ["jarvis"], developmentStack: { componentIds: ["x"] } },
+    )).rejects.toThrow("Development sessions require durable lifecycle support.");
+    expect(kv.values.size).toBe(0);
+  });
+
   it("create returns a persisted starting session before deferred startup work runs", async () => {
     const kv = createKv();
     const scheduled = vi.fn(async () => undefined);
     const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
       env: Record<string, unknown>;
-      ctx: { storage: { kv: typeof kv } };
+      ctx: { storage: any };
     };
     const policy = { configure: vi.fn(), startSessionStartup: scheduled };
     const tools = { prepareSessionStartup: vi.fn() };
@@ -217,7 +244,10 @@ describe("coding session asynchronous startup", () => {
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
       WORKSHOP_TOOLS: tools,
     };
-    registry.ctx = { storage: { kv } };
+    registry.ctx = { storage: {
+      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      transactionSync: (callback: () => unknown) => callback(),
+    } };
 
     const summary = await registry.createSession(
       { userId: "user-1", email: "user@example.com" },
@@ -227,7 +257,104 @@ describe("coding session asynchronous startup", () => {
     expect(summary.status).toBe("starting");
     expect(kv.get<StoredRecord>(`session:${summary.id}`)?.status).toBe("starting");
     expect(scheduled).toHaveBeenCalledOnce();
+    expect(kv.get(`start:${summary.id}`)).toBeUndefined();
+    expect(kv.get(`stop:${summary.id}`)).toBeUndefined();
     expect(tools.prepareSessionStartup).not.toHaveBeenCalled();
+  });
+
+  it("keeps legacy direct startup cleanup and emits no lifecycle operation keys when the flag is false", async () => {
+    const kv = createKv();
+    const destroy = vi.fn(async () => undefined);
+    vi.mocked(getSandbox).mockReturnValueOnce({ destroy } as any);
+    const policy = {
+      configure: vi.fn(),
+      startSessionStartup: vi.fn(async () => { throw new Error("alarm unavailable"); }),
+    };
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      env: Record<string, unknown>; ctx: { storage: any };
+    };
+    registry.env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "false",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+    };
+    registry.ctx = { storage: { kv } };
+
+    const summary = await registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Repair", repositories: ["jarvis"] },
+    );
+
+    expect(summary).toMatchObject({ status: "failed", error: "alarm unavailable" });
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(kv.get(`start:${summary.id}`)).toBeUndefined();
+    expect(kv.get(`stop:${summary.id}`)).toBeUndefined();
+  });
+
+  it("resumes configure-phase start work after persistence before scheduling", async () => {
+    const kv = createKv();
+    const configure = vi.fn()
+      .mockRejectedValueOnce(new Error("configure unavailable"))
+      .mockResolvedValue(undefined);
+    const startSessionStartup = vi.fn(async () => undefined);
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      env: Record<string, unknown>; ctx: { storage: any };
+    };
+    registry.env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ configure, startSessionStartup }) },
+    };
+    registry.ctx = { storage: {
+      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      transactionSync: (callback: () => unknown) => callback(),
+    } };
+
+    const summary = await registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Repair", repositories: ["jarvis"] },
+    );
+    expect(kv.get<any>(`start:${summary.id}`)).toMatchObject({ phase: "configure", attempts: 1 });
+    expect(startSessionStartup).not.toHaveBeenCalled();
+
+    await registry.alarm();
+    expect(configure).toHaveBeenCalledTimes(2);
+    expect(startSessionStartup).toHaveBeenCalledOnce();
+    expect(kv.get(`start:${summary.id}`)).toBeUndefined();
+  });
+
+  it("replays schedule-phase work after a lost startup acceptance response", async () => {
+    const kv = createKv();
+    let accepted = false;
+    const startSessionStartup = vi.fn(async () => {
+      if (!accepted) {
+        accepted = true;
+        throw new Error("response lost");
+      }
+    });
+    const policy = { configure: vi.fn(), startSessionStartup };
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      env: Record<string, unknown>; ctx: { storage: any };
+    };
+    registry.env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+    };
+    registry.ctx = { storage: {
+      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      transactionSync: (callback: () => unknown) => callback(),
+    } };
+
+    const summary = await registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Repair", repositories: ["jarvis"] },
+    );
+    expect(kv.get<any>(`start:${summary.id}`)).toMatchObject({ phase: "schedule", attempts: 1 });
+
+    await registry.alarm();
+    expect(startSessionStartup).toHaveBeenCalledTimes(2);
+    expect(kv.get(`start:${summary.id}`)).toBeUndefined();
   });
 
   it("stores Prime sessions in a rollback-readable Pi record while exposing Prime publicly", async () => {
@@ -235,9 +362,10 @@ describe("coding session asynchronous startup", () => {
     const policy = { configure: vi.fn(), startSessionStartup: vi.fn(async () => undefined) };
     const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
       env: Record<string, unknown>;
-      ctx: { storage: { kv: typeof kv } };
+      ctx: { storage: any };
     };
     registry.env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
       WORKSHOP_TOOLS: { prepareSessionStartup: vi.fn() },
@@ -245,7 +373,10 @@ describe("coding session asynchronous startup", () => {
       TEAM_PI_CODEX_BASE_URL: "https://team-pi-proxy.unison.totango.com/api/odie",
       TEAM_PI_CODEX_HMAC_SECRET: "worker-secret",
     };
-    registry.ctx = { storage: { kv } };
+    registry.ctx = { storage: {
+      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      transactionSync: (callback: () => unknown) => callback(),
+    } };
 
     const summary = await registry.createSession(
       { userId: "user-1", email: "user@example.com" },
@@ -268,31 +399,43 @@ describe("coding session asynchronous startup", () => {
     expect(kv.get("startup")).toBeUndefined();
   });
 
-  it("persists a failed session when durable startup cannot be scheduled", async () => {
+  it("retries and durably fences a session when startup cannot be scheduled", async () => {
     const kv = createKv();
-    const destroy = vi.fn(async () => undefined);
-    vi.mocked(getSandbox).mockReturnValueOnce({ destroy } as any);
     const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
       env: Record<string, unknown>;
-      ctx: { storage: { kv: typeof kv } };
+      ctx: { storage: any };
     };
     registry.env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: {
         idFromName: (id: string) => id,
-        get: () => ({ configure: vi.fn(), startSessionStartup: vi.fn(async () => { throw new Error("alarm unavailable"); }) }),
+        get: () => ({
+          configure: vi.fn(), cancelSessionStartup: vi.fn(async () => undefined),
+          startSessionStartup: vi.fn(async () => { throw new Error("alarm unavailable"); }),
+        }),
       },
     };
-    registry.ctx = { storage: { kv } };
+    registry.ctx = { storage: {
+      kv,
+      setAlarm: vi.fn(async () => undefined),
+      deleteAlarm: vi.fn(async () => undefined),
+      transactionSync: (callback: () => unknown) => callback(),
+    } };
 
     const summary = await registry.createSession(
       { userId: "user-1", email: "user@example.com" },
       { title: "Repair", repositories: ["jarvis"] },
     );
 
-    expect(summary).toMatchObject({ status: "failed", error: "alarm unavailable" });
-    expect(kv.get<StoredRecord>(`session:${summary.id}`)?.status).toBe("failed");
-    expect(destroy).toHaveBeenCalledOnce();
+    expect(summary).toMatchObject({ status: "starting" });
+    expect(kv.get<any>(`start:${summary.id}`)).toMatchObject({ attempts: 1, phase: "schedule" });
+    await registry.alarm();
+    await registry.alarm();
+    expect(kv.get<StoredRecord>(`session:${summary.id}`)).toMatchObject({
+      status: "stopping", error: "Coding session startup could not be scheduled.",
+    });
+    expect(kv.get<any>(`stop:${summary.id}`)).toMatchObject({ phase: "cancel" });
   });
 
   it("alarm progresses through clone, materialization, and running terminal storage", async () => {
@@ -546,6 +689,100 @@ describe("coding session asynchronous startup", () => {
     expect(registry.isCurrentSessionGeneration("session-1", "sandbox-old")).toBe(false);
   });
 
+  it("expires an unconfigured token policy ticket without requiring a sandbox policy", async () => {
+    const { policy, kv } = createPolicy();
+    kv.delete("policy");
+    await policy.storeTicket({
+      sandboxId: "sandbox-1", terminalId: "terminal-1", userId: "user-1",
+      sessionId: "session-1", terminalKind: "opencode", expiresAt: Date.now() - 1,
+    });
+    await expect(policy.alarm()).resolves.toBeUndefined();
+    expect(kv.get("ticket")).toBeUndefined();
+  });
+
+  it("fails component status without component APIs when the primary terminal container is absent", async () => {
+    const { policy, kv, registry } = createPolicy();
+    (registry as any).developmentUpdated = vi.fn(async () => true);
+    const executionSpec = {
+      processes: [{ id: "service", phase: "service", argv: ["service"], cwd: "/workspace", environment: [] }],
+      images: [], minimumDiskBytes: 1, requirements: { configuration: [], capabilities: [] },
+      readiness: [{ processId: "service", kind: "tcp", port: 3000, timeoutMs: 10 }],
+      liveness: [{ processId: "service", kind: "tcp", port: 3000, timeoutMs: 10 }],
+      applications: [], logs: { maxBytes: 100, maxLines: 10 }, restart: { maxAttempts: 0, backoffMs: 0 },
+      stop: { processOrder: ["service"], graceMs: 10 }, dataDisposition: "disposable", egress: [],
+    } as any;
+    const intent = {
+      sessionId: "session-1", sandboxId: "sandbox-1", generation: 1, catalogRevision: 1,
+      instanceTier: "standard-1", components: [{
+        id: "api", revision: 1, title: "API", dependencyIds: [], applications: [], executionSpec,
+      }],
+    } as any;
+    kv.put("policy", { ...kv.get<any>("policy"), generation: 1, developmentIntent: intent });
+    kv.put("primary-terminal-id", "term-1");
+    kv.put("development-supervision", {
+      generation: 1, sandboxId: "sandbox-1", updatedAt: 1,
+      components: { api: { status: "pending", processes: {}, completedJobs: [],
+        logs: { cursors: {}, text: "", bytes: 0, lines: 0, truncated: false, terminals: {} }, updatedAt: 1 } },
+    });
+    const exec = vi.fn();
+    const exists = vi.fn();
+    sandboxState.sandboxes.set("sandbox-1", { listTerminals: vi.fn(async () => []), exec, exists });
+    await policy.alarm();
+    expect(exec).not.toHaveBeenCalled();
+    expect(exists).not.toHaveBeenCalled();
+    expect(kv.get<any>("development-supervision").components.api).toMatchObject({ status: "failed" });
+    expect(registry.developmentUpdated).toHaveBeenCalledOnce();
+  });
+
+  it("serializes paused reconcile before cleanup so no launch occurs after the cleanup fence", async () => {
+    const { policy, kv, registry } = createPolicy();
+    (registry as any).developmentUpdated = vi.fn(async () => true);
+    const executionSpec = {
+      processes: [{ id: "service", phase: "service", argv: ["service"], cwd: "/workspace", environment: [] }],
+      images: [], minimumDiskBytes: 1, requirements: { configuration: [], capabilities: [] },
+      readiness: [{ processId: "service", kind: "tcp", port: 3000, timeoutMs: 10 }],
+      liveness: [{ processId: "service", kind: "tcp", port: 3000, timeoutMs: 10 }],
+      applications: [], logs: { maxBytes: 100, maxLines: 10 }, restart: { maxAttempts: 0, backoffMs: 0 },
+      stop: { processOrder: ["service"], graceMs: 10 }, dataDisposition: "disposable", egress: [],
+    } as any;
+    const intent = { sessionId: "session-1", sandboxId: "sandbox-1", generation: 1, catalogRevision: 1,
+      instanceTier: "standard-1", components: [{ id: "api", revision: 1, title: "API", dependencyIds: [], applications: [], executionSpec }] } as any;
+    kv.put("policy", { ...kv.get<any>("policy"), generation: 1, developmentIntent: intent });
+    kv.put("primary-terminal-id", "term-1");
+    kv.put("development-supervision", { generation: 1, sandboxId: "sandbox-1", updatedAt: 1,
+      components: { api: { status: "pending", processes: {}, completedJobs: [],
+        logs: { cursors: {}, text: "", bytes: 0, lines: 0, truncated: false, terminals: {} }, updatedAt: 1 } } });
+    let releaseTerminals!: () => void;
+    const terminalGate = new Promise<void>(resolve => { releaseTerminals = resolve; });
+    const kill = vi.fn(async () => undefined);
+    const process = {
+      id: "process-1", pid: 1, exitCode: Promise.resolve(0),
+      status: vi.fn(async () => ({ id: "process-1", pid: 1,
+        command: ["/usr/bin/env", "ODIE_SUPERVISION_MARKER=g1:api:service:a0", "service"],
+        cwd: "/workspace", startedAt: "0", state: "running" as const })),
+      logs: vi.fn(async () => new ReadableStream({ start: controller => controller.close() })),
+      waitForPort: vi.fn(async () => undefined), kill,
+      waitForExit: vi.fn(async () => ({ code: 0 })),
+    } as any;
+    const exec = vi.fn(async () => process);
+    const sandbox = {
+      listTerminals: vi.fn(async () => { await terminalGate; return [{ id: "term-1" }]; }),
+      exec, getProcess: vi.fn(async () => process),
+      listProcesses: vi.fn(async () => [await process.status()]),
+    };
+    sandboxState.sandboxes.set("sandbox-1", sandbox);
+    const alarm = policy.alarm();
+    await Promise.resolve();
+    const cleanup = policy.cleanupDevelopment("session-1", 1, "sandbox-1");
+    expect(exec).not.toHaveBeenCalled();
+    releaseTerminals();
+    await alarm;
+    await cleanup;
+    expect(exec).toHaveBeenCalledOnce();
+    expect(exec.mock.invocationCallOrder[0]).toBeLessThan(kill.mock.invocationCallOrder[0]!);
+    expect(kv.get("development-supervision")).toBeUndefined();
+  });
+
   it("ticket alarm behavior remains isolated from startup state", async () => {
     const { policy, kv } = createPolicy();
     kv.put("ticket", { expiresAt: Date.now() - 1 });
@@ -589,6 +826,51 @@ describe("coding session asynchronous startup", () => {
     expect(deleteAlarm).toHaveBeenCalledOnce();
   });
 
+  it("persists a cancellation fence before configuration and rejects the delayed exact start", async () => {
+    const { policy, kv } = createPolicy();
+    kv.delete("policy");
+
+    await policy.cancelSessionStartup("session-1", 1, "sandbox-1");
+    policy.configure({
+      sessionId: "session-1", sandboxId: "sandbox-1", generation: 1, runtime: "opencode",
+      owner: { userId: "user-1", email: "user@example.com" }, repositories: ["jarvis"],
+    });
+
+    await expect(policy.startSessionStartup(startupRecord({ generation: 1 })))
+      .rejects.toThrow("Coding session startup was cancelled.");
+    expect(kv.get("startup")).toBeUndefined();
+  });
+
+  it("serializes an accepted start before cancellation and deletes it under the same lifecycle fence", async () => {
+    const { policy, kv, setAlarm } = createPolicy();
+    let releaseAlarm!: () => void;
+    let enteredAlarm!: () => void;
+    const alarmEntered = new Promise<void>(resolve => { enteredAlarm = resolve; });
+    setAlarm.mockImplementationOnce(() => {
+      enteredAlarm();
+      return new Promise<void>(resolve => { releaseAlarm = resolve; });
+    });
+
+    const starting = policy.startSessionStartup(startupRecord());
+    await alarmEntered;
+    const canceling = policy.cancelSessionStartup("session-1", 0, "sandbox-1");
+    expect(kv.get("startup")).toBeDefined();
+    releaseAlarm();
+    await starting;
+    await canceling;
+
+    expect(kv.get("startup")).toBeUndefined();
+  });
+
+  it("treats missing policy as no authorized development cleanup work", async () => {
+    const { policy, kv } = createPolicy();
+    kv.delete("policy");
+    vi.mocked(getSandbox).mockClear();
+
+    await expect(policy.cleanupDevelopment("session-1", 1, "sandbox-1")).resolves.toBeUndefined();
+    expect(getSandbox).not.toHaveBeenCalled();
+  });
+
   it("backfills a missing sandbox generation on a matching legacy policy", () => {
     const { policy, kv } = createPolicy();
     kv.put("policy", {
@@ -618,12 +900,103 @@ describe("coding session asynchronous startup", () => {
     })).toThrow("Coding session policy is immutable.");
   });
 
+  it("does not recreate start work when stop wins an in-flight configure", async () => {
+    const kv = createKv();
+    let releaseConfigure!: () => void;
+    let enteredConfigure!: () => void;
+    const configureEntered = new Promise<void>(resolve => { enteredConfigure = resolve; });
+    const configure = vi.fn(() => {
+      enteredConfigure();
+      return new Promise<void>(resolve => { releaseConfigure = resolve; });
+    });
+    const policy = {
+      configure, startSessionStartup: vi.fn(), cancelSessionStartup: vi.fn(async () => undefined),
+    };
+    const destroy = vi.fn(async () => undefined);
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      env: Record<string, unknown>; ctx: { storage: any };
+    };
+    registry.env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+    };
+    registry.ctx = { storage: {
+      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      transactionSync: (callback: () => unknown) => callback(),
+    } };
+
+    const creating = registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Repair", repositories: ["jarvis"] },
+    );
+    await configureEntered;
+    const [sessionKey, persisted] = [...kv.values].find(([key]) => key.startsWith("session:"))!;
+    const sessionId = sessionKey.slice("session:".length);
+    sandboxState.sandboxes.set((persisted as StoredRecord).sandboxId, { destroy });
+
+    await registry.stopSession(sessionId);
+    releaseConfigure();
+    await expect(creating).resolves.toMatchObject({ status: "stopped" });
+    expect(kv.get(`start:${sessionId}`)).toBeUndefined();
+    expect(policy.startSessionStartup).not.toHaveBeenCalled();
+  });
+
+  it("atomically removes durable start work before awaiting cancellation", async () => {
+    const { registry, kv } = createRegistryWith(startingRecord());
+    kv.put("start:session-1", {
+      sessionId: "session-1", sandboxId: "sandbox-1", generation: 0,
+      owner: { userId: "user-1", email: "user@example.com" }, attempts: 0, phase: "schedule",
+    });
+    let releaseCancel!: () => void;
+    let enteredCancel!: () => void;
+    const cancelEntered = new Promise<void>(resolve => { enteredCancel = resolve; });
+    const cancelSessionStartup = vi.fn(() => {
+      enteredCancel();
+      return new Promise<void>(resolve => { releaseCancel = resolve; });
+    });
+    sandboxState.sandboxes.set("sandbox-1", { destroy: vi.fn(async () => undefined) });
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "false",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ cancelSessionStartup }) },
+    };
+
+    const stopping = registry.stopSession("session-1");
+    await cancelEntered;
+    expect(kv.get("start:session-1")).toBeUndefined();
+    expect(kv.get<any>("stop:session-1")).toMatchObject({ phase: "cancel" });
+    releaseCancel();
+    await stopping;
+  });
+
+  it("uses legacy direct stop without lifecycle operation keys when the writer flag is false", async () => {
+    const { registry, kv } = createRegistryWith(startingRecord());
+    const cancelSessionStartup = vi.fn(async () => undefined);
+    const destroy = vi.fn(async () => undefined);
+    sandboxState.sandboxes.set("sandbox-1", { destroy });
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "false",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ cancelSessionStartup }) },
+    };
+
+    await registry.stopSession("session-1");
+
+    expect(cancelSessionStartup).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(kv.get("start:session-1")).toBeUndefined();
+    expect(kv.get("stop:session-1")).toBeUndefined();
+    expect(kv.get<any>("session:session-1")).toMatchObject({ status: "stopped" });
+  });
+
   it("cancels durable startup before destroying a starting sandbox", async () => {
     const { registry } = createRegistryWith(startingRecord());
     const cancelSessionStartup = vi.fn(async () => undefined);
     const destroy = vi.fn(async () => undefined);
     sandboxState.sandboxes.set("sandbox-1", { destroy });
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: {
         idFromName: (id: string) => id,
@@ -637,11 +1010,12 @@ describe("coding session asynchronous startup", () => {
     expect(cancelSessionStartup.mock.invocationCallOrder[0]).toBeLessThan(destroy.mock.invocationCallOrder[0]!);
   });
 
-  it("logs startup cancellation failure but still destroys and stops the session", async () => {
+  it("retains durable stop work when startup cancellation fails", async () => {
     const { registry, kv } = createRegistryWith(startingRecord());
     const destroy = vi.fn(async () => undefined);
     sandboxState.sandboxes.set("sandbox-1", { destroy });
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: {
         idFromName: (id: string) => id,
@@ -649,28 +1023,31 @@ describe("coding session asynchronous startup", () => {
       },
     };
 
-    await registry.stopSession("session-1");
+    await expect(registry.stopSession("session-1")).rejects.toThrow("cancel failed");
 
-    expect(destroy).toHaveBeenCalledOnce();
-    expect(kv.get<StoredRecord>("session:session-1")).toMatchObject({ status: "stopped", terminalId: undefined });
+    expect(destroy).not.toHaveBeenCalled();
+    expect(kv.get<StoredRecord>("session:session-1")).toMatchObject({ status: "stopping" });
+    expect(kv.get<any>("stop:session-1")).toMatchObject({ phase: "cancel" });
   });
 
-  it("marks a session failed when sandbox destruction prevents stopping", async () => {
+  it("keeps durable stop work fenced when sandbox destruction fails", async () => {
     const { registry, kv } = createRegistryWith(startingRecord({ status: "running", terminalId: "terminal-1" }));
     sandboxState.sandboxes.set("sandbox-1", {
       destroy: vi.fn(async () => { throw new Error("destroy failed"); }),
     });
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ cancelSessionStartup: vi.fn() }) },
     };
 
     await expect(registry.stopSession("session-1")).rejects.toThrow("destroy failed");
 
     expect(kv.get<StoredRecord>("session:session-1")).toMatchObject({
-      status: "failed",
-      error: "destroy failed",
+      status: "stopping",
       terminalId: "terminal-1",
     });
+    expect(kv.get<any>("stop:session-1")).toMatchObject({ phase: "destroy", sandboxId: "sandbox-1" });
   });
 
   it("resets retry accounting when startup advances to another phase", async () => {
@@ -769,7 +1146,7 @@ describe("coding session asynchronous startup", () => {
     const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
       env: Record<string, unknown>; ctx: { storage: { kv: typeof kv } };
     };
-    registry.env = { SESSION_CAPACITY: { getByName: () => ({ reserve }) } };
+    registry.env = { CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true", SESSION_CAPACITY: { getByName: () => ({ reserve }) } };
     registry.ctx = { storage: { kv } };
     vi.spyOn(registry, "preflightSession").mockResolvedValue({
       catalogRevision: 1, selection: { componentIds: ["x"], requestedTier: "standard-2" },
@@ -780,8 +1157,8 @@ describe("coding session asynchronous startup", () => {
     await expect(registry.createSession(
       { userId: "user-1", email: "user@example.com" },
       { title: "Heavy", repositories: ["jarvis"], developmentStack: { componentIds: ["x"] } },
-    )).rejects.toThrow("capacity is unavailable");
-    expect(reserve).toHaveBeenCalledOnce();
+    )).rejects.toThrow("current eligible server plan");
+    expect(reserve).not.toHaveBeenCalled();
     expect([...kv.values.keys()].some(key => key.startsWith("session:"))).toBe(false);
   });
 
@@ -799,10 +1176,12 @@ describe("coding session asynchronous startup", () => {
       ...key, state: "active" as const, createdAt: 1, updatedAt: 2,
     }));
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_CAPACITY: { getByName: () => ({ activate }) },
     };
 
     await expect(registry.startupSucceeded("session-1", 0, "sandbox-1", "stale")).resolves.toBe(false);
+    await expect(registry.startupSucceeded("session-1", 1, "sandbox-1", "term-1")).resolves.toBe(true);
     await expect(registry.startupSucceeded("session-1", 1, "sandbox-1", "term-1")).resolves.toBe(true);
     expect(activate).toHaveBeenCalledOnce();
     expect(kv.get<any>("session:session-1")).toMatchObject({ status: "running", terminalId: "term-1" });
@@ -820,24 +1199,96 @@ describe("coding session asynchronous startup", () => {
     const destroy = vi.fn(async () => undefined);
     sandboxState.sandboxes.set("sandbox-1", { destroy });
     const release = vi.fn(async () => { throw new Error("capacity unavailable"); });
-    const standard3 = { name: "standard-3" };
+    const standard3 = { name: "standard-3", idFromName: (id: string) => ({ toString: () => id }) };
     const setAlarm = vi.fn(async () => undefined);
     (registry as typeof registry & { env: Record<string, unknown>; ctx: any }).env = {
-      SESSION_SANDBOX: { name: "standard-1" }, SESSION_SANDBOX_STANDARD_3: standard3,
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+      SESSION_SANDBOX: { name: "standard-1" },
+      SESSION_SANDBOX_STANDARD_3: standard3,
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ cancelSessionStartup: vi.fn() }) },
       SESSION_CAPACITY: { getByName: () => ({ release }) },
     };
     (registry as typeof registry & { ctx: any }).ctx.storage.setAlarm = setAlarm;
 
-    await registry.stopSession("session-1");
+    await expect(registry.stopSession("session-1")).rejects.toThrow("capacity unavailable");
     expect(vi.mocked(getSandbox)).toHaveBeenCalledWith(standard3, "sandbox-1");
     expect(destroy.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]!);
-    expect(kv.get<any>("pending-release:lease-1")).toEqual(lease);
-    expect(kv.get<any>("session:session-1")).toMatchObject({ status: "stopped", capacityLease: undefined });
+    expect(kv.get<any>("stop:session-1")).toMatchObject({ phase: "release", lease });
+    expect(kv.get<any>("session:session-1")).toMatchObject({ status: "stopping", capacityLease: lease });
 
     release.mockResolvedValue(undefined);
     await registry.alarm();
     expect(release).toHaveBeenCalledTimes(2);
-    expect(kv.get("pending-release:lease-1")).toBeUndefined();
+    expect(kv.get("stop:session-1")).toBeUndefined();
+    expect(kv.get<any>("session:session-1")).toMatchObject({ status: "stopped", capacityLease: undefined });
+  });
+
+  it("cleans development processes before durable stop destroy and finalize", async () => {
+    const { registry, kv } = createRegistryWith(startingRecord({
+      status: "running", terminalId: "term-1", generation: 1,
+      development: { catalogRevision: 1, componentIds: ["api"], instanceTier: "standard-1" },
+    } as any));
+    const cleanupDevelopment = vi.fn(async () => undefined);
+    const destroy = vi.fn(async () => undefined);
+    sandboxState.sandboxes.set("sandbox-1", { destroy });
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "false",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ cancelSessionStartup: vi.fn(), cleanupDevelopment }) },
+    };
+    await registry.stopSession("session-1");
+    expect(cleanupDevelopment.mock.invocationCallOrder[0]).toBeLessThan(destroy.mock.invocationCallOrder[0]!);
+    expect(kv.get<any>("session:session-1")).toMatchObject({ status: "stopped", terminalId: undefined });
+    expect(kv.get("stop:session-1")).toBeUndefined();
+  });
+
+  it("keeps legacy restart scheduling free of new start and stop operation keys when the flag is false", async () => {
+    const { registry, kv } = createRegistryWith(startingRecord({ status: "stopped" }));
+    sandboxState.sandboxes.set("sandbox-1", { destroy: vi.fn(async () => undefined) });
+    const policy = { configure: vi.fn(), startSessionStartup: vi.fn(async () => undefined) };
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "false",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+    };
+
+    await expect(registry.restartSession(
+      "session-1", { userId: "user-1", email: "user@example.com" },
+    )).resolves.toMatchObject({ status: "starting" });
+
+    expect(policy.startSessionStartup).toHaveBeenCalledOnce();
+    expect([...kv.values.keys()].some(key => key.startsWith("start:"))).toBe(false);
+    expect([...kv.values.keys()].some(key => key.startsWith("stop:"))).toBe(false);
+  });
+
+  it("prepares replacement intent and cleans development processes before restart destroy", async () => {
+    const { registry, kv } = createRegistryWith(startingRecord({
+      status: "running", terminalId: "term-1", generation: 1,
+      development: { catalogRevision: 1, componentIds: ["api"], instanceTier: "standard-1" },
+    } as any));
+    const prepareDevelopmentRestart = vi.fn(async () => undefined);
+    const cleanupDevelopment = vi.fn(async () => undefined);
+    const configure = vi.fn();
+    const startSessionStartup = vi.fn();
+    const destroy = vi.fn(async () => undefined);
+    sandboxState.sandboxes.set("sandbox-1", { destroy });
+    const policy = {
+      hasDevelopmentIntent: vi.fn(() => true),
+      prepareDevelopmentRestart, cleanupDevelopment, configure, startSessionStartup,
+    };
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+    };
+    const restarted = await registry.restartSession(
+      "session-1", { userId: "user-1", email: "user@example.com" },
+    );
+    expect(restarted.status).toBe("starting");
+    expect(prepareDevelopmentRestart.mock.invocationCallOrder[0])
+      .toBeLessThan(cleanupDevelopment.mock.invocationCallOrder[0]!);
+    expect(cleanupDevelopment.mock.invocationCallOrder[0]).toBeLessThan(destroy.mock.invocationCallOrder[0]!);
+    expect(kv.get<any>("session:session-1")).toMatchObject({ generation: 2, status: "starting" });
   });
 
   it("destroys then atomically transfers a heavy lease to the next generation", async () => {
@@ -856,6 +1307,7 @@ describe("coding session asynchronous startup", () => {
     }));
     const policy = { configure: vi.fn(), startSessionStartup: vi.fn() };
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: {}, SESSION_SANDBOX_STANDARD_4: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_CAPACITY: { getByName: () => ({ transfer }) },
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
@@ -925,6 +1377,7 @@ describe("coding session asynchronous startup", () => {
       const transfer = vi.fn(async () => ({ ...newLease, state: "reserved" as const, createdAt: 1, updatedAt: 2 }));
       const policy = { configure: vi.fn(), startSessionStartup: vi.fn() };
       (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
         SESSION_SANDBOX: {},
         SESSION_SANDBOX_STANDARD_2: { idFromName: (id: string) => ({ toString: () => id }) },
         SESSION_CAPACITY: { getByName: () => ({ transfer }) },
@@ -959,6 +1412,7 @@ describe("coding session asynchronous startup", () => {
     }));
     const policy = { configure: vi.fn(), startSessionStartup: vi.fn() };
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: {},
       SESSION_SANDBOX_STANDARD_2: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_CAPACITY: { getByName: () => ({ transfer }) },
@@ -1036,7 +1490,10 @@ describe("coding session asynchronous startup", () => {
     const release = vi.fn(async () => undefined);
     sandboxState.sandboxes.set("sandbox-1", { destroy });
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
-      SESSION_SANDBOX: {}, SESSION_SANDBOX_STANDARD_2: {},
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+      SESSION_SANDBOX: {},
+      SESSION_SANDBOX_STANDARD_2: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ cancelSessionStartup: vi.fn() }) },
       SESSION_CAPACITY: { getByName: () => ({ release }) },
     };
     await registry.stopSession("session-1");
@@ -1055,6 +1512,7 @@ describe("coding session asynchronous startup", () => {
     setAlarm.mockRejectedValueOnce(new Error("alarm unavailable"));
     kv.put.mockClear();
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: {}, SESSION_POLICIES: {},
     };
 
@@ -1077,6 +1535,7 @@ describe("coding session asynchronous startup", () => {
     setAlarm.mockRejectedValueOnce(new Error("alarm unavailable"));
     const release = vi.fn(async () => undefined);
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_CAPACITY: { getByName: () => ({ release }) },
     };
 
@@ -1085,52 +1544,57 @@ describe("coding session asynchronous startup", () => {
     expect(kv.get("pending-release:lease-1")).toEqual(lease);
   });
 
-  it("keeps a heavy create stopping when scheduling and destruction both fail", async () => {
+  it("rejects a fabricated executable plan before persisting generation authority", async () => {
+    const kv = createKv();
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      env: Record<string, unknown>; ctx: { storage: { kv: typeof kv } };
+    };
+    registry.env = { CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true" };
+    registry.ctx = { storage: { kv } };
+    vi.spyOn(registry, "preflightSession").mockResolvedValue({
+      catalogRevision: 1, selection: { componentIds: ["x"] }, resolvedComponentIds: ["x"],
+      selectedTier: "standard-2", capacity: { available: true, active: 0, limit: 1 }, issues: [], canCreate: true,
+    } as any);
+    await expect(registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Heavy", repositories: ["jarvis"], developmentStack: { componentIds: ["x"] } },
+    )).rejects.toThrow("current eligible server plan");
+    expect([...kv.values.keys()].some(key => key.startsWith("session:"))).toBe(false);
+  });
+
+  it("recovers initial standard-1 schedule and destroy failure from durable stop alarm", async () => {
     const kv = createKv();
     const setAlarm = vi.fn(async () => undefined);
     const deleteAlarm = vi.fn(async () => undefined);
-    const destroy = vi.fn(async () => { throw new Error("destroy unavailable"); });
-    vi.mocked(getSandbox).mockReturnValueOnce({ destroy } as any);
-    const reserve = vi.fn(async (key: any) => ({
-      ...key, state: "reserved" as const, createdAt: 1, updatedAt: 1, expiresAt: 2,
-    }));
-    const release = vi.fn(async () => undefined);
+    const firstDestroy = vi.fn(async () => { throw new Error("destroy unavailable"); });
+    vi.mocked(getSandbox).mockReturnValueOnce({ destroy: firstDestroy } as any);
     const policy = {
-      configure: vi.fn(),
+      configure: vi.fn(), cancelSessionStartup: vi.fn(),
       startSessionStartup: vi.fn(async () => { throw new Error("schedule unavailable"); }),
     };
-    const standard2 = { idFromName: (id: string) => ({ toString: () => id }) };
     const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
-      env: Record<string, unknown>;
-      ctx: { storage: { kv: typeof kv; setAlarm: typeof setAlarm; deleteAlarm: typeof deleteAlarm } };
+      env: Record<string, unknown>; ctx: any;
     };
     registry.env = {
-      SESSION_SANDBOX: {}, SESSION_SANDBOX_STANDARD_2: standard2,
-      SESSION_CAPACITY: { getByName: () => ({ reserve, release }) },
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
     };
-    registry.ctx = { storage: { kv, setAlarm, deleteAlarm } };
-    vi.spyOn(registry, "preflightSession").mockResolvedValue({
-      catalogRevision: 1, selection: { componentIds: ["x"], requestedTier: "standard-2" },
-      resolvedComponentIds: ["x"], selectedTier: "standard-2",
-      capacity: { available: true, active: 0, limit: 1 }, issues: [], canCreate: true,
-    });
-
+    registry.ctx = { storage: { kv, setAlarm, deleteAlarm, transactionSync: (callback: () => unknown) => callback() } };
     const summary = await registry.createSession(
       { userId: "user-1", email: "user@example.com" },
-      { title: "Heavy", repositories: ["jarvis"], developmentStack: { componentIds: ["x"] } },
+      { title: "Terminal", repositories: ["jarvis"] },
     );
-    const retained = kv.get<any>(`session:${summary.id}`);
-    expect(retained).toMatchObject({ status: "stopping", capacityLease: { tier: "standard-2" } });
-    await expect(registry.restartSession(
-      summary.id, { userId: "user-1", email: "user@example.com" },
-    )).rejects.toThrow("already changing state");
-
+    expect(summary.status).toBe("starting");
+    await registry.alarm();
+    await registry.alarm();
+    expect(kv.get<any>(`stop:${summary.id}`)).toMatchObject({ phase: "cancel", instanceTier: "standard-1" });
     const retryDestroy = vi.fn(async () => undefined);
-    sandboxState.sandboxes.set(retained.sandboxId, { destroy: retryDestroy });
-    await registry.stopSession(summary.id);
-    expect(retryDestroy.mock.invocationCallOrder[0]).toBeLessThan(release.mock.invocationCallOrder[0]!);
-    expect(kv.get<any>(`session:${summary.id}`)).toMatchObject({ status: "stopped", capacityLease: undefined });
+    sandboxState.sandboxes.set(summary.id, { destroy: retryDestroy });
+    await registry.alarm();
+    await registry.alarm();
+    expect(kv.get<any>(`session:${summary.id}`)).toMatchObject({ status: "stopped" });
+    expect(kv.get(`stop:${summary.id}`)).toBeUndefined();
   });
 
   it("retains stopping state when a starting heavy sandbox cannot be destroyed", async () => {
@@ -1146,6 +1610,7 @@ describe("coding session asynchronous startup", () => {
     sandboxState.sandboxes.set("sandbox-1", { destroy });
     const cancelSessionStartup = vi.fn(async () => undefined);
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: {},
       SESSION_SANDBOX_STANDARD_3: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ cancelSessionStartup }) },
@@ -1153,13 +1618,43 @@ describe("coding session asynchronous startup", () => {
 
     await expect(registry.stopSession("session-1")).rejects.toThrow("destroy unavailable");
     expect(kv.get<any>("session:session-1")).toMatchObject({
-      status: "stopping", capacityLease: lease, error: "destroy unavailable",
+      status: "stopping", capacityLease: lease,
     });
+    expect(kv.get<any>("stop:session-1")).toMatchObject({ phase: "destroy" });
     await expect(registry.restartSession(
       "session-1", { userId: "user-1", email: "user@example.com" },
     )).rejects.toThrow("already changing state");
   });
 
+
+  for (const tier of ["standard-1", "standard-2"] as const) {
+    it(`rejects an intent-less ${tier} development restart before mutating authority`, async () => {
+      const lease = tier === "standard-2" ? {
+        tier, reservationId: "lease-1", sessionId: "session-1", generation: 1,
+        sandboxId: "sandbox-1", userId: "user-1",
+      } : undefined;
+      const original = startingRecord({
+        status: "running", terminalId: "term-1", generation: 1, instanceTier: tier,
+        ...(lease ? { capacityLease: lease } : {}),
+        development: { catalogRevision: 1, componentIds: ["api"], instanceTier: tier },
+      } as any);
+      const { registry, kv } = createRegistryWith(original);
+      const reserve = vi.fn();
+      (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
+        SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+        SESSION_SANDBOX_STANDARD_2: { idFromName: (id: string) => ({ toString: () => id }) },
+        SESSION_CAPACITY: { getByName: () => ({ reserve }) },
+        SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ hasDevelopmentIntent: () => false }) },
+      };
+      await expect(registry.restartSession(
+        "session-1", { userId: "user-1", email: "user@example.com" },
+      )).rejects.toThrow("requires a new session");
+      expect(kv.get("session:session-1")).toEqual(original);
+      expect(kv.get("restart:session-1")).toBeUndefined();
+      expect(reserve).not.toHaveBeenCalled();
+    });
+  }
 
   it("atomically rolls back stopping metadata when restart work persistence fails", async () => {
     const original = startingRecord({ status: "running", terminalId: "term-1" });
@@ -1240,6 +1735,7 @@ describe("coding session asynchronous startup", () => {
       sandboxState.sandboxes.set("sandbox-1", { destroy });
       const policy = { configure: vi.fn(), startSessionStartup: vi.fn() };
       (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
         SESSION_SANDBOX: {},
         SESSION_SANDBOX_STANDARD_2: { idFromName: (id: string) => ({ toString: () => id }) },
         SESSION_CAPACITY: { getByName: () => ({ reserve, transfer }) },
@@ -1270,6 +1766,7 @@ describe("coding session asynchronous startup", () => {
     const reserve = vi.fn(async () => { throw new Error("capacity unavailable"); });
     const destroy = vi.fn();
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_CAPACITY: { getByName: () => ({ reserve }) },
     };
 
@@ -1294,6 +1791,7 @@ describe("coding session asynchronous startup", () => {
       const release = vi.fn(async () => undefined);
       const destroy = vi.fn();
       (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
         SESSION_CAPACITY: { getByName: () => ({ reserve, release }) },
       };
       if (failurePoint === "pre-arm") {
@@ -1383,11 +1881,15 @@ describe("coding session asynchronous startup", () => {
     sandboxState.sandboxes.set("old-b", { destroy: vi.fn(async () => undefined) });
     const policy = { configure: vi.fn(), startSessionStartup: vi.fn() };
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
       SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
     };
     const finishAlarms: Array<() => void> = [];
-    setAlarm.mockImplementation(() => new Promise<void>(resolve => { finishAlarms.push(resolve); }));
+    setAlarm.mockImplementation(() => {
+      if (finishAlarms.length >= 2) return Promise.resolve();
+      return new Promise<void>(resolve => { finishAlarms.push(resolve); });
+    });
     const owner = { userId: "user-1", email: "user@example.com" };
 
     const restartA = registry.restartSession("session-a", owner);
@@ -1401,6 +1903,30 @@ describe("coding session asynchronous startup", () => {
     await expect(restartB).rejects.toThrow("at most 5 active coding sessions");
     expect(kv.get("session:session-b")).toEqual(sessionB);
     expect(kv.get("restart:session-b")).toBeUndefined();
+  });
+
+
+  it("persists generation-fenced component failure without changing the running terminal", () => {
+    const running = startingRecord({ status: "running", terminalId: "terminal-1", generation: 2,
+      development: { catalogRevision: 1, componentIds: ["api"], instanceTier: "standard-1" } } as any);
+    const { registry, kv } = createRegistryWith(running);
+    const update = {
+      sessionId: "session-1", sandboxId: "sandbox-1", generation: 2,
+      components: [{ id: "api", title: "API", status: "failed" as const,
+        message: "Service failed.", updatedAt: new Date(10) }],
+      applications: [{ id: "app", componentId: "api", title: "App", status: "failed" as const,
+        message: "Service failed.", previewAvailable: false as const }],
+    };
+    expect(registry.developmentUpdated(update)).toBe(true);
+    expect(registry.getDevelopmentStatus("session-1")).toMatchObject({ generation: 2, components: [{ status: "failed" }] });
+    const publicJson = JSON.stringify(registry.getDevelopmentStatus("session-1"));
+    for (const internal of ["sandboxId", "diagnostics", "executionSpec", "processId", "argv", "environment"]) {
+      expect(publicJson).not.toContain(internal);
+    }
+    expect(kv.get<any>("session:session-1")).toMatchObject({ status: "running", terminalId: "terminal-1" });
+
+    expect(registry.developmentUpdated({ ...update, sandboxId: "old", generation: 1 })).toBe(false);
+    expect(registry.getDevelopmentStatus("session-1").generation).toBe(2);
   });
 
 });
