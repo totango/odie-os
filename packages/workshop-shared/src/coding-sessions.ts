@@ -215,7 +215,7 @@ export function validateCodingSessionRepositories(values: unknown): CodingSessio
     }
     repositories.add(value);
   }
-  return [...repositories].toSorted();
+  return [...repositories].sort();
 }
 
 /** Validates and normalizes account-scoped OpenCode customization before persistence or use. */
