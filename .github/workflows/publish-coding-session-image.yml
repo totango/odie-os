@@ -239,15 +239,20 @@ jobs:
         run: |
           worker="odie-coding-canary-${GITHUB_RUN_ID}"
           result="$RUNNER_TEMP/canary-result.json"
-          if ! http_status="$(curl --silent --show-error --max-time 900 --max-filesize 4096 \
-            --output "$result" \
-            --write-out '%{http_code}' \
-            --request POST \
-            --header "Authorization: Bearer $CANARY_TOKEN" \
-            "https://${worker}.odie-os.workers.dev/run")"; then
-            printf 'Native standard-3 Sandbox canary request failed.\n' >&2
-            exit 1
-          fi
+          http_status=""
+          for attempt in 1 2 3 4 5 6; do
+            if ! http_status="$(curl --silent --show-error --max-time 900 --max-filesize 4096 \
+              --output "$result" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $CANARY_TOKEN" \
+              "https://${worker}.odie-os.workers.dev/run")"; then
+              printf 'Native standard-3 Sandbox canary request failed.\n' >&2
+              exit 1
+            fi
+            if [[ "$http_status" != 401 && "$http_status" != 404 ]] || [ "$attempt" = 6 ]; then break; fi
+            sleep 5
+          done
           candidate="$(< candidate-artifact/cloudflare-image-digest.txt)"
           if [ "$http_status" = 200 ] && jq --exit-status \
             --arg sha "$GITHUB_SHA" \

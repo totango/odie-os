@@ -34,6 +34,10 @@ describe("native canary workflow cleanup", () => {
       workflow.indexOf("      - name: Invoke and validate one-shot native canary"),
       workflow.indexOf("  cleanup:"),
     );
+    expect(invocation).toContain("for attempt in 1 2 3 4 5 6; do");
+    expect(invocation).toContain('if [[ "$http_status" != 401 && "$http_status" != 404 ]] || [ "$attempt" = 6 ]; then break; fi');
+    expect(invocation).toContain("sleep 5");
+    expect(invocation.match(/curl/g)).toHaveLength(1);
     expect(invocation).toContain("--max-filesize 4096");
     expect(invocation).toContain('--output "$result"');
     expect(invocation).toContain("--write-out '%{http_code}'");
