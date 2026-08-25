@@ -208,14 +208,18 @@ export function validateCodingSessionRepositories(values: unknown): CodingSessio
   if (values.length > MAX_CODING_SESSION_REPOSITORIES) {
     throw new Error(`Select at most ${MAX_CODING_SESSION_REPOSITORIES} repositories.`);
   }
-  const repositories = new Set<CodingSessionRepository>();
+  const repositorySet = new Set<CodingSessionRepository>();
+  const repositories: CodingSessionRepository[] = [];
   for (const value of values) {
-    if (!isCodingSessionRepository(value) || repositories.has(value)) {
+    if (!isCodingSessionRepository(value) || repositorySet.has(value)) {
       throw new Error("Coding session repository set is invalid.");
     }
-    repositories.add(value);
+    repositorySet.add(value);
+    let index = 0;
+    while (index < repositories.length && repositories[index]! < value) index++;
+    repositories.splice(index, 0, value);
   }
-  return [...repositories].sort();
+  return repositories;
 }
 
 /** Validates and normalizes account-scoped OpenCode customization before persistence or use. */
