@@ -6,6 +6,8 @@ type GadgetSearch = {
   // Selected workpiece (gadget) ID. Workpiece IDs start at 0, so parsing must not treat 0 as
   // absent.
   w?: number
+  /** Open blueprint publishing for the selected gadget after the workspace loads. */
+  blueprint?: boolean
 }
 
 function parseIntParam(value: unknown): number | undefined {
@@ -24,5 +26,6 @@ export const Route = createFileRoute('/workspace/$id')({
       : typeof search.chat === 'string' ? Number(search.chat) || undefined
       : undefined,
     w: parseIntParam(search.w),
+    blueprint: search.blueprint === true || search.blueprint === 'true' || undefined,
   }),
 })

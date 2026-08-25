@@ -7708,6 +7708,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let record;
     if (chatId === undefined) {
       record = this.impl.createGadget(title, bindingName);  // validates the title and name
+      // A permanent gadget is real workspace activity. Without this, a workspace created directly
+      // from the Gadgets page remains provisional and is hidden from workspace/output indexes.
+      this.impl.bumpLastActive();
     } else {
       // Creating a gadget with a chat open is provisional to that chat, like code edits: record
       // the creation in the chat log as a "changes" message (with no code update) and mark

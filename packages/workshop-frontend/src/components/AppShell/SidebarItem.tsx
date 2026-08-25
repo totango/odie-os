@@ -16,6 +16,10 @@ export type SidebarItemProps = {
   collapsed?: boolean
   /** When true, match this item active when the current path starts with `to`. */
   matchPrefix?: boolean
+  /** Additional exact paths represented by this item. */
+  activePaths?: string[]
+  /** Additional path prefixes represented by this item. */
+  activePrefixes?: string[]
 }
 
 export default function SidebarItem({
@@ -26,6 +30,8 @@ export default function SidebarItem({
   trailing,
   collapsed = false,
   matchPrefix = false,
+  activePaths = [],
+  activePrefixes = [],
 }: SidebarItemProps) {
   // Resolve the active path manually so we can style the icon as well as the row. For parameterized
   // routes (e.g. "/gatekeepers/$appId"), substitute the params so the resolved path can match.
@@ -36,9 +42,11 @@ export default function SidebarItem({
       target = target.replaceAll(`$${key}`, String(value))
     }
   }
-  const isActive = matchPrefix
+  const isActive = activePaths.includes(pathname)
+    || activePrefixes.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`))
+    || (matchPrefix
     ? pathname === target || pathname.startsWith(target + '/')
-    : pathname === target
+    : pathname === target)
 
   // Kept loose: the generated route-tree union is stricter than is convenient for a generic row.
   const linkProps = { to, params } as unknown as LinkProps
@@ -47,6 +55,7 @@ export default function SidebarItem({
     <Link
       {...linkProps}
       title={collapsed ? label : undefined}
+      aria-current={isActive ? 'page' : undefined}
       className={[
         'group relative flex h-11 items-center gap-2.5 rounded-lg px-2.5 text-[14px] leading-5 transition-colors md:h-8 md:text-[13px] md:leading-[18px]',
         isActive

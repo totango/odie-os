@@ -107,7 +107,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         setNotFound(true)
       }
     }).catch(err => {
-      setError(err.message || 'Failed to load blueprint.')
+      setError(err.message || 'Failed to load template.')
     }).finally(() => {
       setLoading(false)
     })
@@ -571,7 +571,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       let metadata = await overseer.getMetadata()
       window.location.href = `/workspace/${metadata.id}`
     } catch (err: any) {
-      setError(err.message || 'Failed to create gadget from blueprint.')
+      setError(err.message || 'Failed to create app from template.')
     } finally {
       overseer.then(stub => stub[Symbol.dispose]()).catch(() => {})
       setCreating(false)
@@ -588,13 +588,13 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         () => rpcStub.downloadBlueprint(id),
         makeBlueprintFilename(blueprint.metadata.title, blueprint.metadata.version),
         {
-          description: 'Gadget Blueprint',
+          description: 'App Template',
           contentType: 'application/octet-stream',
           extension: BLUEPRINT_ARCHIVE_EXTENSION,
         },
       )
     } catch (err: any) {
-      setError(err.message || 'Failed to download blueprint.')
+      setError(err.message || 'Failed to download template.')
     } finally {
       setDownloading(false)
     }
@@ -612,7 +612,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     } catch (err: any) {
       console.error('Failed to update featured status:', err)
       toasts.add({
-        title: nextFeatured ? 'Failed to feature blueprint' : 'Failed to unfeature blueprint',
+        title: nextFeatured ? 'Failed to feature template' : 'Failed to unfeature template',
         variant: 'error',
       })
     } finally {
@@ -637,7 +637,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         setIsInLibrary(true)
         setIsUploadedBlueprint(false)
       }
-      toasts.add({ title: nextPinned ? 'Blueprint favorited' : 'Blueprint unfavorited', variant: 'success' })
+      toasts.add({ title: nextPinned ? 'Template favorited' : 'Template unfavorited', variant: 'success' })
     } catch (err) {
       console.error('Failed to update blueprint pin:', err)
       toasts.add({ title: 'Failed to update favorite status', variant: 'error' })
@@ -662,10 +662,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     try {
       await authenticatedApi.addBlueprintToLibrary(id)
       setIsInLibrary(true)
-      toasts.add({ title: 'Blueprint added to library', variant: 'success' })
+      toasts.add({ title: 'Template saved to your library', variant: 'success' })
     } catch (err) {
       console.error('Failed to add blueprint to library:', err)
-      toasts.add({ title: 'Failed to add blueprint to library', variant: 'error' })
+      toasts.add({ title: 'Failed to save template', variant: 'error' })
     } finally {
       setAddingToLibrary(false)
     }
@@ -679,17 +679,17 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       await authenticatedApi.removeBlueprintFromLibrary(id)
       if (isUploadedBlueprint) {
         setShowDeleteConfirm(false)
-        toasts.add({ title: 'Blueprint deleted', variant: 'success' })
+        toasts.add({ title: 'Template deleted', variant: 'success' })
         navigate({ to: '/' })
       } else {
         setIsInLibrary(false)
         setIsPinned(false)
-        toasts.add({ title: 'Blueprint removed from library', variant: 'success' })
+        toasts.add({ title: 'Template removed from your library', variant: 'success' })
       }
     } catch (err) {
       console.error('Failed to remove blueprint from library:', err)
       toasts.add({
-        title: isUploadedBlueprint ? 'Failed to delete blueprint' : 'Failed to remove blueprint from library',
+        title: isUploadedBlueprint ? 'Failed to delete template' : 'Failed to remove template from your library',
         variant: 'error',
       })
     } finally {
@@ -712,11 +712,11 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
         await authenticatedApi.deleteOrphanedBlueprint(id)
       }
       setShowDeleteConfirm(false)
-      toasts.add({ title: 'Blueprint deleted', variant: 'success' })
+      toasts.add({ title: 'Template deleted', variant: 'success' })
       navigate({ to: '/' })
     } catch (err) {
       console.error('Failed to delete blueprint:', err)
-      toasts.add({ title: 'Failed to delete blueprint', variant: 'error' })
+      toasts.add({ title: 'Failed to delete template', variant: 'error' })
     } finally {
       overseer?.then(stub => stub[Symbol.dispose]()).catch(() => {})
       setRemovingFromLibrary(false)
@@ -728,14 +728,14 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }
 
   if (loading || authLoading) {
-    return <BlueprintStatePage title="Loading blueprint..." loading />
+    return <BlueprintStatePage title="Loading template..." loading />
   }
 
   if (notFound) {
     return (
       <BlueprintStatePage
-        title="Blueprint not found"
-        message="This blueprint may have been removed or the link may be incorrect."
+        title="Template not found"
+        message="This template may have been removed or the link may be incorrect."
         actionLabel="Back to Explore"
         onAction={() => navigate({ to: '/explore' })}
       />
@@ -745,8 +745,8 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   if (!blueprint) {
     return (
       <BlueprintStatePage
-        title="Couldn’t load blueprint"
-        message={error || 'Failed to load blueprint.'}
+        title="Couldn’t load template"
+        message={error || 'Failed to load template.'}
         actionLabel="Back to Explore"
         onAction={() => navigate({ to: '/explore' })}
       />
@@ -761,13 +761,13 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   let remainingCount = bindingEntries.length - readyCount
   let primaryActionLabel: string
   if (!isAuthenticated) {
-    primaryActionLabel = 'Log in to create a gadget'
+    primaryActionLabel = 'Log in to create an app'
   } else if (unresolvedBindingName !== null) {
     primaryActionLabel = remainingCount > 0
       ? `Configure ${remainingCount} remaining ${remainingCount === 1 ? 'connection' : 'connections'}`
       : 'Configure connections'
   } else {
-    primaryActionLabel = 'Create Gadget'
+    primaryActionLabel = 'Create App'
   }
   let createDisabled = creating
   let canDeleteOwnedBlueprint = isOwnBlueprint && !loadingOwnBlueprintState
@@ -841,7 +841,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               <Tooltip content={isAuthenticated ? 'Add to library' : 'Log in to add to library'} asChild>
                 <button
                   type="button"
-                  aria-label={isAuthenticated ? 'Add blueprint to library' : 'Log in to add blueprint to library'}
+                  aria-label={isAuthenticated ? 'Save template to library' : 'Log in to save template to library'}
                   onClick={handleAddToLibrary}
                   disabled={addingToLibrary || loadingLibraryState}
                   className="press inline-flex h-10 w-10 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-kumo-line bg-kumo-base p-0 text-kumo-subtle transition-colors duration-150 ease-out hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-60"
@@ -855,7 +855,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               <DropdownMenu.Trigger
                 render={(
                   <WorkshopIconButton
-                    aria-label="More blueprint actions"
+                    aria-label="More template actions"
                     className="!h-10 !w-10 shrink-0 rounded-lg border border-kumo-line bg-kumo-base text-kumo-subtle hover:border-kumo-fill hover:bg-kumo-tint hover:text-kumo-default data-[popup-open]:border-kumo-fill data-[popup-open]:bg-kumo-tint data-[popup-open]:text-kumo-default"
                   >
                     <DotsThree size={18} weight="bold" />
@@ -900,7 +900,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                       onClick={() => setShowDeleteConfirm(true)}
                       className={MENU_ITEM_DANGER}
                     >
-                      Delete blueprint
+                      Delete template
                     </DropdownMenu.Item>
                   </>
                 )}
@@ -915,7 +915,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                         onClick={() => setShowDeleteConfirm(true)}
                         className={MENU_ITEM_DANGER}
                       >
-                        Delete blueprint
+                        Delete template
                       </DropdownMenu.Item>
                     ) : (
                       <DropdownMenu.Item
@@ -940,7 +940,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                       disabled={updatingFeatured}
                       className={MENU_ITEM}
                     >
-                      {updatingFeatured ? 'Updating...' : (isFeatured ? 'Unfeature blueprint' : 'Feature blueprint')}
+                      {updatingFeatured ? 'Updating...' : (isFeatured ? 'Unfeature template' : 'Feature template')}
                     </DropdownMenu.Item>
                   </>
                 )}
@@ -963,7 +963,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
               </div>
               <div className="mb-3 px-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
                 {readyCount === bindingEntries.length
-                  ? 'Everything is ready. You can change any connection before creating the Gadget.'
+                  ? 'Everything is ready. You can change any connection before creating the app.'
                   : `${readyCount} of ${bindingEntries.length} ready. Suggestions are used automatically when they match one of your connected accounts.`}
               </div>
               <div className="overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base">
@@ -986,7 +986,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                 No connections required to start
               </p>
               <p className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
-                Create the Gadget now. You can add optional connections later from its Connections page.
+                Create the app now. You can add optional connections later from its Connections page.
               </p>
             </section>
           )}
@@ -1019,7 +1019,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   <Dialog.Description className="mt-1 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-subtle">
                     {activeBinding.type === 'gatekeeper' && activeBinding.description
                       ? activeBinding.description
-                      : 'Choose the resource or model this new Gadget should use.'}
+                      : 'Choose the resource or model this new app should use.'}
                   </Dialog.Description>
                 </div>
                 <Dialog.Close
@@ -1080,12 +1080,12 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       >
         <Dialog className="responsive-dialog overflow-y-auto p-8" size="sm">
           <Dialog.Title className="text-lg font-semibold">
-            Delete blueprint
+            Delete template
           </Dialog.Title>
           <Dialog.Description className="mt-2 text-kumo-subtle">
             Delete "{blueprint?.metadata.title}"? {canDeleteOwnedBlueprint
-              ? 'This blueprint link will stop working, but gadgets already created from it won’t be affected.'
-              : 'This blueprint was uploaded manually and cannot be recovered.'}
+              ? 'This template link will stop working, but apps already created from it won’t be affected.'
+              : 'This template was uploaded manually and cannot be recovered.'}
           </Dialog.Description>
           <div className="mt-6 flex justify-end gap-2">
             <Dialog.Close
