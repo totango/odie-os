@@ -55,6 +55,7 @@ cleanup() {
 }
 trap cleanup EXIT
 mkdir -p "$HOME" "$temporary_root/agentic" "$temporary_root/repository" "$temporary_root/workspace" "$temporary_root/editor-data"
+printf '%s\n' 'bind-addr: 127.0.0.1:13337' 'auth: none' 'cert: false' > "$temporary_root/code-server-config.yaml"
 printf '{"packageManager":"%s"}\n' "$PNPM_PACKAGE_MANAGER" > "$temporary_root/agentic/package.json"
 printf '{"packageManager":"%s"}\n' "$REPOSITORY_PNPM_PACKAGE_MANAGER" > "$temporary_root/repository/package.json"
 [[ "$(cd "$temporary_root/agentic" && COREPACK_ENABLE_NETWORK=0 pnpm --version)" == "${agentic_pnpm_version}" ]] || fail "offline Agentic pnpm activation failed"
@@ -64,9 +65,10 @@ timeout 30s opencode --version >/dev/null
 timeout 30s pi --version >/dev/null
 timeout 30s prime-agent --version >/dev/null
 /opt/odie-prime-agent/kernel-venv/bin/python -m IPython -c 'import ipykernel, rlm, rlm.mcp; assert 6 * 7 == 42' >/dev/null
-[[ "$(code-server --user-data-dir "$temporary_root/editor-data" --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" == "$EXPECTED_EXTENSION_HASH" ]] || fail "unexpected editor extensions"
+[[ "$(code-server --config "$temporary_root/code-server-config.yaml" --user-data-dir "$temporary_root/editor-data" --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" == "$EXPECTED_EXTENSION_HASH" ]] || fail "unexpected editor extensions"
 
 EXTENSIONS_GALLERY='{}' code-server \
+  --config "$temporary_root/code-server-config.yaml" \
   --auth none \
   --disable-update-check \
   --bind-addr 127.0.0.1:13337 \

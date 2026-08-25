@@ -112,7 +112,10 @@ RUN test "$(node --version)" = "v${NODE_VERSION}" \
     && prime-agent --version \
     && rg --version \
     && test "$(node -p "require('/opt/odie-code-server/package.json').version")" = "$CODE_SERVER_VERSION" \
-    && test "$(code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" = "65e3a533e0df9f58a8f81ba5ac430cea826cae6eb507dccdc93498228783c068" \
+    && printf '%s\n' 'verified code-server package version' \
+    && printf '%s\n' 'bind-addr: 127.0.0.1:3000' 'auth: none' 'cert: false' > /tmp/odie-code-server-config.yaml \
+    && test "$(code-server --config /tmp/odie-code-server-config.yaml --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" = "65e3a533e0df9f58a8f81ba5ac430cea826cae6eb507dccdc93498228783c068" \
+    && printf '%s\n' 'verified code-server extension set' \
     && test "$(node -p "require('/opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" = "$PI_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/prime-agent/package.json').version")" = "$PRIME_AGENT_VERSION" \
@@ -130,6 +133,7 @@ RUN test "$(node --version)" = "v${NODE_VERSION}" \
       /root/.config/code-server \
       /root/.local/share/code-server \
       /tmp/jiti \
+      /tmp/odie-code-server-config.yaml \
       /tmp/odie-code-server-user-data
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os" \
