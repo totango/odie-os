@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { CAPACITY_LIMITS } from "../src/capacity.js";
 
 interface WranglerConfig {
+  vars?: Record<string, string>;
   containers: Array<{
     class_name: string;
     image: string;
@@ -84,5 +85,14 @@ describe.each([
         "CodingSessionCapacity",
       ],
     });
+  });
+});
+
+describe("durable lifecycle rollout config", () => {
+  it("enables writers only for Odie production", () => {
+    expect(readConfig("wrangler.odie-os-production.jsonc").vars?.CODING_SESSION_DURABLE_LIFECYCLE_ENABLED)
+      .toBe("true");
+    expect(readConfig("wrangler.jsonc").vars?.CODING_SESSION_DURABLE_LIFECYCLE_ENABLED)
+      .toBeUndefined();
   });
 });
