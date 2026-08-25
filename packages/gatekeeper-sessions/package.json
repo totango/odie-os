@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "echo \"run 'pnpm dev-server' in the root directory instead\" >&2 && exit 1",
     "deploy": "wrangler deploy",
-    "build": "pnpm exec capnweb-validate build --out .wrangler/validate && tsc",
-    "types:check": "tsc --noEmit",
+    "build": "pnpm exec capnweb-validate build --out .wrangler/validate && tsc && tsc -p canary/tsconfig.json",
+    "types:check": "tsc --noEmit && tsc -p canary/tsconfig.json",
     "test": "vitest run",
     "clean": "rm -rf dist .wrangler"
   },
