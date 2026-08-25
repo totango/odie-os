@@ -34,6 +34,7 @@ export function RequiredConnectionsGate({ authenticatedApi, pathname, children }
   const [loadError, setLoadError] = useState<string>()
   const [checking, setChecking] = useState(false)
   const refreshGeneration = useRef(0)
+  const escapeRoute = isRequiredConnectionsEscapeRoute(pathname)
 
   const refresh = useCallback(async () => {
     const generation = ++refreshGeneration.current
@@ -54,12 +55,14 @@ export function RequiredConnectionsGate({ authenticatedApi, pathname, children }
   }, [authenticatedApi])
 
   useEffect(() => {
+    if (escapeRoute) return
     setStatuses(null)
     setLoadError(undefined)
     void refresh()
-  }, [refresh])
+  }, [escapeRoute, refresh])
 
   useEffect(() => {
+    if (escapeRoute) return
     let cancelled = false
     let subscription: { [Symbol.dispose](): void } | null = null
     const subscriber = new AccountsSubscriberAdapter({
@@ -81,14 +84,14 @@ export function RequiredConnectionsGate({ authenticatedApi, pathname, children }
       cancelled = true
       subscription?.[Symbol.dispose]()
     }
-  }, [authenticatedApi, refresh])
+  }, [authenticatedApi, escapeRoute, refresh])
 
   const unhealthy = useMemo(
     () => (statuses ?? []).filter((status) => status.state !== 'healthy'),
     [statuses],
   )
 
-  if (isRequiredConnectionsEscapeRoute(pathname)) return <>{children}</>
+  if (escapeRoute) return <>{children}</>
 
   if (statuses === null && !loadError) {
     return (

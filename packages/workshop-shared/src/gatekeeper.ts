@@ -592,16 +592,16 @@ export const CONNECTION_HEALTH_STATES = [
 /**
  * Machine-readable state for a required connection.
  *
- * `healthy` means the existing connected account passed a live vendor-owned probe. `missing` means
- * no account exists yet. `expired` means reconnecting the same account should refresh OAuth or token
- * credentials. `unavailable` means a non-OAuth condition needs action, such as tenant binding,
- * upstream access, deployment configuration, or service availability.
+ * `healthy` means the existing connected account is configured for required use. It does not
+ * guarantee transient upstream availability. `missing` means no account exists yet. `expired` means
+ * reconnecting the same account should refresh OAuth or token credentials. `unavailable` means a
+ * durable non-OAuth condition needs action, such as tenant binding or deployment configuration.
  */
 export type ConnectionHealthState = typeof CONNECTION_HEALTH_STATES[number];
 
-/** Result of a gatekeeper-owned live health probe for one connected account. */
+/** Result of a gatekeeper-owned required-connection check for one connected account. */
 export type ConnectionHealthStatus = {
-  /** The account's current health state after the gatekeeper's live probe. */
+  /** The account's current health state for required-use gating. */
   state: Exclude<ConnectionHealthState, "missing">;
 
   /** Human-readable, non-secret explanation suitable for logs or UI display. */
@@ -695,12 +695,14 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}>;
 
   /**
-   * Performs a gatekeeper-owned live health check for deployments that mark this vendor as required.
+   * Checks whether this account is configured for deployments that mark the vendor as required.
    *
-   * Gatekeepers should verify more than local token presence: call a lightweight upstream endpoint or
-   * tool that proves the account can actually use the required tenant/resource. Return `expired` only
-   * for credentials a reconnect can refresh, and use `unavailable` for authenticated-but-not-bound or
-   * access-denied states where reconnecting OAuth alone is not the right diagnosis.
+   * The Workshop checks its durable credential-validity state before calling this method. Gatekeepers
+   * should verify additional durable requirements such as the configured endpoint, granted scope
+   * revision, or tenant binding. A transient network failure, rate limit, or upstream outage must not
+   * make the entire Workshop unavailable; report those failures from the operation that encountered
+   * them instead. Return `expired` only for credentials a reconnect can refresh, and use `unavailable`
+   * for durable conditions where reconnecting OAuth alone is not the right diagnosis.
    */
   getConnectionStatus?(): Promise<ConnectionHealthStatus>;
 

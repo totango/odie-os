@@ -27,7 +27,7 @@ import {
   type ConnectOutcome,
 } from "@gadgets/mcp-shared/account";
 import { generateNonce } from "@gadgets/mcp-shared/connect-nonce";
-import { fetchTools, withClient, type ConnectionAccount, type McpConnection } from "@gadgets/mcp-shared/connection";
+import { type ConnectionAccount, type McpConnection } from "@gadgets/mcp-shared/connection";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import {
   errorPageHtml,
@@ -40,7 +40,7 @@ import type { McpLog, McpLogFields } from "@gadgets/mcp-shared/log";
 import { generateSessionTypes, sessionTypeName } from "@gadgets/mcp-shared/schema-to-ts";
 import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import { endpointTag, sameEndpoint, type ToolScope } from "@gadgets/mcp-shared/scope";
-import { classifyTool, type ClassifiedTool, type ServerTrust } from "@gadgets/mcp-shared/tools";
+import { type ClassifiedTool, type ServerTrust } from "@gadgets/mcp-shared/tools";
 import {
   McpGatekeeperUserBase,
   mcpGatekeeperUserContext,
@@ -198,6 +198,24 @@ export class OdieKgAccount extends McpAccountBase<Env> {
     return logger;
   }
 
+  /** Invalidates the old scope grant before an endpoint repoint can begin. */
+  override beginConnect(
+    initiationNonce: string,
+    target: ConnectedServer | null,
+  ): Promise<ConnectOutcome> {
+    let existing: ConnectedServer | undefined;
+    try {
+      existing = this.requireServer();
+    } catch {
+      // A first connection has no prior scope grant to invalidate.
+    }
+    if (existing && target && this.awaitingSelection(initiationNonce)
+        && !sameEndpoint(existing.endpoint, target.endpoint)) {
+      this.ctx.storage.kv.delete(ODIE_MCP_SCOPE_VERSION_KEY);
+    }
+    return super.beginConnect(initiationNonce, target);
+  }
+
   protected mintAccount(): Fetcher<GatekeeperUser> {
     const props: McpGatekeeperUserProps = { accountObjectId: this.ctx.id.toString() };
     return (this.ctx as unknown as ExportContext<unknown>).exports.OdieKgUser({ props });
@@ -219,7 +237,7 @@ export class OdieKgAccount extends McpAccountBase<Env> {
     return this.ctx.storage.kv.get<number>(ODIE_MCP_SCOPE_VERSION_KEY) === ODIE_MCP_SCOPE_VERSION;
   }
 
-  /** Performs a live tenant/tool probe for required-connection health checks. */
+  /** Verifies the durable endpoint and scope state used by required-connection checks. */
   async getConnectionStatus(): Promise<ConnectionHealthStatus> {
     const config = readOdieKgConfig(this.env);
     if (!config) return { state: "unavailable", message: "ODIE MCP is not configured." };
@@ -238,33 +256,7 @@ export class OdieKgAccount extends McpAccountBase<Env> {
         };
       }
 
-      const scope = odieKgToolScope();
-      const tools = (await fetchTools(
-        this.env,
-        this,
-        config.endpoint,
-        tool => scope.tools?.includes(tool.name) ?? false,
-      )).tools
-        .map(tool => classifyTool(tool, "vetted"))
-        .map(applyOdieKgToolPolicy)
-        .filter(entry => entry !== null);
-      if (missingOdieMcpTools(tools).length > 0) {
-        return {
-          state: "expired",
-          message: `Reconnect ODIE MCP to authorize all ${ODIE_KG_ALLOWED_TOOLS.length} read-only tools.`,
-        };
-      }
-
-      const result = await withClient(this.env, this, config.endpoint,
-        client => client.callTool("odie-kg-status", {}));
-      if (result.isError) {
-        const message = mcpToolText(result);
-        return message ? classifyOdieKgStatusError(message) : {
-          state: "unavailable",
-          message: "The ODIE MCP status check failed. Try again or contact an administrator.",
-        };
-      }
-      return { state: "healthy", message: "ODIE MCP is reachable and organization-bound." };
+      return { state: "healthy", message: "ODIE MCP is connected for the current read scopes." };
     } catch (error) {
       return classifyOdieKgStatusError(error);
     }
@@ -447,20 +439,14 @@ export class OdieKgGatekeeper
     return new OdieKgConnectionAccount(this.env, account, this.ctx.props.endpoint);
   }
 
-  /** Filters the remote catalog to fixed reads and overrides remote annotations. */
+  /** Filters the cached remote catalog to fixed reads and overrides remote annotations. */
   override async tools() {
     const configured = readOdieKgConfig(this.env)?.endpoint;
     if (!configured || !sameEndpoint(configured, this.ctx.props.endpoint)) {
       throw new Error("The ODIE MCP endpoint changed. Reconnect this account.");
     }
     try {
-      const tools = (await fetchTools(
-        this.env,
-        this.account(),
-        this.endpoint,
-        tool => this.scope.tools?.includes(tool.name) ?? false,
-      )).tools
-        .map(tool => classifyTool(tool, this.trust))
+      const tools = (await super.tools())
         .map(applyOdieKgToolPolicy)
         .filter(entry => entry !== null);
       const missingTools = missingOdieMcpTools(tools);
@@ -583,16 +569,6 @@ function classifyOdieKgStatusError(error: unknown): ConnectionHealthStatus {
     state: "unavailable",
     message: "ODIE MCP is unavailable. Try again or contact an administrator.",
   };
-}
-
-function mcpToolText(result: { content?: unknown }): string | undefined {
-  const content = Array.isArray(result.content) ? result.content : [];
-  const text = content
-    .map(item => item && typeof item === "object" && "text" in item
-      && typeof item.text === "string" ? item.text : "")
-    .filter(Boolean)
-    .join("\n");
-  return text || undefined;
 }
 
 /** Typed MCP session installed with one method per allowlisted KG tool. */

@@ -948,7 +948,7 @@ export interface AuthenticatedApi extends RpcTarget {
   listGatekeeperVendors(filter?: GatekeeperVendorFilter): Promise<GatekeeperVendorInfo[]>;
 
   /**
-   * Returns the live health of deployment-required connections for this user.
+   * Returns the required-use status of deployment-required connections for this user.
    *
    * Generic deployments return an empty list unless the backend is configured with required vendor
    * ids. `expired` entries include `accountId` so callers can use reconnectAccount(accountId) rather
