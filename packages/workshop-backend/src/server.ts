@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, type CodingSessionAttachCapability, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -328,6 +328,20 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.listCodingSessions();
   }
 
+  getCodingSessionDevelopmentCatalog(): Promise<CodingSessionDevelopmentCatalog> {
+    return this.#user.getCodingSessionDevelopmentCatalog();
+  }
+
+  async preflightCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionDevelopmentPlan> {
+    await this.#assertRequiredConnectionsHealthy();
+    if (request.runtime && request.runtime !== "opencode") await this.#assertCodingSessionRuntimeEnabled(request.runtime);
+    return this.#user.preflightCodingSession(request);
+  }
+
+  getCodingSessionDevelopmentStatus(sessionId: string): Promise<CodingSessionDevelopmentStatus> {
+    return this.#user.getCodingSessionDevelopmentStatus(sessionId);
+  }
+
   listCodingSessionRepositoryOptions(query?: string): Promise<CodingSessionRepositoryOption[]> {
     return this.#user.listCodingSessionRepositoryOptions(query);
   }
@@ -372,6 +386,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async mintCodingSessionEditorCapability(sessionId: string): Promise<CodingSessionEditorCapability> {
     await this.#assertRequiredConnectionsHealthy();
     return this.#user.mintCodingSessionEditorCapability(sessionId);
+  }
+
+  async mintCodingSessionApplicationCapability(
+    sessionId: string,
+    applicationId: string,
+  ): Promise<CodingSessionApplicationCapability> {
+    await this.#assertRequiredConnectionsHealthy();
+    return this.#user.mintCodingSessionApplicationCapability(sessionId, applicationId);
   }
 
   listCodingSessionActivity(sessionId?: string): Promise<CodingSessionActivity[]> {

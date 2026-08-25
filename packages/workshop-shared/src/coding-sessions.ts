@@ -1,7 +1,11 @@
 import type { WorkerEntrypoint } from "cloudflare:workers";
 import type { ActionDescription, ObservationDescription } from "./gatekeeper.js";
 import type {
+  CodingSessionApplicationCapability,
   CodingSessionAttachCapability,
+  CodingSessionDevelopmentCatalog,
+  CodingSessionDevelopmentPlan,
+  CodingSessionDevelopmentStatus,
   CodingSessionEditorCapability,
   CodingSessionRepository,
   CodingSessionSummary,
@@ -9,6 +13,9 @@ import type {
   CreateCodingSessionRequest,
   OpenCodeUserCustomization,
 } from "./api.js";
+
+/** Maximum number of repositories accepted for one coding session. */
+export const MAX_CODING_SESSION_REPOSITORIES = 8;
 
 const MAX_OPENCODE_PLUGINS = 20;
 const MAX_OPENCODE_SKILLS = 20;
@@ -118,6 +125,21 @@ export interface CodingSessionsService extends WorkerEntrypoint {
   /** Lists sessions owned by the authenticated Workshop user. */
   listSessions(owner: CodingSessionOwner): Promise<CodingSessionSummary[]>;
 
+  /** Returns the display-safe development-stack catalog available to the authenticated owner. */
+  getDevelopmentCatalog(owner: CodingSessionOwner): Promise<CodingSessionDevelopmentCatalog>;
+
+  /** Checks one create request without reserving capacity or creating a sandbox generation. */
+  preflightSession(
+    owner: CodingSessionOwner,
+    request: CreateCodingSessionRequest,
+  ): Promise<CodingSessionDevelopmentPlan>;
+
+  /** Returns persisted component and application lifecycle for one owned session. */
+  getDevelopmentStatus(
+    owner: CodingSessionOwner,
+    sessionId: string,
+  ): Promise<CodingSessionDevelopmentStatus>;
+
   /**
    * Retrieves one non-archived session owned by the authenticated Workshop user and reconciles its
    * live runtime metadata without exposing sandbox or terminal identifiers.
@@ -166,11 +188,38 @@ export interface CodingSessionsService extends WorkerEntrypoint {
 
   /** Mints a generation-bound browser VS Code capability after verifying ownership. */
   mintEditorCapability(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionEditorCapability>;
+
+  /** Mints a generation-bound capability for one reviewed application after verifying ownership. */
+  mintApplicationCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    applicationId: string,
+  ): Promise<CodingSessionApplicationCapability>;
 }
 
 /** Returns whether a value is a canonical GitHub repository name accepted by Coding Sessions. */
 export function isCodingSessionRepository(value: unknown): value is CodingSessionRepository {
   return typeof value === "string" && /^[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?$/.test(value);
+}
+
+/** Validates and canonically orders a bounded, non-empty coding-session repository set. */
+export function validateCodingSessionRepositories(values: unknown): CodingSessionRepository[] {
+  if (!Array.isArray(values) || values.length === 0) throw new Error("Select at least one repository.");
+  if (values.length > MAX_CODING_SESSION_REPOSITORIES) {
+    throw new Error(`Select at most ${MAX_CODING_SESSION_REPOSITORIES} repositories.`);
+  }
+  const repositorySet = new Set<CodingSessionRepository>();
+  const repositories: CodingSessionRepository[] = [];
+  for (const value of values) {
+    if (!isCodingSessionRepository(value) || repositorySet.has(value)) {
+      throw new Error("Coding session repository set is invalid.");
+    }
+    repositorySet.add(value);
+    let index = 0;
+    while (index < repositories.length && repositories[index]! < value) index++;
+    repositories.splice(index, 0, value);
+  }
+  return repositories;
 }
 
 /** Validates and normalizes account-scoped OpenCode customization before persistence or use. */

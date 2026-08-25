@@ -343,6 +343,218 @@ export type CodingSessionStatus = "starting" | "running" | "stopping" | "stopped
 /** Coding agent runtime selected for a coding session. */
 export type CodingSessionRuntime = "opencode" | "pi" | "prime-agent";
 
+/** Container capacity tier selected before a coding-session generation starts. */
+export type CodingSessionInstanceTier = "standard-1" | "standard-2" | "standard-3" | "standard-4";
+
+/** Lifecycle state of one server-owned development-stack component or application. */
+export type CodingSessionDevelopmentComponentStatus =
+  | "pending"
+  | "starting"
+  | "ready"
+  | "degraded"
+  | "failed"
+  | "stopping"
+  | "stopped";
+
+/** Server-selected execution location used by one development-stack component. */
+export type CodingSessionDevelopmentExecution = "sandbox" | "external";
+
+/** Authority conveyed by one server-owned browser-facing development application. */
+export type CodingSessionDevelopmentApplicationAuthority = "application" | "management";
+
+/** One browser-facing application declared by a server-owned development-stack component. */
+export interface CodingSessionDevelopmentApplication {
+  /** Stable catalog-global application identifier used when minting its capability. */
+  id: string;
+  /** User-visible application name. */
+  title: string;
+  /** Authority classification shown before the application is opened. */
+  authority: CodingSessionDevelopmentApplicationAuthority;
+  /** Optional user-visible explanation of the application. */
+  description?: string;
+}
+
+/** Public description of one server-owned development-stack component. */
+export interface CodingSessionDevelopmentComponent {
+  /** Stable component identifier. */
+  id: string;
+  /** Monotonically increasing revision of this server-owned component definition. */
+  revision: number;
+  /** User-visible component name. */
+  title: string;
+  /** User-visible explanation of the component. */
+  description: string;
+  /** Whether this deployment currently permits the component in new plans. */
+  available: boolean;
+  /** Bounded explanation shown when this component is not currently available. */
+  unavailableReason?: string;
+  /** Location where the server-owned component executes. */
+  execution: CodingSessionDevelopmentExecution;
+  /** Repositories that must be present before this component can start. */
+  requiredRepositories: CodingSessionRepository[];
+  /** Server-owned component dependencies that the planner adds. */
+  dependencyIds: string[];
+  /** Smallest coding-sandbox tier required alongside this component, including external components. */
+  minimumTier: CodingSessionInstanceTier;
+  /** Browser-facing applications this component can make available. */
+  applications: CodingSessionDevelopmentApplication[];
+}
+
+/** Public description of one server-owned development-stack profile. */
+export interface CodingSessionDevelopmentProfile {
+  /** Stable profile identifier. */
+  id: string;
+  /** Monotonically increasing revision of this server-owned profile definition. */
+  revision: number;
+  /** User-visible profile name. */
+  title: string;
+  /** User-visible explanation of the profile. */
+  description: string;
+  /** Whether this deployment currently permits the profile in new plans. */
+  available: boolean;
+  /** Bounded explanation shown when this profile is not currently available. */
+  unavailableReason?: string;
+  /** Server-owned components selected by this profile before dependency expansion. */
+  componentIds: string[];
+  /** Smallest coding-sandbox tier required alongside this profile, including external profiles. */
+  minimumTier: CodingSessionInstanceTier;
+}
+
+/** Public, display-safe projection of the server-owned development-stack catalog. */
+export interface CodingSessionDevelopmentCatalog {
+  /** Monotonically increasing revision of the complete catalog projection. */
+  revision: number;
+  /** Known server-owned components, including planned entries unavailable for new sessions. */
+  components: CodingSessionDevelopmentComponent[];
+  /** Known server-owned profiles, including planned entries unavailable for new sessions. */
+  profiles: CodingSessionDevelopmentProfile[];
+  /** Container tiers enabled by this deployment. */
+  enabledTiers: CodingSessionInstanceTier[];
+}
+
+/** Requested server-owned profile, component additions, and optional capacity preference. */
+export interface CodingSessionStackSelection {
+  /** Server-owned base profile to expand, when a profile is selected. */
+  profileId?: string;
+  /** Explicit components selected directly or added to the selected profile. */
+  componentIds?: string[];
+  /** Preferred tier; the server rejects a tier below the resolved minimum. */
+  requestedTier?: CodingSessionInstanceTier;
+}
+
+/** Stable category for one coding-session development-plan problem. */
+export type CodingSessionDevelopmentPlanIssueCode =
+  | "invalid-selection"
+  | "unknown-profile"
+  | "unknown-component"
+  | "missing-repository"
+  | "dependency-conflict"
+  | "port-conflict"
+  | "configuration-unavailable"
+  | "tier-too-small"
+  | "tier-disabled"
+  | "capacity-unavailable";
+
+/** One bounded, user-visible problem found while planning a development stack. */
+export interface CodingSessionDevelopmentPlanIssue {
+  /** Stable category suitable for programmatic UI handling. */
+  code: CodingSessionDevelopmentPlanIssueCode;
+  /** Bounded explanation suitable for display to the requesting user. */
+  message: string;
+  /** Component associated with this issue, when applicable. */
+  componentId?: string;
+  /** Repository associated with this issue, when applicable. */
+  repository?: CodingSessionRepository;
+}
+
+/** Current admission-capacity snapshot for the tier selected by a development plan. */
+export interface CodingSessionDevelopmentCapacity {
+  /** Whether a new generation could currently be admitted to this tier. */
+  available: boolean;
+  /** Number of active or reserved generations counted in the selected admission scope. */
+  active: number;
+  /** Server-enforced concurrent-generation limit in the selected admission scope. */
+  limit: number;
+}
+
+/** Checked, display-safe result of server-side development-stack preflight planning. */
+export interface CodingSessionDevelopmentPlan {
+  /** Catalog revision used to construct this plan. */
+  catalogRevision: number;
+  /** Canonical selection after validation and normalization. */
+  selection: CodingSessionStackSelection;
+  /** Dependency-expanded component identifiers in server-selected startup order. */
+  resolvedComponentIds: string[];
+  /** Complete canonical repository set required by the resolved components. */
+  requiredRepositories: CodingSessionRepository[];
+  /** Smallest tier permitted for the resolved components. */
+  minimumTier: CodingSessionInstanceTier;
+  /** Tier the server would use if this request were created now. */
+  selectedTier: CodingSessionInstanceTier;
+  /** Informational admission-capacity snapshot for the selected tier. */
+  capacity: CodingSessionDevelopmentCapacity;
+  /** Problems that prevent or qualify creation of this plan. */
+  issues: CodingSessionDevelopmentPlanIssue[];
+  /** Whether the request is currently eligible for creation. */
+  canCreate: boolean;
+}
+
+/** Persisted public metadata for the development stack selected by a coding session. */
+export interface CodingSessionDevelopmentMetadata {
+  /** Catalog revision whose server-owned definitions were resolved for this session. */
+  catalogRevision: number;
+  /** Selected base profile, when the request used one. */
+  profileId?: string;
+  /** Dependency-expanded component identifiers persisted for restart compatibility. */
+  componentIds: string[];
+  /** Container tier fixed for this session generation. */
+  instanceTier: CodingSessionInstanceTier;
+}
+
+/** Last persisted lifecycle snapshot for one selected development-stack component. */
+export interface CodingSessionDevelopmentComponentSummary {
+  /** Stable catalog component identifier. */
+  id: string;
+  /** User-visible component name. */
+  title: string;
+  /** Last persisted lifecycle state. */
+  status: CodingSessionDevelopmentComponentStatus;
+  /** Bounded status or failure detail, when one is available. */
+  message?: string;
+  /** Time this lifecycle snapshot was last changed. */
+  updatedAt: Date;
+}
+
+/** Last persisted lifecycle snapshot for one browser-facing development application. */
+export interface CodingSessionDevelopmentApplicationSummary {
+  /** Stable catalog-global application identifier used when minting its capability. */
+  id: string;
+  /** Catalog component that owns this application. */
+  componentId: string;
+  /** User-visible application name. */
+  title: string;
+  /** Last persisted lifecycle state. */
+  status: CodingSessionDevelopmentComponentStatus;
+  /** Whether this deployment can currently mint a preview capability for the application. */
+  previewAvailable: boolean;
+  /** Bounded status or failure detail, when one is available. */
+  message?: string;
+}
+
+/** Persisted component and application lifecycle for one owned coding session. */
+export interface CodingSessionDevelopmentStatus {
+  /** Coding session to which this status belongs. */
+  sessionId: string;
+  /** Monotonically increasing public generation used to reject stale lifecycle responses. */
+  generation: number;
+  /** Last persisted lifecycle snapshots for selected components. */
+  components: CodingSessionDevelopmentComponentSummary[];
+  /** Last persisted lifecycle snapshots for browser-facing applications. */
+  applications: CodingSessionDevelopmentApplicationSummary[];
+  /** Time any development-stack lifecycle snapshot was last changed. */
+  updatedAt: Date;
+}
+
 /** User-visible metadata for a coding session. */
 export interface CodingSessionSummary {
   /** Opaque session identifier. */
@@ -355,6 +567,8 @@ export interface CodingSessionSummary {
   runtime: CodingSessionRuntime;
   /** Current lifecycle state. */
   status: CodingSessionStatus;
+  /** Persisted development-stack selection, absent on historical terminal-only sessions. */
+  development?: CodingSessionDevelopmentMetadata;
   /** When the session was created. */
   createdAt: Date;
   /** When the session was last used. */
@@ -373,6 +587,8 @@ export interface CreateCodingSessionRequest {
   repositories: CodingSessionRepository[];
   /** Coding agent runtime. Omitted requests retain the historical OpenCode behavior. */
   runtime?: CodingSessionRuntime;
+  /** Server-owned development-stack selection. Omission retains terminal-only standard-1 behavior. */
+  developmentStack?: CodingSessionStackSelection;
 }
 
 /** One account-scoped OpenCode skill materialized into a coding session. */
@@ -415,6 +631,14 @@ export interface CodingSessionEditorCapability {
   /** Separate-origin URL containing an unguessable generation-bound editor capability. */
   url: string;
   /** Time after which new HTTP requests and WebSocket handshakes require a freshly minted URL. */
+  expiresAt: Date;
+}
+
+/** Short-lived capability for opening one catalog application in a running session generation. */
+export interface CodingSessionApplicationCapability {
+  /** Application-specific URL containing an unguessable generation-bound capability. */
+  url: string;
+  /** Time after which the application URL and new transport handshakes must be rejected. */
   expiresAt: Date;
 }
 
@@ -548,6 +772,15 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Lists coding sessions owned by this user. */
   listCodingSessions(): Promise<CodingSessionSummary[]>;
 
+  /** Reads the server-owned, display-safe development-stack catalog for new coding sessions. */
+  getCodingSessionDevelopmentCatalog(): Promise<CodingSessionDevelopmentCatalog>;
+
+  /** Checks repositories, dependencies, tier policy, and current capacity without reserving it. */
+  preflightCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionDevelopmentPlan>;
+
+  /** Reads persisted component and application lifecycle for one owned coding session. */
+  getCodingSessionDevelopmentStatus(sessionId: string): Promise<CodingSessionDevelopmentStatus>;
+
   /** Searches Totango repositories the connected GitHub user can push to for Coding Sessions. */
   listCodingSessionRepositoryOptions(query?: string): Promise<CodingSessionRepositoryOption[]>;
 
@@ -577,6 +810,12 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Mints a generation-bound capability for browser VS Code in an owned running session. */
   mintCodingSessionEditorCapability(sessionId: string): Promise<CodingSessionEditorCapability>;
+
+  /** Mints a generation-bound capability for one catalog application in an owned running session. */
+  mintCodingSessionApplicationCapability(
+    sessionId: string,
+    applicationId: string,
+  ): Promise<CodingSessionApplicationCapability>;
 
   /** Lists coding-session tool activity, optionally narrowed to one session. */
   listCodingSessionActivity(sessionId?: string): Promise<import("./coding-sessions.js").CodingSessionActivity[]>;
