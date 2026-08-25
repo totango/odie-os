@@ -344,9 +344,9 @@ export type CodingSessionStatus = "starting" | "running" | "stopping" | "stopped
 export type CodingSessionRuntime = "opencode" | "pi" | "prime-agent";
 
 /** Container capacity tier selected before a coding-session generation starts. */
-export type CodingSessionInstanceTier = "standard-1" | "standard-3" | "standard-4";
+export type CodingSessionInstanceTier = "standard-1" | "standard-2" | "standard-3" | "standard-4";
 
-/** Lifecycle state of one reviewed development-stack component or application. */
+/** Lifecycle state of one server-owned development-stack component or application. */
 export type CodingSessionDevelopmentComponentStatus =
   | "pending"
   | "starting"
@@ -356,13 +356,13 @@ export type CodingSessionDevelopmentComponentStatus =
   | "stopping"
   | "stopped";
 
-/** Reviewed execution location used by one development-stack component. */
+/** Server-selected execution location used by one development-stack component. */
 export type CodingSessionDevelopmentExecution = "sandbox" | "external";
 
-/** Authority conveyed by one reviewed browser-facing development application. */
+/** Authority conveyed by one server-owned browser-facing development application. */
 export type CodingSessionDevelopmentApplicationAuthority = "application" | "management";
 
-/** One browser-facing application declared by a reviewed development-stack component. */
+/** One browser-facing application declared by a server-owned development-stack component. */
 export interface CodingSessionDevelopmentApplication {
   /** Stable catalog-global application identifier used when minting its capability. */
   id: string;
@@ -378,7 +378,7 @@ export interface CodingSessionDevelopmentApplication {
 export interface CodingSessionDevelopmentComponent {
   /** Stable component identifier. */
   id: string;
-  /** Monotonically increasing revision of this reviewed component definition. */
+  /** Monotonically increasing revision of this server-owned component definition. */
   revision: number;
   /** User-visible component name. */
   title: string;
@@ -388,11 +388,11 @@ export interface CodingSessionDevelopmentComponent {
   available: boolean;
   /** Bounded explanation shown when this component is not currently available. */
   unavailableReason?: string;
-  /** Location where the reviewed component executes. */
+  /** Location where the server-owned component executes. */
   execution: CodingSessionDevelopmentExecution;
   /** Repositories that must be present before this component can start. */
   requiredRepositories: CodingSessionRepository[];
-  /** Reviewed component dependencies that the server adds to a plan. */
+  /** Server-owned component dependencies that the planner adds. */
   dependencyIds: string[];
   /** Smallest coding-sandbox tier required alongside this component, including external components. */
   minimumTier: CodingSessionInstanceTier;
@@ -404,7 +404,7 @@ export interface CodingSessionDevelopmentComponent {
 export interface CodingSessionDevelopmentProfile {
   /** Stable profile identifier. */
   id: string;
-  /** Monotonically increasing revision of this reviewed profile definition. */
+  /** Monotonically increasing revision of this server-owned profile definition. */
   revision: number;
   /** User-visible profile name. */
   title: string;
@@ -414,7 +414,7 @@ export interface CodingSessionDevelopmentProfile {
   available: boolean;
   /** Bounded explanation shown when this profile is not currently available. */
   unavailableReason?: string;
-  /** Reviewed components selected by this profile before dependency expansion. */
+  /** Server-owned components selected by this profile before dependency expansion. */
   componentIds: string[];
   /** Smallest coding-sandbox tier required alongside this profile, including external profiles. */
   minimumTier: CodingSessionInstanceTier;
@@ -424,9 +424,9 @@ export interface CodingSessionDevelopmentProfile {
 export interface CodingSessionDevelopmentCatalog {
   /** Monotonically increasing revision of the complete catalog projection. */
   revision: number;
-  /** Known reviewed components, including entries currently unavailable for new sessions. */
+  /** Known server-owned components, including planned entries unavailable for new sessions. */
   components: CodingSessionDevelopmentComponent[];
-  /** Known reviewed profiles, including entries currently unavailable for new sessions. */
+  /** Known server-owned profiles, including planned entries unavailable for new sessions. */
   profiles: CodingSessionDevelopmentProfile[];
   /** Container tiers enabled by this deployment. */
   enabledTiers: CodingSessionInstanceTier[];
@@ -434,7 +434,7 @@ export interface CodingSessionDevelopmentCatalog {
 
 /** Requested server-owned profile, component additions, and optional capacity preference. */
 export interface CodingSessionStackSelection {
-  /** Reviewed base profile to expand, when a profile is selected. */
+  /** Server-owned base profile to expand, when a profile is selected. */
   profileId?: string;
   /** Explicit components selected directly or added to the selected profile. */
   componentIds?: string[];
@@ -444,6 +444,7 @@ export interface CodingSessionStackSelection {
 
 /** Stable category for one coding-session development-plan problem. */
 export type CodingSessionDevelopmentPlanIssueCode =
+  | "invalid-selection"
   | "unknown-profile"
   | "unknown-component"
   | "missing-repository"
@@ -500,7 +501,7 @@ export interface CodingSessionDevelopmentPlan {
 
 /** Persisted public metadata for the development stack selected by a coding session. */
 export interface CodingSessionDevelopmentMetadata {
-  /** Catalog revision whose reviewed definitions were resolved for this session. */
+  /** Catalog revision whose server-owned definitions were resolved for this session. */
   catalogRevision: number;
   /** Selected base profile, when the request used one. */
   profileId?: string;
@@ -512,7 +513,7 @@ export interface CodingSessionDevelopmentMetadata {
 
 /** Last persisted lifecycle snapshot for one selected development-stack component. */
 export interface CodingSessionDevelopmentComponentSummary {
-  /** Stable reviewed component identifier. */
+  /** Stable catalog component identifier. */
   id: string;
   /** User-visible component name. */
   title: string;
@@ -526,9 +527,9 @@ export interface CodingSessionDevelopmentComponentSummary {
 
 /** Last persisted lifecycle snapshot for one browser-facing development application. */
 export interface CodingSessionDevelopmentApplicationSummary {
-  /** Stable application identifier, unique within its component. */
+  /** Stable catalog-global application identifier used when minting its capability. */
   id: string;
-  /** Reviewed component that owns this application. */
+  /** Catalog component that owns this application. */
   componentId: string;
   /** User-visible application name. */
   title: string;
@@ -586,7 +587,7 @@ export interface CreateCodingSessionRequest {
   repositories: CodingSessionRepository[];
   /** Coding agent runtime. Omitted requests retain the historical OpenCode behavior. */
   runtime?: CodingSessionRuntime;
-  /** Reviewed development-stack selection. Omission retains terminal-only standard-1 behavior. */
+  /** Server-owned development-stack selection. Omission retains terminal-only standard-1 behavior. */
   developmentStack?: CodingSessionStackSelection;
 }
 
@@ -633,7 +634,7 @@ export interface CodingSessionEditorCapability {
   expiresAt: Date;
 }
 
-/** Short-lived capability for opening one reviewed application in a running session generation. */
+/** Short-lived capability for opening one catalog application in a running session generation. */
 export interface CodingSessionApplicationCapability {
   /** Application-specific URL containing an unguessable generation-bound capability. */
   url: string;
@@ -810,7 +811,7 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Mints a generation-bound capability for browser VS Code in an owned running session. */
   mintCodingSessionEditorCapability(sessionId: string): Promise<CodingSessionEditorCapability>;
 
-  /** Mints a generation-bound capability for one reviewed application in an owned running session. */
+  /** Mints a generation-bound capability for one catalog application in an owned running session. */
   mintCodingSessionApplicationCapability(
     sessionId: string,
     applicationId: string,

@@ -159,6 +159,31 @@ describe("coding session asynchronous startup", () => {
     vi.clearAllMocks();
   });
 
+  it("accepts omitted legacy preflight but rejects an explicitly empty development selection before create", async () => {
+    const kv = createKv();
+    const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
+      ctx: { storage: { kv: typeof kv } };
+    };
+    registry.ctx = { storage: { kv } };
+
+    expect(registry.preflightSession({ title: "Legacy", repositories: ["jarvis"] })).toMatchObject({
+      canCreate: true,
+      issues: [],
+      selectedTier: "standard-1",
+    });
+    expect(registry.preflightSession({
+      title: "Empty", repositories: ["jarvis"], developmentStack: {},
+    })).toMatchObject({
+      canCreate: false,
+      issues: [expect.objectContaining({ code: "invalid-selection" })],
+    });
+    await expect(registry.createSession(
+      { userId: "user-1", email: "user@example.com" },
+      { title: "Empty", repositories: ["jarvis"], developmentStack: {} },
+    )).rejects.toThrow("Select a development profile or at least one development component.");
+    expect(kv.values.size).toBe(0);
+  });
+
   it("create returns a persisted starting session before deferred startup work runs", async () => {
     const kv = createKv();
     const scheduled = vi.fn(async () => undefined);

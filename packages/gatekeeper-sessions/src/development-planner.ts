@@ -12,7 +12,15 @@ import type { DevelopmentCatalogDefinition, DevelopmentComponentDefinition } fro
 /** Capacity snapshots supplied to the pure development-stack planner. */
 export type DevelopmentCapacityByTier = Partial<Record<CodingSessionInstanceTier, CodingSessionDevelopmentCapacity>>;
 
-const TIERS: CodingSessionInstanceTier[] = ["standard-1", "standard-3", "standard-4"];
+/** Deployment-side non-secret requirements currently available to executable component specs. */
+export interface DevelopmentPlannerContext {
+  configuration?: Iterable<string>;
+  capabilities?: Iterable<string>;
+  egressGrants?: Iterable<string>;
+  diskBytesByTier?: Partial<Record<CodingSessionInstanceTier, number>>;
+}
+
+const TIERS: CodingSessionInstanceTier[] = ["standard-1", "standard-2", "standard-3", "standard-4"];
 const EMPTY_CAPACITY: CodingSessionDevelopmentCapacity = { available: false, active: 0, limit: 0 };
 const MAX_SELECTION_COMPONENTS = 20;
 const MAX_SELECTION_ID_LENGTH = 64;
@@ -23,10 +31,17 @@ export function planDevelopmentStack(
   catalog: DevelopmentCatalogDefinition,
   request: Pick<CreateCodingSessionRequest, "repositories" | "developmentStack">,
   capacities: DevelopmentCapacityByTier,
+  context: DevelopmentPlannerContext = {},
 ): CodingSessionDevelopmentPlan {
   const issues: CodingSessionDevelopmentPlanIssue[] = [];
   const requested = request.developmentStack;
   const selection = normalizeSelection(requested, issues);
+  if (requested !== undefined && selection.profileId === undefined && (selection.componentIds?.length ?? 0) === 0) {
+    issues.push({
+      code: "invalid-selection",
+      message: "Select a development profile or at least one development component.",
+    });
+  }
   const componentsById = new Map(catalog.components.map(component => [component.id, component]));
   const profilesById = new Map(catalog.profiles.map(profile => [profile.id, profile]));
   const selectedIds = new Set<string>();
@@ -103,6 +118,26 @@ export function planDevelopmentStack(
         code: "configuration-unavailable", componentId: component.id,
         message: component.unavailableReason ?? `${component.title} is unavailable.`,
       });
+    } else if (component.executionSpec) {
+      const configuration = new Set(context.configuration ?? []);
+      const capabilities = new Set(context.capabilities ?? []);
+      const missingRequirement = component.executionSpec.requirements.configuration.some(
+        requirement => !configuration.has(requirement),
+      ) || component.executionSpec.requirements.capabilities.some(
+        requirement => !capabilities.has(requirement),
+      );
+      if (missingRequirement) issues.push({
+        code: "configuration-unavailable", componentId: component.id,
+        message: `${component.title} is missing required deployment configuration or capabilities.`,
+      });
+      const egressGrants = new Set(context.egressGrants ?? []);
+      const missingEgress = component.executionSpec.egress.some(
+        rule => !egressGrants.has(`${component.id}:${rule.id}`),
+      );
+      if (missingEgress) issues.push({
+        code: "configuration-unavailable", componentId: component.id,
+        message: `${component.title} is missing required reviewed network access.`,
+      });
     }
     for (const conflictId of component.conflictsWith ?? []) {
       if (!resolvedIds.has(conflictId)) continue;
@@ -134,6 +169,18 @@ export function planDevelopmentStack(
 
   const minimumTier = maxTier(profileMinimum, ...resolved.map(component => component.minimumTier));
   const selectedTier = selection.requestedTier ?? minimumTier;
+  const requiredDiskBytes = resolved.reduce((total, component) =>
+    component.available && component.execution === "sandbox" && component.executionSpec
+      ? total + component.executionSpec.minimumDiskBytes
+      : total, 0);
+  const diskBudget = context.diskBytesByTier?.[selectedTier];
+  if (requiredDiskBytes > 0 &&
+      (!Number.isSafeInteger(diskBudget) || (diskBudget as number) < requiredDiskBytes)) {
+    issues.push({
+      code: "capacity-unavailable",
+      message: "The selected tier lacks required development-stack disk capacity.",
+    });
+  }
   if (tierIndex(selectedTier) < tierIndex(minimumTier)) {
     issues.push({
       code: "tier-too-small",

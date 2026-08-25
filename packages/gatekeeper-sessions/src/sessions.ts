@@ -704,6 +704,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       !record.archivedAt && ["starting", "running", "stopping"].includes(record.status)).length;
     return planDevelopmentStack(DEVELOPMENT_CATALOG, request, {
       "standard-1": { available: active < MAX_SESSIONS_PER_USER, active, limit: MAX_SESSIONS_PER_USER },
+      "standard-2": { available: false, active: 0, limit: 0 },
       "standard-3": { available: false, active: 0, limit: 0 },
       "standard-4": { available: false, active: 0, limit: 0 },
     });
