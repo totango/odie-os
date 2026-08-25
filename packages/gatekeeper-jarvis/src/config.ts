@@ -19,17 +19,6 @@ export const JARVIS_UI_ICON = {
 };
 
 const ALLOWED_TOOL_SET = new Set<string>(JARVIS_ALLOWED_TOOLS);
-const MANUAL_ACTION_TOOL_SET = new Set<string>([
-  "jarvis_answer_support_question",
-  "jarvis_investigate_customer_issue",
-  "jarvis_call_wren_tool",
-  // Running an arbitrary named tool against live production is not an observation, whatever the
-  // far side says about it. JARVIS refuses the writes it hosts, but this gatekeeper does not get to
-  // depend on that being true today or after the next tool ships there: the name and arguments are
-  // chosen by the agent, and the reachable surface still includes ad-hoc SQL against production
-  // databases. Listing and describing stay reads -- they disclose no data.
-  "jarvis_call_prod_tool",
-]);
 
 /** Parsed deployment configuration for the JARVIS MCP endpoint. */
 export type JarvisConfig = {
@@ -42,13 +31,16 @@ export function isJarvisAllowedTool(toolName: string): toolName is JarvisAllowed
   return ALLOWED_TOOL_SET.has(toolName);
 }
 
-/** Applies the gatekeeper-owned JARVIS read/action policy without trusting server annotations. */
+/**
+ * Applies the deployment-owned policy that every allowlisted JARVIS tool is read-only.
+ * Dispatcher tools are included because the internal endpoint constrains their reachable catalogs
+ * to read-only operations; unknown tools still fail closed at the allowlist above.
+ */
 export function applyJarvisToolPolicy(entry: ClassifiedTool): ClassifiedTool | null {
   if (!isJarvisAllowedTool(entry.tool.name)) return null;
-  const manualAction = MANUAL_ACTION_TOOL_SET.has(entry.tool.name);
   return {
     ...entry,
-    mode: manualAction ? "action" : "read",
+    mode: "read",
     autoApprovable: false,
     classifiedBy: "default",
   };

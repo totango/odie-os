@@ -84,18 +84,14 @@ describe("JarvisAccount", () => {
 });
 
 describe("JarvisSession", () => {
-  it("enforces manual approval for support and investigation despite unsafe annotations", () => {
-    for (const name of ["jarvis_answer_support_question", "jarvis_investigate_customer_issue"]) {
+  it("enforces the deployment-owned read-only policy despite unsafe annotations", () => {
+    for (const name of JARVIS_ALLOWED_TOOLS) {
       const classified = applyJarvisToolPolicy(classifyTool({
         name,
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       }, "vetted"));
-      expect(classified).toMatchObject({ mode: "action", autoApprovable: false });
+      expect(classified).toMatchObject({ mode: "read", autoApprovable: false });
     }
-    expect(applyJarvisToolPolicy(classifyTool({
-      name: "query_knowledge",
-      annotations: { readOnlyHint: false },
-    }, "vetted"))).toMatchObject({ mode: "read", autoApprovable: false });
   });
 
   it("is the validated MCP session subclass used for generated tool methods", () => {
@@ -145,54 +141,48 @@ describe("JarvisSession", () => {
     expect(submitted).toBe(false);
   });
 
-  it("stages support and investigation tools for manual approval under trusted JARVIS annotations", async () => {
-    const supportTool = classifyTool({
+  it("runs allowlisted support and investigation tools as observations", async () => {
+    const supportTool = applyJarvisToolPolicy(classifyTool({
       name: "jarvis_answer_support_question",
       description: "Draft a support answer.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    }, "vetted");
-    const investigationTool = classifyTool({
+    }, "vetted"))!;
+    const investigationTool = applyJarvisToolPolicy(classifyTool({
       name: "jarvis_investigate_customer_issue",
       description: "Start an investigation.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
-    }, "vetted");
-    expect(supportTool).toMatchObject({ mode: "action", autoApprovable: false });
-    expect(investigationTool).toMatchObject({ mode: "action", autoApprovable: false });
+    }, "vetted"))!;
 
-    const submitted: Array<{ id: number; autoApprovable?: boolean; awaitDecision?: boolean }> = [];
+    const called: string[] = [];
+    let authorized = 0;
     const session = new JarvisSession({
       serverName: "JARVIS",
       endpoint: "https://jarvis.example.com/mcp",
       scope: { tools: ["jarvis_answer_support_question", "jarvis_investigate_customer_issue"] },
       tools: async () => [supportTool, investigationTool],
-      call: async () => { throw new Error("action tool should not call before approval"); },
+      call: async fn => fn({
+        callTool: async (name: string) => {
+          called.push(name);
+          return { content: [{ type: "text", text: `called ${name}` }] };
+        },
+      } as never),
       actionKindFor: toolName => ({ tag: `jarvis:${toolName}`, label: toolName }),
-      stageAction: (toolName, args) => ({
-        id: submitted.length + 1,
-        toolName,
-        args,
-        state: "pending",
-        submittedAt: Date.now(),
-      }),
+      stageAction: () => { throw new Error("read tool should not stage an action"); },
       discardStagedAction: () => {},
       lookupAction: () => undefined,
     }, {
-      authorizeObservation: async () => {},
-      submitAction: async (id: number, description: { autoApprovable?: boolean; awaitDecision?: boolean }) => {
-        submitted.push({ id, autoApprovable: description.autoApprovable, awaitDecision: description.awaitDecision });
-      },
+      authorizeObservation: async () => { authorized++; },
+      submitAction: async () => { throw new Error("read tool should not submit an action"); },
       dup() { return this; },
       [Symbol.dispose]() {},
     } as never);
 
     await expect(session.callTool("jarvis_answer_support_question", { question: "help" }))
-      .resolves.toMatchObject({ status: "pending", actionId: 1 });
+      .resolves.toMatchObject({ status: "ok" });
     await expect(session.callTool("jarvis_investigate_customer_issue", { customer: "acme" }))
-      .resolves.toMatchObject({ status: "pending", actionId: 2 });
-    expect(submitted).toEqual([
-      { id: 1, autoApprovable: false, awaitDecision: true },
-      { id: 2, autoApprovable: false, awaitDecision: true },
-    ]);
+      .resolves.toMatchObject({ status: "ok" });
+    expect(called).toEqual(["jarvis_answer_support_question", "jarvis_investigate_customer_issue"]);
+    expect(authorized).toBe(2);
   });
 });
 

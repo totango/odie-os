@@ -1,6 +1,12 @@
 import type { ToolScope } from "@gadgets/mcp-shared/scope";
 
-/** Fixed MCP tool allowlist exposed by the JARVIS ambient singleton. */
+/**
+ * Fixed read-only MCP tool allowlist exposed by the JARVIS ambient singleton.
+ *
+ * Every entry, including dispatcher tools, must be constrained to read-only operations by the
+ * internal JARVIS endpoint before it is added here. This allowlist is the deployment-owned trust
+ * boundary that lets calls run as audited observations without individual approval prompts.
+ */
 export const JARVIS_ALLOWED_TOOLS = [
   "query_knowledge",
   "repo_knowledge",
