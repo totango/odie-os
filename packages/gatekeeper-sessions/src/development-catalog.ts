@@ -102,7 +102,6 @@ const ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const IMAGE_PATTERN = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-const SAFE_PATH_PATTERN = /^\/[^\u0000-\u001f\u007f]*$/;
 const NOT_YET_AVAILABLE = "Development-stack execution is not available in this deployment yet.";
 const COMPLETE_LOCAL_UNAVAILABLE = "The complete local stack exceeds the public sandbox disk limit. Use the complete external profile instead.";
 
@@ -279,7 +278,7 @@ export function validateDevelopmentCatalog(catalog: DevelopmentCatalogDefinition
       applicationIds.add(application.id);
     }
     if (entry.available && !entry.executionSpec) throw new Error(`Available component ${entry.id} lacks an execution spec.`);
-    if (entry.available && entry.dependencyIds.some(id => !catalog.components.find(component => component.id === id)!.available)) {
+    if (entry.available && entry.dependencyIds.some(id => !catalog.components.find(candidate => candidate.id === id)!.available)) {
       throw new Error(`Available component ${entry.id} depends on an unavailable component.`);
     }
     if (entry.executionSpec) validateExecutionSpec(entry, entry.executionSpec);
@@ -297,7 +296,7 @@ export function validateDevelopmentCatalog(catalog: DevelopmentCatalogDefinition
       if (!componentIds.has(componentId)) throw new Error(`Profile ${entry.id} has an unknown component.`);
     }
     if (entry.available && entry.componentIds.length === 0) throw new Error(`Available profile ${entry.id} is empty.`);
-    if (entry.available && entry.componentIds.some(id => !catalog.components.find(component => component.id === id)!.available)) {
+    if (entry.available && entry.componentIds.some(id => !catalog.components.find(candidate => candidate.id === id)!.available)) {
       throw new Error(`Available profile ${entry.id} selects an unavailable component.`);
     }
   }
@@ -326,7 +325,7 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
   if (!Number.isInteger(spec.restart.backoffMs) || spec.restart.backoffMs < 0) throw new Error(`Component ${entry.id} has invalid restart backoff.`);
   positiveInteger(spec.stop.graceMs, `Component ${entry.id} stop grace`);
 
-  const processIds = uniqueIds(spec.processes, `process in ${entry.id}`);
+  uniqueIds(spec.processes, `process in ${entry.id}`);
   const imageIds = uniqueIds(spec.images, `image in ${entry.id}`);
   for (const image of spec.images) if (!IMAGE_PATTERN.test(image.reference)) throw new Error(`Image ${image.id} is not digest-pinned.`);
   for (const process of spec.processes) {
@@ -343,7 +342,7 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
       }
       environmentNames.add(variable.name);
       if (variable.source.kind === "literal") {
-        if (typeof variable.source.value !== "string" || variable.source.value.length > 4_096 || /[\u0000\r\n]/.test(variable.source.value)) {
+        if (typeof variable.source.value !== "string" || variable.source.value.length > 4_096 || hasControlCharacters(variable.source.value)) {
           throw new Error(`Process ${process.id} has an invalid public environment value.`);
         }
       } else if (variable.source.kind === "configuration") {
@@ -367,7 +366,7 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
     if (health.kind === "http") {
       validPort(health.port, `Component ${entry.id} HTTP health port`);
       if (!entry.ports.includes(health.port)) throw new Error(`Component ${entry.id} HTTP health port is undeclared.`);
-      if (!SAFE_PATH_PATTERN.test(health.path) || health.path.length > 2_048 || !Array.isArray(health.statuses) ||
+      if (!isSafePath(health.path) || health.path.length > 2_048 || !Array.isArray(health.statuses) ||
           health.statuses.length === 0 || new Set(health.statuses).size !== health.statuses.length ||
           health.statuses.some(status => !Number.isInteger(status) || status < 100 || status > 599)) {
         throw new Error(`Component ${entry.id} has an invalid HTTP health check.`);
@@ -429,7 +428,7 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
         !HOST_PATTERN.test(rule.host) || rule.host === "localhost" || rule.host.endsWith(".localhost") ||
         !Array.isArray(rule.pathPrefixes) || rule.pathPrefixes.length === 0 ||
         new Set(rule.pathPrefixes).size !== rule.pathPrefixes.length ||
-        rule.pathPrefixes.some(prefix => typeof prefix !== "string" || prefix.length > 2_048 || !SAFE_PATH_PATTERN.test(prefix)) ||
+        rule.pathPrefixes.some(prefix => typeof prefix !== "string" || prefix.length > 2_048 || !isSafePath(prefix)) ||
         !Array.isArray(rule.methods) || rule.methods.length === 0 || new Set(rule.methods).size !== rule.methods.length ||
         rule.methods.some(method => !["GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH", "DELETE"].includes(method))) {
       throw new Error(`Component ${entry.id} has an invalid egress rule.`);
@@ -457,8 +456,20 @@ function validateAvailability(
   }
 }
 
+function hasControlCharacters(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 32 || code === 127) return true;
+  }
+  return false;
+}
+
+function isSafePath(value: unknown): value is string {
+  return typeof value === "string" && value.startsWith("/") && !hasControlCharacters(value);
+}
+
 function validatePublicText(value: string, maximum: number, label: string): void {
-  if (typeof value !== "string" || !value.trim() || value.length > maximum || /[\u0000-\u001f\u007f]/.test(value)) {
+  if (typeof value !== "string" || !value.trim() || value.length > maximum || hasControlCharacters(value)) {
     throw new Error(`${label} must be bounded, nonempty display text.`);
   }
 }
