@@ -24,9 +24,11 @@ HTTP status fail without retry.
 
 The claimed canary also handles native container readiness at the smallest safe boundary. Only the
 initial Node `sandbox.exec()` retries `ContainerUnavailableError`, which means the operation was not
-admitted. It makes at most three total attempts inside the existing 180-second lifecycle deadline.
-A valid non-negative integer `retryAfterMs` is used up to 10 seconds; otherwise the two waits are
-one and two seconds. No later stage, process output or readiness wait, admitted operation,
+admitted. It makes at most six total attempts inside a five-minute lifecycle deadline. Two exact
+candidate attempts each exhausted the former three-attempt limit at the Node stage; the larger bound
+can distinguish longer cold readiness from persistent failure. A valid non-negative integer
+`retryAfterMs` is used up to 10 seconds; otherwise fallback waits grow from one second and cap at 10
+seconds. No later stage, process output or readiness wait, admitted operation,
 `OperationInterruptedError`, `RPCTransportError`, other class, or other status is retried.
 
 ## Force-cancel residual and manual cleanup
