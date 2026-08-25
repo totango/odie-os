@@ -12,7 +12,7 @@ import {
 import { claimCanaryRun, rejectCanaryRequest } from "./policy.js";
 
 const SANDBOX_ID = "one-shot";
-const CANARY_DEADLINE_MS = 180_000;
+const CANARY_DEADLINE_MS = 300_000;
 const POST_DESTROY_SETTLE_MS = 10_000;
 const DESTROY_TIMEOUT_MS = 30_000;
 

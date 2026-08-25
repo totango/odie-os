@@ -66,10 +66,13 @@ describe("native canary initial Node readiness", () => {
 
   it("bounds the delay and total attempts", async () => {
     const final = unavailable(50);
-    const run = runWith([unavailable(100_000), unavailable(-1), final, process]);
+    const run = runWith([
+      unavailable(100_000), unavailable(-1), unavailable(), unavailable(Number.NaN),
+      unavailable(Number.MAX_SAFE_INTEGER + 1), final, process,
+    ]);
     await expect(run.result).rejects.toBe(final);
-    expect(run.attempts()).toBe(3);
-    expect(run.delays).toEqual([10_000, 2_000]);
+    expect(run.attempts()).toBe(6);
+    expect(run.delays).toEqual([10_000, 2_000, 4_000, 8_000, 10_000]);
   });
 
   it.each([

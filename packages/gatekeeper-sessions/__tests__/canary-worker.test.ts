@@ -9,6 +9,7 @@ const sandbox = {
   },
 };
 let lifecycleFailure: unknown;
+let lifecycleOptions: { runTimeoutMs: number; settleTimeoutMs: number; destroyTimeoutMs: number } | undefined;
 
 vi.mock("@cloudflare/sandbox", () => ({
   Sandbox: class {},
@@ -23,7 +24,12 @@ vi.mock("../canary/checks.js", () => ({
   },
   EXPECTED_NODE_VERSION: "v24.14.0",
   runCanary: vi.fn(),
-  runClaimedCanaryLifecycle: async (target: typeof sandbox) => {
+  runClaimedCanaryLifecycle: async (
+    target: typeof sandbox,
+    _run: unknown,
+    options: { runTimeoutMs: number; settleTimeoutMs: number; destroyTimeoutMs: number },
+  ) => {
+    lifecycleOptions = options;
     await target.claimOneShot();
     if (lifecycleFailure) throw lifecycleFailure;
     target.destroyCalls++;
@@ -56,6 +62,17 @@ describe("native canary Worker endpoint", () => {
     sandbox.claimed = false;
     sandbox.destroyCalls = 0;
     lifecycleFailure = undefined;
+    lifecycleOptions = undefined;
+  });
+
+  it("bounds a cold native run with the five-minute lifecycle deadline", async () => {
+    const response = await worker.fetch(request(), env as never);
+    expect(response.status).toBe(200);
+    expect(lifecycleOptions).toEqual({
+      runTimeoutMs: 300_000,
+      settleTimeoutMs: 10_000,
+      destroyTimeoutMs: 30_000,
+    });
   });
 
   it("allows one request and a repeat claim never destroys its sandbox", async () => {
