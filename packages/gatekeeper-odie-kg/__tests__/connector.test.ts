@@ -107,7 +107,7 @@ describe("ODIE MCP connector", () => {
     await expect(facet.tools()).rejects.toThrow(/endpoint changed/i);
   });
 
-  it("invalidates the scope grant before repointing an existing account", async () => {
+  it("invalidates the scope grant only while an endpoint repoint is accepted", async () => {
     const values = new Map<string, unknown>([
       ["server", { endpoint: ENDPOINT, serverName: ODIE_KG_DISPLAY_NAME }],
       ["odieMcpScopeVersion", 1],
@@ -119,13 +119,22 @@ describe("ODIE MCP connector", () => {
         storage: {
           kv: {
             get: (key: string) => values.get(key),
+            put: (key: string, value: unknown) => values.set(key, value),
             delete: (key: string) => values.delete(key),
           },
         },
       },
     });
     const base = vi.spyOn(McpAccountBase.prototype, "beginConnect")
-      .mockResolvedValue({ kind: "invalid" });
+      .mockResolvedValueOnce({ kind: "invalid" })
+      .mockResolvedValueOnce({ kind: "redirect", url: "https://auth.example.com" })
+      .mockResolvedValueOnce({ kind: "invalid" });
+
+    await account.beginConnect("stale-nonce", {
+      endpoint: "https://new.example.com/api/mcp/odie",
+      serverName: ODIE_KG_DISPLAY_NAME,
+    } as never);
+    expect(values.has("odieMcpScopeVersion")).toBe(true);
 
     await account.beginConnect("nonce", {
       endpoint: "https://new.example.com/api/mcp/odie",
@@ -134,12 +143,12 @@ describe("ODIE MCP connector", () => {
 
     expect(values.has("odieMcpScopeVersion")).toBe(false);
     values.set("odieMcpScopeVersion", 1);
-    await account.beginConnect("stale-nonce", {
+    await account.beginConnect("nonce", {
       endpoint: "https://new.example.com/api/mcp/odie",
       serverName: ODIE_KG_DISPLAY_NAME,
     } as never);
     expect(values.has("odieMcpScopeVersion")).toBe(true);
-    expect(base).toHaveBeenCalledTimes(2);
+    expect(base).toHaveBeenCalledTimes(3);
     base.mockRestore();
   });
 });

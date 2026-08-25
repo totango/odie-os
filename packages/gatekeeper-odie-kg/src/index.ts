@@ -199,7 +199,7 @@ export class OdieKgAccount extends McpAccountBase<Env> {
   }
 
   /** Invalidates the old scope grant before an endpoint repoint can begin. */
-  override beginConnect(
+  override async beginConnect(
     initiationNonce: string,
     target: ConnectedServer | null,
   ): Promise<ConnectOutcome> {
@@ -209,11 +209,33 @@ export class OdieKgAccount extends McpAccountBase<Env> {
     } catch {
       // A first connection has no prior scope grant to invalidate.
     }
-    if (existing && target && this.awaitingSelection(initiationNonce)
-        && !sameEndpoint(existing.endpoint, target.endpoint)) {
+    const repointing = existing !== undefined && target !== null && this.awaitingSelection(initiationNonce)
+      && !sameEndpoint(existing.endpoint, target.endpoint);
+    const previousScopeVersion = repointing
+      ? this.ctx.storage.kv.get<number>(ODIE_MCP_SCOPE_VERSION_KEY)
+      : undefined;
+    if (repointing) {
       this.ctx.storage.kv.delete(ODIE_MCP_SCOPE_VERSION_KEY);
     }
-    return super.beginConnect(initiationNonce, target);
+    try {
+      const outcome = await super.beginConnect(initiationNonce, target);
+      if (repointing && outcome.kind === "invalid" && previousScopeVersion !== undefined) {
+        this.ctx.storage.kv.put(ODIE_MCP_SCOPE_VERSION_KEY, previousScopeVersion);
+      }
+      return outcome;
+    } catch (error) {
+      let current: ConnectedServer | undefined;
+      try {
+        current = this.requireServer();
+      } catch {
+        // A failed first connection has no previous grant to restore.
+      }
+      if (repointing && existing && current && sameEndpoint(current.endpoint, existing.endpoint)
+          && previousScopeVersion !== undefined) {
+        this.ctx.storage.kv.put(ODIE_MCP_SCOPE_VERSION_KEY, previousScopeVersion);
+      }
+      throw error;
+    }
   }
 
   protected mintAccount(): Fetcher<GatekeeperUser> {
