@@ -16,9 +16,9 @@ ARG CODE_SERVER_VERSION=4.133.0
 
 # Node is installed alongside the base image's global tools. Replacing /usr/local would remove the
 # pinned OpenCode installation inherited from the matching Sandbox image.
-ADD --checksum=sha256:41cd79bb7877c81605a9e68ec4c91547774f46a40c67a17e34d7179ef11729df \
-    https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
-    /tmp/node.tar.xz
+ADD --checksum=sha256:dbf5b8665dec15e59e6359a517fefb47b23fdb9152d8def975b9bca3dfc6d355 \
+    https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz \
+    /tmp/node.tar.gz
 
 # Browser VS Code and its reviewed baseline extensions are fetched only at image build time. Every
 # artifact is version and digest pinned; repository recommendations never authorize online installs.
@@ -61,8 +61,8 @@ ENV PATH="/opt/node/bin:${PATH}" \
 # Prime Agent uses ripgrep for fast model-driven repository search. Install it in the image because
 # coding sessions run offline and cannot satisfy the CLI's best-effort package-manager fallback.
 RUN mkdir -p /opt/node \
-    && tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1 \
-    && rm -f /tmp/node.tar.xz \
+    && tar -xzf /tmp/node.tar.gz -C /opt/node --strip-components=1 \
+    && rm -f /tmp/node.tar.gz \
     && printf '%s\n' 'export PATH="/opt/node/bin:$PATH"' > /etc/profile.d/odie-node.sh \
     && chmod 644 /etc/profile.d/odie-node.sh \
     && corepack enable pnpm \
