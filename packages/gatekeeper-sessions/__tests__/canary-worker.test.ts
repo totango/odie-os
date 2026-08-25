@@ -8,7 +8,7 @@ const sandbox = {
     this.claimed = true;
   },
 };
-let lifecycleFailure: Error | undefined;
+let lifecycleFailure: unknown;
 
 vi.mock("@cloudflare/sandbox", () => ({
   Sandbox: class {},
@@ -16,6 +16,11 @@ vi.mock("@cloudflare/sandbox", () => ({
 }));
 vi.mock("@cloudflare/sandbox/interpreter", () => ({ withInterpreter: () => ({}) }));
 vi.mock("../canary/checks.js", () => ({
+  CanaryStageError: class CanaryStageError extends Error {
+    constructor(readonly failureStage: string, cause: unknown) {
+      super(`Canary ${failureStage} stage failed.`, { cause });
+    }
+  },
   EXPECTED_NODE_VERSION: "v24.14.0",
   runCanary: vi.fn(),
   runClaimedCanaryLifecycle: async (target: typeof sandbox) => {
@@ -30,6 +35,7 @@ vi.mock("../canary/checks.js", () => ({
 }));
 
 const worker = (await import("../canary/worker.js")).default;
+const { CanaryStageError } = await import("../canary/checks.js");
 const TOKEN = "a".repeat(64);
 const env = {
   CANARY_SANDBOX: {},
@@ -61,7 +67,7 @@ describe("native canary Worker endpoint", () => {
     expect(sandbox.destroyCalls).toBe(1);
     const repeat = await worker.fetch(request(), env as never);
     expect(repeat.status).toBe(500);
-    expect(await repeat.json()).toEqual({ ok: false });
+    expect(await repeat.json()).toEqual({ ok: false, failureStage: "lifecycle" });
     expect(sandbox.destroyCalls).toBe(1);
   });
 
@@ -70,6 +76,33 @@ describe("native canary Worker endpoint", () => {
     const response = await worker.fetch(request(), env as never);
     expect(response.status).toBe(500);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
-    expect(await response.text()).toBe('{"ok":false}');
+    expect(await response.text()).toBe('{"ok":false,"failureStage":"lifecycle"}');
+  });
+
+  it("recursively returns only a closed stage from aggregate failures", async () => {
+    lifecycleFailure = new AggregateError([
+      new Error("sensitive outer detail"),
+      new AggregateError([
+        new CanaryStageError("typescript", new Error("sensitive nested detail")),
+      ], "sensitive aggregate detail"),
+    ]);
+    const response = await worker.fetch(request(), env as never);
+    expect(response.status).toBe(500);
+    expect(await response.text()).toBe('{"ok":false,"failureStage":"typescript"}');
+  });
+
+  it("prefers the operation stage when operation and cleanup both fail", async () => {
+    lifecycleFailure = new AggregateError([
+      new CanaryStageError("code-server", new Error("sensitive operation detail")),
+      new CanaryStageError("cleanup", new Error("sensitive cleanup detail")),
+    ]);
+    const response = await worker.fetch(request(), env as never);
+    expect(await response.text()).toBe('{"ok":false,"failureStage":"code-server"}');
+  });
+
+  it("falls back to lifecycle for an out-of-contract stage", async () => {
+    lifecycleFailure = new CanaryStageError("sensitive-invalid-stage" as never, new Error("sensitive detail"));
+    const response = await worker.fetch(request(), env as never);
+    expect(await response.text()).toBe('{"ok":false,"failureStage":"lifecycle"}');
   });
 });

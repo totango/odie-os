@@ -11,6 +11,11 @@ empty. The independent `cleanup` job then deletes both control-plane resources: 
 container application by UUID and the exact Worker service. `wrangler delete` alone is not enough;
 it does not delete the container application.
 
+A failed invocation returns only `{ "ok": false, "failureStage": "<closed-stage>" }`. The stage is
+one of `node`, `javascript`, `typescript`, `terminal`, `code-server`, `cleanup`, or `lifecycle`.
+Caught messages, sandbox output, resource IDs, and other untrusted details are never returned or
+printed by the workflow. Internal stage errors retain their causes for focused tests and debugging.
+
 ## Force-cancel residual and manual cleanup
 
 A failed or timed-out canary still reaches the independent `always()` cleanup job. GitHub can,

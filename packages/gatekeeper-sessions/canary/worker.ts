@@ -2,10 +2,12 @@ import { Sandbox, getSandbox } from "@cloudflare/sandbox";
 import { withInterpreter } from "@cloudflare/sandbox/interpreter";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import {
+  CanaryStageError,
   EXPECTED_NODE_VERSION,
   runCanary,
   runClaimedCanaryLifecycle,
   type CanaryChecksReport,
+  type CanaryFailureStage,
 } from "./checks.js";
 import { claimCanaryRun, rejectCanaryRequest } from "./policy.js";
 
@@ -16,6 +18,7 @@ const DESTROY_TIMEOUT_MS = 30_000;
 
 type CanaryLogFields = {
   phase?: "run" | "destroy" | "verify";
+  failureStage?: CanaryFailureStage;
 };
 
 const logger = createLogger<CanaryLogFields>({ component: "gatekeeper.sessions.canary" });
@@ -50,7 +53,7 @@ export default {
         event: "coding.session.canary.configuration.invalid",
         phase: "run",
       });
-      return jsonResponse({ ok: false }, 500);
+      return failureResponse("lifecycle");
     }
 
     const sandbox = getSandbox(env.CANARY_SANDBOX, SANDBOX_ID, { normalizeId: true });
@@ -65,12 +68,14 @@ export default {
           destroyTimeoutMs: DESTROY_TIMEOUT_MS,
         },
       );
-    } catch {
+    } catch (error) {
+      const failureStage = extractFailureStage(error);
       logger.error("native candidate-image canary failed", {
         event: "coding.session.canary.failed",
         phase: "run",
+        failureStage,
       });
-      return jsonResponse({ ok: false }, 500);
+      return failureResponse(failureStage);
     }
     logger.info("native candidate-image canary passed", {
       event: "coding.session.canary.passed",
@@ -84,6 +89,34 @@ export default {
     }, 200);
   },
 };
+
+function failureResponse(failureStage: CanaryFailureStage): Response {
+  return jsonResponse({ ok: false, failureStage }, 500);
+}
+
+function extractFailureStage(error: unknown): CanaryFailureStage {
+  const pending = [error];
+  const seen = new Set<unknown>();
+  let inspected = 0;
+  while (pending.length > 0 && inspected < 64) {
+    const current = pending.pop();
+    if (seen.has(current)) continue;
+    seen.add(current);
+    inspected++;
+    if (current instanceof CanaryStageError && isCanaryStage(current.failureStage)) {
+      return current.failureStage;
+    }
+    if (current instanceof AggregateError && Array.isArray(current.errors)) {
+      for (const nested of current.errors.slice(0, 32).toReversed()) pending.push(nested);
+    }
+  }
+  return "lifecycle";
+}
+
+function isCanaryStage(value: unknown): value is Exclude<CanaryFailureStage, "lifecycle"> {
+  return value === "node" || value === "javascript" || value === "typescript" || value === "terminal" ||
+    value === "code-server" || value === "cleanup";
+}
 
 function validSourceSha(value: string): boolean {
   return /^[0-9a-f]{40}$/.test(value);
