@@ -844,6 +844,26 @@
           "type": "durable_object_namespace"
         },
         {
+          "class_name": "CodingSessionSandboxStandard2",
+          "name": "SESSION_SANDBOX_STANDARD_2",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "CodingSessionSandboxStandard3",
+          "name": "SESSION_SANDBOX_STANDARD_3",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "CodingSessionSandboxStandard4",
+          "name": "SESSION_SANDBOX_STANDARD_4",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "CodingSessionCapacity",
+          "name": "SESSION_CAPACITY",
+          "type": "durable_object_namespace"
+        },
+        {
           "class_name": "CodingSessionPolicy",
           "name": "SESSION_POLICIES",
           "type": "durable_object_namespace"
@@ -886,6 +906,24 @@
           "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
           "instance_type": "standard-1",
           "max_instances": 20
+        },
+        {
+          "class_name": "CodingSessionSandboxStandard2",
+          "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+          "instance_type": "standard-2",
+          "max_instances": 8
+        },
+        {
+          "class_name": "CodingSessionSandboxStandard3",
+          "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+          "instance_type": "standard-3",
+          "max_instances": 4
+        },
+        {
+          "class_name": "CodingSessionSandboxStandard4",
+          "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+          "instance_type": "standard-4",
+          "max_instances": 2
         }
       ],
       "inputs": [
@@ -933,6 +971,15 @@
             "GitHubOrganizationGatekeeper"
           ],
           "tag": "v2"
+        },
+        {
+          "new_sqlite_classes": [
+            "CodingSessionSandboxStandard2",
+            "CodingSessionSandboxStandard3",
+            "CodingSessionSandboxStandard4",
+            "CodingSessionCapacity"
+          ],
+          "tag": "v3"
         }
       ],
       "modules": [
