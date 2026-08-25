@@ -1,9 +1,13 @@
 import type { SandboxProcess, Terminal } from "@cloudflare/sandbox";
+import { ContainerUnavailableError } from "@cloudflare/sandbox/errors";
 import type { CodeContext, ExecutionResult, Interpreter } from "@cloudflare/sandbox/interpreter";
 import versions from "./versions.json";
 
 const EDITOR_PORT = 13_337;
 const PROCESS_TIMEOUT_MS = 30_000;
+const NODE_EXEC_MAX_ATTEMPTS = 3;
+const NODE_EXEC_DEFAULT_RETRY_DELAY_MS = 1_000;
+const NODE_EXEC_MAX_RETRY_DELAY_MS = 10_000;
 const MAX_INTERPRETER_STDOUT_BYTES = 4_096;
 const MAX_TERMINAL_BYTES = 16 * 1024;
 const MAX_TERMINAL_EVENTS = 128;
@@ -73,10 +77,7 @@ export async function runCanary(
 
   try {
     options.beforeStage?.("node");
-    const node = await sandbox.exec([
-      "node", "--eval",
-      "process.stdout.write(`odie-node-version:${process.version}\\nodie-node-stdout:42\\n`); process.stderr.write('odie-node-stderr:ok\\n')",
-    ], { timeout: PROCESS_TIMEOUT_MS });
+    const node = await startNodeCanaryProcess(sandbox);
     processes.push(node);
     const nodeOutput = await node.output({ encoding: "utf8", timeout: PROCESS_TIMEOUT_MS, maxBytes: 4096 });
     assert(nodeOutput.stdout === `odie-node-version:${EXPECTED_NODE_VERSION}\nodie-node-stdout:42\n`,
@@ -210,6 +211,35 @@ export async function runCanary(
   } catch (error) {
     throw new CanaryStageError("cleanup", error);
   }
+}
+
+/** Starts the initial Node check, retrying only pre-admission container unavailability. */
+export async function startNodeCanaryProcess(
+  sandbox: Pick<CanarySandboxClient, "exec">,
+  sleep: (delayMs: number) => Promise<void> = delay,
+): Promise<SandboxProcess> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await sandbox.exec([
+        "node", "--eval",
+        "process.stdout.write(`odie-node-version:${process.version}\\nodie-node-stdout:42\\n`); process.stderr.write('odie-node-stderr:ok\\n')",
+      ], { timeout: PROCESS_TIMEOUT_MS });
+    } catch (error) {
+      if (!(error instanceof ContainerUnavailableError) || attempt >= NODE_EXEC_MAX_ATTEMPTS) throw error;
+      await sleep(nodeExecRetryDelay(error.context.retryAfterMs, attempt));
+    }
+  }
+}
+
+function nodeExecRetryDelay(retryAfterMs: number | undefined, attempt: number): number {
+  if (Number.isSafeInteger(retryAfterMs) && retryAfterMs !== undefined && retryAfterMs >= 0) {
+    return Math.min(retryAfterMs, NODE_EXEC_MAX_RETRY_DELAY_MS);
+  }
+  return Math.min(NODE_EXEC_DEFAULT_RETRY_DELAY_MS * 2 ** (attempt - 1), NODE_EXEC_MAX_RETRY_DELAY_MS);
+}
+
+function delay(delayMs: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, delayMs));
 }
 
 /** Claims one run, applies a real Worker-side deadline, and destroys only after a successful claim. */
