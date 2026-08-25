@@ -14,6 +14,7 @@ const WORKERS = [
   "gatekeeper-context",
   "gatekeeper-github",
   "gatekeeper-jarvis",
+  "gatekeeper-mcp",
   "gatekeeper-odie-kg",
   "gatekeeper-scheduler",
   "gatekeeper-team-pi",
