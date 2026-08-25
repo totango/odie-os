@@ -14,6 +14,9 @@ import type {
   OpenCodeUserCustomization,
 } from "./api.js";
 
+/** Maximum number of repositories accepted for one coding session. */
+export const MAX_CODING_SESSION_REPOSITORIES = 8;
+
 const MAX_OPENCODE_PLUGINS = 20;
 const MAX_OPENCODE_SKILLS = 20;
 const MAX_OPENCODE_SKILL_NAME_LENGTH = 64;
@@ -197,6 +200,22 @@ export interface CodingSessionsService extends WorkerEntrypoint {
 /** Returns whether a value is a canonical GitHub repository name accepted by Coding Sessions. */
 export function isCodingSessionRepository(value: unknown): value is CodingSessionRepository {
   return typeof value === "string" && /^[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?$/.test(value);
+}
+
+/** Validates and canonically orders a bounded, non-empty coding-session repository set. */
+export function validateCodingSessionRepositories(values: unknown): CodingSessionRepository[] {
+  if (!Array.isArray(values) || values.length === 0) throw new Error("Select at least one repository.");
+  if (values.length > MAX_CODING_SESSION_REPOSITORIES) {
+    throw new Error(`Select at most ${MAX_CODING_SESSION_REPOSITORIES} repositories.`);
+  }
+  const repositories = new Set<CodingSessionRepository>();
+  for (const value of values) {
+    if (!isCodingSessionRepository(value) || repositories.has(value)) {
+      throw new Error("Coding session repository set is invalid.");
+    }
+    repositories.add(value);
+  }
+  return [...repositories].toSorted();
 }
 
 /** Validates and normalizes account-scoped OpenCode customization before persistence or use. */

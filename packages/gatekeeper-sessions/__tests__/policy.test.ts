@@ -10,6 +10,7 @@ describe("coding session repository policy", () => {
     expect(() => validateRepositories([])).toThrow("Select at least one")
     expect(() => validateRepositories(["agentic", "agentic"])).toThrow("invalid")
     expect(() => validateRepositories(["../unknown"])).toThrow("invalid")
+    expect(() => validateRepositories(Array.from({ length: 9 }, (_, index) => `repo-${index}`))).toThrow("at most 8")
   });
 
   it.each([

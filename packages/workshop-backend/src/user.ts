@@ -1,6 +1,6 @@
 import { RpcStub, RpcTarget } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
-import { validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
+import { validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
@@ -1445,13 +1445,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let service = this.sessionsService;
     if (!service) throw new Error("Coding sessions are not installed on this deployment.");
+    const canonicalRepositories = repositories === undefined
+      ? undefined
+      : validateCodingSessionRepositories(repositories);
 
     for (let record of this.#connectedAccountRecords()) {
       if (record.vendorId !== "github" || !areCredentialsValid(record)) continue;
       let description = await record.account.describe();
-      if (repositories?.length) {
+      if (canonicalRepositories) {
         let verifier = await record.account.getVerifier() as unknown as Fetcher<GitHubVerifierApi>;
-        let access = await Promise.all(repositories.map(repository =>
+        let access = await Promise.all(canonicalRepositories.map(repository =>
           verifier.hasRepoWriteAccess(CODING_SESSION_REPOSITORY_OWNER, repository)));
         if (access.some(allowed => !allowed)) {
           throw new Error("Your GitHub account cannot push to every selected repository.");
@@ -1512,8 +1515,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** Preflights a coding session after re-authorizing every requested repository. */
   async preflightCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionDevelopmentPlan> {
-    let {owner, service} = await this.#codingSessionsAccess(request.repositories);
-    return service.preflightSession(owner, request);
+    const repositories = validateCodingSessionRepositories(request.repositories);
+    let {owner, service} = await this.#codingSessionsAccess(repositories);
+    return service.preflightSession(owner, { ...request, repositories });
   }
 
   /** Reads development status after verifying ownership and current repository authority. */
@@ -1539,8 +1543,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** Creates a coding session after enforcing a valid GitHub connection. */
   async createCodingSession(request: CreateCodingSessionRequest): Promise<CodingSessionSummary> {
-    let {owner, service} = await this.#codingSessionsAccess(request.repositories);
-    return service.createSession(owner, request, validateOpenCodeCustomization(this.storage.openCodeCustomization.get()));
+    const repositories = validateCodingSessionRepositories(request.repositories);
+    let {owner, service} = await this.#codingSessionsAccess(repositories);
+    return service.createSession(
+      owner, { ...request, repositories }, validateOpenCodeCustomization(this.storage.openCodeCustomization.get()));
   }
 
   /**
