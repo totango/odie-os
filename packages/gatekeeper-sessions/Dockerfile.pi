@@ -4,11 +4,21 @@ FROM docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os"
 
+ARG NODE_VERSION=24.14.0
+ARG PNPM_PACKAGE_MANAGER=pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c
+ARG REPOSITORY_PNPM_PACKAGE_MANAGER=pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72
+ARG OPENCODE_VERSION=1.18.15
 ARG PI_VERSION=0.84.2
 ARG PI_MCP_ADAPTER_VERSION=2.26.0
 ARG PRIME_AGENT_VERSION=0.8.0
 ARG VALHALLA_VERSION=0.3.0
 ARG CODE_SERVER_VERSION=4.133.0
+
+# Node is installed alongside the base image's global tools. Replacing /usr/local would remove the
+# pinned OpenCode installation inherited from the matching Sandbox image.
+ADD --checksum=sha256:41cd79bb7877c81605a9e68ec4c91547774f46a40c67a17e34d7179ef11729df \
+    https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz \
+    /tmp/node.tar.xz
 
 # Browser VS Code and its reviewed baseline extensions are fetched only at image build time. Every
 # artifact is version and digest pinned; repository recommendations never authorize online installs.
@@ -44,27 +54,48 @@ COPY --from=uv /uv /uvx /bin/
 COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs /opt/odie-pi/
 COPY pi-image/prime-kernel-requirements.txt /opt/odie-prime-agent/requirements.txt
 
+ENV PATH="/opt/node/bin:${PATH}" \
+    COREPACK_HOME="/opt/odie-corepack" \
+    COREPACK_ENABLE_NETWORK="0"
+
 # Prime Agent uses ripgrep for fast model-driven repository search. Install it in the image because
 # coding sessions run offline and cannot satisfy the CLI's best-effort package-manager fallback.
-RUN apt-get update \
+RUN mkdir -p /opt/node \
+    && tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1 \
+    && rm -f /tmp/node.tar.xz \
+    && printf '%s\n' 'export PATH="/opt/node/bin:$PATH"' > /etc/profile.d/odie-node.sh \
+    && chmod 644 /etc/profile.d/odie-node.sh \
+    && corepack enable pnpm \
+    && COREPACK_ENABLE_NETWORK=1 corepack install --global "$REPOSITORY_PNPM_PACKAGE_MANAGER" \
+    && COREPACK_ENABLE_NETWORK=1 corepack install --global "$PNPM_PACKAGE_MANAGER" \
+    && apt-get update \
     && apt-get install --yes --no-install-recommends ripgrep \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /opt/odie-code-server/extensions \
+    && mkdir -p /opt/odie-code-server/extensions /tmp/odie-code-server-user-data \
     && tar -xzf /tmp/code-server.tar.gz -C /opt/odie-code-server --strip-components=1 \
     && ln -s /opt/odie-code-server/bin/code-server /usr/local/bin/code-server \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-eslint.vsix \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/prettier-vscode.vsix \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-yaml.vsix \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python-debugpy.vsix \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python-envs.vsix \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python.vsix \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-go.vsix \
-    && EXTENSIONS_GALLERY='{}' code-server --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-rust-analyzer.vsix \
-    && rm -f /tmp/code-server.tar.gz /tmp/*.vsix
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-eslint.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/prettier-vscode.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-yaml.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python-debugpy.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python-envs.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-python.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-go.vsix \
+    && EXTENSIONS_GALLERY='{}' code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --install-extension /tmp/vscode-rust-analyzer.vsix \
+    && rm -f /tmp/code-server.tar.gz /tmp/*.vsix \
+    && rm -rf \
+      /root/.config/code-server \
+      /root/.local/share/code-server \
+      /tmp/odie-code-server-user-data
 
 # Package lifecycle scripts stay disabled. ZeroMQ runs its pinned native installer explicitly. The
 # Prime kernel uses a pinned uv image, exact Python version, and hash-locked Python dependencies.
-RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
+RUN test "$(node --version)" = "v${NODE_VERSION}" \
+    && test "pnpm@$(pnpm --version)" = "${PNPM_PACKAGE_MANAGER%%+*}" \
+    && test "$(node -p 'process.arch')" = "x64" \
+    && test "$(uname -m)" = "x86_64" \
+    && for command in ps pgrep pkill setsid stdbuf timeout tail tee flock du df truncate jq curl git bash tini; do command -v "$command" >/dev/null; done \
+    && npm ci --prefix /opt/odie-pi --ignore-scripts \
     && node /opt/odie-pi/node_modules/zeromq/script/install.js \
     && node -e 'require("/opt/odie-pi/node_modules/zeromq")' \
     && UV_PYTHON_INSTALL_DIR=/opt/odie-prime-agent/python uv python install 3.11.14 \
@@ -76,11 +107,12 @@ RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
     && ln -s /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi \
     && ln -s /opt/odie-pi/node_modules/prime-agent/dist/bundle/cli.js /usr/local/bin/prime-agent \
     && opencode --version \
+    && test "$(node -p "require('/usr/local/lib/node_modules/opencode-ai/package.json').version")" = "$OPENCODE_VERSION" \
     && pi --version \
     && prime-agent --version \
     && rg --version \
     && test "$(node -p "require('/opt/odie-code-server/package.json').version")" = "$CODE_SERVER_VERSION" \
-    && test "$(code-server --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" = "65e3a533e0df9f58a8f81ba5ac430cea826cae6eb507dccdc93498228783c068" \
+    && test "$(code-server --user-data-dir /tmp/odie-code-server-user-data --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" = "65e3a533e0df9f58a8f81ba5ac430cea826cae6eb507dccdc93498228783c068" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/package.json').version")" = "$PI_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/pi-mcp-adapter/package.json').version")" = "$PI_MCP_ADAPTER_VERSION" \
     && test "$(node -p "require('/opt/odie-pi/node_modules/prime-agent/package.json').version")" = "$PRIME_AGENT_VERSION" \
@@ -90,7 +122,15 @@ RUN npm ci --prefix /opt/odie-pi --ignore-scripts \
     && test -f /opt/odie-valhalla/opencode/skills/vegvisir/SKILL.md \
     && node \
       --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
-      --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))'
+      --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))' \
+    && rm -rf \
+      /root/.npm \
+      /root/.cache/uv \
+      /root/.ipython \
+      /root/.config/code-server \
+      /root/.local/share/code-server \
+      /tmp/jiti \
+      /tmp/odie-code-server-user-data
 
 LABEL org.opencontainers.image.source="https://github.com/totango/odie-os" \
       org.opencontainers.image.description="Odie OS coding-session sandbox with OpenCode, Pi, Prime Agent, browser VS Code, Valhalla, and pi-mcp-adapter"
