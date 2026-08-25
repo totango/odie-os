@@ -489,4 +489,49 @@ describe("development planner", () => {
     }, { ...openCapacity, "standard-3": { available: false, active: 2, limit: 2 } }, openContext);
     expect(exhausted.issues.map(issue => issue.code)).toEqual(["capacity-unavailable"]);
   });
+
+  it("rejects duplicate health coverage and noncontiguous HTTP statuses", () => {
+    const duplicate = component("duplicate", { executionSpec: executionSpec() });
+    duplicate.executionSpec!.readiness.push(structuredClone(duplicate.executionSpec!.readiness[0]!));
+    expect(() => validateDevelopmentCatalog(catalog([duplicate]))).toThrow(/readiness coverage/);
+
+    const noncontiguous = component("noncontiguous", {
+      ports: [8080],
+      executionSpec: executionSpec({
+        readiness: [{ processId: "service", kind: "http", port: 8080, path: "/health", statuses: [200, 204], timeoutMs: 1_000 }],
+      }),
+    });
+    expect(() => validateDevelopmentCatalog(catalog([noncontiguous]))).toThrow(/invalid HTTP health/);
+  });
+
+
+  it("rejects excessive log retention, reserved marker env, and lifecycle phase regressions", () => {
+    const logs = component("logs", { executionSpec: executionSpec({ logs: { maxBytes: 65_537, maxLines: 10 } }) });
+    expect(() => validateDevelopmentCatalog(catalog([logs]))).toThrow(/storage bound/);
+    const logLines = component("log-lines", { executionSpec: executionSpec({ logs: { maxBytes: 1_000, maxLines: 2_001 } }) });
+    expect(() => validateDevelopmentCatalog(catalog([logLines]))).toThrow(/storage bound/);
+
+    const longStop = component("long-stop", { executionSpec: executionSpec({ stop: { processOrder: ["service"], graceMs: 60_001 } }) });
+    expect(() => validateDevelopmentCatalog(catalog([longStop]))).toThrow(/stop grace exceeds/);
+    const longJob = component("long-job", { executionSpec: executionSpec() });
+    longJob.executionSpec!.processes.unshift({
+      id: "init", phase: "init", argv: ["init"], cwd: "/workspace", environment: [],
+      idempotent: true, timeoutMs: 30 * 60 * 1_000 + 1,
+    });
+    expect(() => validateDevelopmentCatalog(catalog([longJob]))).toThrow(/bounded timeout/);
+
+    const marker = component("marker", { executionSpec: executionSpec() });
+    marker.executionSpec!.processes[0]!.environment = [{
+      name: "ODIE_SUPERVISION_MARKER", source: { kind: "literal", value: "attacker" },
+    }];
+    expect(() => validateDevelopmentCatalog(catalog([marker]))).toThrow(/environment name/);
+
+    const order = component("order", { executionSpec: executionSpec() });
+    order.executionSpec!.processes.unshift(
+      { id: "seed", phase: "seed", argv: ["seed"], cwd: "/workspace", environment: [], idempotent: true, timeoutMs: 100 },
+      { id: "migrate", phase: "migration", argv: ["migrate"], cwd: "/workspace", environment: [], idempotent: true, timeoutMs: 100 },
+    );
+    expect(() => validateDevelopmentCatalog(catalog([order]))).toThrow(/lifecycle order/);
+  });
+
 });
