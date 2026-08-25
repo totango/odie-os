@@ -12,6 +12,17 @@ export const EXPECTED_NODE_VERSION = versions.node;
 /** Named stages accepted by test-only fault injection. */
 export type CanaryStage = "node" | "javascript" | "typescript" | "terminal" | "code-server" | "cleanup";
 
+/** Closed, non-sensitive failure stages returned by the native canary endpoint. */
+export type CanaryFailureStage = CanaryStage | "lifecycle";
+
+/** Associates an internal canary error with its safe public stage without discarding its cause. */
+export class CanaryStageError extends Error {
+  constructor(readonly failureStage: CanaryStage, cause: unknown) {
+    super(`Canary ${failureStage} stage failed.`, { cause });
+    this.name = "CanaryStageError";
+  }
+}
+
 /** Minimal public Sandbox client surface used by the canary. */
 export interface CanarySandboxClient {
   exec(command: readonly [string, ...string[]], options?: {
@@ -57,6 +68,7 @@ export async function runCanary(
   const processes: SandboxProcess[] = [];
   const contexts: CodeContext[] = [];
   let operationError: unknown;
+  let operationStage: Exclude<CanaryStage, "cleanup"> = "node";
   const cleanupErrors: unknown[] = [];
 
   try {
@@ -73,6 +85,7 @@ export async function runCanary(
     assert(nodeOutput.exitCode === 0 && !nodeOutput.timedOut && !nodeOutput.truncated,
       "Node process did not exit cleanly.");
 
+    operationStage = "javascript";
     options.beforeStage?.("javascript");
     const javascriptContext = await sandbox.interpreter.createCodeContext({
       language: "javascript", cwd: "/workspace",
@@ -83,6 +96,7 @@ export async function runCanary(
       { context: javascriptContext },
     ), "odie-js:42");
 
+    operationStage = "typescript";
     options.beforeStage?.("typescript");
     const typescriptContext = await sandbox.interpreter.createCodeContext({
       language: "typescript", cwd: "/workspace",
@@ -93,6 +107,7 @@ export async function runCanary(
       { context: typescriptContext },
     ), "odie-ts:42");
 
+    operationStage = "terminal";
     options.beforeStage?.("terminal");
     terminal = await sandbox.createTerminal({
       command: [
@@ -112,6 +127,7 @@ export async function runCanary(
     assert(!terminalExit.timedOut, "Terminal termination timed out.");
     terminal = undefined;
 
+    operationStage = "code-server";
     options.beforeStage?.("code-server");
     const userDataDir = "/workspace/.odie-code-server/user-data";
     await sandbox.mkdir(`${userDataDir}/User`, { recursive: true });
@@ -148,13 +164,13 @@ export async function runCanary(
     await editorResponse.body?.cancel();
     await stopProcess(editor);
   } catch (error) {
-    operationError = error;
+    operationError = new CanaryStageError(operationStage, error);
   } finally {
     for (const context of contexts.toReversed()) {
       try {
         await sandbox.interpreter.deleteCodeContext(context.id);
       } catch (error) {
-        cleanupErrors.push(error);
+        cleanupErrors.push(new CanaryStageError("cleanup", error));
       }
     }
     if (terminal) {
@@ -163,14 +179,14 @@ export async function runCanary(
         const exit = await terminal.waitForExit({ timeout: 5_000 });
         assert(!exit.timedOut, "Terminal cleanup timed out.");
       } catch (error) {
-        cleanupErrors.push(error);
+        cleanupErrors.push(new CanaryStageError("cleanup", error));
       }
     }
     for (const process of processes.toReversed()) {
       try {
         await stopProcess(process);
       } catch (error) {
-        cleanupErrors.push(error);
+        cleanupErrors.push(new CanaryStageError("cleanup", error));
       }
     }
   }
@@ -181,15 +197,19 @@ export async function runCanary(
   if (operationError !== undefined) throw operationError;
   if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, "Canary resource cleanup failed.");
 
-  options.beforeStage?.("cleanup");
-  const [activeProcesses, terminals] = await Promise.all([sandbox.listProcesses(), sandbox.listTerminals()]);
-  assert(!activeProcesses.some(process => process.state === "running"), "A canary process is still running.");
-  const snapshots = await Promise.all(terminals.map(terminalHandle => terminalHandle.getSnapshot()));
-  assert(!snapshots.some(snapshot => snapshot.status === "running"), "A canary terminal is still running.");
-  return {
-    checks: ["node", "javascript", "typescript", "terminal", "code-server", "cleanup"],
-    resourceIds: { process: processes.map(process => process.id), terminal: terminalIds },
-  };
+  try {
+    options.beforeStage?.("cleanup");
+    const [activeProcesses, terminals] = await Promise.all([sandbox.listProcesses(), sandbox.listTerminals()]);
+    assert(!activeProcesses.some(process => process.state === "running"), "A canary process is still running.");
+    const snapshots = await Promise.all(terminals.map(terminalHandle => terminalHandle.getSnapshot()));
+    assert(!snapshots.some(snapshot => snapshot.status === "running"), "A canary terminal is still running.");
+    return {
+      checks: ["node", "javascript", "typescript", "terminal", "code-server", "cleanup"],
+      resourceIds: { process: processes.map(process => process.id), terminal: terminalIds },
+    };
+  } catch (error) {
+    throw new CanaryStageError("cleanup", error);
+  }
 }
 
 /** Claims one run, applies a real Worker-side deadline, and destroys only after a successful claim. */

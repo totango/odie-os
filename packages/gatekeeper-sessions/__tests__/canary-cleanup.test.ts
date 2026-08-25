@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { destroyAndVerifySandbox, runCanary, runClaimedCanaryLifecycle } from "../canary/checks.js";
+import {
+  CanaryStageError,
+  destroyAndVerifySandbox,
+  runCanary,
+  runClaimedCanaryLifecycle,
+} from "../canary/checks.js";
 
 class FakeSandbox {
   readonly deletedContexts: string[] = [];
@@ -129,7 +134,11 @@ describe("native canary cleanup", () => {
     it(`cleans resources after an injected ${failure} failure`, async () => {
       const sandbox = new FakeSandbox();
       sandbox.fail = failure;
-      await expect(runCanary(sandbox as never)).rejects.toThrow("injected");
+      const error = await runCanary(sandbox as never).catch(caught => caught);
+      expect(error).toBeInstanceOf(CanaryStageError);
+      expect((error as CanaryStageError).failureStage).toBe(failure);
+      expect((error as CanaryStageError).cause).toBeInstanceOf(Error);
+      expect(((error as CanaryStageError).cause as Error).message).toContain("injected");
       if (failure === "node") expect(sandbox.nodeKillCount).toBe(1);
       if (failure === "javascript") expect(sandbox.deletedContexts).toEqual(["context-1"]);
       if (failure === "typescript") expect(sandbox.deletedContexts).toEqual(["context-2", "context-1"]);
@@ -140,6 +149,18 @@ describe("native canary cleanup", () => {
       }
     });
   }
+
+  it("classifies final resource verification as cleanup while preserving its cause", async () => {
+    const sandbox = new FakeSandbox();
+    const error = await runCanary(sandbox as never, {
+      beforeStage(stage) {
+        if (stage === "cleanup") throw new Error("sensitive cleanup detail");
+      },
+    }).catch(caught => caught);
+    expect(error).toBeInstanceOf(CanaryStageError);
+    expect((error as CanaryStageError).failureStage).toBe("cleanup");
+    expect(((error as CanaryStageError).cause as Error).message).toBe("sensitive cleanup detail");
+  });
 
   it("escalates a timed-out TERM wait to SIGKILL", async () => {
     const sandbox = new FakeSandbox();

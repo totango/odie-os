@@ -29,6 +29,22 @@ describe("native canary workflow cleanup", () => {
     expect(cleanup).not.toContain("packages: write");
   });
 
+  it("captures the canary response without printing its body and validates closed schemas", () => {
+    const invocation = workflow.slice(
+      workflow.indexOf("      - name: Invoke and validate one-shot native canary"),
+      workflow.indexOf("  cleanup:"),
+    );
+    expect(invocation).toContain("--max-filesize 4096");
+    expect(invocation).toContain('--output "$result"');
+    expect(invocation).toContain("--write-out '%{http_code}'");
+    expect(invocation).not.toContain("--fail-with-body");
+    expect(invocation).toContain('keys == ["candidateImage", "checks", "ok", "sourceSha"]');
+    expect(invocation).toContain('keys == ["failureStage", "ok"]');
+    expect(invocation).toContain('IN("node", "javascript", "typescript", "terminal", "code-server", "cleanup", "lifecycle")');
+    expect(invocation).toContain("failed at stage: %s");
+    expect(invocation).not.toContain('cat "$result"');
+  });
+
   it("requires the current BuildKit SLSA v1 provenance contract", () => {
     expect(workflow).toContain("https://slsa.dev/provenance/v1");
     expect(workflow).toContain(".SLSA).buildDefinition.buildType");
