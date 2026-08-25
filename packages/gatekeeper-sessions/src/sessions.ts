@@ -8,7 +8,6 @@ import {
   type CodingSessionApplicationCapability,
   type CodingSessionAttachCapability,
   type CodingSessionDevelopmentCatalog,
-  type CodingSessionDevelopmentComponentStatus,
   type CodingSessionDevelopmentPlan,
   type CodingSessionDevelopmentStatus,
   type CodingSessionEditorCapability,
@@ -39,7 +38,19 @@ import {
   validateWorkshopMcpRequestTarget,
 } from "./mcp-policy.js";
 import { DEVELOPMENT_CATALOG, publicDevelopmentCatalog } from "./development-catalog.js";
+import {
+  cloneDevelopmentGenerationIntent,
+  createDevelopmentGenerationIntent,
+  type DevelopmentGenerationIntent,
+} from "./development-intent.js";
 import { planDevelopmentStack } from "./development-planner.js";
+import {
+  cleanupDevelopmentGeneration,
+  createDevelopmentSupervisorState,
+  publicDevelopmentSupervisorUpdate,
+  reconcileDevelopmentGeneration,
+  type DevelopmentSupervisorState,
+} from "./development-supervisor.js";
 import { validateRepositories } from "./policy.js";
 import {
   type CapacityReservationKey,
@@ -78,6 +89,7 @@ const OPENCODE_CONFIG_DIR = "/workspace/.odie-opencode";
 const STARTUP_ALARM_DELAY_MS = 1_000;
 const STARTUP_MAX_ATTEMPTS = 3;
 const STARTUP_CLONE_CONCURRENCY = 2;
+const DEVELOPMENT_RECONCILE_INTERVAL_MS = 5_000;
 // Bound attach/reconnect replay so fresh input is not queued behind a large TUI history.
 const TERMINAL_REPLAY_BUFFER_SIZE = 256 * 1024;
 
@@ -110,6 +122,7 @@ interface Env extends GitHubAppEnv {
   TEAM_PI_CODEX_BASE_URL?: string;
   TEAM_PI_CODEX_HMAC_SECRET?: string;
   CODING_SESSION_PI_RUNTIME_ENABLED?: string;
+  CODING_SESSION_DURABLE_LIFECYCLE_ENABLED?: string;
 }
 
 type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
@@ -156,6 +169,8 @@ type SessionPolicy = {
   runtime?: CodingSessionRuntime;
   owner: CodingSessionOwner;
   repositories: CodingSessionRepository[];
+  /** Complete server-authored execution authority for this generation, when selected. */
+  developmentIntent?: DevelopmentGenerationIntent;
 };
 
 type StartupPhase = "authorize" | "clone" | "materialize" | "terminal";
@@ -172,6 +187,26 @@ type StartupRecord = {
   updatedAt: number;
 };
 
+type StartRecord = {
+  sessionId: string;
+  owner: CodingSessionOwner;
+  sandboxId: string;
+  generation: number;
+  attempts: number;
+  phase: "configure" | "schedule";
+  developmentIntent?: DevelopmentGenerationIntent;
+};
+
+type StopRecord = {
+  sessionId: string;
+  sandboxId: string;
+  generation: number;
+  instanceTier: CodingSessionInstanceTier;
+  lease?: CapacityReservationKey;
+  development?: true;
+  phase: "cancel" | "cleanup" | "destroy" | "release" | "finalize";
+};
+
 type RestartRecord = {
   sessionId: string;
   owner: CodingSessionOwner;
@@ -183,7 +218,8 @@ type RestartRecord = {
   newGeneration: number;
   replacement?: CapacityReplacement;
   newLease?: CapacityReservationKey;
-  phase: "destroy" | "transfer" | "schedule";
+  development?: true;
+  phase: "prepare" | "cleanup" | "destroy" | "transfer" | "schedule";
 };
 
 type StartupProcess = {
@@ -270,14 +306,19 @@ CodingSessionSandboxStandard4.outboundByHost = codingSessionOutboundHandlers;
 
 /** Durable repository and model egress policy for one sandbox instance. */
 export class CodingSessionPolicy extends DurableObject<Env> {
+  #lifecycleTail: Promise<void> = Promise.resolve();
+
   /** Installs the immutable owner and repository set before the sandbox starts. */
   configure(policy: SessionPolicy): void {
     const existing = this.ctx.storage.kv.get<SessionPolicy>("policy");
     if (existing) {
       if (JSON.stringify({ sessionId: existing.sessionId, generation: existing.generation ?? 0,
-            instanceTier: existing.instanceTier ?? "standard-1", owner: existing.owner, repositories: existing.repositories }) !==
+            instanceTier: existing.instanceTier ?? "standard-1", owner: existing.owner,
+            repositories: existing.repositories, developmentIntent: existing.developmentIntent }) !==
           JSON.stringify({ sessionId: policy.sessionId, generation: policy.generation ?? 0,
-            instanceTier: policy.instanceTier ?? "standard-1", owner: policy.owner, repositories: policy.repositories })) {
+            instanceTier: policy.instanceTier ?? "standard-1", owner: policy.owner,
+            repositories: policy.repositories,
+            developmentIntent: policy.developmentIntent ?? existing.developmentIntent })) {
         throw new Error("Coding session policy is immutable.");
       }
       // Policy DOs are keyed by container ID, so another sandbox generation must use another DO.
@@ -294,31 +335,42 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 
   /** Persists bounded startup progress and schedules the first asynchronous startup alarm. */
   async startSessionStartup(record: StartupRecord): Promise<void> {
-    const existing = this.ctx.storage.kv.get<StartupRecord>("startup");
-    if (existing && (existing.generation ?? 0) !== (record.generation ?? 0)) {
-      throw new Error("Coding session startup generation is already in progress.");
-    }
-    if (!existing) this.ctx.storage.kv.put("startup", record);
-    try {
-      await this.ctx.storage.setAlarm(Date.now() + 1);
-    } catch (error) {
-      if (!existing) this.ctx.storage.kv.delete("startup");
-      throw error;
-    }
+    await this.#withLifecycleLock(async () => {
+      const policy = this.#policy();
+      const sandboxId = required(policy.sandboxId, "startup sandboxId");
+      if (this.ctx.storage.kv.get<boolean>(startupCancellationKey(policy.sessionId, record.generation ?? 0, sandboxId))) {
+        throw new Error("Coding session startup was cancelled.");
+      }
+      const existing = this.ctx.storage.kv.get<StartupRecord>("startup");
+      if (existing && (existing.generation ?? 0) !== (record.generation ?? 0)) {
+        throw new Error("Coding session startup generation is already in progress.");
+      }
+      if (!existing) this.ctx.storage.kv.put("startup", record);
+      try {
+        await this.#armPolicyAlarm(Date.now() + 1);
+      } catch (error) {
+        if (!existing) this.ctx.storage.kv.delete("startup");
+        throw error;
+      }
+    });
   }
 
   /** Cancels asynchronous startup for the configured session generation. */
   async cancelSessionStartup(sessionId: string, generation: number, sandboxId: string): Promise<void> {
-    const policy = this.#policy();
-    if (policy.sessionId !== sessionId || (policy.generation ?? 0) !== generation || policy.sandboxId !== sandboxId) return;
-    this.ctx.storage.kv.delete("startup");
-    await this.ctx.storage.deleteAlarm();
+    await this.#withLifecycleLock(async () => {
+      const policy = this.ctx.storage.kv.get<SessionPolicy>("policy");
+      if (policy && (policy.sessionId !== sessionId || (policy.generation ?? 0) !== generation ||
+          policy.sandboxId !== sandboxId)) return;
+      this.ctx.storage.kv.put(startupCancellationKey(sessionId, generation, sandboxId), true);
+      this.ctx.storage.kv.delete("startup");
+      await this.#scheduleNextPolicyAlarm();
+    });
   }
 
   /** Stores a short-lived terminal ticket in a token-addressed policy object. */
   async storeTicket(ticket: AttachTicket): Promise<void> {
     this.ctx.storage.kv.put("ticket", ticket);
-    await this.ctx.storage.setAlarm(ticket.expiresAt);
+    await this.#armPolicyAlarm(ticket.expiresAt);
   }
 
   /** Atomically consumes a terminal ticket. */
@@ -332,7 +384,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   /** Stores a reusable but short-lived browser-editor ticket. */
   async storeEditorTicket(ticket: EditorTicket): Promise<void> {
     this.ctx.storage.kv.put("editorTicket", ticket);
-    await this.ctx.storage.setAlarm(ticket.expiresAt);
+    await this.#armPolicyAlarm(ticket.expiresAt);
   }
 
   /** Reads a browser-editor ticket without consuming it. */
@@ -342,15 +394,124 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     return ticket;
   }
 
-  /** Dispatches isolated ticket expiry or bounded asynchronous session startup work. */
+  /** Multiplexes startup, ticket expiry, and component supervision without clobbering wakeups. */
   async alarm(): Promise<void> {
+    this.ctx.storage.kv.delete("policy-alarm-at");
     const startup = this.ctx.storage.kv.get<StartupRecord>("startup");
     if (startup) {
-      await this.#advanceStartup(startup);
+      await this.#withLifecycleLock(async () => {
+        const current = this.ctx.storage.kv.get<StartupRecord>("startup");
+        if (!current) return;
+        const policy = this.#policy();
+        const sandboxId = required(policy.sandboxId, "startup sandboxId");
+        if (this.ctx.storage.kv.get<boolean>(startupCancellationKey(policy.sessionId, current.generation ?? 0, sandboxId))) {
+          this.ctx.storage.kv.delete("startup");
+          return;
+        }
+        // Pre-arm recovery before any remote authorization, sandbox, or registry work.
+        await this.#armPolicyAlarm(Date.now() + STARTUP_ALARM_DELAY_MS);
+        await this.#advanceStartup(current);
+      });
       return;
     }
-    this.ctx.storage.kv.delete("ticket");
-    this.ctx.storage.kv.delete("editorTicket");
+
+    await this.#withLifecycleLock(async () => {
+      const supervision = this.ctx.storage.kv.get<DevelopmentSupervisorState>("development-supervision");
+      if (!supervision || this.ctx.storage.kv.get<boolean>("development-cleaned")) return;
+      const policy = this.#policy();
+      const intent = policy.developmentIntent;
+      if (!intent) throw new Error("Development generation intent is missing.");
+      await this.#armPolicyAlarm(Date.now() + DEVELOPMENT_RECONCILE_INTERVAL_MS);
+      const sandbox = sandboxFor(this.env, storedPolicyTier(policy), required(policy.sandboxId, "development sandboxId"));
+      const terminalId = this.ctx.storage.kv.get<string>("primary-terminal-id");
+      const terminals = await sandbox.listTerminals();
+      if (!terminalId || !terminals.some(terminal => terminal.id === terminalId)) {
+        for (const component of Object.values(supervision.components)) {
+          component.status = "failed";
+          component.message = "The component container is unavailable. Restart the session.";
+          component.updatedAt = Date.now();
+        }
+        supervision.updatedAt = Date.now();
+        this.ctx.storage.kv.put("development-supervision", supervision);
+        await this.#registry().developmentUpdated(publicDevelopmentSupervisorUpdate(intent, supervision));
+        this.ctx.storage.kv.put("development-cleaned", true);
+      } else {
+        const next = await reconcileDevelopmentGeneration(
+          intent, supervision, sandbox, {}, Date.now(), async checkpoint => {
+            this.ctx.storage.kv.put("development-supervision", checkpoint);
+          },
+        );
+        if (!this.ctx.storage.kv.get<boolean>("development-cleaned")) {
+          this.ctx.storage.kv.put("development-supervision", next);
+          await this.#registry().developmentUpdated(publicDevelopmentSupervisorUpdate(intent, next));
+        }
+      }
+    });
+    const now = Date.now();
+    const ticket = this.ctx.storage.kv.get<AttachTicket>("ticket");
+    if (ticket && ticket.expiresAt <= now) this.ctx.storage.kv.delete("ticket");
+    const editorTicket = this.ctx.storage.kv.get<EditorTicket>("editorTicket");
+    if (editorTicket && editorTicket.expiresAt <= now) this.ctx.storage.kv.delete("editorTicket");
+    await this.#scheduleNextPolicyAlarm();
+  }
+
+  /** Checks whether an exact dark-rollout generation has private restart authority. */
+  hasDevelopmentIntent(sessionId: string, generation: number, sandboxId: string): boolean {
+    const policy = this.#policy();
+    return policy.sessionId === sessionId && (policy.generation ?? 0) === generation &&
+      policy.sandboxId === sandboxId && policy.developmentIntent !== undefined;
+  }
+
+  /** Copies private generation authority directly into a fenced replacement policy object. */
+  async prepareDevelopmentRestart(
+    sessionId: string,
+    generation: number,
+    sandboxId: string,
+    newSandboxId: string,
+    newGeneration: number,
+  ): Promise<boolean> {
+    const policy = this.#policy();
+    if (policy.sessionId !== sessionId || (policy.generation ?? 0) !== generation || policy.sandboxId !== sandboxId) {
+      throw new Error("Coding session restart generation is stale.");
+    }
+    const intent = policy.developmentIntent;
+    if (!intent) return false;
+    const replacementIntent = cloneDevelopmentGenerationIntent({
+      ...intent,
+      sandboxId: newSandboxId,
+      generation: newGeneration,
+    });
+    await policyForSandbox(this.env, storedPolicyTier(policy), newSandboxId).configure({
+      ...policy,
+      sandboxId: newSandboxId,
+      generation: newGeneration,
+      developmentIntent: replacementIntent,
+    });
+    return true;
+  }
+
+  /** Cleans up catalog services only for the exact configured generation before sandbox destroy. */
+  async cleanupDevelopment(sessionId: string, generation: number, sandboxId: string): Promise<void> {
+    await this.#withLifecycleLock(async () => {
+      const policy = this.ctx.storage.kv.get<SessionPolicy>("policy");
+      if (!policy) return;
+      if (policy.sessionId !== sessionId || (policy.generation ?? 0) !== generation || policy.sandboxId !== sandboxId) return;
+      const intent = policy.developmentIntent;
+      const state = this.ctx.storage.kv.get<DevelopmentSupervisorState>("development-supervision");
+      if (!intent || !state) return;
+      // Fence reconciliation before the first remote cleanup operation. Retries remain idempotent.
+      this.ctx.storage.kv.put("development-cleaned", true);
+      await this.#armPolicyAlarm(Date.now() + DEVELOPMENT_RECONCILE_INTERVAL_MS);
+      const sandbox = sandboxFor(this.env, storedPolicyTier(policy), sandboxId);
+      const stopped = await cleanupDevelopmentGeneration(intent, state, sandbox, Date.now(), async checkpoint => {
+        this.ctx.storage.kv.put("development-supervision", checkpoint);
+      });
+      this.ctx.storage.kv.put("development-supervision", stopped);
+      await this.#registry().developmentUpdated(publicDevelopmentSupervisorUpdate(intent, stopped));
+      // Public stopped status is durable in the registry; discard private process/log state now.
+      this.ctx.storage.kv.delete("development-supervision");
+      await this.#scheduleNextPolicyAlarm();
+    });
   }
 
   /** Mints or reuses a GitHub token scoped to this session's repositories. */
@@ -649,8 +810,23 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       policy.owner, policy.sessionId, policy.repositories);
     const terminal = await this.#runningOrCreatedPrimaryTerminal(sandboxId, runtime, policy.repositories, customization);
     const applied = await this.#registry().startupSucceeded(policy.sessionId, policy.generation ?? 0, sandboxId, terminal.id);
-    if (!applied) await sandbox.destroy();
+    if (!applied) {
+      await sandbox.destroy();
+      this.ctx.storage.kv.delete("startup");
+      return;
+    }
+    this.ctx.storage.kv.put("primary-terminal-id", terminal.id);
     this.ctx.storage.kv.delete("startup");
+    if (policy.developmentIntent) {
+      this.ctx.storage.kv.delete("development-cleaned");
+      const state = this.ctx.storage.kv.get<DevelopmentSupervisorState>("development-supervision") ??
+        createDevelopmentSupervisorState(policy.developmentIntent);
+      this.ctx.storage.kv.put("development-supervision", state);
+      await this.#registry().developmentUpdated(publicDevelopmentSupervisorUpdate(policy.developmentIntent, state));
+      await this.#armPolicyAlarm(Date.now() + 1);
+    } else {
+      await this.#scheduleNextPolicyAlarm();
+    }
   }
 
   async #advanceClone(startup: StartupRecord, repositories: CodingSessionRepository[]): Promise<void> {
@@ -752,8 +928,50 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     this.ctx.storage.kv.put("startup", startup);
   }
 
+  async #withLifecycleLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.#lifecycleTail;
+    let release!: () => void;
+    this.#lifecycleTail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   #scheduleStartup(delayMs = STARTUP_ALARM_DELAY_MS): Promise<void> {
-    return this.ctx.storage.setAlarm(Date.now() + delayMs);
+    return this.#armPolicyAlarm(Date.now() + delayMs);
+  }
+
+  async #armPolicyAlarm(at: number): Promise<void> {
+    const current = this.ctx.storage.kv.get<number>("policy-alarm-at");
+    if (current !== undefined && current <= at) return;
+    await this.ctx.storage.setAlarm(at);
+    this.ctx.storage.kv.put("policy-alarm-at", at);
+  }
+
+  async #scheduleNextPolicyAlarm(): Promise<void> {
+    const deadlines: number[] = [];
+    if (this.ctx.storage.kv.get<StartupRecord>("startup")) deadlines.push(Date.now() + STARTUP_ALARM_DELAY_MS);
+    const supervision = this.ctx.storage.kv.get<DevelopmentSupervisorState>("development-supervision");
+    if (supervision && !this.ctx.storage.kv.get<boolean>("development-cleaned")) {
+      const restartAt = Object.values(supervision.components)
+        .map(component => component.restartAfter).filter((value): value is number => value !== undefined);
+      deadlines.push(restartAt.length > 0 ? Math.min(...restartAt) : Date.now() + DEVELOPMENT_RECONCILE_INTERVAL_MS);
+    }
+    const ticket = this.ctx.storage.kv.get<AttachTicket>("ticket");
+    if (ticket) deadlines.push(ticket.expiresAt);
+    const editorTicket = this.ctx.storage.kv.get<EditorTicket>("editorTicket");
+    if (editorTicket) deadlines.push(editorTicket.expiresAt);
+    if (deadlines.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      this.ctx.storage.kv.delete("policy-alarm-at");
+    } else {
+      const next = Math.min(...deadlines);
+      await this.ctx.storage.setAlarm(next);
+      this.ctx.storage.kv.put("policy-alarm-at", next);
+    }
   }
 
   #registry(): DurableObjectStub<CodingSessionRegistry> {
@@ -769,6 +987,18 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   /** Retries durable restart work and capacity releases after pre-arming the next wakeup. */
   async alarm(): Promise<void> {
     if (this.#hasRegistryWork()) await this.#requireRegistryRetryAlarm();
+    for (const [, stop] of this.ctx.storage.kv.list<StopRecord>({ prefix: "stop:" })) {
+      try {
+        await this.#resumeStop(stop);
+      } catch (error) {
+        logger.warn("coding session stop will retry", {
+          event: "coding.session.stop.retry", sessionId: stop.sessionId, error,
+        });
+      }
+    }
+    for (const [, start] of this.ctx.storage.kv.list<StartRecord>({ prefix: "start:" })) {
+      await this.#resumeStart(start);
+    }
     for (const [, restart] of this.ctx.storage.kv.list<RestartRecord>({ prefix: "restart:" })) {
       try {
         await this.#resumeRestart(restart);
@@ -818,25 +1048,37 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     });
   }
 
-  /** Returns persisted lifecycle metadata for the current generation. */
+  /** Returns the separate public-safe lifecycle snapshot persisted for the current generation. */
   getDevelopmentStatus(sessionId: string): CodingSessionDevelopmentStatus {
     const record = this.#get(sessionId);
     if (!record || record.archivedAt) throw new Error("Coding session was not found.");
-    const componentStatus: CodingSessionDevelopmentComponentStatus = record.status === "running" ? "ready" :
-      record.status === "starting" ? "starting" : record.status === "stopping" ? "stopping" :
-      record.status === "stopped" ? "stopped" : "failed";
-    const selected = new Set(record.development?.componentIds ?? []);
-    const components = DEVELOPMENT_CATALOG.components.filter(component => selected.has(component.id)).map(component => ({
-      id: component.id, title: component.title, status: componentStatus, updatedAt: record.lastActiveAt,
-      ...(record.error ? { message: record.error } : {}),
-    }));
-    const applications = DEVELOPMENT_CATALOG.components.filter(component => selected.has(component.id)).flatMap(component =>
-      component.applications.map(application => ({
-        id: application.id, componentId: component.id, title: application.title,
-        status: componentStatus, previewAvailable: false,
-        ...(record.error ? { message: record.error } : {}),
-      })));
-    return { sessionId, generation: storedSessionGeneration(record), components, applications, updatedAt: record.lastActiveAt };
+    const status = this.ctx.storage.kv.get<CodingSessionDevelopmentStatus>(`development-status:${sessionId}`);
+    if (status && status.generation === storedSessionGeneration(record)) return status;
+    return {
+      sessionId,
+      generation: storedSessionGeneration(record),
+      components: [],
+      applications: [],
+      updatedAt: record.lastActiveAt,
+    };
+  }
+
+  /** Persists a display-safe component snapshot only when its exact sandbox generation is current. */
+  developmentUpdated(update: ReturnType<typeof publicDevelopmentSupervisorUpdate>): boolean {
+    const record = this.#get(update.sessionId);
+    if (!record || record.archivedAt || record.sandboxId !== update.sandboxId ||
+        storedSessionGeneration(record) !== update.generation) return false;
+    if (record.status !== "running" && !(record.status === "stopping" &&
+        update.components.every(component => component.status === "stopping" || component.status === "stopped"))) return false;
+    const status: CodingSessionDevelopmentStatus = {
+      sessionId: update.sessionId,
+      generation: update.generation,
+      components: update.components,
+      applications: update.applications,
+      updatedAt: new Date(),
+    };
+    this.ctx.storage.kv.put(`development-status:${update.sessionId}`, status);
+    return true;
   }
 
   /** Rejects application previews until the reviewed preview gateway is available. */
@@ -879,6 +1121,10 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (plan && !plan.canCreate) {
       throw new Error(plan.issues[0]?.message ?? "Development stack is unavailable.");
     }
+    const durableLifecycle = durableLifecycleEnabled(this.env);
+    if (plan && !durableLifecycle) {
+      throw new Error("Development sessions require durable lifecycle support.");
+    }
     if ([...this.#records()].filter(record =>
       !record.archivedAt && ["starting", "running", "stopping"].includes(record.status)).length >= MAX_SESSIONS_PER_USER) {
       throw new Error(`A user may have at most ${MAX_SESSIONS_PER_USER} active coding sessions.`);
@@ -894,6 +1140,9 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     const sandboxId = id;
     const generation = plan ? 1 : 0;
     const instanceTier = plan?.selectedTier ?? "standard-1";
+    const developmentIntent = plan ? createDevelopmentGenerationIntent(
+      DEVELOPMENT_CATALOG, plan, { sessionId: id, sandboxId, generation },
+    ) : undefined;
     let capacityLease: CapacityReservationKey | undefined;
     if (isHeavyTier(instanceTier)) {
       const key: CapacityReservationKey = {
@@ -925,10 +1174,42 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       } : {}),
       ...(capacityLease ? { capacityLease } : {}),
     };
-    this.#put(record);
+    if (!durableLifecycle) {
+      this.#put(record);
+      try {
+        await this.#scheduleStart(record, owner);
+        logger.info("coding session startup scheduled", {
+          event: "coding.session.start.scheduled", sessionId: id, userId: owner.userId,
+          repositoryCount: repositories.length,
+        });
+      } catch (error) {
+        try {
+          await sandboxFor(this.env, storedSessionTier(record), record.sandboxId).destroy();
+          if (record.capacityLease) {
+            this.ctx.storage.kv.put(`pending-release:${record.capacityLease.reservationId}`, record.capacityLease);
+            const lease = record.capacityLease;
+            record = { ...record, capacityLease: undefined };
+            this.#put(record);
+            await this.#releaseCapacity(lease);
+          }
+        } catch {
+          // Retain an exact heavy lease when destruction may be incomplete.
+        }
+        record = {
+          ...record, status: record.capacityLease ? "stopping" : "failed",
+          error: boundedError(error), lastActiveAt: new Date(),
+        };
+        this.#put(record);
+        logger.error("coding session startup could not be scheduled", {
+          event: "coding.session.start.schedule.failed", sessionId: id, userId: owner.userId, error,
+        });
+      }
+      return publicSummary(record);
+    }
 
     try {
-      await this.#scheduleStart(record, owner);
+      await this.#beginStart(record, owner, developmentIntent);
+      record = this.#get(id) ?? record;
       logger.info("coding session startup scheduled", {
         event: "coding.session.start.scheduled",
         sessionId: id,
@@ -936,25 +1217,35 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         repositoryCount: repositories.length,
       });
     } catch (error) {
-      try {
-        await sandboxFor(this.env, storedSessionTier(record), record.sandboxId).destroy();
-        if (record.capacityLease) {
-          this.ctx.storage.kv.put(`pending-release:${record.capacityLease.reservationId}`, record.capacityLease);
-          const lease = record.capacityLease;
-          record = { ...record, capacityLease: undefined };
-          this.#put(record);
-          await this.#releaseCapacity(lease);
-        }
-      } catch {
-        // Retain an exact heavy lease when destruction may be incomplete.
-      }
       record = {
         ...record,
-        status: record.capacityLease ? "stopping" : "failed",
-        error: boundedError(error),
+        status: "stopping",
+        error: "Coding session startup could not be scheduled.",
         lastActiveAt: new Date(),
       };
-      this.#put(record);
+      const stop: StopRecord = {
+        sessionId: record.id,
+        sandboxId: record.sandboxId,
+        generation: storedSessionGeneration(record),
+        instanceTier: storedSessionTier(record),
+        ...(record.capacityLease ? { lease: record.capacityLease } : {}),
+        ...(record.development?.componentIds.length ? { development: true as const } : {}),
+        phase: "destroy",
+      };
+      await this.#requireRegistryRetryAlarm();
+      this.ctx.storage.transactionSync(() => {
+        this.#put(record);
+        this.ctx.storage.kv.put(`stop:${record.id}`, stop);
+      });
+      this.#setDevelopmentLifecycle(record, "stopping");
+      try {
+        await this.#resumeStop(stop);
+        record = this.#get(record.id) ?? record;
+      } catch (stopError) {
+        logger.warn("coding session startup cleanup will retry", {
+          event: "coding.session.start.cleanup.retry", sessionId: record.id, error: stopError,
+        });
+      }
       logger.error("coding session startup could not be scheduled", {
         event: "coding.session.start.schedule.failed",
         sessionId: id,
@@ -977,6 +1268,12 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       throw new Error("Coding session is already changing state.");
     }
     assertRuntimeConfigured(this.env, storedSessionRuntime(record));
+    if (record.development?.componentIds.length &&
+        !(await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).hasDevelopmentIntent(
+          record.id, storedSessionGeneration(record), record.sandboxId,
+        ))) {
+      throw new Error("Development restart requires a new session.");
+    }
     const reactivating = record.status === "stopped" || record.status === "failed";
     if (reactivating) this.#assertActiveSessionLimit(sessionId);
     const instanceTier = storedSessionTier(record);
@@ -1031,7 +1328,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       ...(freshLease ? { newLease: freshLease } : {}),
       newSandboxId,
       newGeneration,
-      phase: "destroy",
+      ...(record.development?.componentIds.length ? { development: true as const } : {}),
+      phase: record.development?.componentIds.length ? "prepare" : "destroy",
     };
     // Arm recovery while the old record is still exact. A crash before the transaction leaves only
     // a harmless empty alarm; a crash after it leaves durable, wakeable restart work.
@@ -1058,54 +1356,77 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return publicSummary(this.#get(sessionId) ?? stopping);
   }
 
-  /** Stops and destroys a session owned by this registry. */
+  /** Starts or resumes durable cleanup, destroy, release, and finalize phases for one session. */
   async stopSession(sessionId: string): Promise<void> {
     const record = this.#get(sessionId);
     if (!record) return;
     if (this.ctx.storage.kv.get<RestartRecord>(`restart:${sessionId}`)) {
       throw new Error("Coding session is already changing state.");
     }
-    if (record.status === "stopped") return;
-    const stopping: SessionRecord = { ...record, status: "stopping", lastActiveAt: new Date() };
-    this.#put(stopping);
-    if (record.status === "starting") {
+    const existing = this.ctx.storage.kv.get<StopRecord>(`stop:${sessionId}`);
+    if (existing) {
+      await this.#resumeStop(existing);
+      return;
+    }
+    const existingStart = this.ctx.storage.kv.get<StartRecord>(`start:${sessionId}`);
+    if (record.status === "stopped" && !existingStart) return;
+    if (!durableLifecycleEnabled(this.env) && !existingStart && !record.development) {
+      const stopping: SessionRecord = { ...record, status: "stopping", lastActiveAt: new Date() };
+      this.#put(stopping);
+      if (record.status === "starting") {
+        try {
+          await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).cancelSessionStartup(
+            record.id, storedSessionGeneration(record), record.sandboxId,
+          );
+        } catch (error) {
+          logger.warn("coding session startup cancellation failed", {
+            event: "coding.session.startup.cancel.failed", sessionId, error,
+          });
+        }
+      }
       try {
-        await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).cancelSessionStartup(record.id, storedSessionGeneration(record), record.sandboxId);
+        await sandboxFor(this.env, storedSessionTier(record), record.sandboxId).destroy();
+        if (record.capacityLease) await this.#releaseCapacity(record.capacityLease);
       } catch (error) {
-        logger.warn("coding session startup cancellation failed", {
-          event: "coding.session.startup.cancel.failed",
-          sessionId,
-          error,
+        const current = this.#get(sessionId);
+        if (current?.sandboxId === record.sandboxId && current.status === "stopping") {
+          this.#put({
+            ...stopping, status: record.capacityLease ? "stopping" : "failed",
+            error: boundedError(error), lastActiveAt: new Date(),
+          });
+        }
+        logger.error("coding session failed to stop", {
+          event: "coding.session.stop.failed", sessionId, error,
         });
+        throw error;
       }
-    }
-    try {
-      await sandboxFor(this.env, storedSessionTier(record), record.sandboxId).destroy();
-      if (record.capacityLease) await this.#releaseCapacity(record.capacityLease);
-    } catch (error) {
-      const current = this.#get(sessionId);
-      if (current?.sandboxId === record.sandboxId && current.status === "stopping") {
-        this.#put({
-          ...stopping,
-          status: record.capacityLease ? "stopping" : "failed",
-          error: boundedError(error),
-          lastActiveAt: new Date(),
-        });
-      }
-      logger.error("coding session failed to stop", {
-        event: "coding.session.stop.failed", sessionId, error,
+      this.#put({
+        ...record, status: "stopped", terminalId: undefined, shellTerminalId: undefined,
+        editorProcessId: undefined, capacityLease: undefined, lastActiveAt: new Date(),
       });
-      throw error;
+      return;
     }
-    this.#put({
-      ...record,
-      status: "stopped",
-      terminalId: undefined,
-      shellTerminalId: undefined,
-      editorProcessId: undefined,
-      capacityLease: undefined,
-      lastActiveAt: new Date(),
+    const operation: StopRecord = {
+      sessionId,
+      sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
+      ...(record.capacityLease ? { lease: record.capacityLease } : {}),
+      ...(record.development?.componentIds.length ? { development: true as const } : {}),
+      phase: "cancel",
+    };
+    await this.#requireRegistryRetryAlarm();
+    this.ctx.storage.transactionSync(() => {
+      const current = this.#get(sessionId);
+      if (!current || current.sandboxId !== record.sandboxId ||
+          storedSessionGeneration(current) !== storedSessionGeneration(record)) {
+        throw new Error("Coding session stop was cancelled.");
+      }
+      this.#put({ ...current, status: "stopping", lastActiveAt: new Date() });
+      this.ctx.storage.kv.delete(`start:${sessionId}`);
+      this.ctx.storage.kv.put(`stop:${sessionId}`, operation);
     });
+    await this.#resumeStop(operation);
   }
 
   /** Stops and hides a session from the default session list. */
@@ -1383,6 +1704,28 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     this.ctx.storage.kv.put(`session:${record.id}`, record);
   }
 
+  #setDevelopmentLifecycle(
+    record: SessionRecord,
+    status: CodingSessionDevelopmentStatus["components"][number]["status"],
+    message?: string,
+  ): void {
+    if (!record.development) return;
+    const previous = this.ctx.storage.kv.get<CodingSessionDevelopmentStatus>(`development-status:${record.id}`);
+    if (!previous) return;
+    const now = new Date();
+    this.ctx.storage.kv.put(`development-status:${record.id}`, {
+      sessionId: record.id,
+      generation: storedSessionGeneration(record),
+      components: previous.components.map(component => ({
+        ...component, status, updatedAt: now, message,
+      })),
+      applications: previous.applications.map(application => ({
+        ...application, status, message, previewAvailable: false,
+      })),
+      updatedAt: now,
+    });
+  }
+
   #isRestartSourceCurrent(source: SessionRecord): boolean {
     const current = this.#get(source.id);
     if (!current || current.archivedAt || current.status !== source.status ||
@@ -1400,8 +1743,184 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     }
   }
 
+  async #scheduleStart(record: SessionRecord, owner: CodingSessionOwner): Promise<void> {
+    const runtime = storedSessionRuntime(record);
+    assertRuntimeConfigured(this.env, runtime);
+    const policy = policyForSandbox(this.env, storedSessionTier(record), record.sandboxId);
+    await policy.configure({
+      sessionId: record.id, sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record), instanceTier: storedSessionTier(record),
+      runtime, owner, repositories: record.repositories,
+    });
+    const now = Date.now();
+    await policy.startSessionStartup({
+      generation: storedSessionGeneration(record), phase: "authorize", nextRepositoryIndex: 0,
+      attempt: 0, createdAt: now, updatedAt: now,
+    });
+  }
+
+  async #beginStart(
+    record: SessionRecord,
+    owner: CodingSessionOwner,
+    developmentIntent?: DevelopmentGenerationIntent,
+  ): Promise<void> {
+    const start: StartRecord = {
+      sessionId: record.id, owner, sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record), attempts: 0, phase: "configure",
+      ...(developmentIntent ? { developmentIntent } : {}),
+    };
+    await this.#requireRegistryRetryAlarm();
+    this.ctx.storage.transactionSync(() => {
+      this.#put(record);
+      this.ctx.storage.kv.put(`start:${record.id}`, start);
+      if (developmentIntent) {
+        const initial = createDevelopmentSupervisorState(developmentIntent, record.createdAt.valueOf());
+        this.ctx.storage.kv.put(`development-status:${record.id}`, publicStatusFromSupervisor(developmentIntent, initial));
+      }
+    });
+    await this.#resumeStart(start);
+  }
+
+  async #resumeStart(start: StartRecord): Promise<void> {
+    let operation = this.ctx.storage.kv.get<StartRecord>(`start:${start.sessionId}`) ?? start;
+    try {
+      const record = this.#get(operation.sessionId);
+      if (!record || record.status !== "starting" || record.sandboxId !== operation.sandboxId ||
+          storedSessionGeneration(record) !== operation.generation) {
+        this.ctx.storage.kv.delete(`start:${operation.sessionId}`);
+        return;
+      }
+      const policy = policyForSandbox(this.env, storedSessionTier(record), record.sandboxId);
+      if (operation.phase === "configure") {
+        const runtime = storedSessionRuntime(record);
+        assertRuntimeConfigured(this.env, runtime);
+        await policy.configure({
+          sessionId: record.id, sandboxId: record.sandboxId,
+          generation: storedSessionGeneration(record), instanceTier: storedSessionTier(record),
+          runtime, owner: operation.owner, repositories: record.repositories,
+          ...(operation.developmentIntent ? { developmentIntent: operation.developmentIntent } : {}),
+        });
+        const persisted = this.ctx.storage.kv.get<StartRecord>(`start:${operation.sessionId}`);
+        const current = this.#get(operation.sessionId);
+        if (!persisted || !current || current.status !== "starting" ||
+            current.sandboxId !== operation.sandboxId || storedSessionGeneration(current) !== operation.generation) return;
+        operation = { ...persisted, phase: "schedule" };
+        delete operation.developmentIntent;
+        this.ctx.storage.kv.put(`start:${operation.sessionId}`, operation);
+      }
+      const now = Date.now();
+      await policy.startSessionStartup({
+        generation: operation.generation, phase: "authorize", nextRepositoryIndex: 0,
+        attempt: 0, createdAt: now, updatedAt: now,
+      });
+      this.ctx.storage.kv.delete(`start:${operation.sessionId}`);
+    } catch (error) {
+      const persisted = this.ctx.storage.kv.get<StartRecord>(`start:${operation.sessionId}`);
+      const current = this.#get(operation.sessionId);
+      if (!persisted || !current || current.status !== "starting" || current.sandboxId !== operation.sandboxId ||
+          storedSessionGeneration(current) !== operation.generation) return;
+      operation = persisted;
+      const attempts = operation.attempts + 1;
+      if (attempts < STARTUP_MAX_ATTEMPTS) {
+        this.ctx.storage.kv.put(`start:${operation.sessionId}`, { ...operation, attempts });
+        logger.warn("coding session durable start will retry", {
+          event: "coding.session.start.retry", sessionId: operation.sessionId, reason: `attempt-${attempts}`, error,
+        });
+        return;
+      }
+      logger.error("coding session durable start exhausted", {
+        event: "coding.session.start.exhausted", sessionId: operation.sessionId, reason: `attempt-${attempts}`, error,
+      });
+      const record = this.#get(operation.sessionId);
+      if (!record || record.sandboxId !== operation.sandboxId || record.status !== "starting") {
+        this.ctx.storage.kv.delete(`start:${operation.sessionId}`);
+        return;
+      }
+      const stopping = { ...record, status: "stopping" as const,
+        error: "Coding session startup could not be scheduled.", lastActiveAt: new Date() };
+      const stop: StopRecord = {
+        sessionId: record.id, sandboxId: record.sandboxId, generation: operation.generation,
+        instanceTier: storedSessionTier(record), ...(record.capacityLease ? { lease: record.capacityLease } : {}),
+        ...(record.development?.componentIds.length ? { development: true as const } : {}), phase: "cancel",
+      };
+      this.ctx.storage.transactionSync(() => {
+        this.#put(stopping);
+        this.ctx.storage.kv.delete(`start:${operation.sessionId}`);
+        this.ctx.storage.kv.put(`stop:${operation.sessionId}`, stop);
+      });
+      this.#setDevelopmentLifecycle(stopping, "stopping");
+    }
+  }
+
+  async #resumeStop(stop: StopRecord): Promise<void> {
+    let operation = this.ctx.storage.kv.get<StopRecord>(`stop:${stop.sessionId}`) ?? stop;
+    if (operation.phase === "cancel") {
+      await policyForSandbox(this.env, operation.instanceTier, operation.sandboxId).cancelSessionStartup(
+        operation.sessionId, operation.generation, operation.sandboxId,
+      );
+      operation = { ...operation, phase: "cleanup" };
+      this.ctx.storage.kv.put(`stop:${operation.sessionId}`, operation);
+    }
+    if (operation.phase === "cleanup") {
+      if (operation.development) await policyForSandbox(this.env, operation.instanceTier, operation.sandboxId).cleanupDevelopment(
+        operation.sessionId, operation.generation, operation.sandboxId,
+      );
+      operation = { ...operation, phase: "destroy" };
+      this.ctx.storage.kv.put(`stop:${operation.sessionId}`, operation);
+    }
+    if (operation.phase === "destroy") {
+      await sandboxFor(this.env, operation.instanceTier, operation.sandboxId).destroy();
+      operation = { ...operation, phase: "release" };
+      this.ctx.storage.kv.put(`stop:${operation.sessionId}`, operation);
+    }
+    if (operation.phase === "release") {
+      if (operation.lease) await capacityFor(this.env, operation.lease.tier).release(operation.lease);
+      operation = { ...operation, phase: "finalize" };
+      this.ctx.storage.kv.put(`stop:${operation.sessionId}`, operation);
+    }
+    const current = this.#get(operation.sessionId);
+    if (current && current.sandboxId === operation.sandboxId &&
+        storedSessionGeneration(current) === operation.generation && current.status === "stopping") {
+      const stoppedRecord: SessionRecord = {
+        ...current,
+        status: "stopped",
+        terminalId: undefined,
+        shellTerminalId: undefined,
+        editorProcessId: undefined,
+        capacityLease: undefined,
+        lastActiveAt: new Date(),
+      };
+      this.#put(stoppedRecord);
+      this.#setDevelopmentLifecycle(stoppedRecord, "stopped");
+    }
+    this.ctx.storage.kv.delete(`stop:${operation.sessionId}`);
+  }
+
   async #resumeRestart(restart: RestartRecord): Promise<void> {
     let operation = this.ctx.storage.kv.get<RestartRecord>(`restart:${restart.sessionId}`) ?? restart;
+    if (operation.phase === "prepare") {
+      const prepared = await policyForSandbox(this.env, operation.instanceTier, operation.oldSandboxId).prepareDevelopmentRestart(
+        operation.sessionId, operation.oldGeneration, operation.oldSandboxId,
+        operation.newSandboxId, operation.newGeneration,
+      );
+      if (prepared === false) {
+        const current = this.#get(operation.sessionId);
+        if (current && current.status === "stopping" && current.sandboxId === operation.oldSandboxId) {
+          this.#put({ ...current, status: "failed", error: "Development restart requires a new session.", lastActiveAt: new Date() });
+        }
+        this.ctx.storage.kv.delete(`restart:${operation.sessionId}`);
+        return;
+      }
+      operation = { ...operation, phase: "cleanup" };
+      this.ctx.storage.kv.put(`restart:${operation.sessionId}`, operation);
+    }
+    if (operation.phase === "cleanup") {
+      await policyForSandbox(this.env, operation.instanceTier, operation.oldSandboxId).cleanupDevelopment(
+        operation.sessionId, operation.oldGeneration, operation.oldSandboxId,
+      );
+      operation = { ...operation, phase: "destroy" };
+      this.ctx.storage.kv.put(`restart:${operation.sessionId}`, operation);
+    }
     if (operation.phase === "destroy") {
       await sandboxFor(this.env, operation.instanceTier, operation.oldSandboxId).destroy();
       operation = { ...operation, phase: "transfer" };
@@ -1456,13 +1975,20 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         lastActiveAt: new Date(),
       };
       this.#put(starting);
+      this.#setDevelopmentLifecycle(starting, "pending");
     }
-    await this.#scheduleStart(starting, operation.owner);
+    if (durableLifecycleEnabled(this.env) || operation.development) {
+      await this.#beginStart(starting, operation.owner);
+    } else {
+      await this.#scheduleStart(starting, operation.owner);
+    }
     this.ctx.storage.kv.delete(`restart:${operation.sessionId}`);
   }
 
   #hasRegistryWork(): boolean {
+    for (const _entry of this.ctx.storage.kv.list({ prefix: "start:" })) return true;
     for (const _entry of this.ctx.storage.kv.list({ prefix: "restart:" })) return true;
+    for (const _entry of this.ctx.storage.kv.list({ prefix: "stop:" })) return true;
     for (const _entry of this.ctx.storage.kv.list({ prefix: "pending-release:" })) return true;
     return false;
   }
@@ -1494,34 +2020,12 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     }
   }
 
-  async #scheduleStart(record: SessionRecord, owner: CodingSessionOwner): Promise<void> {
-    const runtime = storedSessionRuntime(record);
-    assertRuntimeConfigured(this.env, runtime);
-    const policy = policyForSandbox(this.env, storedSessionTier(record), record.sandboxId);
-    await policy.configure({
-      sessionId: record.id,
-      sandboxId: record.sandboxId,
-      generation: storedSessionGeneration(record),
-      instanceTier: storedSessionTier(record),
-      runtime,
-      owner,
-      repositories: record.repositories,
-    });
-    const now = Date.now();
-    await policy.startSessionStartup({
-      generation: storedSessionGeneration(record),
-      phase: "authorize",
-      nextRepositoryIndex: 0,
-      attempt: 0,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-
   /** Applies successful asynchronous startup only to the current starting generation. */
   async startupSucceeded(sessionId: string, generation: number, sandboxId: string, terminalId: string): Promise<boolean> {
     const current = this.#get(sessionId);
-    if (!current || current.archivedAt || storedSessionGeneration(current) !== generation || current.sandboxId !== sandboxId || current.status !== "starting") return false;
+    if (!current || current.archivedAt || storedSessionGeneration(current) !== generation || current.sandboxId !== sandboxId) return false;
+    if (current.status === "running" && current.terminalId === terminalId) return true;
+    if (current.status !== "starting") return false;
     if (current.capacityLease) {
       const activated = await capacityFor(this.env, current.capacityLease.tier).activate(current.capacityLease);
       if (!sameCapacityKey(current.capacityLease, activated)) {
@@ -1546,17 +2050,19 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (!current || current.archivedAt || storedSessionGeneration(current) !== generation ||
         current.sandboxId !== sandboxId || !["starting", "failed", "stopping"].includes(current.status)) return false;
     if (!destroyed) {
-      this.#put({
-        ...current, status: current.capacityLease ? "stopping" : "failed",
+      const failed = {
+        ...current, status: current.capacityLease ? "stopping" as const : "failed" as const,
         terminalId: undefined, shellTerminalId: undefined,
         editorProcessId: undefined, error, lastActiveAt: new Date(),
-      });
+      };
+      this.#put(failed);
+      this.#setDevelopmentLifecycle(failed, "failed", "Development component startup failed.");
       return true;
     }
     if (current.capacityLease) {
       this.ctx.storage.kv.put(`pending-release:${current.capacityLease.reservationId}`, current.capacityLease);
     }
-    this.#put({
+    const failed: SessionRecord = {
       ...current,
       status: "failed",
       terminalId: undefined,
@@ -1565,7 +2071,9 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       capacityLease: undefined,
       error,
       lastActiveAt: new Date(),
-    });
+    };
+    this.#put(failed);
+    this.#setDevelopmentLifecycle(failed, "failed", "Development component startup failed.");
     if (current.capacityLease) await this.#releaseCapacity(current.capacityLease);
     return true;
   }
@@ -2208,6 +2716,28 @@ async function validEditorCapabilityToken(env: Env, token: string): Promise<bool
 function randomToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return bytesToBase64Url(bytes);
+}
+
+function durableLifecycleEnabled(env: Env): boolean {
+  return env.CODING_SESSION_DURABLE_LIFECYCLE_ENABLED === "true";
+}
+
+function startupCancellationKey(sessionId: string, generation: number, sandboxId: string): string {
+  return `startup-cancelled:${sessionId}:${generation}:${sandboxId}`;
+}
+
+function publicStatusFromSupervisor(
+  intent: DevelopmentGenerationIntent,
+  state: DevelopmentSupervisorState,
+): CodingSessionDevelopmentStatus {
+  const update = publicDevelopmentSupervisorUpdate(intent, state);
+  return {
+    sessionId: intent.sessionId,
+    generation: intent.generation,
+    components: update.components,
+    applications: update.applications,
+    updatedAt: new Date(state.updatedAt),
+  };
 }
 
 function boundedError(error: unknown): string {
