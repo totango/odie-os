@@ -28,6 +28,10 @@ export interface DevelopmentProcessSpec {
   repository?: CodingSessionRepository;
   imageId?: string;
   environment: DevelopmentEnvironmentSpec[];
+  /** Required declaration for every retry-safe one-shot lifecycle job. */
+  idempotent?: true;
+  /** Bounded remote lifetime required for every one-shot lifecycle job. */
+  timeoutMs?: number;
 }
 
 /** One digest-pinned image available to the execution contract. */
@@ -102,6 +106,10 @@ const ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const IMAGE_PATTERN = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
 const HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const MAX_DEVELOPMENT_JOB_TIMEOUT_MS = 30 * 60 * 1_000;
+const MAX_DEVELOPMENT_STOP_GRACE_MS = 60_000;
+const MAX_DEVELOPMENT_LOG_BYTES = 64 * 1024;
+const MAX_DEVELOPMENT_LOG_LINES = 2_000;
 const NOT_YET_AVAILABLE = "Development-stack execution is not available in this deployment yet.";
 const COMPLETE_LOCAL_UNAVAILABLE = "The complete local stack exceeds the public sandbox disk limit. Use the complete external profile instead.";
 
@@ -321,15 +329,34 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
   if (!Number.isSafeInteger(spec.minimumDiskBytes) || spec.minimumDiskBytes <= 0) throw new Error(`Component ${entry.id} has invalid disk headroom.`);
   positiveInteger(spec.logs.maxBytes, `Component ${entry.id} log byte limit`);
   positiveInteger(spec.logs.maxLines, `Component ${entry.id} log line limit`);
+  if (spec.logs.maxBytes > MAX_DEVELOPMENT_LOG_BYTES || spec.logs.maxLines > MAX_DEVELOPMENT_LOG_LINES) {
+    throw new Error(`Component ${entry.id} log retention exceeds the durable storage bound.`);
+  }
   if (!Number.isInteger(spec.restart.maxAttempts) || spec.restart.maxAttempts < 0) throw new Error(`Component ${entry.id} has invalid restart attempts.`);
   if (!Number.isInteger(spec.restart.backoffMs) || spec.restart.backoffMs < 0) throw new Error(`Component ${entry.id} has invalid restart backoff.`);
   positiveInteger(spec.stop.graceMs, `Component ${entry.id} stop grace`);
+  if (spec.stop.graceMs > MAX_DEVELOPMENT_STOP_GRACE_MS) {
+    throw new Error(`Component ${entry.id} stop grace exceeds the supervision bound.`);
+  }
 
   uniqueIds(spec.processes, `process in ${entry.id}`);
   const imageIds = uniqueIds(spec.images, `image in ${entry.id}`);
   for (const image of spec.images) if (!IMAGE_PATTERN.test(image.reference)) throw new Error(`Image ${image.id} is not digest-pinned.`);
+  const processPhases: DevelopmentProcessPhase[] = ["init", "migration", "seed", "service"];
+  let previousPhase = -1;
   for (const process of spec.processes) {
     if (!["init", "migration", "seed", "service"].includes(process.phase)) throw new Error(`Process ${process.id} has invalid phase.`);
+    const phase = processPhases.indexOf(process.phase);
+    if (phase < previousPhase) throw new Error(`Component ${entry.id} has processes out of lifecycle order.`);
+    previousPhase = phase;
+    if (process.phase === "service") {
+      if (process.idempotent !== undefined || process.timeoutMs !== undefined) {
+        throw new Error(`Service process ${process.id} has one-shot declarations.`);
+      }
+    } else if (process.idempotent !== true || !Number.isSafeInteger(process.timeoutMs) || process.timeoutMs! <= 0 ||
+        process.timeoutMs! > MAX_DEVELOPMENT_JOB_TIMEOUT_MS) {
+      throw new Error(`One-shot process ${process.id} must be idempotent with a bounded timeout.`);
+    }
     if (!Array.isArray(process.argv) || process.argv.length === 0 || process.argv.some(arg => typeof arg !== "string" || arg.length === 0)) throw new Error(`Process ${process.id} has invalid argv.`);
     if (typeof process.cwd !== "string" || !process.cwd.startsWith("/")) throw new Error(`Process ${process.id} must have an absolute cwd.`);
     if (process.repository && !entry.requiredRepositories.includes(process.repository)) throw new Error(`Process ${process.id} uses an undeclared repository.`);
@@ -337,7 +364,8 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
     if (!Array.isArray(process.environment)) throw new Error(`Process ${process.id} has invalid environment declarations.`);
     const environmentNames = new Set<string>();
     for (const variable of process.environment) {
-      if (!variable || !ENV_NAME_PATTERN.test(variable.name) || environmentNames.has(variable.name)) {
+      if (!variable || variable.name === "ODIE_SUPERVISION_MARKER" ||
+          !ENV_NAME_PATTERN.test(variable.name) || environmentNames.has(variable.name)) {
         throw new Error(`Process ${process.id} has an invalid or duplicate environment name.`);
       }
       environmentNames.add(variable.name);
@@ -368,7 +396,9 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
       if (!entry.ports.includes(health.port)) throw new Error(`Component ${entry.id} HTTP health port is undeclared.`);
       if (!isSafePath(health.path) || health.path.length > 2_048 || !Array.isArray(health.statuses) ||
           health.statuses.length === 0 || new Set(health.statuses).size !== health.statuses.length ||
-          health.statuses.some(status => !Number.isInteger(status) || status < 100 || status > 599)) {
+          health.statuses.some(status => !Number.isInteger(status) || status < 100 || status > 599) ||
+          ![...health.statuses].toSorted((a, b) => a - b)
+            .every((status, index, statuses) => index === 0 || status === statuses[index - 1]! + 1)) {
         throw new Error(`Component ${entry.id} has an invalid HTTP health check.`);
       }
     } else if (health.kind === "tcp") {
@@ -386,10 +416,12 @@ function validateExecutionSpec(entry: DevelopmentComponentDefinition, spec: Deve
   }
   const readinessProcesses = new Set(spec.readiness.map(health => health.processId));
   const livenessProcesses = new Set(spec.liveness.map(health => health.processId));
-  if (readinessProcesses.size !== serviceIds.size || [...serviceIds].some(id => !readinessProcesses.has(id))) {
+  if (spec.readiness.length !== serviceIds.size || readinessProcesses.size !== serviceIds.size ||
+      [...serviceIds].some(id => !readinessProcesses.has(id))) {
     throw new Error(`Component ${entry.id} lacks readiness coverage for every service process.`);
   }
-  if (livenessProcesses.size !== serviceIds.size || [...serviceIds].some(id => !livenessProcesses.has(id))) {
+  if (spec.liveness.length !== serviceIds.size || livenessProcesses.size !== serviceIds.size ||
+      [...serviceIds].some(id => !livenessProcesses.has(id))) {
     throw new Error(`Component ${entry.id} lacks liveness coverage for every service process.`);
   }
 
@@ -527,6 +559,15 @@ function assertAcyclic(entries: DevelopmentComponentDefinition[]): void {
 }
 
 validateDevelopmentCatalog(DEVELOPMENT_CATALOG);
+deepFreeze(DEVELOPMENT_CATALOG);
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
 
 /** Returns a fresh display-safe catalog projection with no execution-private fields. */
 export function publicDevelopmentCatalog(
