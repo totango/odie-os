@@ -10,7 +10,7 @@ const workflow = readFileSync(
 describe("native canary workflow cleanup", () => {
   it("always runs its destructive exact-resource step with dependency-independent deletes", () => {
     const cleanup = workflow.slice(workflow.indexOf("  cleanup:"));
-    expect(cleanup).toContain("- name: Delete exact container application and Worker, then prove absence\n        if: ${{ always() }}");
+    expect(cleanup).toContain("- name: Delete exact tier container application and Worker, then prove absence\n        if: ${{ always() }}");
     expect(cleanup).toContain("--request DELETE");
     expect(cleanup).toContain("/containers/applications/$application_id");
     expect(cleanup).toContain("/workers/services/$worker?force=true");
@@ -19,9 +19,12 @@ describe("native canary workflow cleanup", () => {
     expect(cleanup).not.toContain("pnpm exec wrangler delete");
   });
 
-  it("uses stable run-only names and least privilege", () => {
-    expect(workflow).not.toContain("GITHUB_RUN_ATTEMPT");
-    expect(workflow).toContain('worker="odie-coding-canary-${GITHUB_RUN_ID}"');
+  it("uses stable run-and-tier names and least privilege", () => {
+    expect(workflow).toContain("attempt-${{ github.run_attempt }}");
+    expect(workflow).toContain('worker="odie-coding-canary-${GITHUB_RUN_ID}-${INSTANCE_TIER}"');
+    expect(workflow).toContain("instanceTier: [standard-1, standard-2, standard-3, standard-4]");
+    expect(workflow.match(/max-parallel: 1/g)).toHaveLength(2);
+    expect(workflow.match(/fail-fast: false/g)).toHaveLength(2);
     expect(workflow).toContain("  publish:\n    permissions:");
     expect(workflow).toContain("packages: write");
     const cleanup = workflow.slice(workflow.indexOf("  cleanup:"));
@@ -31,22 +34,31 @@ describe("native canary workflow cleanup", () => {
 
   it("captures the canary response without printing its body and validates closed schemas", () => {
     const invocation = workflow.slice(
-      workflow.indexOf("      - name: Invoke and validate one-shot native canary"),
+      workflow.indexOf("      - name: Invoke, validate and record tier canary"),
       workflow.indexOf("  cleanup:"),
     );
     expect(invocation).toContain("for attempt in 1 2 3 4 5 6; do");
     expect(invocation).toContain('if [[ "$http_status" != 401 && "$http_status" != 404 ]] || [ "$attempt" = 6 ]; then break; fi');
     expect(invocation).toContain("sleep 5");
     expect(invocation.match(/curl/g)).toHaveLength(1);
-    expect(invocation).toContain("--max-filesize 4096");
+    expect(invocation).toContain("--max-time 600 --max-filesize 4096");
     expect(invocation).toContain('--output "$result"');
     expect(invocation).toContain("--write-out '%{http_code}'");
     expect(invocation).not.toContain("--fail-with-body");
-    expect(invocation).toContain('keys == ["candidateImage", "checks", "ok", "sourceSha"]');
+    expect(invocation).toContain('keys == ["candidateImage", "checks", "instanceTier", "ok", "sourceSha"]');
     expect(invocation).toContain('keys == ["failureStage", "ok"]');
     expect(invocation).toContain('IN("node", "javascript", "typescript", "terminal", "code-server", "cleanup", "lifecycle")');
     expect(invocation).toContain("failed at stage: %s");
     expect(invocation).not.toContain('cat "$result"');
+  });
+
+  it("gates the exact all-tier receipt on both matrix aggregates", () => {
+    const receipt = workflow.slice(workflow.indexOf("  receipt:"));
+    expect(receipt).toContain("needs: [publish, canary, cleanup]");
+    expect(receipt).toContain("needs.canary.result == 'success'");
+    expect(receipt).toContain("needs.cleanup.result == 'success'");
+    expect(receipt).toContain("receipt.mjs aggregate");
+    expect(receipt).toContain("coding-session-all-tier-canary-receipt-${{ github.sha }}-attempt-${{ github.run_attempt }}");
   });
 
   it("requires the current BuildKit SLSA v1 provenance contract", () => {

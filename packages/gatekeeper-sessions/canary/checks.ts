@@ -21,7 +21,7 @@ export type CanaryFailureStage = CanaryStage | "lifecycle";
 
 /** Associates an internal canary error with its safe public stage without discarding its cause. */
 export class CanaryStageError extends Error {
-  constructor(readonly failureStage: CanaryStage, cause: unknown) {
+  constructor(readonly failureStage: CanaryFailureStage, cause: unknown) {
     super(`Canary ${failureStage} stage failed.`, { cause });
     this.name = "CanaryStageError";
   }
@@ -165,7 +165,7 @@ export async function runCanary(
     await editorResponse.body?.cancel();
     await stopProcess(editor);
   } catch (error) {
-    operationError = new CanaryStageError(operationStage, error);
+    operationError = new CanaryStageError(classifyCanaryOperationFailure(operationStage, error), error);
   } finally {
     for (const context of contexts.toReversed()) {
       try {
@@ -211,6 +211,14 @@ export async function runCanary(
   } catch (error) {
     throw new CanaryStageError("cleanup", error);
   }
+}
+
+/** Classifies exhausted container startup separately from an admitted Node runtime check. */
+export function classifyCanaryOperationFailure(
+  stage: Exclude<CanaryStage, "cleanup">,
+  error: unknown,
+): CanaryFailureStage {
+  return stage === "node" && error instanceof ContainerUnavailableError ? "lifecycle" : stage;
 }
 
 /** Starts the initial Node check, retrying only pre-admission container unavailability. */

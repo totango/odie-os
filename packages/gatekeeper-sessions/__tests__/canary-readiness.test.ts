@@ -5,7 +5,7 @@ import {
   RPCTransportError,
 } from "@cloudflare/sandbox/errors";
 import { describe, expect, it } from "vitest";
-import { startNodeCanaryProcess } from "../canary/checks.js";
+import { classifyCanaryOperationFailure, startNodeCanaryProcess } from "../canary/checks.js";
 
 const process = { id: "node" } as SandboxProcess;
 
@@ -41,6 +41,17 @@ function runWith(
     delays,
   };
 }
+
+describe("native canary failure classification", () => {
+  it("reports exhausted pre-admission Node startup as lifecycle", () => {
+    expect(classifyCanaryOperationFailure("node", unavailable())).toBe("lifecycle");
+  });
+
+  it("keeps admitted Node failures and later stages unchanged", () => {
+    expect(classifyCanaryOperationFailure("node", new Error("node output"))).toBe("node");
+    expect(classifyCanaryOperationFailure("javascript", unavailable())).toBe("javascript");
+  });
+});
 
 describe("native canary initial Node readiness", () => {
   it("returns the first successful exec without delay", async () => {

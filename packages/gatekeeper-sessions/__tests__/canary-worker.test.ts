@@ -23,6 +23,7 @@ vi.mock("../canary/checks.js", () => ({
     }
   },
   EXPECTED_NODE_VERSION: "v24.14.0",
+  INSTANCE_TIER: "standard-3",
   runCanary: vi.fn(),
   runClaimedCanaryLifecycle: async (
     target: typeof sandbox,
@@ -49,6 +50,7 @@ const env = {
   SOURCE_SHA: "b".repeat(40),
   CANDIDATE_IMAGE: `registry.cloudflare.com/${"c".repeat(32)}/odie-os-coding-session@sha256:${"d".repeat(64)}`,
   EXPECTED_NODE_VERSION: "v24.14.0",
+  INSTANCE_TIER: "standard-3",
 };
 
 function request() {
@@ -81,6 +83,14 @@ describe("native canary Worker endpoint", () => {
     ]);
     expect(responses.map(response => response.status).toSorted()).toEqual([200, 500]);
     expect(responses.every(response => response.headers.get("Cache-Control") === "no-store")).toBe(true);
+    const passed = responses.find(response => response.status === 200)!;
+    expect(await passed.json()).toEqual({
+      ok: true,
+      sourceSha: env.SOURCE_SHA,
+      candidateImage: env.CANDIDATE_IMAGE,
+      instanceTier: "standard-3",
+      checks: ["node", "javascript", "typescript", "terminal", "code-server", "cleanup"],
+    });
     expect(sandbox.destroyCalls).toBe(1);
     const repeat = await worker.fetch(request(), env as never);
     expect(repeat.status).toBe(500);
@@ -115,6 +125,15 @@ describe("native canary Worker endpoint", () => {
     ]);
     const response = await worker.fetch(request(), env as never);
     expect(await response.text()).toBe('{"ok":false,"failureStage":"code-server"}');
+  });
+
+  it("preserves lifecycle operation precedence when cleanup also fails", async () => {
+    lifecycleFailure = new AggregateError([
+      new CanaryStageError("lifecycle", new Error("sensitive startup detail")),
+      new CanaryStageError("cleanup", new Error("sensitive cleanup detail")),
+    ]);
+    const response = await worker.fetch(request(), env as never);
+    expect(await response.text()).toBe('{"ok":false,"failureStage":"lifecycle"}');
   });
 
   it("falls back to lifecycle for an out-of-contract stage", async () => {

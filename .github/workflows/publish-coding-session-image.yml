@@ -169,12 +169,17 @@ jobs:
           retention-days: 90
 
   canary:
-    name: Native Sandbox candidate canary
+    name: Native Sandbox candidate canary (${{ matrix.instanceTier }})
     permissions:
       actions: read
       contents: read
     needs: publish
     if: github.repository == 'totango/odie-os' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        instanceTier: [standard-1, standard-2, standard-3, standard-4]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
@@ -201,25 +206,27 @@ jobs:
           name: coding-session-image-candidate-${{ github.sha }}
           path: candidate-artifact
 
-      - name: Reverify current main and generate isolated config
+      - name: Reverify current main and generate isolated tier config
         env:
           GH_TOKEN: ${{ github.token }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          INSTANCE_TIER: ${{ matrix.instanceTier }}
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID"
           main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
           test "$main_sha" = "$GITHUB_SHA"
           conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&status=completed&per_page=20" --jq '[.workflow_runs[] | select(.head_branch == "main")][0].conclusion // ""')"
           test "$conclusion" = "success"
-          config="$RUNNER_TEMP/coding-session-native-canary.json"
+          config="$RUNNER_TEMP/coding-session-native-canary-${INSTANCE_TIER}.json"
           node packages/gatekeeper-sessions/canary/config.mjs generate \
             --ghcr-file candidate-artifact/image-digest.txt \
             --cloudflare-file candidate-artifact/cloudflare-image-digest.txt \
             --provenance-file candidate-artifact/source-provenance.json \
+            --tier "$INSTANCE_TIER" \
             --out "$config"
           printf 'CANARY_CONFIG=%s\n' "$config" >> "$GITHUB_ENV"
 
-      - name: Deploy isolated standard-3 canary
+      - name: Deploy isolated tier canary
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -235,19 +242,21 @@ jobs:
           printf '%s' "$token" | pnpm exec wrangler secret put CANARY_TOKEN --config "$CANARY_CONFIG"
           printf 'CANARY_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
 
-      - name: Invoke and validate one-shot native canary
+      - name: Invoke, validate and record tier canary
+        env:
+          INSTANCE_TIER: ${{ matrix.instanceTier }}
         run: |
-          worker="odie-coding-canary-${GITHUB_RUN_ID}"
+          worker="odie-coding-canary-${GITHUB_RUN_ID}-${INSTANCE_TIER}"
           result="$RUNNER_TEMP/canary-result.json"
           http_status=""
           for attempt in 1 2 3 4 5 6; do
-            if ! http_status="$(curl --silent --show-error --max-time 900 --max-filesize 4096 \
+            if ! http_status="$(curl --silent --show-error --max-time 600 --max-filesize 4096 \
               --output "$result" \
               --write-out '%{http_code}' \
               --request POST \
               --header "Authorization: Bearer $CANARY_TOKEN" \
               "https://${worker}.odie-os.workers.dev/run")"; then
-              printf 'Native standard-3 Sandbox canary request failed.\n' >&2
+              printf 'Native %s Sandbox canary request failed.\n' "$INSTANCE_TIER" >&2
               exit 1
             fi
             if [[ "$http_status" != 401 && "$http_status" != 404 ]] || [ "$attempt" = 6 ]; then break; fi
@@ -257,11 +266,18 @@ jobs:
           if [ "$http_status" = 200 ] && jq --exit-status \
             --arg sha "$GITHUB_SHA" \
             --arg candidate "$candidate" \
-            'keys == ["candidateImage", "checks", "ok", "sourceSha"] and
+            --arg tier "$INSTANCE_TIER" \
+            'keys == ["candidateImage", "checks", "instanceTier", "ok", "sourceSha"] and
              .ok == true and .sourceSha == $sha and .candidateImage == $candidate and
+             .instanceTier == $tier and
              .checks == ["node", "javascript", "typescript", "terminal", "code-server", "cleanup"]' \
             "$result" >/dev/null 2>&1; then
-            printf 'Native standard-3 Sandbox canary passed and destroyed its sandbox.\n' >> "$GITHUB_STEP_SUMMARY"
+            node packages/gatekeeper-sessions/canary/receipt.mjs create \
+              --provenance-file candidate-artifact/source-provenance.json \
+              --response-file "$result" \
+              --tier "$INSTANCE_TIER" \
+              --out canary-receipt.json
+            printf 'Native %s Sandbox canary passed and destroyed its sandbox.\n' "$INSTANCE_TIER" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$http_status" = 500 ]; then
@@ -270,19 +286,32 @@ jobs:
                   (.failureStage | IN("node", "javascript", "typescript", "terminal", "code-server", "cleanup", "lifecycle"))
                then .failureStage else error("invalid failure response") end' \
               "$result" 2>/dev/null)"; then
-              printf 'Native standard-3 Sandbox canary failed at stage: %s\n' "$failure_stage" >&2
+              printf 'Native %s Sandbox canary failed at stage: %s\n' "$INSTANCE_TIER" "$failure_stage" >&2
               exit 1
             fi
           fi
-          printf 'Native standard-3 Sandbox canary returned an invalid response (HTTP %s).\n' "$http_status" >&2
+          printf 'Native %s Sandbox canary returned an invalid response (HTTP %s).\n' "$INSTANCE_TIER" "$http_status" >&2
           exit 1
 
+      - name: Upload attempt-qualified tier receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coding-session-canary-receipt-${{ github.sha }}-${{ matrix.instanceTier }}-attempt-${{ github.run_attempt }}
+          path: canary-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
   cleanup:
-    name: Delete native canary control-plane resources
+    name: Delete native canary resources (${{ matrix.instanceTier }})
     permissions:
       contents: read
     needs: [publish, canary]
     if: ${{ always() && github.repository == 'totango/odie-os' && github.ref == 'refs/heads/main' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        instanceTier: [standard-1, standard-2, standard-3, standard-4]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: production
@@ -305,20 +334,21 @@ jobs:
           cache: true
           run-install: true
 
-      - name: Delete exact container application and Worker, then prove absence
+      - name: Delete exact tier container application and Worker, then prove absence
         if: ${{ always() }}
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          INSTANCE_TIER: ${{ matrix.instanceTier }}
         run: |
           test -n "$CLOUDFLARE_ACCOUNT_ID"
           test -n "$CLOUDFLARE_API_TOKEN"
-          worker="odie-coding-canary-${GITHUB_RUN_ID}"
+          worker="odie-coding-canary-${GITHUB_RUN_ID}-${INSTANCE_TIER}"
           application="${worker}-container"
-          [[ "$worker" =~ ^odie-coding-canary-[0-9]+$ ]] || exit 1
+          [[ "$worker" =~ ^odie-coding-canary-[1-9][0-9]*-standard-[1-4]$ ]] || exit 1
           failures=0
 
-          lookup_file="$RUNNER_TEMP/exact-canary-application.json"
+          lookup_file="$RUNNER_TEMP/exact-canary-application-${INSTANCE_TIER}.json"
           lookup_application() {
             node scripts/coding-session-canary-applications.mjs \
               --name "$application" --out "$lookup_file"
@@ -326,28 +356,21 @@ jobs:
           if lookup_application; then
             application_id="$(jq --exit-status --raw-output \
               'if keys == ["applicationId"] and (.applicationId == null or (.applicationId | type == "string")) then .applicationId // "" else error("malformed lookup") end' \
-              "$lookup_file")" || {
-                application_id=""
-                failures=1
-              }
+              "$lookup_file")" || { application_id=""; failures=1; }
           else
             application_id=""
             failures=1
           fi
           if [ -n "$application_id" ]; then
             application_delete_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-              --request DELETE \
-              --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/containers/applications/$application_id")" || \
-                application_delete_status=000
+              --request DELETE --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/containers/applications/$application_id")" || application_delete_status=000
             case "$application_delete_status" in 200|202|204|404) ;; *) failures=1 ;; esac
           fi
 
           worker_delete_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-            --request DELETE \
-            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/services/$worker?force=true")" || \
-              worker_delete_status=000
+            --request DELETE --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/services/$worker?force=true")" || worker_delete_status=000
           case "$worker_delete_status" in 200|202|204|404) ;; *) failures=1 ;; esac
 
           application_absent=false
@@ -358,10 +381,7 @@ jobs:
             if lookup_application; then
               poll_application_id="$(jq --exit-status --raw-output \
                 'if keys == ["applicationId"] and (.applicationId == null or (.applicationId | type == "string")) then .applicationId // "" else error("malformed lookup") end' \
-                "$lookup_file")" || {
-                  poll_application_id="lookup-failed"
-                  failures=1
-                }
+                "$lookup_file")" || { poll_application_id="lookup-failed"; failures=1; }
               if [ -z "$poll_application_id" ]; then application_absent=true; fi
             else
               failures=1
@@ -376,7 +396,51 @@ jobs:
           $application_absent || failures=1
           $worker_absent || failures=1
           if [ "$failures" -ne 0 ]; then
-            printf 'Exact native canary teardown or absence proof failed. Follow canary/README.md.\n' >&2
+            printf 'Exact %s native canary teardown or absence proof failed. Follow canary/README.md.\n' "$INSTANCE_TIER" >&2
             exit 1
           fi
-          printf 'Proved exact container application and Worker are absent.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Proved exact %s container application and Worker are absent.\n' "$INSTANCE_TIER" >> "$GITHUB_STEP_SUMMARY"
+
+  receipt:
+    name: Record all-tier native canary receipt
+    permissions:
+      actions: read
+      contents: read
+    needs: [publish, canary, cleanup]
+    if: ${{ always() && needs.publish.result == 'success' && needs.canary.result == 'success' && needs.cleanup.result == 'success' && github.repository == 'totango/odie-os' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download candidate provenance
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: coding-session-image-candidate-${{ github.sha }}
+          path: candidate-artifact
+
+      - name: Download every attempt-qualified tier receipt
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: coding-session-canary-receipt-${{ github.sha }}-*-attempt-*
+          path: tier-receipts
+
+      - name: Validate exact all-four agreement and aggregate
+        run: |
+          node packages/gatekeeper-sessions/canary/receipt.mjs aggregate \
+            --provenance-file candidate-artifact/source-provenance.json \
+            --receipts-dir tier-receipts \
+            --out all-tier-canary-receipt.json
+          printf 'All four native Sandbox tiers passed and every exact control-plane resource was removed.\n' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload attempt-qualified all-tier receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coding-session-all-tier-canary-receipt-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: all-tier-canary-receipt.json
+          if-no-files-found: error
+          retention-days: 90

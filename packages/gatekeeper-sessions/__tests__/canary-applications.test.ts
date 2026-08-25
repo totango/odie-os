@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { findExactApplication } from "../../../scripts/coding-session-canary-applications.mjs";
 
 const ACCOUNT = "a".repeat(32);
-const NAME = "odie-coding-canary-123-container";
+const NAME = "odie-coding-canary-123-standard-3-container";
 const ID = "12345678-1234-1234-1234-123456789abc";
 
 function page(result: Array<{ id: string; name: string }>, next?: unknown) {
@@ -33,6 +33,18 @@ describe("paginated canary application lookup", () => {
     const fetch = async () => ++calls === 1 ? page([{ id: ID, name: NAME }], "second") :
       page([{ id: "abcdefab-1234-1234-1234-123456789abc", name: NAME }]);
     await expect(findExactApplication({ accountId: ACCOUNT, apiToken: "secret", name: NAME, fetch })).rejects.toThrow("Duplicate");
+  });
+
+  it("rejects non-tiered and noncanonical application names", async () => {
+    for (const name of [
+      "odie-coding-canary-123-container",
+      "odie-coding-canary-0123-standard-1-container",
+      "odie-coding-canary-123-standard-5-container",
+      "odie-coding-canary-123-standard-1-container-extra",
+    ]) {
+      await expect(findExactApplication({ accountId: ACCOUNT, apiToken: "secret", name, fetch: async () => page([]) }))
+        .rejects.toThrow("Invalid canary application name");
+    }
   });
 
   it("rejects malformed pages and tokens", async () => {
