@@ -2,8 +2,8 @@ import { Link } from "@tanstack/react-router";
 import { useKumoToastManager } from "@cloudflare/kumo";
 import {
   Blueprint as BlueprintIcon,
-  BookOpen,
   MagnifyingGlass,
+  Plus,
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { BlueprintPublicInfo } from "@gadgets/workshop-shared/api";
@@ -14,6 +14,7 @@ import { BlueprintPreviewPlaceholder } from "./components/BlueprintPreviewImage"
 import ViewToggle from "./components/ViewToggle";
 import { useHub } from "./HubContext";
 import { isSupportCuratedAsset, rankForSelectedHub } from "./supportCuration";
+import LibraryHeader from "./components/library/LibraryHeader";
 
 type VendorMap = Map<string, VendorDescription>;
 
@@ -60,7 +61,7 @@ export default function BlueprintsPage() {
       .catch((err) => {
         console.error("Failed to load Explore data:", err);
         toastsRef.current.add({
-          title: "Failed to load featured blueprints",
+          title: "Failed to load featured templates",
           variant: "error",
         });
       })
@@ -84,22 +85,27 @@ export default function BlueprintsPage() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-3 sm:px-10">
-      <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-6 sm:pt-10">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Explore</h1>
-          <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-            Discover featured blueprints to use as starting points. Open one to create a workspace
-            from it, or save it to reuse later.
-          </p>
+      <LibraryHeader section="templates" templateView="featured" />
+      <div className="flex flex-col items-start justify-between gap-3 px-3 py-4 sm:flex-row sm:items-center">
+        <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
+          Featured templates
+        </span>
+        <div className="flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
+          <Link
+            to="/outputs"
+            search={{ createBlueprint: true }}
+            className="press inline-flex h-9 items-center gap-1.5 rounded-lg bg-kumo-contrast px-3 text-[13px] font-medium text-kumo-inverse hover:bg-kumo-strong"
+          >
+            <Plus size={14} weight="bold" />
+            Create template
+          </Link>
+          <ViewToggle view={view} onChange={setView} />
         </div>
-        <ViewToggle view={view} onChange={setView} />
-      </header>
+      </div>
 
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-3 px-3 pb-3">
-        <span className="text-[12px] font-medium uppercase tracking-[0.08em] text-kumo-inactive">
-          Featured
-        </span>
+        <span />
         <div className="relative min-w-0 flex-1 sm:w-64 sm:flex-none">
           <MagnifyingGlass
             size={16}
@@ -109,7 +115,7 @@ export default function BlueprintsPage() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search blueprints…"
+            placeholder="Search templates…"
             className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[13px]"
           />
         </div>
@@ -122,13 +128,13 @@ export default function BlueprintsPage() {
           <EmptySection
             title={
               search
-                ? "No blueprints match"
-                : "No featured blueprints yet"
+                ? "No templates match"
+                : "No featured templates yet"
             }
             message={
               search
                 ? "Try a different search term."
-                : "Featured blueprints will appear here when they’re published. You can still create blueprints from your own workspaces."
+                : "Featured templates will appear here when they’re published. You can still create templates from your own apps."
             }
           />
         ) : view === "grid" ? (
@@ -188,7 +194,7 @@ function FeaturedBlueprintCard({
       <Link
         to="/blueprint/$id"
         params={{ id: blueprint.id }}
-        aria-label={`Open featured blueprint ${blueprint.metadata.title}`}
+        aria-label={`Open featured template ${blueprint.metadata.title}`}
         className="absolute inset-0 z-10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-brand"
       />
 
@@ -210,7 +216,7 @@ function FeaturedBlueprintCard({
             {blueprint.metadata.description || "No description"}
           </p>
           {badges.length > 0 && (
-            <div className="relative z-20 mt-2 flex flex-wrap gap-1">
+            <div className="pointer-events-none relative z-20 mt-2 flex flex-wrap gap-1">
               {badges.map((badge) => (
                 <BindingBadge
                   key={badge.vendorKey ?? badge.type}
@@ -239,7 +245,7 @@ function FeaturedBlueprintRow({
     <Link
       to="/blueprint/$id"
       params={{ id: blueprint.id }}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
+      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint focus-visible:outline focus-visible:outline-2 focus-visible:outline-kumo-brand"
     >
       <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-kumo-fill text-kumo-subtle">
         <BlueprintIcon size={16} weight="regular" />
@@ -306,7 +312,7 @@ function EmptySection({ title, message }: { title: string; message: string }) {
   return (
     <div className="flex flex-col items-center gap-3 px-3 py-20 text-center">
       <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
-        <BookOpen size={18} />
+        <BlueprintIcon size={18} />
       </div>
       <div>
         <p className="text-sm font-medium text-kumo-default">{title}</p>

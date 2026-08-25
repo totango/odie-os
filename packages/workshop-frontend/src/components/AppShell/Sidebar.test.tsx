@@ -79,4 +79,16 @@ describe('Sidebar Code navigation', () => {
     expect(codeLink?.textContent).toContain('Code')
     expect(codeLink?.getAttribute('href')).toBe('/sessions')
   })
+
+  it.each(['/outputs', '/explore', '/blueprints', '/blueprint/example'])('keeps Library active at %s', async (pathname) => {
+    testState.pathname = pathname
+
+    const rendered = await renderSidebar()
+
+    const libraryLink = rendered.querySelector('a[href="/outputs"]')
+    expect(libraryLink?.textContent).toContain('Library')
+    expect(libraryLink?.className).toContain('bg-kumo-fill')
+    expect(libraryLink?.getAttribute('aria-current')).toBe('page')
+    expect(rendered.querySelector('a[href="/explore"]')).toBeNull()
+  })
 })

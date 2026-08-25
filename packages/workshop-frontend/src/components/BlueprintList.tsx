@@ -2,9 +2,9 @@ import { Link } from '@tanstack/react-router'
 import {
   Blueprint as BlueprintIcon,
   Clock,
-  Compass,
   DotsThreeVertical,
   MagnifyingGlass,
+  Plus,
   Star,
   Trash,
   UploadSimple,
@@ -30,7 +30,7 @@ type BlueprintItem = {
 // Chrome shared by the page's secondary actions. `w-full` + `justify-center` are what let a pair of
 // these sit in a 2-column grid and come out the same width whatever their labels say.
 const ACTION_BUTTON =
-  'press inline-flex h-9 w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-kumo-line bg-kumo-base px-3.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default transition-colors hover:bg-kumo-tint disabled:cursor-default disabled:opacity-50'
+  'press inline-flex h-9 w-full cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-kumo-line bg-kumo-base px-3.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-default transition-colors hover:bg-kumo-tint disabled:cursor-default disabled:opacity-50'
 
 function formatRelativeTime(date: Date): string {
   const diff = Date.now() - date.getTime()
@@ -61,41 +61,42 @@ function BlueprintRow({
   onRemoveFromLibrary: (b: BlueprintItem) => void
 }) {
   return (
-    <Link
-      to="/blueprint/$id"
-      params={{ id: item.id }}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
-    >
-      {/* Neutral monogram */}
-      <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-kumo-subtle">
-        <BlueprintIcon size={16} weight="regular" />
-      </div>
-
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          {item.pinned && <Star size={12} weight="fill" className="flex-shrink-0 text-kumo-brand" />}
-          <h3 className="truncate text-sm font-medium text-kumo-default">
-            {item.title || 'Untitled blueprint'}
-          </h3>
+    <div className="group flex items-center gap-1 rounded-lg px-1 py-1 transition-colors duration-150 ease-out hover:bg-kumo-tint">
+      <Link
+        to="/blueprint/$id"
+        params={{ id: item.id }}
+        aria-label={`Open template ${item.title || 'Untitled template'}`}
+        className="flex min-w-0 flex-1 items-center gap-3 rounded-lg px-2 py-1.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-kumo-brand"
+      >
+        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-kumo-subtle">
+          <BlueprintIcon size={16} weight="regular" />
         </div>
-        {item.description && (
-          <p className="mt-0.5 truncate text-xs text-kumo-subtle">{item.description}</p>
-        )}
-      </div>
 
-      <span className="hidden flex-shrink-0 items-center gap-1 text-xs text-kumo-inactive lg:flex">
-        <Clock size={10} />
-        {formatRelativeTime(new Date(item.recency))}
-      </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            {item.pinned && <Star size={12} weight="fill" className="flex-shrink-0 text-kumo-brand" />}
+            <h3 className="truncate text-sm font-medium text-kumo-default">
+              {item.title || 'Untitled template'}
+            </h3>
+          </div>
+          {item.description && (
+            <p className="mt-0.5 truncate text-xs text-kumo-subtle">{item.description}</p>
+          )}
+        </div>
 
-      {/* Inside the row's <Link>: stopPropagation blocks the Link's SPA handler, so preventDefault
-          is needed to stop the native <a> from navigating. */}
-      <div onClick={(e) => { e.stopPropagation(); e.preventDefault() }}>
+        <span className="hidden flex-shrink-0 items-center gap-1 text-xs text-kumo-inactive lg:flex">
+          <Clock size={10} />
+          {formatRelativeTime(new Date(item.recency))}
+        </span>
+      </Link>
+
+      <div>
         <DropdownMenu>
           <DropdownMenu.Trigger
             render={
               <button
                 type="button"
+                aria-label={`Actions for ${item.title || 'Untitled template'}`}
                 className="rounded-md p-1.5 text-kumo-subtle transition-colors hover:bg-kumo-fill hover:text-kumo-default focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
               >
                 <DotsThreeVertical size={16} />
@@ -116,7 +117,7 @@ function BlueprintRow({
           </DropdownMenu.Content>
         </DropdownMenu>
       </div>
-    </Link>
+    </div>
   )
 }
 
@@ -146,7 +147,7 @@ export default function BlueprintList() {
         const ensure = (id: string): BlueprintItem => {
           let it = map.get(id)
           if (!it) {
-            it = { id, title: 'Untitled blueprint', description: '', recency: 0, pinned: false, inLibrary: false, isOwn: false }
+            it = { id, title: 'Untitled template', description: '', recency: 0, pinned: false, inLibrary: false, isOwn: false }
             map.set(id, it)
           }
           return it
@@ -193,11 +194,11 @@ export default function BlueprintList() {
     setUploading(true)
     try {
       await authenticatedApi.importBlueprint(file.stream() as ReadableStream<Uint8Array>)
-      toasts.add({ title: 'Blueprint uploaded', variant: 'success' })
+      toasts.add({ title: 'Template uploaded', variant: 'success' })
       load()
     } catch (err) {
       console.error('Failed to upload blueprint:', err)
-      toasts.add({ title: 'Failed to upload blueprint', variant: 'error' })
+      toasts.add({ title: 'Failed to upload template', variant: 'error' })
     } finally {
       setUploading(false)
     }
@@ -235,7 +236,7 @@ export default function BlueprintList() {
       toasts.add({ title: 'Removed from library', variant: 'success' })
     } catch (err) {
       console.error('Failed to remove blueprint from library:', err)
-      toasts.add({ title: 'Failed to remove blueprint', variant: 'error' })
+      toasts.add({ title: 'Failed to remove template', variant: 'error' })
     }
   }
 
@@ -266,16 +267,16 @@ export default function BlueprintList() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search blueprints…"
-              className="h-9 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[13px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+              placeholder="Search templates…"
+              className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[16px] tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[13px]"
             />
           </div>
           {/* Grid, not flex: 1fr columns give the two buttons a matching width, where flex would
               size each to its own label. */}
-          <div className="grid w-full grid-cols-2 gap-2 sm:w-auto sm:shrink-0">
-            <Link to="/explore" className={ACTION_BUTTON}>
-              <Compass size={14} />
-              Explore
+          <div className="grid w-full grid-cols-1 gap-2 min-[400px]:grid-cols-2 sm:w-auto sm:shrink-0">
+            <Link to="/outputs" search={{ createBlueprint: true }} className={ACTION_BUTTON}>
+              <Plus size={14} weight="bold" />
+              Create template
             </Link>
             <button
               type="button"
@@ -302,27 +303,27 @@ export default function BlueprintList() {
           </div>
         ) : loadError ? (
           <div className="py-12 text-center text-sm">
-            <p className="text-kumo-danger">Something went wrong loading your blueprints.</p>
+            <p className="text-kumo-danger">Something went wrong loading your templates.</p>
             <button type="button" onClick={load} className="mt-1 text-kumo-brand underline">Try again</button>
           </div>
         ) : filtered.length === 0 ? (
           search ? (
-            <div className="py-12 text-center text-sm text-kumo-inactive">No blueprints found</div>
+            <div className="py-12 text-center text-sm text-kumo-inactive">No templates found</div>
           ) : (
             <div className="flex flex-col items-center gap-3 px-3 py-16 text-center">
               <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
                 <BlueprintIcon size={18} />
               </div>
               <div>
-                <p className="text-sm font-medium text-kumo-default">No blueprints yet</p>
+                <p className="text-sm font-medium text-kumo-default">No templates yet</p>
                 <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
-                  Publish a workspace as a blueprint, or add one from Explore.
+                  Publish an app as a template, or save one from Featured.
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <Link to="/explore" className={ACTION_BUTTON}>
-                  <Compass size={14} />
-                  Explore blueprints
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <Link to="/outputs" search={{ createBlueprint: true }} className={ACTION_BUTTON}>
+                  <Plus size={14} weight="bold" />
+                  Create template
                 </Link>
                 <button
                   type="button"

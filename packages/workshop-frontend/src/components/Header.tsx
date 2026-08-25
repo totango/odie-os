@@ -77,7 +77,7 @@ export default function Header() {
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
             >
-              Explore
+              Templates
             </Link>
             {gatekeeperApps.map((app) => (
               <Link
@@ -142,7 +142,7 @@ export default function Header() {
               className={navLinkClass}
               activeProps={{ className: navLinkActiveClass }}
             >
-              Explore
+              Templates
             </Link>
             {gatekeeperApps.map((app) => (
               <Link

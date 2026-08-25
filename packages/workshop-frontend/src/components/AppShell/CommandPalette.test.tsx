@@ -52,6 +52,8 @@ describe('CommandPalette', () => {
 
     await act(async () => root!.render(<RouterProvider router={router} />))
     expect(container.textContent).toContain('Work Items')
+    expect(container.textContent).toContain('Library')
+    expect(container.textContent).not.toContain('Blueprints')
 
     const button = [...container.querySelectorAll<HTMLButtonElement>('button')]
       .find((node) => node.textContent?.includes('Work Items'))

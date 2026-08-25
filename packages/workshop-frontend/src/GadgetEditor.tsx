@@ -407,7 +407,7 @@ function NoGadgetPlaceholder({ height }: { height: string }) {
     <div className="flex items-center justify-center px-6 text-center" style={{ height }}>
       <div className="max-w-[360px]">
         <p className="m-0 text-[15px] leading-[22px] font-semibold tracking-[-0.3px] text-kumo-default">
-          No gadgets yet
+          No apps yet
         </p>
         <p className="mt-1.5 mb-0 text-[13px] leading-[19px] tracking-[-0.25px] text-kumo-subtle">
           Ask the agent in chat to build something, and it will appear here.
@@ -425,8 +425,8 @@ export default function GadgetEditor() {
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
 
-  const { chat: chatParam, w: workpieceParam } = useSearch({ strict: false }) as
-    { chat?: number; w?: number }
+  const { chat: chatParam, w: workpieceParam, blueprint: blueprintParam } = useSearch({ strict: false }) as
+    { chat?: number; w?: number; blueprint?: boolean }
   const urlChatId = chatParam !== undefined ? chatParam : null
   const urlWorkpieceId = workpieceParam !== undefined ? workpieceParam : null
 
@@ -501,6 +501,7 @@ export default function GadgetEditor() {
   const [activityClosing, setActivityClosing] = useState(false)
   const [shareModalOpen, setShareModalOpen] = useState(false)
   const [blueprintModalOpen, setBlueprintModalOpen] = useState(false)
+  const openedBlueprintParamRef = useRef(false)
   const [previewMode, _setPreviewMode] = useState(false)
   const [workpieceRailExpanded, setWorkpieceRailExpanded] = useState(getInitialAppRailExpanded)
   const workpieceRailWidth = workpieceRailExpanded
@@ -718,6 +719,26 @@ export default function GadgetEditor() {
   // selection, in which case gadget-dependent views render their empty states for a frame.
   const selectedGadgetStub =
     gadget !== null && gadget.id === selectedGadgetId ? gadget.stub : null
+
+  // A blueprint creation CTA can deep-link to a gadget. Consume the flag once the selected
+  // capability is ready, then remove it so closing the modal does not reopen it.
+  useEffect(() => {
+    if (!blueprintParam || !selectedGadgetStub || openedBlueprintParamRef.current || !id) return
+    openedBlueprintParamRef.current = true
+    setBlueprintModalOpen(true)
+    navigate({
+      to: '/workspace/$id',
+      params: { id },
+      search: (previous: Record<string, unknown>) => {
+        const { blueprint: _blueprint, ...rest } = previous
+        return rest
+      },
+      replace: true,
+    })
+  }, [blueprintParam, id, navigate, selectedGadgetStub])
+  useEffect(() => {
+    if (!blueprintParam) openedBlueprintParamRef.current = false
+  }, [blueprintParam])
   // Only the selected chat's streaming drives this editor. Everything downstream then narrows it
   // further to the selected gadget.
   const streamingActiveFile = streamingActiveFileState?.chatId === effectiveSelectedChatId
@@ -1453,8 +1474,8 @@ export default function GadgetEditor() {
           <WorkshopIconButton
             onClick={() => setBlueprintModalOpen(true)}
             disabled={!selectedGadgetStub}
-            title="Blueprints"
-            aria-label="Blueprints"
+            title="Create or manage templates"
+            aria-label="Create or manage templates"
           >
             <Blueprint size={16} />
           </WorkshopIconButton>
@@ -1572,7 +1593,7 @@ export default function GadgetEditor() {
               onClick={() => setBlueprintModalOpen(true)}
               className={MENU_ITEM}
             >
-              Blueprints
+              Create or manage templates
             </DropdownMenu.Item>
             <DropdownMenu.Item
               disabled={!mobilePreviewActive}

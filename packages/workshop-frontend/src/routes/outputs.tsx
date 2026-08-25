@@ -1,9 +1,10 @@
-import { createFileRoute, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import {
   MagnifyingGlass,
   DotsThreeVertical,
+  AppWindow,
   Stack,
   ArrowSquareOut,
   Cube,
@@ -15,6 +16,7 @@ import {
   PencilSimple,
   Trash,
   X,
+  Plus,
 } from '@phosphor-icons/react'
 import { OutputSummary } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
@@ -29,6 +31,7 @@ import { isSupportOrigin, rankForSelectedHub } from '../supportCuration'
 import NewFormatRow from '../components/format/NewFormatRow'
 import DeleteConfirmationDialog from '../components/DeleteConfirmationDialog'
 import { WorkshopButton, WorkshopIconButton } from '../components/WorkshopControls'
+import LibraryHeader from '../components/library/LibraryHeader'
 
 // The Outputs page: everything the user's workspaces have produced, in one place, so they don't
 // have to remember which workspace they made a thing in. Backed by an index in the user's own
@@ -36,6 +39,9 @@ import { WorkshopButton, WorkshopIconButton } from '../components/WorkshopContro
 
 export const Route = createFileRoute('/outputs')({
   component: OutputsPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    createBlueprint: search.createBlueprint === true || search.createBlueprint === 'true' || undefined,
+  }),
 })
 
 function formatRelativeTime(date: Date): string {
@@ -64,11 +70,13 @@ function canModify(output: OutputSummary): boolean {
 // ─── rows / cards ────────────────────────────────────────────────────────────
 
 function OutputMenu({
+  label,
   onOpen,
   onOpenWorkspace,
   onRename,
   onRemove,
 }: {
+  label: string
   onOpen: () => void
   onOpenWorkspace: () => void
   // Undefined for a workspace shared with "use" access, which may open an output but not change
@@ -89,7 +97,7 @@ function OutputMenu({
           render={
             <button
               type="button"
-              aria-label="Output actions"
+              aria-label={`Actions for ${label}`}
               className="cursor-pointer rounded-md p-1.5 text-kumo-subtle transition-colors hover:bg-kumo-fill hover:text-kumo-default focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
             >
               <DotsThreeVertical size={16} />
@@ -151,27 +159,25 @@ function OutputCard({
   output, onOpen, onOpenWorkspace, onRename, onRemove,
 }: { output: OutputSummary } & OutputActions) {
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
-      className="themed-card-hover-shadow press group flex cursor-pointer flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill"
-    >
-      <div className="relative aspect-[4/3] w-full border-b border-kumo-line">
-        <FormatThumbnail output={output.output} />
-      </div>
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
-        <FormatTile output={output.output} size="sm" />
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
-            {output.title || 'Untitled'}
-          </p>
-          <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-            {subtitle(output)}
-          </p>
+    <div className="themed-card-hover-shadow group relative flex flex-col overflow-hidden rounded-xl border border-kumo-line bg-kumo-base text-left transition-[border-color,box-shadow] duration-150 ease-out hover:border-kumo-fill">
+      <button type="button" onClick={onOpen} className="press cursor-pointer text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-inset focus-visible:outline-kumo-brand">
+        <div className="relative aspect-[4/3] w-full border-b border-kumo-line">
+          <FormatThumbnail output={output.output} />
         </div>
-        <OutputMenu onOpen={onOpen} onOpenWorkspace={onOpenWorkspace}
+        <div className="flex items-center gap-2.5 px-3 py-2.5 pr-11">
+          <FormatTile output={output.output} size="sm" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[13px] font-medium leading-[18px] tracking-[-0.25px] text-kumo-default">
+              {output.title || 'Untitled'}
+            </p>
+            <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+              {subtitle(output)}
+            </p>
+          </div>
+        </div>
+      </button>
+      <div className="absolute bottom-2.5 right-2">
+        <OutputMenu label={output.title || 'Untitled app'} onOpen={onOpen} onOpenWorkspace={onOpenWorkspace}
                     onRename={onRename} onRemove={onRemove} />
       </div>
     </div>
@@ -182,31 +188,26 @@ function OutputRow({
   output, onOpen, onOpenWorkspace, onRename, onRemove,
 }: { output: OutputSummary } & OutputActions) {
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpen() } }}
-      className="group flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2.5 transition-colors duration-150 ease-out hover:bg-kumo-tint"
-    >
-      <FormatTile output={output.output} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">
-          {output.title || 'Untitled'}
-        </p>
-        <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
-          {formatOf(output.output).noun} · {output.workspaceTitle || 'Untitled workspace'}
-        </p>
-      </div>
-      {/* Fixed-width meta columns so rows line up like a table. */}
-      <div className="hidden shrink-0 items-center gap-6 text-xs text-kumo-inactive lg:flex">
-        <OutputProvenance owner={output.owner} />
-        <span className="flex w-40 items-center justify-end gap-1 whitespace-nowrap">
-          <Clock size={10} />
-          Workspace active {formatRelativeTime(output.lastActive)}
-        </span>
-      </div>
-      <OutputMenu onOpen={onOpen} onOpenWorkspace={onOpenWorkspace}
+    <div className="group flex items-center gap-1 rounded-lg px-1 py-1 transition-colors duration-150 ease-out hover:bg-kumo-tint">
+      <button type="button" onClick={onOpen} className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-kumo-brand">
+        <FormatTile output={output.output} />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium tracking-[-0.25px] text-kumo-default">
+            {output.title || 'Untitled'}
+          </p>
+          <p className="mt-0.5 truncate text-[12px] leading-4 tracking-[-0.2px] text-kumo-subtle">
+            {formatOf(output.output).noun} · {output.workspaceTitle || 'Untitled workspace'}
+          </p>
+        </div>
+        <div className="hidden shrink-0 items-center gap-6 text-xs text-kumo-inactive lg:flex">
+          <OutputProvenance owner={output.owner} />
+          <span className="flex w-40 items-center justify-end gap-1 whitespace-nowrap">
+            <Clock size={10} />
+            Workspace active {formatRelativeTime(output.lastActive)}
+          </span>
+        </div>
+      </button>
+      <OutputMenu label={output.title || 'Untitled app'} onOpen={onOpen} onOpenWorkspace={onOpenWorkspace}
                   onRename={onRename} onRemove={onRemove} />
     </div>
   )
@@ -228,6 +229,7 @@ function FilterChip({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className={`inline-flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium tracking-[-0.25px] transition-colors ${
         active
@@ -347,12 +349,12 @@ function RenameOutputDialog({
           <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
             <div className="min-w-0">
               <Dialog.Title className="text-[15px] font-medium leading-5 tracking-[-0.3px] text-kumo-default">
-                Rename output
+                Rename app
               </Dialog.Title>
               {/* Renames the output itself, unlike the sidebar's workspace rename, which relabels
                   only your own copy. */}
               <Dialog.Description className="mt-1 text-[12px] leading-4 text-kumo-subtle">
-                Renames the output for everyone with access to “{output?.workspaceTitle}”.
+                Renames the app for everyone with access to “{output?.workspaceTitle}”.
               </Dialog.Description>
             </div>
             <WorkshopIconButton type="button" className="!h-7 !w-7" disabled={busy} aria-label="Close" onClick={onClose}>
@@ -384,13 +386,72 @@ function RenameOutputDialog({
   )
 }
 
+function CreateGadgetDialog({
+  open,
+  value,
+  busy,
+  onValueChange,
+  onClose,
+  onCreate,
+}: {
+  open: boolean
+  value: string
+  busy: boolean
+  onValueChange: (value: string) => void
+  onClose: () => void
+  onCreate: () => void
+}) {
+  return (
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => { if (!nextOpen && !busy) onClose() }}>
+      <Dialog className="responsive-dialog !z-[1000] !w-[min(420px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0 !top-[20%] !-translate-y-0" size="sm">
+        <form onSubmit={(event) => { event.preventDefault(); onCreate() }}>
+          <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
+            <div>
+              <Dialog.Title className="text-[15px] font-medium leading-5 tracking-[-0.3px] text-kumo-default">
+                Create app
+              </Dialog.Title>
+              <Dialog.Description className="mt-1 text-[12px] leading-4 text-kumo-subtle">
+                Start with a blank app, then build it in chat or edit its files directly.
+              </Dialog.Description>
+            </div>
+            <WorkshopIconButton type="button" className="!h-7 !w-7" disabled={busy} aria-label="Close" onClick={onClose}>
+              <X size={16} />
+            </WorkshopIconButton>
+          </div>
+          <div className="px-5 py-4">
+            <label className="block text-[12px] font-medium text-kumo-subtle" htmlFor="new-gadget-title">
+              Name
+            </label>
+            <input
+              id="new-gadget-title"
+              autoFocus
+              value={value}
+              disabled={busy}
+              onChange={(event) => onValueChange(event.target.value)}
+              placeholder="Name your app"
+              className="mt-1.5 h-9 w-full rounded-lg border border-kumo-line bg-kumo-base px-3 text-[13px] text-kumo-default focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15"
+            />
+          </div>
+          <div className="flex items-center justify-end gap-2 border-t border-kumo-line px-5 py-3">
+            <WorkshopButton type="button" disabled={busy} onClick={onClose}>Cancel</WorkshopButton>
+            <WorkshopButton tone="primary" type="submit" disabled={busy || !value.trim()}>
+              {busy ? 'Creating…' : 'Create app'}
+            </WorkshopButton>
+          </div>
+        </form>
+      </Dialog>
+    </Dialog.Root>
+  )
+}
+
 // ─── page ─────────────────────────────────────────────────────────────────────
 
 // Which format to show; 'all' plus one entry per format id actually present.
 type TypeFilter = 'all' | string
 
 function OutputsPage() {
-  useDocumentTitle('Outputs')
+  const { createBlueprint: choosingBlueprintSource = false } = Route.useSearch()
+  useDocumentTitle(choosingBlueprintSource ? 'Create template' : 'Apps')
   const { authenticatedApi } = useAuthenticatedApi()
   const { hub } = useHub()
   const navigate = useNavigate()
@@ -417,6 +478,9 @@ function OutputsPage() {
   const [renameValue, setRenameValue] = useState('')
   const [removeOutput, setRemoveOutput] = useState<OutputSummary | null>(null)
   const [mutationBusy, setMutationBusy] = useState(false)
+  const [createDialogOpen, setCreateDialogOpen] = useState(false)
+  const [newGadgetTitle, setNewGadgetTitle] = useState('')
+  const [creatingGadget, setCreatingGadget] = useState(false)
 
   useEffect(() => {
     localStorage.setItem('outputs-view', view)
@@ -468,7 +532,9 @@ function OutputsPage() {
     navigate({
       to: '/workspace/$id',
       params: { id: output.workspaceId },
-      search: { w: output.workpieceId },
+      search: choosingBlueprintSource
+        ? { w: output.workpieceId, blueprint: true }
+        : { w: output.workpieceId },
     })
   }
 
@@ -497,7 +563,7 @@ function OutputsPage() {
       setRenameOutput(null)
     } catch (err) {
       console.error('Failed to rename output:', err)
-      toasts.add({ title: "Couldn't rename this output", variant: 'error' })
+      toasts.add({ title: "Couldn't rename this app", variant: 'error' })
     } finally {
       gadget?.[Symbol.dispose]()
       overseer?.[Symbol.dispose]()
@@ -519,7 +585,7 @@ function OutputsPage() {
       setRemoveOutput(null)
     } catch (err) {
       console.error('Failed to remove output:', err)
-      toasts.add({ title: "Couldn't remove this output", variant: 'error' })
+      toasts.add({ title: "Couldn't remove this app", variant: 'error' })
     } finally {
       gadget?.[Symbol.dispose]()
       overseer?.[Symbol.dispose]()
@@ -527,23 +593,50 @@ function OutputsPage() {
     }
   }
 
-  // Keep configured categories visible even before the user has made one. Apps is the universal
+  const createGadget = async () => {
+    const title = newGadgetTitle.trim()
+    if (!title || creatingGadget) return
+    setCreatingGadget(true)
+    const overseer = authenticatedApi.newGadget(hub)
+    let gadget
+    try {
+      const [metadata] = await Promise.all([
+        overseer.getMetadata(),
+        overseer.setTitle(title),
+      ])
+      gadget = await overseer.createGadget(title)
+      const workpieceId = await gadget.getId()
+      setCreateDialogOpen(false)
+      setNewGadgetTitle('')
+      navigate({ to: '/workspace/$id', params: { id: metadata.id }, search: { w: workpieceId } })
+    } catch (err) {
+      console.error('Failed to create gadget:', err)
+      toasts.add({ title: "Couldn't create this app", variant: 'error' })
+    } finally {
+      gadget?.[Symbol.dispose]()
+      overseer[Symbol.dispose]()
+      setCreatingGadget(false)
+    }
+  }
+
+  // Keep configured categories visible even before the user has made one. Gadgets is the universal
   // fallback; configured formats follow deployment order, then legacy/disabled types found in the
   // actual list are appended so existing outputs never lose their filter.
+  const browsableOutputs = choosingBlueprintSource ? outputs.filter(canModify) : outputs
   const presentTypes = useMemo(() => {
     let generic = formatOf()
     let byId = new Map<string, string>([[generic.id, generic.plural]])
     for (let offer of formats) {
       if (!byId.has(offer.output.id)) byId.set(offer.output.id, offer.output.plural)
     }
-    for (let output of outputs) {
+    for (let output of browsableOutputs) {
       let format = formatOf(output.output)
       if (!byId.has(format.id)) byId.set(format.id, format.plural)
     }
     return [...byId]
-  }, [formats, outputs])
+  }, [formats, browsableOutputs])
   const showTypeFilters = presentTypes.length > 1
-  const showToolbar = outputs.length > 0 || showTypeFilters
+  const showToolbar = browsableOutputs.length > 0 || showTypeFilters
   // Keep ownership scopes available alongside categories even when one or both counts are zero.
   const showOwnerFilters = showToolbar
 
@@ -569,23 +662,35 @@ function OutputsPage() {
   // A control's own counts ignore that control but honour the others, so the numbers describe what
   // clicking would actually give you. Without this the format chips still total every output while
   // a scope is selected, and they don't add up to the list underneath.
-  const inTypeScope = outputs.filter((o) => matchesOwner(o) && matchesSearch(o))
-  const inOwnerScope = outputs.filter((o) => matchesType(o) && matchesSearch(o))
+  const inTypeScope = browsableOutputs.filter((o) => matchesOwner(o) && matchesSearch(o))
+  const inOwnerScope = browsableOutputs.filter((o) => matchesType(o) && matchesSearch(o))
   const filtered = inTypeScope.filter(matchesType)
   const isFiltered = q !== '' || (showTypeFilters && typeFilter !== 'all')
       || (showOwnerFilters && ownerFilter !== 'all')
 
   return (
     <div className="mx-auto flex h-full w-full max-w-5xl flex-col px-3 sm:px-10">
-      <header className="flex items-end justify-between gap-4 px-3 pb-4 pt-6 sm:pt-10">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Outputs</h1>
-          <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-            Everything your workspaces have produced, in one place.
-          </p>
+      <LibraryHeader section="apps" />
+      <div className="flex flex-col items-start justify-between gap-3 px-3 py-4 sm:flex-row sm:items-center">
+        {choosingBlueprintSource && (
+          <div className="min-w-0">
+            <h2 className="text-[15px] font-medium text-kumo-default">Create template</h2>
+            <p className="mt-0.5 text-[12px] leading-4 text-kumo-subtle">Choose an app to publish as a reusable starting point.</p>
+          </div>
+        )}
+        <div className="flex w-full shrink-0 items-center justify-end gap-2 sm:w-auto">
+          {choosingBlueprintSource ? (
+            <Link to="/explore" className="press inline-flex h-9 items-center rounded-lg border border-kumo-line bg-kumo-base px-3 text-[13px] font-medium text-kumo-default hover:bg-kumo-tint">
+              Cancel
+            </Link>
+          ) : (
+            <WorkshopButton tone="primary" onClick={() => setCreateDialogOpen(true)}>
+              <Plus size={14} weight="bold" /> New app
+            </WorkshopButton>
+          )}
+          <ViewToggle view={view} onChange={setView} />
         </div>
-        <ViewToggle view={view} onChange={setView} />
-      </header>
+      </div>
 
       {/* Toolbar: format chips on the left (the browsing axis), scope + search on the right (the
           refining controls). Configured categories stay visible with zero counts. */}
@@ -626,7 +731,7 @@ function OutputsPage() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search outputs…"
+              placeholder="Search apps…"
               className="h-10 w-full rounded-lg border border-kumo-line bg-kumo-base pl-9 pr-4 text-[16px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] duration-150 ease-out focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:h-9 sm:text-[13px]"
             />
           </div>
@@ -642,7 +747,7 @@ function OutputsPage() {
           </div>
         ) : loadError ? (
           <div className="py-12 text-center text-sm">
-            <p className="text-kumo-danger">Something went wrong loading your outputs.</p>
+            <p className="text-kumo-danger">Something went wrong loading your apps.</p>
             <button onClick={() => setReloadToken((n) => n + 1)} className="mt-1 text-kumo-brand underline">
               Try again
             </button>
@@ -650,20 +755,28 @@ function OutputsPage() {
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center gap-3 px-3 py-20 text-center">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-fill text-kumo-subtle">
-              <Stack size={18} />
+              <AppWindow size={18} />
             </div>
             <div>
               <p className="text-sm font-medium text-kumo-default">
-                {isFiltered ? 'No outputs match' : 'No outputs yet'}
+                {isFiltered ? 'No apps match' : 'No apps yet'}
               </p>
               <p className="mt-1 text-[13px] leading-[18px] text-kumo-subtle">
                 {isFiltered
                   ? 'Try a different filter or search term.'
-                  : 'Anything your workspaces build will show up here.'}
+                  : choosingBlueprintSource
+                    ? 'Create an app first, then return here to publish it as a template.'
+                    : 'Anything your workspaces build will show up here.'}
               </p>
             </div>
-            {/* Offer the deployment's formats here rather than sending them to the home page. */}
-            {!isFiltered && <NewFormatRow label="Start with" />}
+            {!isFiltered && (
+              <>
+                <WorkshopButton tone="primary" onClick={() => setCreateDialogOpen(true)}>
+                  <Plus size={14} weight="bold" /> New app
+                </WorkshopButton>
+                {!choosingBlueprintSource && <NewFormatRow label="Or start with a format" />}
+              </>
+            )}
           </div>
         ) : view === 'grid' ? (
           <div className="grid grid-cols-1 gap-4 px-3 min-[400px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
@@ -696,14 +809,22 @@ function OutputsPage() {
         onClose={() => setRenameOutput(null)}
         onSave={() => { void saveRename() }}
       />
+      <CreateGadgetDialog
+        open={createDialogOpen}
+        value={newGadgetTitle}
+        busy={creatingGadget}
+        onValueChange={setNewGadgetTitle}
+        onClose={() => { setCreateDialogOpen(false); setNewGadgetTitle('') }}
+        onCreate={() => { void createGadget() }}
+      />
       <DeleteConfirmationDialog
         open={removeOutput !== null}
-        title={`Remove “${removeOutput?.title || 'Untitled'}”?`}
+        title={`Remove app “${removeOutput?.title || 'Untitled'}”?`}
         description={
           <>
-            This permanently removes the output from “{removeOutput?.workspaceTitle}”
+            This permanently removes the app from “{removeOutput?.workspaceTitle}”
             {removeOutput?.owner ? ', for everyone with access to that workspace' : ''}. Other
-            outputs in that workspace stay available. This can’t be undone.
+            apps in that workspace stay available. This can’t be undone.
           </>
         }
         confirmLabel="Remove"

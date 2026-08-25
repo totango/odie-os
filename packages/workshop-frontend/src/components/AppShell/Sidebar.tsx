@@ -1,13 +1,12 @@
 import { Link, useRouterState } from '@tanstack/react-router'
 import {
   BookOpen,
-  Compass,
+  Books,
   Hexagon,
   House,
   MagnifyingGlass,
   SidebarSimple,
   SquaresFour,
-  Stack,
   TerminalWindow,
   WarningCircle,
 } from '@phosphor-icons/react'
@@ -193,8 +192,10 @@ export default function Sidebar({
             />
             <SidebarItem
               to="/outputs"
-              label="Created"
-              icon={<Stack size={14} weight="regular" />}
+              label="Library"
+              icon={<Books size={14} weight="regular" />}
+              activePaths={['/outputs', '/explore', '/blueprints']}
+              activePrefixes={['/blueprint']}
               collapsed={collapsed}
             />
             {/* Gatekeeper management apps (e.g. the Context Library), listed dynamically. */}
@@ -236,12 +237,6 @@ export default function Sidebar({
               />
               )
             })}
-            <SidebarItem
-              to="/explore"
-              label="Library"
-              icon={<Compass size={14} weight="regular" />}
-              collapsed={collapsed}
-            />
           </nav>
 
           {/* Workspace tools: search. Pinned so it's always reachable. */}
