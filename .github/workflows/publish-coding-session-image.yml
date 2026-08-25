@@ -1,4 +1,4 @@
-name: Publish coding session image
+name: Publish coding session candidate image
 
 on:
   workflow_dispatch:
@@ -14,6 +14,10 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/totango/odie-os-coding-session
+  NODE_VERSION: "24.14.0"
+  PNPM_PACKAGE_MANAGER: "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c"
+  REPOSITORY_PNPM_PACKAGE_MANAGER: "pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72"
+  OPENCODE_VERSION: "1.18.15"
   PI_VERSION: "0.84.2"
   PI_MCP_ADAPTER_VERSION: "2.26.0"
   PRIME_AGENT_VERSION: "0.8.0"
@@ -52,28 +56,27 @@ jobs:
           TAG: ${{ github.sha }}
         run: |
           if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
-            digest="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format "{{json .Manifest}}" \
-              | jq --raw-output ".digest")"
-            test -n "$digest"
-            test "$digest" != "null"
-            jq --null-input --arg digest "$digest" '{"containerimage.digest": $digest}' > image-metadata.json
-            printf "Reusing existing private GHCR source \`%s@%s\`.\n" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
-          else
-            docker buildx build \
-              --platform linux/amd64 \
-              --build-arg "PI_VERSION=$PI_VERSION" \
-              --build-arg "PI_MCP_ADAPTER_VERSION=$PI_MCP_ADAPTER_VERSION" \
-              --build-arg "PRIME_AGENT_VERSION=$PRIME_AGENT_VERSION" \
-              --build-arg "VALHALLA_VERSION=$VALHALLA_VERSION" \
-              --build-arg "CODE_SERVER_VERSION=$CODE_SERVER_VERSION" \
-              --tag "$IMAGE:$TAG" \
-              --file packages/gatekeeper-sessions/Dockerfile.pi \
-              --provenance=mode=max \
-              --sbom=true \
-              --metadata-file image-metadata.json \
-              --push \
-              packages/gatekeeper-sessions
+            printf 'Refusing to reuse immutable GHCR commit tag %s:%s; investigate the prior publish.\n' "$IMAGE" "$TAG" >&2
+            exit 1
           fi
+          docker buildx build \
+            --platform linux/amd64 \
+            --build-arg "NODE_VERSION=$NODE_VERSION" \
+            --build-arg "PNPM_PACKAGE_MANAGER=$PNPM_PACKAGE_MANAGER" \
+            --build-arg "REPOSITORY_PNPM_PACKAGE_MANAGER=$REPOSITORY_PNPM_PACKAGE_MANAGER" \
+            --build-arg "OPENCODE_VERSION=$OPENCODE_VERSION" \
+            --build-arg "PI_VERSION=$PI_VERSION" \
+            --build-arg "PI_MCP_ADAPTER_VERSION=$PI_MCP_ADAPTER_VERSION" \
+            --build-arg "PRIME_AGENT_VERSION=$PRIME_AGENT_VERSION" \
+            --build-arg "VALHALLA_VERSION=$VALHALLA_VERSION" \
+            --build-arg "CODE_SERVER_VERSION=$CODE_SERVER_VERSION" \
+            --tag "$IMAGE:$TAG" \
+            --file packages/gatekeeper-sessions/Dockerfile.pi \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file image-metadata.json \
+            --push \
+            packages/gatekeeper-sessions
 
       - name: Record immutable digest
         env:
@@ -84,6 +87,31 @@ jobs:
           test "$digest" != "null"
           printf '%s@%s\n' "$IMAGE" "$digest" > image-digest.txt
           printf "Published private GHCR source: \`%s@%s\`\n" "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+
+          source_ref="$IMAGE@$digest"
+          index_json="$(docker buildx imagetools inspect "$source_ref" --raw)"
+          target_digest="$(jq --exit-status --raw-output \
+            '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | if length == 1 then .[0].digest else error("expected one linux/amd64 manifest") end' \
+            <<<"$index_json")"
+          attestation_digest="$(jq --exit-status --raw-output --arg target "$target_digest" \
+            '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest" and .annotations["vnd.docker.reference.digest"] == $target)] | if length == 1 then .[0].digest else error("expected one amd64 attestation manifest") end' \
+            <<<"$index_json")"
+          docker buildx imagetools inspect "$IMAGE@$attestation_digest" --raw \
+            | jq --exit-status \
+              '[.layers[].annotations["in-toto.io/predicate-type"]] as $types | ($types | index("https://spdx.dev/Document")) != null and ($types | index("https://slsa.dev/provenance/v0.2")) != null' \
+              >/dev/null
+          docker buildx imagetools inspect "$source_ref" --format '{{json .SBOM}}' \
+            | jq --exit-status '(.SPDX // ."linux/amd64".SPDX).spdxVersion == "SPDX-2.3"' >/dev/null
+          docker buildx imagetools inspect "$source_ref" --format '{{json .Provenance}}' \
+            | jq --exit-status '(.SLSA // ."linux/amd64".SLSA).buildType == "https://mobyproject.org/buildkit@v1"' >/dev/null
+
+      - name: Smoke image without network access
+        run: |
+          source_ref="$(< image-digest.txt)"
+          docker pull "$source_ref"
+          docker logout ghcr.io
+          timeout --signal=TERM --kill-after=15s 8m \
+            packages/gatekeeper-sessions/pi-image/test-image-network-none.sh "$source_ref"
 
       - name: Install Wrangler
         run: npm install --global wrangler@4.119.0
@@ -102,7 +130,8 @@ jobs:
           cloudflare_repo="registry.cloudflare.com/$CLOUDFLARE_ACCOUNT_ID/odie-os-coding-session"
           cloudflare_tag="$cloudflare_repo:$TAG"
 
-          docker pull "$source_ref"
+          # The authenticated pull was completed before credentials were removed for smoke testing.
+          docker image inspect "$source_ref" >/dev/null
           docker tag "$source_ref" "$local_ref"
           source_id="$(docker image inspect --format '{{.Id}}' "$source_ref")"
           local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
@@ -117,13 +146,13 @@ jobs:
           mirrored_id="$(docker image inspect --format '{{.Id}}' "$cloudflare_ref")"
           test "$source_id" = "$mirrored_id"
           printf '%s\n' "$cloudflare_ref" > cloudflare-image-digest.txt
-          printf "Mirrored Cloudflare image: \`%s\`\n" "$cloudflare_ref" >> "$GITHUB_STEP_SUMMARY"
-          printf 'The commit tag is transport-only; deployments must use this digest.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf "Mirrored unpromoted Cloudflare candidate: \`%s\`\n" "$cloudflare_ref" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Candidate only: do not update a production Wrangler digest until the native Sandbox SDK canary passes.\n' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload immutable digests
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: coding-session-image-${{ github.sha }}
+          name: coding-session-image-candidate-${{ github.sha }}
           path: |
             image-digest.txt
             cloudflare-image-digest.txt
