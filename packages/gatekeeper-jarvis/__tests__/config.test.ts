@@ -70,30 +70,27 @@ describe("JARVIS allowlist", () => {
     expect(isJarvisAllowedTool("escalate_to_human")).toBe(false);
   });
 
-  it("hides internal and arbitrary production tools from management settings", () => {
+  it("hides only the internal repository tool from management settings", () => {
     expect(JARVIS_SETTINGS_TOOLS).not.toContain("repo_knowledge");
-    expect(JARVIS_SETTINGS_TOOLS).not.toContain("jarvis_call_prod_tool");
+    expect(JARVIS_SETTINGS_TOOLS).toContain("jarvis_call_prod_tool");
     expect(JARVIS_SETTINGS_TOOLS).toEqual(
-      JARVIS_ALLOWED_TOOLS.filter(
-        tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"
-      )
+      JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge")
     );
   });
 });
 
 describe("JARVIS tool policy", () => {
-  it("defaults chat to the scoped Wren caller but away from arbitrary production calls", () => {
+  it("defaults chat to all administrator-visible read-only tools", () => {
     const policy = defaultJarvisToolPolicy();
     expect(policy).toEqual({
-      revision: 5,
+      revision: 6,
       chat: {
-        tools: JARVIS_ALLOWED_TOOLS.filter(
-          tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"
-        ),
+        tools: JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge"),
       },
       code: { tools: [...JARVIS_ALLOWED_TOOLS] },
       syncCode: false,
     });
+    expect(policy.chat.tools).toContain("jarvis_call_prod_tool");
     expect(policy.chat.tools).toContain("jarvis_call_wren_tool");
   });
 
@@ -120,7 +117,7 @@ describe("JARVIS tool policy", () => {
       code: { tools: [...historicalTools] },
       syncCode: false,
     };
-    expect(upgradeDefaultJarvisToolPolicy(priorDefault).revision).toBe(5);
+    expect(upgradeDefaultJarvisToolPolicy(priorDefault).revision).toBe(6);
 
     const currentDefault = {
       revision: 3,
@@ -132,8 +129,8 @@ describe("JARVIS tool policy", () => {
       syncCode: false,
     };
     const upgraded = upgradeDefaultJarvisToolPolicy(currentDefault);
-    expect(upgraded.revision).toBe(5);
-    expect(upgraded.chat.tools).not.toContain("jarvis_call_prod_tool");
+    expect(upgraded.revision).toBe(6);
+    expect(upgraded.chat.tools).toContain("jarvis_call_prod_tool");
     expect(upgraded.chat.tools).toContain("jarvis_call_wren_tool");
     expect(upgraded.code.tools).toContain("jarvis_call_prod_tool");
 
@@ -146,7 +143,25 @@ describe("JARVIS tool policy", () => {
         tool => tool !== "jarvis_describe_wren_tool" && tool !== "jarvis_call_wren_tool") },
       syncCode: false,
     };
-    expect(upgradeDefaultJarvisToolPolicy(priorV4Default).revision).toBe(5);
+    expect(upgradeDefaultJarvisToolPolicy(priorV4Default).revision).toBe(6);
+    const customizedV4Code = {
+      ...priorV4Default,
+      code: { tools: ["query_knowledge"] },
+    };
+    expect(upgradeDefaultJarvisToolPolicy(customizedV4Code).chat.tools)
+      .toContain("jarvis_call_prod_tool");
+    expect(upgradeDefaultJarvisToolPolicy(customizedV4Code).code.tools)
+      .toEqual(["query_knowledge"]);
+
+    const savedAllVisible = {
+      revision: 12,
+      chat: { tools: JARVIS_ALLOWED_TOOLS.filter(
+        tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool") },
+      code: { tools: [...JARVIS_ALLOWED_TOOLS] },
+      syncCode: false,
+    };
+    expect(upgradeDefaultJarvisToolPolicy(savedAllVisible).chat.tools)
+      .toContain("jarvis_call_prod_tool");
 
     const customized = {
       ...historical,
@@ -155,17 +170,15 @@ describe("JARVIS tool policy", () => {
     };
     expect(upgradeDefaultJarvisToolPolicy(customized)).toBe(customized);
     const unsafeCustomized = { ...historical, revision: 2 };
-    const sanitized = upgradeDefaultJarvisToolPolicy(unsafeCustomized);
-    expect(sanitized.chat.tools).not.toContain("jarvis_call_prod_tool");
-    expect(sanitized.code.tools).toContain("jarvis_call_prod_tool");
+    expect(upgradeDefaultJarvisToolPolicy(unsafeCustomized)).toBe(unsafeCustomized);
     const customizedV3 = {
       ...currentDefault,
       chat: { tools: currentDefault.chat.tools.filter(tool => tool !== "lookup_incident") },
     };
     const sanitizedV3 = upgradeDefaultJarvisToolPolicy(customizedV3);
-    expect(sanitizedV3).not.toBe(customizedV3);
+    expect(sanitizedV3).toBe(customizedV3);
     expect(sanitizedV3.chat.tools).not.toContain("lookup_incident");
-    expect(sanitizedV3.chat.tools).not.toContain("jarvis_call_prod_tool");
+    expect(sanitizedV3.chat.tools).toContain("jarvis_call_prod_tool");
     expect(sanitizedV3.code.tools).toContain("jarvis_call_prod_tool");
 
     const unrestricted = {
@@ -176,7 +189,7 @@ describe("JARVIS tool policy", () => {
     };
     const bounded = upgradeDefaultJarvisToolPolicy(unrestricted);
     expect(bounded.chat.tools).toEqual(
-      JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "jarvis_call_prod_tool")
+      JARVIS_ALLOWED_TOOLS.filter(tool => tool !== "repo_knowledge")
     );
     expect(bounded.code.tools).toEqual(JARVIS_ALLOWED_TOOLS);
   });
@@ -194,14 +207,14 @@ describe("JARVIS tool policy", () => {
     });
   });
 
-  it("keeps arbitrary production calls out of chat while retaining the scoped Wren caller", () => {
+  it("retains selected production and Wren callers in chat", () => {
     expect(normalizeJarvisToolPolicy({
       chatTools: ["query_knowledge", "jarvis_call_prod_tool", "jarvis_call_wren_tool"],
       syncCode: false,
       codeTools: ["query_knowledge", "jarvis_call_prod_tool", "jarvis_call_wren_tool"],
     }, 8)).toEqual({
       revision: 8,
-      chat: { tools: ["query_knowledge", "jarvis_call_wren_tool"] },
+      chat: { tools: ["query_knowledge", "jarvis_call_prod_tool", "jarvis_call_wren_tool"] },
       code: { tools: ["query_knowledge", "jarvis_call_prod_tool", "jarvis_call_wren_tool"] },
       syncCode: false,
     });

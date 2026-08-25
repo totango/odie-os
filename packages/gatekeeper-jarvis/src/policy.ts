@@ -26,21 +26,27 @@ const HISTORICAL_V1_TOOLS = [
 const HISTORICAL_V4_TOOLS = JARVIS_ALLOWED_TOOLS.filter(
   tool => tool !== "jarvis_describe_wren_tool" && tool !== "jarvis_call_wren_tool"
 );
+const HISTORICAL_V4_VISIBLE_CHAT_TOOLS = HISTORICAL_V4_TOOLS.filter(
+  tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"
+);
+const HISTORICAL_VISIBLE_CHAT_TOOLS = JARVIS_ALLOWED_TOOLS.filter(
+  tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"
+);
 
-/** Returns the default policy without live repository or arbitrary production calls in chat. */
+/** Returns the default policy without the internal repository tool in chat. */
 export function defaultJarvisToolPolicy(): JarvisToolPolicy {
   const tools = [...JARVIS_ALLOWED_TOOLS];
   return {
-    revision: 5,
+    revision: 6,
     chat: {
-      tools: tools.filter(tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool"),
+      tools: tools.filter(tool => tool !== "repo_knowledge"),
     },
     code: { tools },
     syncCode: false,
   };
 }
 
-/** Upgrades untouched defaults and enforces the reserved generic-production Chat boundary. */
+/** Upgrades defaults and preserves an administrator's previous "all visible tools" selection. */
 export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): JarvisToolPolicy {
   const historicalTools = [...HISTORICAL_V1_TOOLS];
   const untouchedV1 = policy.revision === 1 && policy.syncCode === true &&
@@ -52,17 +58,24 @@ export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): Jarvis
     sameTools(policy.chat.tools, HISTORICAL_V4_TOOLS.filter(tool => tool !== "repo_knowledge")) &&
     sameTools(policy.code.tools, HISTORICAL_V4_TOOLS);
   const untouchedV4 = policy.revision === 4 && policy.syncCode === false &&
-    sameTools(policy.chat.tools, HISTORICAL_V4_TOOLS.filter(
-      tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool")) &&
+    sameTools(policy.chat.tools, HISTORICAL_V4_VISIBLE_CHAT_TOOLS) &&
     sameTools(policy.code.tools, HISTORICAL_V4_TOOLS);
-  const untouched = untouchedV1 || untouchedV2 || untouchedV3 || untouchedV4;
+  const untouchedV5 = policy.revision === 5 && policy.syncCode === false &&
+    sameTools(policy.chat.tools, HISTORICAL_VISIBLE_CHAT_TOOLS) &&
+    sameTools(policy.code.tools, JARVIS_ALLOWED_TOOLS);
+  const untouched = untouchedV1 || untouchedV2 || untouchedV3 || untouchedV4 || untouchedV5;
   if (untouched) return defaultJarvisToolPolicy();
-  const normalizeChat = policy.chat.tools === undefined ||
-    policy.chat.tools.includes("jarvis_call_prod_tool");
+  const selectedEveryPreviouslyVisibleChatTool =
+    !policy.chat.tools?.includes("jarvis_call_prod_tool") &&
+    (sameTools(policy.chat.tools, HISTORICAL_V4_VISIBLE_CHAT_TOOLS) ||
+      HISTORICAL_VISIBLE_CHAT_TOOLS.every(tool => policy.chat.tools?.includes(tool)));
+  const normalizeChat = policy.chat.tools === undefined || selectedEveryPreviouslyVisibleChatTool;
   const normalizeCode = policy.code.tools === undefined;
   if (!normalizeChat && !normalizeCode) return policy;
-  const chatTools = (policy.chat.tools ?? JARVIS_ALLOWED_TOOLS)
-    .filter(tool => tool !== "jarvis_call_prod_tool");
+  const chatTools = policy.chat.tools === undefined
+    ? defaultJarvisToolPolicy().chat.tools
+    : JARVIS_ALLOWED_TOOLS.filter(tool =>
+      policy.chat.tools?.includes(tool) || tool === "jarvis_call_prod_tool");
   return {
     ...policy,
     chat: normalizeChat ? { tools: chatTools } : policy.chat,
@@ -70,7 +83,7 @@ export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): Jarvis
   };
 }
 
-/** Normalizes policy input to the fixed allowlist, reserving arbitrary production calls for code. */
+/** Normalizes policy input to the deployment's fixed read-only allowlist. */
 export function normalizeJarvisToolPolicy(
   input: JarvisToolPolicyInput,
   revision: number,
@@ -78,7 +91,7 @@ export function normalizeJarvisToolPolicy(
   if (!input || !Array.isArray(input.chatTools) || typeof input.syncCode !== "boolean") {
     throw new TypeError("Invalid JARVIS tool policy.");
   }
-  const chat = normalizeTools(input.chatTools).filter(tool => tool !== "jarvis_call_prod_tool");
+  const chat = normalizeTools(input.chatTools);
   const code = input.syncCode ? [...chat] : normalizeTools(input.codeTools ?? []);
   return {
     revision,
