@@ -235,6 +235,16 @@ test("worker entries carry the deploy contract", () => {
       name: "SESSION_POLICIES",
       class_name: "CodingSessionPolicy",
     },
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_APPLICATION_PREVIEWS",
+      class_name: "CodingSessionApplicationPreview",
+    },
+    {
+      type: "durable_object_namespace",
+      name: "SESSION_REGISTRIES",
+      class_name: "CodingSessionRegistry",
+    },
   ]);
   assert.deepEqual(sessions.bindings.find((binding) => binding.name === "WORKSHOP_TOOLS"), {
     type: "service",
@@ -242,7 +252,6 @@ test("worker entries carry the deploy contract", () => {
     service: "$WORKER_NAME(workshop-backend)",
     entrypoint: "CodingSessionToolHostImpl",
   });
-  assert.ok(!sessions.bindings.some((binding) => binding.class_name === "CodingSessionRegistry"));
   const sessionImage =
       "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60";
   assert.deepEqual(sessions.containers, [
@@ -271,7 +280,7 @@ test("worker entries carry the deploy contract", () => {
       max_instances: 2,
     },
   ]);
-  assert.deepEqual(sessions.migrations.at(-1), {
+  assert.deepEqual(sessions.migrations.at(-2), {
     tag: "v3",
     new_sqlite_classes: [
       "CodingSessionSandboxStandard2",
@@ -279,6 +288,10 @@ test("worker entries carry the deploy contract", () => {
       "CodingSessionSandboxStandard4",
       "CodingSessionCapacity",
     ],
+  });
+  assert.deepEqual(sessions.migrations.at(-1), {
+    tag: "v4",
+    new_sqlite_classes: ["CodingSessionApplicationPreview"],
   });
 
   // Ambient gatekeepers are preinstalled on every core deploy; preinstalls must take no

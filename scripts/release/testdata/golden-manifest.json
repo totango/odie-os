@@ -869,6 +869,16 @@
           "type": "durable_object_namespace"
         },
         {
+          "class_name": "CodingSessionApplicationPreview",
+          "name": "SESSION_APPLICATION_PREVIEWS",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "CodingSessionRegistry",
+          "name": "SESSION_REGISTRIES",
+          "type": "durable_object_namespace"
+        },
+        {
           "name": "GITHUB_APP_ID",
           "text": "$SECRET(GITHUB_APP_ID)",
           "type": "secret_text"
@@ -980,6 +990,12 @@
             "CodingSessionCapacity"
           ],
           "tag": "v3"
+        },
+        {
+          "new_sqlite_classes": [
+            "CodingSessionApplicationPreview"
+          ],
+          "tag": "v4"
         }
       ],
       "modules": [

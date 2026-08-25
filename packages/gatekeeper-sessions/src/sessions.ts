@@ -1,6 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { zstdDecompressSync } from "node:zlib";
-import { ContainerProxy, Sandbox, getSandbox, type Terminal } from "@cloudflare/sandbox";
+import { ContainerProxy, Sandbox, type Terminal } from "@cloudflare/sandbox";
 import type { OutboundHandlerContext } from "@cloudflare/containers";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
@@ -53,6 +53,12 @@ import {
 } from "./development-supervisor.js";
 import { validateRepositories } from "./policy.js";
 import {
+  CodingSessionApplicationPreview,
+  handleApplicationPreviewIngress,
+  type ApplicationPreviewEnv,
+} from "./application-preview.js";
+import { sandboxFor, sandboxObjectId } from "./sandbox-routing.js";
+import {
   type CapacityReservationKey,
   type CapacityReservationRecord,
   type CapacityReplacement,
@@ -77,7 +83,7 @@ import {
   primeAgentSettings,
 } from "./runtime.js";
 
-export { ContainerProxy };
+export { ContainerProxy, CodingSessionApplicationPreview };
 
 const ATTACH_TTL_MS = 60_000;
 const EDITOR_CAPABILITY_TTL_MS = 30 * 60 * 1_000;
@@ -107,11 +113,7 @@ type SessionsLogFields = {
 
 const logger = createLogger<SessionsLogFields>({ component: "gatekeeper.sessions" });
 
-interface Env extends GitHubAppEnv {
-  SESSION_SANDBOX: DurableObjectNamespace<CodingSessionSandbox>;
-  SESSION_SANDBOX_STANDARD_2: DurableObjectNamespace<CodingSessionSandboxStandard2>;
-  SESSION_SANDBOX_STANDARD_3: DurableObjectNamespace<CodingSessionSandboxStandard3>;
-  SESSION_SANDBOX_STANDARD_4: DurableObjectNamespace<CodingSessionSandboxStandard4>;
+interface Env extends GitHubAppEnv, ApplicationPreviewEnv {
   SESSION_CAPACITY: DurableObjectNamespace<CodingSessionCapacity>;
   SESSION_POLICIES: DurableObjectNamespace<CodingSessionPolicy>;
   WORKSHOP_TOOLS: Service<CodingSessionToolHost>;
@@ -2195,6 +2197,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
 }
 
 async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const applicationPreview = await handleApplicationPreviewIngress(request, env);
+  if (applicationPreview) return applicationPreview;
   const url = new URL(request.url);
   const editorMatch = /^\/c\/([A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43})(\/.*)$/.exec(url.pathname);
   if (editorMatch) return handleEditorHttp(request, env, ctx, editorMatch[1]!, editorMatch[2]!);
@@ -2361,7 +2365,7 @@ function policyFor(env: Env, containerId: string): DurableObjectStub<CodingSessi
 function policyForSandbox(
   env: Env, tier: CodingSessionInstanceTier, sandboxId: string,
 ): DurableObjectStub<CodingSessionPolicy> {
-  return policyFor(env, sandboxNamespace(env, tier).idFromName(sandboxId).toString());
+  return policyFor(env, sandboxObjectId(env, tier, sandboxId).toString());
 }
 
 async function ticketFor(env: Env, token: string): Promise<DurableObjectStub<CodingSessionPolicy>> {
@@ -2407,20 +2411,6 @@ function storedPolicyTier(policy: SessionPolicy): CodingSessionInstanceTier {
 
 function storedTicketTier(ticket: AttachTicket | EditorTicket): CodingSessionInstanceTier {
   return ticket.instanceTier ?? "standard-1";
-}
-
-function sandboxNamespace(
-  env: Env,
-  tier: CodingSessionInstanceTier,
-): DurableObjectNamespace<CodingSessionSandbox> {
-  if (tier === "standard-2") return env.SESSION_SANDBOX_STANDARD_2 as unknown as DurableObjectNamespace<CodingSessionSandbox>;
-  if (tier === "standard-3") return env.SESSION_SANDBOX_STANDARD_3 as unknown as DurableObjectNamespace<CodingSessionSandbox>;
-  if (tier === "standard-4") return env.SESSION_SANDBOX_STANDARD_4 as unknown as DurableObjectNamespace<CodingSessionSandbox>;
-  return env.SESSION_SANDBOX;
-}
-
-function sandboxFor(env: Env, tier: CodingSessionInstanceTier, sandboxId: string) {
-  return getSandbox(sandboxNamespace(env, tier), sandboxId);
 }
 
 function capacityFor(env: Env, tier: HeavySessionTier): DurableObjectStub<CodingSessionCapacity> {
