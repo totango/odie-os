@@ -34,6 +34,7 @@
     { "binding": "GATEKEEPER_GITHUB", "service": "odie-os-gk-github", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_GITHUB_ORG", "service": "odie-os-gk-sessions", "entrypoint": "GitHubOrganizationVendor" },
     { "binding": "GATEKEEPER_JARVIS", "service": "odie-os-gk-jarvis", "entrypoint": "GatekeeperVendor" },
+    { "binding": "GATEKEEPER_MCP", "service": "odie-os-gk-mcp", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_ODIE_KG", "service": "odie-os-gk-odie-kg", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_SCHEDULER", "service": "odie-os-gk-scheduler", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_SESSIONS", "service": "odie-os-gk-sessions", "entrypoint": "GatekeeperVendor" },
