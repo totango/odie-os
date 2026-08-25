@@ -222,6 +222,22 @@ describe("workspace session across a user-DO-only reset", () => {
 });
 
 describe("workspace origin hub metadata", () => {
+  it("makes a workspace visible when the user creates a permanent gadget", async () => {
+    using publicApi = await connect();
+    const account = await createAccount(publicApi, "directgadget");
+    using authenticated = await publicApi.authenticate(account.token);
+    using workspace = await authenticated.newGadget("ops");
+    const metadata = await workspace.getMetadata();
+
+    expect((await authenticated.listGadgets()).map((g) => g.id)).not.toContain(metadata.id);
+
+    using gadget = await workspace.createGadget("Direct gadget");
+    expect(await gadget.getTitle()).toBe("Direct gadget");
+    await expect.poll(async () =>
+      (await authenticated.listGadgets()).map((g) => g.id),
+    ).toContain(metadata.id);
+  });
+
   it("stamps provisional workspaces and lists the origin after activity", async () => {
     using publicApi = await connect();
     const account = await createAccount(publicApi, "origin");
