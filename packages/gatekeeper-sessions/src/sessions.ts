@@ -8,9 +8,11 @@ import {
   type CodingSessionApplicationCapability,
   type CodingSessionAttachCapability,
   type CodingSessionDevelopmentCatalog,
+  type CodingSessionDevelopmentComponentStatus,
   type CodingSessionDevelopmentPlan,
   type CodingSessionDevelopmentStatus,
   type CodingSessionEditorCapability,
+  type CodingSessionInstanceTier,
   type CodingSessionRepository,
   type CodingSessionRuntime,
   type CodingSessionSummary,
@@ -39,6 +41,14 @@ import {
 import { DEVELOPMENT_CATALOG, publicDevelopmentCatalog } from "./development-catalog.js";
 import { planDevelopmentStack } from "./development-planner.js";
 import { validateRepositories } from "./policy.js";
+import {
+  type CapacityReservationKey,
+  type CapacityReservationRecord,
+  type CapacityReplacement,
+  type CodingSessionCapacity,
+  type HeavySessionTier,
+  HEAVY_SESSION_TIERS,
+} from "./capacity.js";
 import {
   assertRuntimeEnabled,
   codingSessionRuntime,
@@ -87,6 +97,10 @@ const logger = createLogger<SessionsLogFields>({ component: "gatekeeper.sessions
 
 interface Env extends GitHubAppEnv {
   SESSION_SANDBOX: DurableObjectNamespace<CodingSessionSandbox>;
+  SESSION_SANDBOX_STANDARD_2: DurableObjectNamespace<CodingSessionSandboxStandard2>;
+  SESSION_SANDBOX_STANDARD_3: DurableObjectNamespace<CodingSessionSandboxStandard3>;
+  SESSION_SANDBOX_STANDARD_4: DurableObjectNamespace<CodingSessionSandboxStandard4>;
+  SESSION_CAPACITY: DurableObjectNamespace<CodingSessionCapacity>;
   SESSION_POLICIES: DurableObjectNamespace<CodingSessionPolicy>;
   WORKSHOP_TOOLS: Service<CodingSessionToolHost>;
   BASE_URL?: string;
@@ -106,6 +120,12 @@ type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
   terminalId?: string;
   shellTerminalId?: string;
   editorProcessId?: string;
+  /** Public generation. Historical terminal-only sessions default to generation zero. */
+  generation?: number;
+  /** Fixed sandbox tier. Historical terminal-only sessions default to standard-1. */
+  instanceTier?: CodingSessionInstanceTier;
+  /** Exact heavy-capacity reservation held by this generation. */
+  capacityLease?: CapacityReservationKey;
 };
 
 type AttachTicket = {
@@ -114,6 +134,8 @@ type AttachTicket = {
   userId: string;
   sessionId: string;
   terminalKind: CodingSessionTerminalKind;
+  generation?: number;
+  instanceTier?: CodingSessionInstanceTier;
   expiresAt: number;
 };
 
@@ -121,12 +143,16 @@ type EditorTicket = {
   sandboxId: string;
   userId: string;
   sessionId: string;
+  generation?: number;
+  instanceTier?: CodingSessionInstanceTier;
   expiresAt: number;
 };
 
 type SessionPolicy = {
   sessionId: string;
   sandboxId?: string;
+  generation?: number;
+  instanceTier?: CodingSessionInstanceTier;
   runtime?: CodingSessionRuntime;
   owner: CodingSessionOwner;
   repositories: CodingSessionRepository[];
@@ -135,6 +161,7 @@ type SessionPolicy = {
 type StartupPhase = "authorize" | "clone" | "materialize" | "terminal";
 
 type StartupRecord = {
+  generation?: number;
   phase: StartupPhase;
   nextRepositoryIndex: number;
   completedRepositoryIndexes?: number[];
@@ -143,6 +170,20 @@ type StartupRecord = {
   attempt: number;
   createdAt: number;
   updatedAt: number;
+};
+
+type RestartRecord = {
+  sessionId: string;
+  owner: CodingSessionOwner;
+  oldSandboxId: string;
+  oldGeneration: number;
+  instanceTier: CodingSessionInstanceTier;
+  oldLease?: CapacityReservationKey;
+  newSandboxId: string;
+  newGeneration: number;
+  replacement?: CapacityReplacement;
+  newLease?: CapacityReservationKey;
+  phase: "destroy" | "transfer" | "schedule";
 };
 
 type StartupProcess = {
@@ -198,9 +239,18 @@ export class CodingSessionSandbox extends Sandbox<Env> {
 
 }
 
+/** Standard-2 isolated Linux environment for one heavy coding-session generation. */
+export class CodingSessionSandboxStandard2 extends CodingSessionSandbox {}
+
+/** Standard-3 isolated Linux environment for one heavy coding-session generation. */
+export class CodingSessionSandboxStandard3 extends CodingSessionSandbox {}
+
+/** Standard-4 isolated Linux environment for one heavy coding-session generation. */
+export class CodingSessionSandboxStandard4 extends CodingSessionSandbox {}
+
 // Assignment must invoke Container's inherited static setter, which installs these handlers in the
 // registry used by ContainerProxy. A static class field would shadow the setter without registering.
-CodingSessionSandbox.outboundByHost = {
+const codingSessionOutboundHandlers = {
   "team-pi-proxy.unison.totango.com":
     (request: Request, env: Env, ctx: OutboundHandlerContext) =>
       policyFor(env, ctx.containerId).forwardTeamPiCodexRequest(request),
@@ -213,6 +263,10 @@ CodingSessionSandbox.outboundByHost = {
   "proxy.golang.org": publicReadOnlyRequest,
   "sum.golang.org": publicReadOnlyRequest,
 };
+CodingSessionSandbox.outboundByHost = codingSessionOutboundHandlers;
+CodingSessionSandboxStandard2.outboundByHost = codingSessionOutboundHandlers;
+CodingSessionSandboxStandard3.outboundByHost = codingSessionOutboundHandlers;
+CodingSessionSandboxStandard4.outboundByHost = codingSessionOutboundHandlers;
 
 /** Durable repository and model egress policy for one sandbox instance. */
 export class CodingSessionPolicy extends DurableObject<Env> {
@@ -220,8 +274,10 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   configure(policy: SessionPolicy): void {
     const existing = this.ctx.storage.kv.get<SessionPolicy>("policy");
     if (existing) {
-      if (JSON.stringify({ sessionId: existing.sessionId, owner: existing.owner, repositories: existing.repositories }) !==
-          JSON.stringify({ sessionId: policy.sessionId, owner: policy.owner, repositories: policy.repositories })) {
+      if (JSON.stringify({ sessionId: existing.sessionId, generation: existing.generation ?? 0,
+            instanceTier: existing.instanceTier ?? "standard-1", owner: existing.owner, repositories: existing.repositories }) !==
+          JSON.stringify({ sessionId: policy.sessionId, generation: policy.generation ?? 0,
+            instanceTier: policy.instanceTier ?? "standard-1", owner: policy.owner, repositories: policy.repositories })) {
         throw new Error("Coding session policy is immutable.");
       }
       // Policy DOs are keyed by container ID, so another sandbox generation must use another DO.
@@ -238,19 +294,23 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 
   /** Persists bounded startup progress and schedules the first asynchronous startup alarm. */
   async startSessionStartup(record: StartupRecord): Promise<void> {
-    this.ctx.storage.kv.put("startup", record);
+    const existing = this.ctx.storage.kv.get<StartupRecord>("startup");
+    if (existing && (existing.generation ?? 0) !== (record.generation ?? 0)) {
+      throw new Error("Coding session startup generation is already in progress.");
+    }
+    if (!existing) this.ctx.storage.kv.put("startup", record);
     try {
       await this.ctx.storage.setAlarm(Date.now() + 1);
     } catch (error) {
-      this.ctx.storage.kv.delete("startup");
+      if (!existing) this.ctx.storage.kv.delete("startup");
       throw error;
     }
   }
 
   /** Cancels asynchronous startup for the configured session generation. */
-  async cancelSessionStartup(sessionId: string, sandboxId: string): Promise<void> {
+  async cancelSessionStartup(sessionId: string, generation: number, sandboxId: string): Promise<void> {
     const policy = this.#policy();
-    if (policy.sessionId !== sessionId || policy.sandboxId !== sandboxId) return;
+    if (policy.sessionId !== sessionId || (policy.generation ?? 0) !== generation || policy.sandboxId !== sandboxId) return;
     this.ctx.storage.kv.delete("startup");
     await this.ctx.storage.deleteAlarm();
   }
@@ -474,6 +534,10 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   }
 
   async #advanceStartup(startup: StartupRecord): Promise<void> {
+    if ((startup.generation ?? 0) !== (this.#policy().generation ?? 0)) {
+      this.ctx.storage.kv.delete("startup");
+      return;
+    }
     if (startup.failureError !== undefined) {
       await this.#finalizeStartupFailure(startup, startup.failureError);
       return;
@@ -531,8 +595,18 @@ export class CodingSessionPolicy extends DurableObject<Env> {
         });
       }
     }
-    await this.#registry().startupFailed(policy.sessionId, sandboxId, error);
-    await getSandbox(this.env.SESSION_SANDBOX, sandboxId).destroy();
+    try {
+      await sandboxFor(this.env, storedPolicyTier(policy), sandboxId).destroy();
+    } catch (destroyError) {
+      await this.#registry().startupFailed(
+        policy.sessionId, policy.generation ?? 0, sandboxId, error, false);
+      await this.#scheduleStartup();
+      logger.error("coding session failed sandbox cleanup will retry", {
+        event: "coding.session.startup.cleanup.retry", sessionId: policy.sessionId, error: destroyError,
+      });
+      return;
+    }
+    await this.#registry().startupFailed(policy.sessionId, policy.generation ?? 0, sandboxId, error, true);
     this.ctx.storage.kv.delete("startup");
   }
 
@@ -540,7 +614,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     const policy = this.#policy();
     const sandboxId = required(policy.sandboxId, "startup sandboxId");
     const runtime = codingSessionRuntime(policy.runtime);
-    const sandbox = getSandbox(this.env.SESSION_SANDBOX, sandboxId) as unknown as StartupSandbox;
+    const sandbox = sandboxFor(this.env, storedPolicyTier(this.#policy()), sandboxId) as unknown as StartupSandbox;
     if (startup.phase === "authorize") {
       await this.env.WORKSHOP_TOOLS.prepareSessionStartup(policy.owner, policy.sessionId, policy.repositories);
       await sandbox.configureGitHubAuth(await this.#installationToken(policy.repositories));
@@ -574,13 +648,13 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     const customization = await this.env.WORKSHOP_TOOLS.prepareSessionStartup(
       policy.owner, policy.sessionId, policy.repositories);
     const terminal = await this.#runningOrCreatedPrimaryTerminal(sandboxId, runtime, policy.repositories, customization);
-    const applied = await this.#registry().startupSucceeded(policy.sessionId, sandboxId, terminal.id);
+    const applied = await this.#registry().startupSucceeded(policy.sessionId, policy.generation ?? 0, sandboxId, terminal.id);
     if (!applied) await sandbox.destroy();
     this.ctx.storage.kv.delete("startup");
   }
 
   async #advanceClone(startup: StartupRecord, repositories: CodingSessionRepository[]): Promise<void> {
-    const sandbox = getSandbox(this.env.SESSION_SANDBOX, required(this.#policy().sandboxId, "startup sandboxId")) as unknown as StartupSandbox;
+    const sandbox = sandboxFor(this.env, storedPolicyTier(this.#policy()), required(this.#policy().sandboxId, "startup sandboxId")) as unknown as StartupSandbox;
     const completed = new Set(startup.completedRepositoryIndexes ?? []);
     const active: NonNullable<StartupRecord["cloneProcesses"]> = [];
     let nextRepositoryIndex = startup.nextRepositoryIndex;
@@ -655,7 +729,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     repositories: CodingSessionRepository[],
     customization: OpenCodeUserCustomization,
   ): Promise<Terminal> {
-    const sandbox = getSandbox(this.env.SESSION_SANDBOX, sandboxId) as unknown as StartupSandbox;
+    const sandbox = sandboxFor(this.env, storedPolicyTier(this.#policy()), sandboxId) as unknown as StartupSandbox;
     const options = primaryTerminalOptions(runtime, repositories[0]!, this.env, customization);
     const existing = await matchingRunningTerminals(sandbox, options.command, options.cwd);
     if (existing.length > 0) {
@@ -667,7 +741,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 
   async #stopCloneProcesses(startup: StartupRecord): Promise<void> {
     const sandboxId = required(this.#policy().sandboxId, "startup sandboxId");
-    const sandbox = getSandbox(this.env.SESSION_SANDBOX, sandboxId) as unknown as StartupSandbox;
+    const sandbox = sandboxFor(this.env, storedPolicyTier(this.#policy()), sandboxId) as unknown as StartupSandbox;
     await Promise.allSettled((startup.cloneProcesses ?? []).map(async ({ processId }) => {
       const process = await sandbox.getProcess(processId);
       if (process) await process.kill(15);
@@ -692,35 +766,77 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   readonly #shellTerminalCreations = new Map<string, Promise<string>>();
   readonly #editorProcessCreations = new Map<string, Promise<string>>();
 
+  /** Retries durable restart work and capacity releases after pre-arming the next wakeup. */
+  async alarm(): Promise<void> {
+    if (this.#hasRegistryWork()) await this.#requireRegistryRetryAlarm();
+    for (const [, restart] of this.ctx.storage.kv.list<RestartRecord>({ prefix: "restart:" })) {
+      try {
+        await this.#resumeRestart(restart);
+      } catch (error) {
+        logger.warn("coding session restart will retry", {
+          event: "coding.session.restart.retry", sessionId: restart.sessionId, error,
+        });
+      }
+    }
+    for (const [storageKey, lease] of this.ctx.storage.kv.list<CapacityReservationKey>({ prefix: "pending-release:" })) {
+      try {
+        await capacityFor(this.env, lease.tier).release(lease);
+        this.ctx.storage.kv.delete(storageKey);
+      } catch (error) {
+        logger.warn("coding session capacity release will retry", {
+          event: "coding.session.capacity.release.retry", sessionId: lease.sessionId, error,
+        });
+      }
+    }
+    if (!this.#hasRegistryWork()) {
+      try {
+        await this.ctx.storage.deleteAlarm();
+      } catch (error) {
+        logger.warn("coding session registry retry alarm could not be cleared", {
+          event: "coding.session.registry.retry.clear.failed", error,
+        });
+      }
+    }
+  }
+
   /** Lists this user's sessions newest first. */
   async listSessions(): Promise<CodingSessionSummary[]> {
     return [...this.#records()].map(publicSummary)
       .toSorted((a, b) => b.createdAt.valueOf() - a.createdAt.valueOf());
   }
 
-  /** Plans a development stack from persisted capacity metadata without contacting a sandbox. */
-  preflightSession(request: CreateCodingSessionRequest): CodingSessionDevelopmentPlan {
+  /** Plans a development stack from current capacity snapshots without reserving capacity. */
+  async preflightSession(request: CreateCodingSessionRequest, userId: string): Promise<CodingSessionDevelopmentPlan> {
     const active = [...this.#records()].filter(record =>
       !record.archivedAt && ["starting", "running", "stopping"].includes(record.status)).length;
+    const enabledHeavy = HEAVY_SESSION_TIERS.filter(tier => DEVELOPMENT_CATALOG.enabledTiers.includes(tier));
+    const heavy = await Promise.all(enabledHeavy.map(async tier =>
+      [tier, await capacityFor(this.env, tier).snapshot(tier, userId)] as const));
     return planDevelopmentStack(DEVELOPMENT_CATALOG, request, {
       "standard-1": { available: active < MAX_SESSIONS_PER_USER, active, limit: MAX_SESSIONS_PER_USER },
-      "standard-2": { available: false, active: 0, limit: 0 },
-      "standard-3": { available: false, active: 0, limit: 0 },
-      "standard-4": { available: false, active: 0, limit: 0 },
+      ...Object.fromEntries(heavy),
     });
   }
 
-  /** Returns an empty compatible lifecycle snapshot for a historical terminal-only session. */
+  /** Returns persisted lifecycle metadata for the current generation. */
   getDevelopmentStatus(sessionId: string): CodingSessionDevelopmentStatus {
     const record = this.#get(sessionId);
     if (!record || record.archivedAt) throw new Error("Coding session was not found.");
-    return {
-      sessionId,
-      generation: 0,
-      components: [],
-      applications: [],
-      updatedAt: record.lastActiveAt,
-    };
+    const componentStatus: CodingSessionDevelopmentComponentStatus = record.status === "running" ? "ready" :
+      record.status === "starting" ? "starting" : record.status === "stopping" ? "stopping" :
+      record.status === "stopped" ? "stopped" : "failed";
+    const selected = new Set(record.development?.componentIds ?? []);
+    const components = DEVELOPMENT_CATALOG.components.filter(component => selected.has(component.id)).map(component => ({
+      id: component.id, title: component.title, status: componentStatus, updatedAt: record.lastActiveAt,
+      ...(record.error ? { message: record.error } : {}),
+    }));
+    const applications = DEVELOPMENT_CATALOG.components.filter(component => selected.has(component.id)).flatMap(component =>
+      component.applications.map(application => ({
+        id: application.id, componentId: component.id, title: application.title,
+        status: componentStatus, previewAvailable: false,
+        ...(record.error ? { message: record.error } : {}),
+      })));
+    return { sessionId, generation: storedSessionGeneration(record), components, applications, updatedAt: record.lastActiveAt };
   }
 
   /** Rejects application previews until the reviewed preview gateway is available. */
@@ -745,9 +861,10 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   }
 
   /** Returns whether persisted metadata still points at the supplied running sandbox generation. */
-  isCurrentSessionGeneration(sessionId: string, sandboxId: string): boolean {
+  isCurrentSessionGeneration(sessionId: string, sandboxId: string, generation?: number): boolean {
     const record = this.#get(sessionId);
-    return !!record && !record.archivedAt && record.status === "running" && record.sandboxId === sandboxId;
+    return !!record && !record.archivedAt && record.status === "running" && record.sandboxId === sandboxId &&
+      (generation === undefined || storedSessionGeneration(record) === generation);
   }
 
   /** Creates and initializes one multi-repository coding session. */
@@ -757,9 +874,10 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     _customization?: OpenCodeUserCustomization,
   ): Promise<CodingSessionSummary> {
     const repositories = validateRepositories(request.repositories);
-    if (request.developmentStack !== undefined) {
-      const plan = this.preflightSession({ ...request, repositories });
-      if (!plan.canCreate) throw new Error(plan.issues[0]?.message ?? "Development stack is unavailable.");
+    const plan = request.developmentStack === undefined ? undefined :
+      await this.preflightSession({ ...request, repositories }, owner.userId);
+    if (plan && !plan.canCreate) {
+      throw new Error(plan.issues[0]?.message ?? "Development stack is unavailable.");
     }
     if ([...this.#records()].filter(record =>
       !record.archivedAt && ["starting", "running", "stopping"].includes(record.status)).length >= MAX_SESSIONS_PER_USER) {
@@ -773,6 +891,17 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     assertRuntimeConfigured(this.env, runtime);
 
     const id = crypto.randomUUID();
+    const sandboxId = id;
+    const generation = plan ? 1 : 0;
+    const instanceTier = plan?.selectedTier ?? "standard-1";
+    let capacityLease: CapacityReservationKey | undefined;
+    if (isHeavyTier(instanceTier)) {
+      const key: CapacityReservationKey = {
+        tier: instanceTier, reservationId: crypto.randomUUID(), sessionId: id,
+        generation, sandboxId, userId: owner.userId,
+      };
+      capacityLease = capacityKey(await capacityFor(this.env, instanceTier).reserve(key));
+    }
     const now = new Date();
     let record: SessionRecord = {
       id,
@@ -783,7 +912,18 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       status: "starting",
       createdAt: now,
       lastActiveAt: now,
-      sandboxId: id,
+      sandboxId,
+      ...(plan ? {
+        generation,
+        instanceTier,
+        development: {
+          catalogRevision: plan.catalogRevision,
+          ...(plan.selection.profileId ? { profileId: plan.selection.profileId } : {}),
+          componentIds: plan.resolvedComponentIds,
+          instanceTier,
+        },
+      } : {}),
+      ...(capacityLease ? { capacityLease } : {}),
     };
     this.#put(record);
 
@@ -796,7 +936,24 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         repositoryCount: repositories.length,
       });
     } catch (error) {
-      record = { ...record, status: "failed", error: boundedError(error), lastActiveAt: new Date() };
+      try {
+        await sandboxFor(this.env, storedSessionTier(record), record.sandboxId).destroy();
+        if (record.capacityLease) {
+          this.ctx.storage.kv.put(`pending-release:${record.capacityLease.reservationId}`, record.capacityLease);
+          const lease = record.capacityLease;
+          record = { ...record, capacityLease: undefined };
+          this.#put(record);
+          await this.#releaseCapacity(lease);
+        }
+      } catch {
+        // Retain an exact heavy lease when destruction may be incomplete.
+      }
+      record = {
+        ...record,
+        status: record.capacityLease ? "stopping" : "failed",
+        error: boundedError(error),
+        lastActiveAt: new Date(),
+      };
       this.#put(record);
       logger.error("coding session startup could not be scheduled", {
         event: "coding.session.start.schedule.failed",
@@ -820,6 +977,38 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       throw new Error("Coding session is already changing state.");
     }
     assertRuntimeConfigured(this.env, storedSessionRuntime(record));
+    const reactivating = record.status === "stopped" || record.status === "failed";
+    if (reactivating) this.#assertActiveSessionLimit(sessionId);
+    const instanceTier = storedSessionTier(record);
+    const newSandboxId = crypto.randomUUID();
+    const newGeneration = record.development ? storedSessionGeneration(record) + 1 : 0;
+    let freshLease: CapacityReservationKey | undefined;
+    if (isHeavyTier(instanceTier) && !record.capacityLease) {
+      if (record.status !== "stopped" && record.status !== "failed") {
+        throw new Error("Heavy coding session has no capacity lease.");
+      }
+      const requested: CapacityReservationKey = {
+        tier: instanceTier,
+        reservationId: crypto.randomUUID(),
+        sessionId,
+        generation: newGeneration,
+        sandboxId: newSandboxId,
+        userId: owner.userId,
+      };
+      const reserved = await capacityFor(this.env, instanceTier).reserve(requested);
+      if (!sameCapacityKey(requested, reserved)) {
+        await this.#releaseCapacity(requested);
+        throw new Error("Capacity reservation returned a different reservation.");
+      }
+      freshLease = capacityKey(reserved);
+      try {
+        if (!this.#isRestartSourceCurrent(record)) throw new Error("Coding session restart was cancelled.");
+        this.#assertActiveSessionLimit(sessionId);
+      } catch (error) {
+        await this.#releaseCapacity(freshLease);
+        throw error;
+      }
+    }
     const stopping: SessionRecord = {
       ...record,
       status: "stopping",
@@ -829,47 +1018,59 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       editorProcessId: undefined,
       lastActiveAt: new Date(),
     };
-    this.#put(stopping);
-    let operation = stopping;
+    const restart: RestartRecord = {
+      sessionId,
+      owner,
+      oldSandboxId: record.sandboxId,
+      oldGeneration: storedSessionGeneration(record),
+      instanceTier,
+      ...(record.capacityLease ? {
+        oldLease: record.capacityLease,
+        replacement: { reservationId: crypto.randomUUID(), generation: newGeneration, sandboxId: newSandboxId },
+      } : {}),
+      ...(freshLease ? { newLease: freshLease } : {}),
+      newSandboxId,
+      newGeneration,
+      phase: "destroy",
+    };
+    // Arm recovery while the old record is still exact. A crash before the transaction leaves only
+    // a harmless empty alarm; a crash after it leaves durable, wakeable restart work.
     try {
-      await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).destroy();
-      let current = this.#get(sessionId);
-      if (current?.sandboxId !== record.sandboxId || current.status !== "stopping") {
-        throw new Error("Coding session restart was cancelled.");
-      }
-      const starting: SessionRecord = {
-        ...stopping,
-        status: "starting",
-        sandboxId: crypto.randomUUID(),
-        lastActiveAt: new Date(),
-      };
-      this.#put(starting);
-      operation = starting;
-      await this.#scheduleStart(starting, owner);
-      return publicSummary(starting);
-    } catch (error) {
-      const current = this.#get(sessionId);
-      if (current?.sandboxId !== operation.sandboxId || current.status !== operation.status) {
-        return publicSummary(current ?? operation);
-      }
-      const failed = { ...operation, status: "failed" as const, error: boundedError(error), lastActiveAt: new Date() };
-      this.#put(failed);
-      logger.error("coding session failed to restart", {
-        event: "coding.session.restart.failed", sessionId, userId: owner.userId, error,
+      await this.#requireRegistryRetryAlarm();
+      if (!this.#isRestartSourceCurrent(record)) throw new Error("Coding session restart was cancelled.");
+      this.ctx.storage.transactionSync(() => {
+        if (!this.#isRestartSourceCurrent(record)) throw new Error("Coding session restart was cancelled.");
+        if (reactivating) this.#assertActiveSessionLimit(sessionId);
+        this.#put(stopping);
+        this.ctx.storage.kv.put(`restart:${sessionId}`, restart);
       });
-      return publicSummary(failed);
+    } catch (error) {
+      if (freshLease) await this.#releaseCapacity(freshLease);
+      throw error;
     }
+    try {
+      await this.#resumeRestart(restart);
+    } catch (error) {
+      logger.warn("coding session restart will retry", {
+        event: "coding.session.restart.retry", sessionId, userId: owner.userId, error,
+      });
+    }
+    return publicSummary(this.#get(sessionId) ?? stopping);
   }
 
   /** Stops and destroys a session owned by this registry. */
   async stopSession(sessionId: string): Promise<void> {
     const record = this.#get(sessionId);
-    if (!record || record.status === "stopped") return;
+    if (!record) return;
+    if (this.ctx.storage.kv.get<RestartRecord>(`restart:${sessionId}`)) {
+      throw new Error("Coding session is already changing state.");
+    }
+    if (record.status === "stopped") return;
     const stopping: SessionRecord = { ...record, status: "stopping", lastActiveAt: new Date() };
     this.#put(stopping);
     if (record.status === "starting") {
       try {
-        await policyForSandbox(this.env, record.sandboxId).cancelSessionStartup(record.id, record.sandboxId);
+        await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).cancelSessionStartup(record.id, storedSessionGeneration(record), record.sandboxId);
       } catch (error) {
         logger.warn("coding session startup cancellation failed", {
           event: "coding.session.startup.cancel.failed",
@@ -879,11 +1080,17 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       }
     }
     try {
-      await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).destroy();
+      await sandboxFor(this.env, storedSessionTier(record), record.sandboxId).destroy();
+      if (record.capacityLease) await this.#releaseCapacity(record.capacityLease);
     } catch (error) {
       const current = this.#get(sessionId);
       if (current?.sandboxId === record.sandboxId && current.status === "stopping") {
-        this.#put({ ...stopping, status: "failed", error: boundedError(error), lastActiveAt: new Date() });
+        this.#put({
+          ...stopping,
+          status: record.capacityLease ? "stopping" : "failed",
+          error: boundedError(error),
+          lastActiveAt: new Date(),
+        });
       }
       logger.error("coding session failed to stop", {
         event: "coding.session.stop.failed", sessionId, error,
@@ -896,6 +1103,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       terminalId: undefined,
       shellTerminalId: undefined,
       editorProcessId: undefined,
+      capacityLease: undefined,
       lastActiveAt: new Date(),
     });
   }
@@ -903,7 +1111,11 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   /** Stops and hides a session from the default session list. */
   async archiveSession(sessionId: string): Promise<void> {
     const record = this.#get(sessionId);
-    if (!record || record.archivedAt) return;
+    if (!record) return;
+    if (this.ctx.storage.kv.get<RestartRecord>(`restart:${sessionId}`)) {
+      throw new Error("Coding session is already changing state.");
+    }
+    if (record.archivedAt) return;
     if (record.status !== "stopped") await this.stopSession(sessionId);
     const stopped = this.#get(sessionId) ?? record;
     this.#put({
@@ -928,20 +1140,23 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       throw new Error("Coding session is not running.");
     }
     if (terminal !== "opencode" && terminal !== "shell") throw new Error("Invalid terminal type.");
-    const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
+    const sandbox = sandboxFor(this.env, storedSessionTier(record), record.sandboxId);
     const primary = await this.#runningPrimaryTerminal(record);
     if (!primary) throw new Error("Coding session environment expired. Restart the session to continue.");
-    await policyForSandbox(this.env, record.sandboxId).configure({
+    await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).configure({
       sessionId: record.id,
       sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
       owner,
       repositories: record.repositories,
     });
     let terminalId = record.terminalId;
+    const generationKey = sessionGenerationKey(record);
     if (terminal === "shell") {
       let shell = record.shellTerminalId ? await sandbox.getTerminal(record.shellTerminalId) : undefined;
       if (!shell) {
-        let creation = this.#shellTerminalCreations.get(sessionId);
+        let creation = this.#shellTerminalCreations.get(generationKey);
         if (!creation) {
           creation = sandbox.createTerminal({
             command: ["/bin/bash", "-l"],
@@ -950,13 +1165,13 @@ export class CodingSessionRegistry extends DurableObject<Env> {
             rows: 40,
             bufferSize: TERMINAL_REPLAY_BUFFER_SIZE,
           }).then(created => created.id);
-          this.#shellTerminalCreations.set(sessionId, creation);
+          this.#shellTerminalCreations.set(generationKey, creation);
         }
         try {
           terminalId = await creation;
         } finally {
-          if (this.#shellTerminalCreations.get(sessionId) === creation) {
-            this.#shellTerminalCreations.delete(sessionId);
+          if (this.#shellTerminalCreations.get(generationKey) === creation) {
+            this.#shellTerminalCreations.delete(generationKey);
           }
         }
       } else {
@@ -965,6 +1180,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     }
     const current = this.#get(sessionId);
     if (!current || current.status !== "running" ||
+        storedSessionGeneration(current) !== storedSessionGeneration(record) ||
         current.sandboxId !== record.sandboxId || current.terminalId !== record.terminalId) {
       throw new Error("Coding session is not running.");
     }
@@ -976,11 +1192,14 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       terminalId,
       userId: owner.userId,
       sessionId: record.id,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
       terminalKind: terminal,
       expiresAt: expiresAt.valueOf(),
     });
     const latest = this.#get(sessionId);
     if (!latest || latest.status !== "running" ||
+        storedSessionGeneration(latest) !== storedSessionGeneration(record) ||
         latest.sandboxId !== record.sandboxId || latest.terminalId !== record.terminalId) {
       throw new Error("Coding session is not running.");
     }
@@ -1004,18 +1223,21 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     if (!record || record.status !== "running" || !record.terminalId) {
       throw new Error("Coding session is not running.");
     }
-    const sandbox = getSandbox(this.env.SESSION_SANDBOX, record.sandboxId);
+    const generationKey = sessionGenerationKey(record);
+    const sandbox = sandboxFor(this.env, storedSessionTier(record), record.sandboxId);
     if (!(await this.#runningPrimaryTerminal(record))) {
       throw new Error("Coding session environment expired. Restart the session to continue.");
     }
-    await policyForSandbox(this.env, record.sandboxId).configure({
+    await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).configure({
       sessionId: record.id,
       sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
       owner,
       repositories: record.repositories,
     });
 
-    let creation = this.#editorProcessCreations.get(sessionId);
+    let creation = this.#editorProcessCreations.get(generationKey);
     if (!creation) {
       creation = (async () => {
         const persistedProcessId = record.editorProcessId;
@@ -1062,12 +1284,14 @@ export class CodingSessionRegistry extends DurableObject<Env> {
               record.sandboxId,
               record.terminalId,
               "Browser VS Code failed to stop. Restart the session to continue.",
+              storedSessionGeneration(record),
             );
           }
           throw error;
         }
         const stillRunning = this.#get(sessionId);
         if (!stillRunning || stillRunning.status !== "running" ||
+            storedSessionGeneration(stillRunning) !== storedSessionGeneration(record) ||
             stillRunning.sandboxId !== record.sandboxId) {
           await stopProcess(process);
           throw new Error("Coding session is not running.");
@@ -1075,19 +1299,20 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         this.#put({ ...stillRunning, editorProcessId: process.id });
         return process.id;
       })();
-      this.#editorProcessCreations.set(sessionId, creation);
+      this.#editorProcessCreations.set(generationKey, creation);
     }
     let processId: string;
     try {
       processId = await creation;
     } finally {
-      if (this.#editorProcessCreations.get(sessionId) === creation) {
-        this.#editorProcessCreations.delete(sessionId);
+      if (this.#editorProcessCreations.get(generationKey) === creation) {
+        this.#editorProcessCreations.delete(generationKey);
       }
     }
 
     const current = this.#get(sessionId);
-    if (!current || current.status !== "running" || current.sandboxId !== record.sandboxId) {
+    if (!current || current.status !== "running" || storedSessionGeneration(current) !== storedSessionGeneration(record) ||
+        current.sandboxId !== record.sandboxId) {
       throw new Error("Coding session is not running.");
     }
     const token = await editorCapabilityToken(this.env);
@@ -1096,10 +1321,13 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       sandboxId: record.sandboxId,
       userId: owner.userId,
       sessionId: record.id,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
       expiresAt: expiresAt.valueOf(),
     });
     const latest = this.#get(sessionId);
-    if (!latest || latest.status !== "running" || latest.sandboxId !== record.sandboxId) {
+    if (!latest || latest.status !== "running" || storedSessionGeneration(latest) !== storedSessionGeneration(record) ||
+        latest.sandboxId !== record.sandboxId) {
       throw new Error("Coding session is not running.");
     }
     this.#put({ ...latest, editorProcessId: processId, lastActiveAt: new Date() });
@@ -1107,9 +1335,11 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   }
 
   /** Records that the persisted primary terminal can no longer serve this session. */
-  markTerminalUnavailable(sessionId: string, sandboxId: string, terminalId: string | undefined, reason: string): void {
+  markTerminalUnavailable(
+    sessionId: string, sandboxId: string, terminalId: string | undefined, reason: string, generation = 0,
+  ): void {
     const record = this.#get(sessionId);
-    if (!record || record.sandboxId !== sandboxId ||
+    if (!record || storedSessionGeneration(record) !== generation || record.sandboxId !== sandboxId ||
         terminalId !== undefined && record.terminalId !== terminalId || record.status !== "running") return;
     this.#put({
       ...record,
@@ -1125,17 +1355,17 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   async #runningPrimaryTerminal(record: SessionRecord): Promise<Terminal | undefined> {
     const terminalId = record.terminalId;
     if (!terminalId) {
-      this.markTerminalUnavailable(record.id, record.sandboxId, undefined, "Coding session environment expired. Restart the session to continue.");
+      this.markTerminalUnavailable(record.id, record.sandboxId, undefined, "Coding session environment expired. Restart the session to continue.", storedSessionGeneration(record));
       return undefined;
     }
-    const terminal = await getSandbox(this.env.SESSION_SANDBOX, record.sandboxId).getTerminal(terminalId);
+    const terminal = await sandboxFor(this.env, storedSessionTier(record), record.sandboxId).getTerminal(terminalId);
     if (!terminal) {
-      this.markTerminalUnavailable(record.id, record.sandboxId, terminalId, "Coding session environment expired. Restart the session to continue.");
+      this.markTerminalUnavailable(record.id, record.sandboxId, terminalId, "Coding session environment expired. Restart the session to continue.", storedSessionGeneration(record));
       return undefined;
     }
     const snapshot = await terminal.getSnapshot();
     if (snapshot.status !== "running") {
-      this.markTerminalUnavailable(record.id, record.sandboxId, terminalId, "Coding session terminal exited. Restart the session to continue.");
+      this.markTerminalUnavailable(record.id, record.sandboxId, terminalId, "Coding session terminal exited. Restart the session to continue.", storedSessionGeneration(record));
       return undefined;
     }
     return terminal;
@@ -1153,19 +1383,133 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     this.ctx.storage.kv.put(`session:${record.id}`, record);
   }
 
+  #isRestartSourceCurrent(source: SessionRecord): boolean {
+    const current = this.#get(source.id);
+    if (!current || current.archivedAt || current.status !== source.status ||
+        current.sandboxId !== source.sandboxId ||
+        storedSessionGeneration(current) !== storedSessionGeneration(source)) return false;
+    if (!current.capacityLease || !source.capacityLease) return current.capacityLease === source.capacityLease;
+    return sameCapacityKey(source.capacityLease, current.capacityLease as CapacityReservationRecord);
+  }
+
+  #assertActiveSessionLimit(excludedSessionId: string): void {
+    const active = [...this.#records()].filter(record => record.id !== excludedSessionId &&
+      !record.archivedAt && ["starting", "running", "stopping"].includes(record.status)).length;
+    if (active >= MAX_SESSIONS_PER_USER) {
+      throw new Error(`A user may have at most ${MAX_SESSIONS_PER_USER} active coding sessions.`);
+    }
+  }
+
+  async #resumeRestart(restart: RestartRecord): Promise<void> {
+    let operation = this.ctx.storage.kv.get<RestartRecord>(`restart:${restart.sessionId}`) ?? restart;
+    if (operation.phase === "destroy") {
+      await sandboxFor(this.env, operation.instanceTier, operation.oldSandboxId).destroy();
+      operation = { ...operation, phase: "transfer" };
+      this.ctx.storage.kv.put(`restart:${operation.sessionId}`, operation);
+    }
+    if (operation.phase === "transfer") {
+      let newLease = operation.newLease;
+      if (operation.oldLease) {
+        const replacement = operation.replacement;
+        if (!replacement) throw new Error("Capacity restart replacement is missing.");
+        newLease = capacityKey(await capacityFor(this.env, operation.oldLease.tier)
+          .transfer(operation.oldLease, replacement));
+      } else if (isHeavyTier(operation.instanceTier) && !newLease) {
+        const malformed = this.#get(operation.sessionId);
+        if (malformed && !malformed.archivedAt && malformed.status === "stopping" &&
+            malformed.sandboxId === operation.oldSandboxId &&
+            storedSessionGeneration(malformed) === operation.oldGeneration) {
+          this.#put({
+            ...malformed, status: "failed", error: "Coding session capacity lease is missing.",
+            lastActiveAt: new Date(),
+          });
+        }
+        this.ctx.storage.kv.delete(`restart:${operation.sessionId}`);
+        return;
+      }
+      operation = { ...operation, ...(newLease ? { newLease } : {}), phase: "schedule" };
+      this.ctx.storage.kv.put(`restart:${operation.sessionId}`, operation);
+    }
+
+    const current = this.#get(operation.sessionId);
+    if (!current || current.archivedAt) throw new Error("Coding session restart was cancelled.");
+    const isNewGeneration = current.sandboxId === operation.newSandboxId &&
+      storedSessionGeneration(current) === operation.newGeneration;
+    if (isNewGeneration && ["running", "failed", "stopped"].includes(current.status)) {
+      this.ctx.storage.kv.delete(`restart:${operation.sessionId}`);
+      return;
+    }
+    let starting: SessionRecord;
+    if (isNewGeneration && current.status === "starting") {
+      starting = current;
+    } else {
+      if (current.sandboxId !== operation.oldSandboxId ||
+          storedSessionGeneration(current) !== operation.oldGeneration || current.status !== "stopping") {
+        throw new Error("Coding session restart was cancelled.");
+      }
+      starting = {
+        ...current,
+        status: "starting",
+        sandboxId: operation.newSandboxId,
+        ...(current.development ? { generation: operation.newGeneration } : {}),
+        capacityLease: operation.newLease,
+        lastActiveAt: new Date(),
+      };
+      this.#put(starting);
+    }
+    await this.#scheduleStart(starting, operation.owner);
+    this.ctx.storage.kv.delete(`restart:${operation.sessionId}`);
+  }
+
+  #hasRegistryWork(): boolean {
+    for (const _entry of this.ctx.storage.kv.list({ prefix: "restart:" })) return true;
+    for (const _entry of this.ctx.storage.kv.list({ prefix: "pending-release:" })) return true;
+    return false;
+  }
+
+  #requireRegistryRetryAlarm(): Promise<void> {
+    return this.ctx.storage.setAlarm(Date.now() + 30_000);
+  }
+
+  async #scheduleRegistryRetry(): Promise<void> {
+    try {
+      await this.#requireRegistryRetryAlarm();
+    } catch (error) {
+      logger.error("coding session registry retry alarm could not be scheduled", {
+        event: "coding.session.registry.retry.schedule.failed", error,
+      });
+    }
+  }
+
+  async #releaseCapacity(lease: CapacityReservationKey): Promise<void> {
+    try {
+      await capacityFor(this.env, lease.tier).release(lease);
+      this.ctx.storage.kv.delete(`pending-release:${lease.reservationId}`);
+    } catch (error) {
+      this.ctx.storage.kv.put(`pending-release:${lease.reservationId}`, lease);
+      await this.#scheduleRegistryRetry();
+      logger.warn("coding session capacity release will retry", {
+        event: "coding.session.capacity.release.retry", sessionId: lease.sessionId, error,
+      });
+    }
+  }
+
   async #scheduleStart(record: SessionRecord, owner: CodingSessionOwner): Promise<void> {
     const runtime = storedSessionRuntime(record);
     assertRuntimeConfigured(this.env, runtime);
-    const policy = policyForSandbox(this.env, record.sandboxId);
+    const policy = policyForSandbox(this.env, storedSessionTier(record), record.sandboxId);
     await policy.configure({
       sessionId: record.id,
       sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
       runtime,
       owner,
       repositories: record.repositories,
     });
     const now = Date.now();
     await policy.startSessionStartup({
+      generation: storedSessionGeneration(record),
       phase: "authorize",
       nextRepositoryIndex: 0,
       attempt: 0,
@@ -1175,9 +1519,15 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   }
 
   /** Applies successful asynchronous startup only to the current starting generation. */
-  async startupSucceeded(sessionId: string, sandboxId: string, terminalId: string): Promise<boolean> {
+  async startupSucceeded(sessionId: string, generation: number, sandboxId: string, terminalId: string): Promise<boolean> {
     const current = this.#get(sessionId);
-    if (!current || current.archivedAt || current.sandboxId !== sandboxId || current.status !== "starting") return false;
+    if (!current || current.archivedAt || storedSessionGeneration(current) !== generation || current.sandboxId !== sandboxId || current.status !== "starting") return false;
+    if (current.capacityLease) {
+      const activated = await capacityFor(this.env, current.capacityLease.tier).activate(current.capacityLease);
+      if (!sameCapacityKey(current.capacityLease, activated)) {
+        throw new Error("Capacity activation returned a different reservation.");
+      }
+    }
     const running = { ...current, status: "running" as const, terminalId, lastActiveAt: new Date() };
     this.#put(running);
     logger.info("coding session environment ready", {
@@ -1189,18 +1539,34 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   }
 
   /** Applies asynchronous startup failure only to the current starting generation. */
-  startupFailed(sessionId: string, sandboxId: string, error: string): boolean {
+  async startupFailed(
+    sessionId: string, generation: number, sandboxId: string, error: string, destroyed: boolean,
+  ): Promise<boolean> {
     const current = this.#get(sessionId);
-    if (!current || current.archivedAt || current.sandboxId !== sandboxId || current.status !== "starting") return false;
+    if (!current || current.archivedAt || storedSessionGeneration(current) !== generation ||
+        current.sandboxId !== sandboxId || !["starting", "failed", "stopping"].includes(current.status)) return false;
+    if (!destroyed) {
+      this.#put({
+        ...current, status: current.capacityLease ? "stopping" : "failed",
+        terminalId: undefined, shellTerminalId: undefined,
+        editorProcessId: undefined, error, lastActiveAt: new Date(),
+      });
+      return true;
+    }
+    if (current.capacityLease) {
+      this.ctx.storage.kv.put(`pending-release:${current.capacityLease.reservationId}`, current.capacityLease);
+    }
     this.#put({
       ...current,
       status: "failed",
       terminalId: undefined,
       shellTerminalId: undefined,
       editorProcessId: undefined,
+      capacityLease: undefined,
       error,
       lastActiveAt: new Date(),
     });
+    if (current.capacityLease) await this.#releaseCapacity(current.capacityLease);
     return true;
   }
 }
@@ -1239,7 +1605,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     owner: CodingSessionOwner,
     request: CreateCodingSessionRequest,
   ): Promise<CodingSessionDevelopmentPlan> {
-    return registryFor(this.ctx, owner.userId).preflightSession(request);
+    return registryFor(this.ctx, owner.userId).preflightSession(request, owner.userId);
   }
 
   /** Returns persisted development lifecycle for one owned session. */
@@ -1345,11 +1711,15 @@ async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Pr
     });
     return new Response("Attachment capability is invalid or expired", { status: 403 });
   }
+  if (!(await registryFor(ctx, ticket.userId).isCurrentSessionGeneration(
+    ticket.sessionId, ticket.sandboxId, ticket.generation ?? 0))) {
+    return new Response("Terminal is no longer available", { status: 410 });
+  }
   try {
-    const terminal = await getSandbox(env.SESSION_SANDBOX, ticket.sandboxId).getTerminal(ticket.terminalId);
+    const terminal = await sandboxFor(env, storedTicketTier(ticket), ticket.sandboxId).getTerminal(ticket.terminalId);
     if (!terminal) {
       if (ticket.terminalKind === "opencode") {
-        await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session environment expired. Restart the session to continue.");
+        await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session environment expired. Restart the session to continue.", ticket.generation ?? 0);
       }
       logger.warn("coding session terminal attach failed", {
         event: "coding.session.terminal.attach.failed",
@@ -1363,7 +1733,7 @@ async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Pr
     const snapshot = await terminal.getSnapshot();
     if (snapshot.status !== "running") {
       if (ticket.terminalKind === "opencode") {
-        await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session terminal exited. Restart the session to continue.");
+        await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session terminal exited. Restart the session to continue.", ticket.generation ?? 0);
       }
       logger.warn("coding session terminal attach failed", {
         event: "coding.session.terminal.attach.failed",
@@ -1418,7 +1788,7 @@ async function handleEditorHttp(
   const ticket = await (await editorTicketFor(env, token)).getEditorTicket(Date.now());
   if (!ticket) return new Response("Editor capability is invalid or expired", { status: 403 });
   if (!(await registryFor(ctx, ticket.userId).isCurrentSessionGeneration(
-    ticket.sessionId, ticket.sandboxId))) {
+    ticket.sessionId, ticket.sandboxId, ticket.generation ?? 0))) {
     return new Response("Editor session is no longer available", { status: 410 });
   }
 
@@ -1436,7 +1806,7 @@ async function handleEditorHttp(
     body: request.body,
     redirect: "manual",
   });
-  const sandbox = getSandbox(env.SESSION_SANDBOX, ticket.sandboxId);
+  const sandbox = sandboxFor(env, storedTicketTier(ticket), ticket.sandboxId);
   try {
     if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       return await sandbox.wsConnect(proxyRequest, EDITOR_PORT);
@@ -1480,8 +1850,10 @@ function policyFor(env: Env, containerId: string): DurableObjectStub<CodingSessi
   return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`container:${containerId}`));
 }
 
-function policyForSandbox(env: Env, sandboxId: string): DurableObjectStub<CodingSessionPolicy> {
-  return policyFor(env, env.SESSION_SANDBOX.idFromName(sandboxId).toString());
+function policyForSandbox(
+  env: Env, tier: CodingSessionInstanceTier, sandboxId: string,
+): DurableObjectStub<CodingSessionPolicy> {
+  return policyFor(env, sandboxNamespace(env, tier).idFromName(sandboxId).toString());
 }
 
 async function ticketFor(env: Env, token: string): Promise<DurableObjectStub<CodingSessionPolicy>> {
@@ -1492,6 +1864,59 @@ async function ticketFor(env: Env, token: string): Promise<DurableObjectStub<Cod
 async function editorTicketFor(env: Env, token: string): Promise<DurableObjectStub<CodingSessionPolicy>> {
   const digest = await sha256Hex(new TextEncoder().encode(token));
   return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`editor-ticket:${digest}`));
+}
+
+function isHeavyTier(tier: CodingSessionInstanceTier): tier is HeavySessionTier {
+  return (HEAVY_SESSION_TIERS as readonly CodingSessionInstanceTier[]).includes(tier);
+}
+
+function capacityKey(record: CapacityReservationRecord): CapacityReservationKey {
+  const { tier, reservationId, sessionId, generation, sandboxId, userId } = record;
+  return { tier, reservationId, sessionId, generation, sandboxId, userId };
+}
+
+function sameCapacityKey(key: CapacityReservationKey, record: CapacityReservationRecord): boolean {
+  return key.tier === record.tier && key.reservationId === record.reservationId &&
+    key.sessionId === record.sessionId && key.generation === record.generation &&
+    key.sandboxId === record.sandboxId && key.userId === record.userId;
+}
+
+function sessionGenerationKey(record: SessionRecord): string {
+  return `${record.id}:${record.sandboxId}:${storedSessionGeneration(record)}`;
+}
+
+function storedSessionGeneration(record: SessionRecord): number {
+  return record.generation ?? 0;
+}
+
+function storedSessionTier(record: SessionRecord): CodingSessionInstanceTier {
+  return record.instanceTier ?? record.development?.instanceTier ?? "standard-1";
+}
+
+function storedPolicyTier(policy: SessionPolicy): CodingSessionInstanceTier {
+  return policy.instanceTier ?? "standard-1";
+}
+
+function storedTicketTier(ticket: AttachTicket | EditorTicket): CodingSessionInstanceTier {
+  return ticket.instanceTier ?? "standard-1";
+}
+
+function sandboxNamespace(
+  env: Env,
+  tier: CodingSessionInstanceTier,
+): DurableObjectNamespace<CodingSessionSandbox> {
+  if (tier === "standard-2") return env.SESSION_SANDBOX_STANDARD_2 as unknown as DurableObjectNamespace<CodingSessionSandbox>;
+  if (tier === "standard-3") return env.SESSION_SANDBOX_STANDARD_3 as unknown as DurableObjectNamespace<CodingSessionSandbox>;
+  if (tier === "standard-4") return env.SESSION_SANDBOX_STANDARD_4 as unknown as DurableObjectNamespace<CodingSessionSandbox>;
+  return env.SESSION_SANDBOX;
+}
+
+function sandboxFor(env: Env, tier: CodingSessionInstanceTier, sandboxId: string) {
+  return getSandbox(sandboxNamespace(env, tier), sandboxId);
+}
+
+function capacityFor(env: Env, tier: HeavySessionTier): DurableObjectStub<CodingSessionCapacity> {
+  return env.SESSION_CAPACITY.getByName(`tier:${tier}`);
 }
 
 function storedSessionRuntime(record: SessionRecord): CodingSessionRuntime {
@@ -1505,6 +1930,9 @@ function publicSummary(record: SessionRecord): CodingSessionSummary {
     shellTerminalId: _shellTerminalId,
     editorProcessId: _editorProcessId,
     primeAgent: _primeAgent,
+    generation: _generation,
+    instanceTier: _instanceTier,
+    capacityLease: _capacityLease,
     ...summary
   } = record;
   return { ...summary, runtime: storedSessionRuntime(record) };

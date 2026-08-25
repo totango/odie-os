@@ -78,10 +78,16 @@ describe("coding session terminal attach HTTP handler", () => {
 
     const first = await sessions.default.fetch(new Request("https://example.test/gatekeeper/sessions/attach/token?cursor=abc", {
       headers: { Upgrade: "websocket", Origin: "https://example.test" },
-    }), env, { exports: {} } as any);
+    }), env, { exports: { CodingSessionRegistry: {
+      idFromName: (id: string) => id,
+      get: () => ({ isCurrentSessionGeneration: vi.fn(() => true) }),
+    } } } as any);
     const second = await sessions.default.fetch(new Request("https://example.test/gatekeeper/sessions/attach/token", {
       headers: { Upgrade: "websocket", Origin: "https://example.test" },
-    }), env, { exports: {} } as any);
+    }), env, { exports: { CodingSessionRegistry: {
+      idFromName: (id: string) => id,
+      get: () => ({ isCurrentSessionGeneration: vi.fn(() => true) }),
+    } } } as any);
 
     expect(first.status).toBe(200);
     expect(await first.json()).toMatchObject({ cursor: "abc", cols: 120, rows: 40 });
@@ -107,12 +113,12 @@ describe("coding session terminal attach HTTP handler", () => {
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ consumeTicket }) },
       SESSION_SANDBOX: {},
     } as any, {
-      exports: { CodingSessionRegistry: { idFromName: (id: string) => id, get: () => ({ markTerminalUnavailable }) } },
+      exports: { CodingSessionRegistry: { idFromName: (id: string) => id, get: () => ({ isCurrentSessionGeneration: vi.fn(() => true), markTerminalUnavailable }) } },
     } as any);
 
     expect(response.status).toBe(410);
     expect(markTerminalUnavailable).toHaveBeenCalledWith(
-      "session-1", "sandbox-1", "term-primary", "Coding session environment expired. Restart the session to continue.");
+      "session-1", "sandbox-1", "term-primary", "Coding session environment expired. Restart the session to continue.", 0);
   });
 });
 
@@ -206,7 +212,7 @@ describe("coding session browser editor HTTP gateway", () => {
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
     expect(response.headers.get("Service-Worker-Allowed")).toBe(`/c/${token}/`);
-    expect(isCurrentSessionGeneration).toHaveBeenCalledWith("session-1", "sandbox-1");
+    expect(isCurrentSessionGeneration).toHaveBeenCalledWith("session-1", "sandbox-1", 0);
   });
 
   it("keeps every internal redirect behind the editor capability prefix", async () => {
