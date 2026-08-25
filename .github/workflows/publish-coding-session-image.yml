@@ -3,13 +3,8 @@ name: Publish coding session candidate image
 on:
   workflow_dispatch:
 
-permissions:
-  actions: read
-  contents: read
-  packages: write
-
 concurrency:
-  group: publish-coding-session-image-${{ github.sha }}
+  group: publish-coding-session-image
   cancel-in-progress: false
 
 env:
@@ -26,6 +21,10 @@ env:
 
 jobs:
   publish:
+    permissions:
+      actions: read
+      contents: read
+      packages: write
     if: github.repository == 'totango/odie-os' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -114,7 +113,7 @@ jobs:
             packages/gatekeeper-sessions/pi-image/test-image-network-none.sh "$source_ref"
 
       - name: Install Wrangler
-        run: npm install --global wrangler@4.119.0
+        run: npm install --global wrangler@4.120.0
 
       - name: Mirror image to Cloudflare registry
         env:
@@ -149,12 +148,210 @@ jobs:
           printf "Mirrored unpromoted Cloudflare candidate: \`%s\`\n" "$cloudflare_ref" >> "$GITHUB_STEP_SUMMARY"
           printf 'Candidate only: do not update a production Wrangler digest until the native Sandbox SDK canary passes.\n' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload immutable digests
+      - name: Record candidate source provenance
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node packages/gatekeeper-sessions/canary/config.mjs provenance \
+            --ghcr-file image-digest.txt \
+            --cloudflare-file cloudflare-image-digest.txt \
+            --out source-provenance.json
+
+      - name: Upload immutable candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coding-session-image-candidate-${{ github.sha }}
           path: |
             image-digest.txt
             cloudflare-image-digest.txt
+            source-provenance.json
           if-no-files-found: error
           retention-days: 90
+
+  canary:
+    name: Native Sandbox candidate canary
+    permissions:
+      actions: read
+      contents: read
+    needs: publish
+    if: github.repository == 'totango/odie-os' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and dependencies
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: true
+          run-install: true
+
+      - name: Download immutable candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: coding-session-image-candidate-${{ github.sha }}
+          path: candidate-artifact
+
+      - name: Reverify current main and generate isolated config
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          test "$main_sha" = "$GITHUB_SHA"
+          conclusion="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&status=completed&per_page=20" --jq '[.workflow_runs[] | select(.head_branch == "main")][0].conclusion // ""')"
+          test "$conclusion" = "success"
+          config="$RUNNER_TEMP/coding-session-native-canary.json"
+          node packages/gatekeeper-sessions/canary/config.mjs generate \
+            --ghcr-file candidate-artifact/image-digest.txt \
+            --cloudflare-file candidate-artifact/cloudflare-image-digest.txt \
+            --provenance-file candidate-artifact/source-provenance.json \
+            --out "$config"
+          printf 'CANARY_CONFIG=%s\n' "$config" >> "$GITHUB_ENV"
+
+      - name: Deploy isolated standard-3 canary
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: pnpm exec wrangler deploy --config "$CANARY_CONFIG"
+
+      - name: Install one-shot invocation secret
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          token="$(openssl rand -hex 32)"
+          printf '::add-mask::%s\n' "$token"
+          printf '%s' "$token" | pnpm exec wrangler secret put CANARY_TOKEN --config "$CANARY_CONFIG"
+          printf 'CANARY_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
+
+      - name: Invoke and validate one-shot native canary
+        run: |
+          worker="odie-coding-canary-${GITHUB_RUN_ID}"
+          curl --silent --show-error --fail-with-body --max-time 900 \
+            --request POST \
+            --header "Authorization: Bearer $CANARY_TOKEN" \
+            "https://${worker}.odie-os.workers.dev/run" > "$RUNNER_TEMP/canary-result.json"
+          candidate="$(< candidate-artifact/cloudflare-image-digest.txt)"
+          jq --exit-status \
+            --arg sha "$GITHUB_SHA" \
+            --arg candidate "$candidate" \
+            'keys == ["candidateImage", "checks", "ok", "sourceSha"] and
+             .ok == true and .sourceSha == $sha and .candidateImage == $candidate and
+             .checks == ["node", "javascript", "typescript", "terminal", "code-server", "cleanup"]' \
+            "$RUNNER_TEMP/canary-result.json" >/dev/null
+          printf 'Native standard-3 Sandbox canary passed and destroyed its sandbox.\n' >> "$GITHUB_STEP_SUMMARY"
+
+  cleanup:
+    name: Delete native canary control-plane resources
+    permissions:
+      contents: read
+    needs: [publish, canary]
+    if: ${{ always() && github.repository == 'totango/odie-os' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      # This job performs its own exact checkout and frozen install even when canary setup or testing
+      # failed. Whole-workflow force cancellation remains the documented residual in canary/README.md.
+      - name: Check out exact candidate source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up pinned Wrangler from the frozen lockfile
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: true
+          run-install: true
+
+      - name: Delete exact container application and Worker, then prove absence
+        if: ${{ always() }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          worker="odie-coding-canary-${GITHUB_RUN_ID}"
+          application="${worker}-container"
+          [[ "$worker" =~ ^odie-coding-canary-[0-9]+$ ]] || exit 1
+          failures=0
+
+          lookup_file="$RUNNER_TEMP/exact-canary-application.json"
+          lookup_application() {
+            node scripts/coding-session-canary-applications.mjs \
+              --name "$application" --out "$lookup_file"
+          }
+          if lookup_application; then
+            application_id="$(jq --exit-status --raw-output \
+              'if keys == ["applicationId"] and (.applicationId == null or (.applicationId | type == "string")) then .applicationId // "" else error("malformed lookup") end' \
+              "$lookup_file")" || {
+                application_id=""
+                failures=1
+              }
+          else
+            application_id=""
+            failures=1
+          fi
+          if [ -n "$application_id" ]; then
+            application_delete_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --request DELETE \
+              --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/containers/applications/$application_id")" || \
+                application_delete_status=000
+            case "$application_delete_status" in 200|202|204|404) ;; *) failures=1 ;; esac
+          fi
+
+          worker_delete_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --request DELETE \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/services/$worker?force=true")" || \
+              worker_delete_status=000
+          case "$worker_delete_status" in 200|202|204|404) ;; *) failures=1 ;; esac
+
+          application_absent=false
+          worker_absent=false
+          for _ in $(seq 1 12); do
+            application_absent=false
+            worker_absent=false
+            if lookup_application; then
+              poll_application_id="$(jq --exit-status --raw-output \
+                'if keys == ["applicationId"] and (.applicationId == null or (.applicationId | type == "string")) then .applicationId // "" else error("malformed lookup") end' \
+                "$lookup_file")" || {
+                  poll_application_id="lookup-failed"
+                  failures=1
+                }
+              if [ -z "$poll_application_id" ]; then application_absent=true; fi
+            else
+              failures=1
+            fi
+            status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/services/$worker")" || status=000
+            if [ "$status" = 404 ]; then worker_absent=true; fi
+            if $application_absent && $worker_absent; then break; fi
+            sleep 5
+          done
+          $application_absent || failures=1
+          $worker_absent || failures=1
+          if [ "$failures" -ne 0 ]; then
+            printf 'Exact native canary teardown or absence proof failed. Follow canary/README.md.\n' >&2
+            exit 1
+          fi
+          printf 'Proved exact container application and Worker are absent.\n' >> "$GITHUB_STEP_SUMMARY"
