@@ -28,4 +28,14 @@ describe("native canary workflow cleanup", () => {
     expect(cleanup).toContain("permissions:\n      contents: read");
     expect(cleanup).not.toContain("packages: write");
   });
+
+  it("requires the current BuildKit SLSA v1 provenance contract", () => {
+    expect(workflow).toContain("https://slsa.dev/provenance/v1");
+    expect(workflow).toContain(".SLSA).buildDefinition.buildType");
+    expect(workflow).toContain(
+      "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md",
+    );
+    expect(workflow).not.toContain("https://slsa.dev/provenance/v0.2");
+    expect(workflow).not.toContain("https://mobyproject.org/buildkit@v1");
+  });
 });

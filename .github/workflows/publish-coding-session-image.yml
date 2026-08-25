@@ -97,12 +97,12 @@ jobs:
             <<<"$index_json")"
           docker buildx imagetools inspect "$IMAGE@$attestation_digest" --raw \
             | jq --exit-status \
-              '[.layers[].annotations["in-toto.io/predicate-type"]] as $types | ($types | index("https://spdx.dev/Document")) != null and ($types | index("https://slsa.dev/provenance/v0.2")) != null' \
+              '[.layers[].annotations["in-toto.io/predicate-type"]] as $types | ($types | index("https://spdx.dev/Document")) != null and ($types | index("https://slsa.dev/provenance/v1")) != null' \
               >/dev/null
           docker buildx imagetools inspect "$source_ref" --format '{{json .SBOM}}' \
             | jq --exit-status '(.SPDX // ."linux/amd64".SPDX).spdxVersion == "SPDX-2.3"' >/dev/null
           docker buildx imagetools inspect "$source_ref" --format '{{json .Provenance}}' \
-            | jq --exit-status '(.SLSA // ."linux/amd64".SLSA).buildType == "https://mobyproject.org/buildkit@v1"' >/dev/null
+            | jq --exit-status '(.SLSA // ."linux/amd64".SLSA).buildDefinition.buildType == "https://github.com/moby/buildkit/blob/master/docs/attestations/slsa-definitions.md"' >/dev/null
 
       - name: Smoke image without network access
         run: |
