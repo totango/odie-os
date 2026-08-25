@@ -113,6 +113,8 @@ describe('RequiredConnectionsGate', () => {
 
     expect(admin.textContent).toContain('Unlocked app')
     expect(admin.textContent).not.toContain('Connect required services')
+    expect(api.getRequiredConnectionStatuses).not.toHaveBeenCalled()
+    expect(api.subscribeConnectedAccounts).not.toHaveBeenCalled()
   })
 
   it('fails closed on gated routes when required status cannot be checked', async () => {

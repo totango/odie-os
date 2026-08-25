@@ -40,7 +40,7 @@ type JsonRpcRequest = {
 };
 
 type RemoteScenario = {
-  listStatus?: 401 | 403;
+  listStatus?: 401 | 403 | 429;
   omitTool?: string;
   toolError?: { name: string; message: string };
 };
@@ -103,6 +103,7 @@ function odieOauthAndMcpHandler(seen: string[]): Handler {
       if (body.method === "tools/list") {
         if (remoteScenario.listStatus === 401) return new Response("token expired", { status: 401 });
         if (remoteScenario.listStatus === 403) return new Response("forbidden", { status: 403 });
+        if (remoteScenario.listStatus === 429) return new Response("rate limited", { status: 429 });
         return rpcResult(body.id, {tools: allRemoteTools(remoteScenario)});
       }
       if (body.method === "tools/call") {
@@ -299,7 +300,7 @@ describe("ODIE MCP integration", () => {
       });
       expect(seenNetwork).toContain("POST https://auth.test/register");
       expect(seenNetwork).toContain("POST https://auth.test/token");
-      expect(seenNetwork.filter(call => call === `POST ${MCP_ENDPOINT}`).length).toBeGreaterThanOrEqual(5);
+      expect(seenNetwork).toContain(`POST ${MCP_ENDPOINT}`);
     });
   });
 
@@ -324,41 +325,31 @@ describe("ODIE MCP integration", () => {
     });
   });
 
-  it("surfaces expired credentials and 403 access failures while inspecting the ambient binding", async () => {
+  it("uses the cached catalog during remote access failures without locking the application", async () => {
+    remoteScenario = {};
     await withSession(async publicApi => {
       using api = await signUp(publicApi, nextUsernames("odiefail")[0]);
       await connectOdieKgAccount(api);
       using overseer = await api.newGadget();
       using gatekeeper = await overseer.getGatekeeperById(0);
+      await expect(gatekeeper.describe()).resolves.toMatchObject({
+        snippet: expect.stringMatching(/36 organization-bound/i),
+      });
 
       remoteScenario = { listStatus: 403 };
       await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
         vendorId: VENDOR_ID,
-        state: "unavailable",
+        state: "healthy",
         accountId: expect.any(Number),
-        message: expect.stringMatching(/not authorized for this organization/i),
       })]);
       await expect(gatekeeper.describe()).resolves.toMatchObject({
         suggestedBindingName: "TOTANGO_KG",
-        snippet: expect.stringMatching(/refused access|HTTP 403|does not have access/i),
-      });
-
-      remoteScenario = { listStatus: 401 };
-      await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
-        vendorId: VENDOR_ID,
-        state: "expired",
-        accountId: expect.any(Number),
-      })]);
-      const expiredAccount = (await listConnectedAccounts(api)).find(candidate => candidate.vendorId === VENDOR_ID);
-      expect(expiredAccount?.credentialsValid).toBe(false);
-      await expect(gatekeeper.describe()).resolves.toMatchObject({
-        suggestedBindingName: "TOTANGO_KG",
-        snippet: expect.stringMatching(/reconnect the account/i),
+        snippet: expect.stringMatching(/36 organization-bound/i),
       });
     });
   });
 
-  it("fails closed when the remote catalog omits any required read tool", async () => {
+  it("keeps the application available when the remote catalog is incomplete", async () => {
     remoteScenario = { omitTool: "odie-kg-query" };
     await withSession(async publicApi => {
       using api = await signUp(publicApi, nextUsernames("odiemissing")[0]);
@@ -366,11 +357,31 @@ describe("ODIE MCP integration", () => {
       await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
         vendorId: VENDOR_ID,
         accountId: account.id,
-        state: "expired",
-        message: expect.stringMatching(/all 36 read-only tools/i),
+        state: "healthy",
       })]);
-      await expect(api.newGadget()).rejects
-        .toThrow(/required connections must be healthy/i);
+      using overseer = await api.newGadget();
+      using gatekeeper = await overseer.getGatekeeperById(0);
+      await expect(gatekeeper.describe()).resolves.toMatchObject({
+        suggestedBindingName: "TOTANGO_KG",
+        snippet: expect.stringMatching(/reconnect the account/i),
+      });
+    });
+  });
+
+  it("does not lock the application when ODIE MCP rate-limits catalog discovery", async () => {
+    await withSession(async publicApi => {
+      using api = await signUp(publicApi, nextUsernames("odieratelimit")[0]);
+      const { account } = await connectOdieKgAccount(api);
+      remoteScenario = { listStatus: 429 };
+
+      await expect(api.getRequiredConnectionStatuses()).resolves.toEqual([expect.objectContaining({
+        vendorId: VENDOR_ID,
+        accountId: account.id,
+        state: "healthy",
+      })]);
+      using overseer = await api.newGadget();
+      using gatekeeper = await overseer.getGatekeeperById(0);
+      await expect(gatekeeper.describe()).resolves.toMatchObject({ suggestedBindingName: "TOTANGO_KG" });
     });
   });
 });
