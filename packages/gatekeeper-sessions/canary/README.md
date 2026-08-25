@@ -16,6 +16,12 @@ one of `node`, `javascript`, `typescript`, `terminal`, `code-server`, `cleanup`,
 Caught messages, sandbox output, resource IDs, and other untrusted details are never returned or
 printed by the workflow. Internal stage errors retain their causes for focused tests and debugging.
 
+A newly deployed workers.dev route or installed `CANARY_TOKEN` can briefly lag at the public edge.
+The workflow retries only exact HTTP 404 or 401 responses, at most six attempts with five seconds
+between attempts. Both happen before the Worker reaches the one-shot claim or any Sandbox call, so
+these retries cannot duplicate canary work. Transport errors, malformed responses, and every other
+HTTP status fail without retry.
+
 ## Force-cancel residual and manual cleanup
 
 A failed or timed-out canary still reaches the independent `always()` cleanup job. GitHub can,
