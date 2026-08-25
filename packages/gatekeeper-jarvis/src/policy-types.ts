@@ -34,7 +34,7 @@ export type JarvisAllowedTool = typeof JARVIS_ALLOWED_TOOLS[number];
 
 /** JARVIS tools administrators may configure through the management application. */
 export const JARVIS_SETTINGS_TOOLS: readonly JarvisAllowedTool[] = JARVIS_ALLOWED_TOOLS.filter(
-  name => name !== "repo_knowledge" && name !== "jarvis_call_prod_tool"
+  name => name !== "repo_knowledge"
 );
 
 /** Deployment-global immutable-snapshot policy for JARVIS chat and code tool access. */
