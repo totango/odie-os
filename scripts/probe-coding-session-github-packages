@@ -1,0 +1,69 @@
+#!/bin/sh
+
+startup_error() {
+  set +x
+  printf '%s\n' "{\"schema\":\"odie.coding-session.github-packages-transport-evidence\",\"schemaVersion\":1,\"authority\":{\"manifestSha256\":null,\"sourceSha256\":null,\"artifacts\":[]},\"ok\":false,\"error\":{\"code\":\"$1\"}}"
+  exit 1
+}
+
+case $- in
+  *x*) startup_error XTRACE_UNSAFE ;;
+esac
+set -eu
+
+# Clear process-startup hazards before invoking any child process.
+unset NODE_DEBUG NODE_DEBUG_NATIVE NODE_OPTIONS NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED
+unset SSLKEYLOGFILE SSL_CERT_DIR SSL_CERT_FILE HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+unset http_proxy https_proxy all_proxy no_proxy LD_PRELOAD LD_AUDIT
+unset DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH BASH_ENV ENV
+clean_path=/usr/bin:/bin
+PATH=$clean_path
+export PATH
+
+if [ "$#" -lt 4 ] || [ "$1" != "--node" ] || [ "$3" != "--node-sha256" ]; then
+  startup_error LAUNCH_ARGUMENTS_INVALID
+fi
+node_bin=$2
+expected_digest=$4
+shift 4
+case "$node_bin" in
+  /*) ;;
+  *) startup_error NODE_PATH_INVALID ;;
+esac
+if [ ! -f "$node_bin" ] || [ ! -x "$node_bin" ]; then
+  startup_error NODE_PATH_INVALID
+fi
+case "$expected_digest" in
+  *[!0-9a-f]*|'') startup_error NODE_DIGEST_INVALID ;;
+esac
+if [ "${#expected_digest}" -ne 64 ]; then
+  startup_error NODE_DIGEST_INVALID
+fi
+
+if [ -x /usr/bin/shasum ]; then
+  digest_output=$(/usr/bin/env -i PATH="$clean_path" /usr/bin/shasum -a 256 -- "$node_bin" 2>/dev/null) ||
+    startup_error NODE_DIGEST_UNAVAILABLE
+elif [ -x /usr/bin/sha256sum ]; then
+  digest_output=$(/usr/bin/env -i PATH="$clean_path" /usr/bin/sha256sum -- "$node_bin" 2>/dev/null) ||
+    startup_error NODE_DIGEST_UNAVAILABLE
+else
+  startup_error NODE_DIGEST_UNAVAILABLE
+fi
+actual_digest=${digest_output%% *}
+if [ "$actual_digest" != "$expected_digest" ]; then
+  startup_error NODE_DIGEST_MISMATCH
+fi
+
+case "$0" in
+  */*) script_dir=${0%/*} ;;
+  *) script_dir=. ;;
+esac
+script_dir=$(CDPATH= cd -P -- "$script_dir" && pwd)
+node_major=$(/usr/bin/env -i PATH="$clean_path" ODIE_GITHUB_PACKAGES_PROBE_CLEAN=1 \
+  "$node_bin" -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)
+if [ "$node_major" != 24 ]; then
+  startup_error NODE_VERSION_INVALID
+fi
+
+exec /usr/bin/env -i PATH="$clean_path" ODIE_GITHUB_PACKAGES_PROBE_CLEAN=1 \
+  "$node_bin" "$script_dir/probe-coding-session-github-packages.mjs" "$@"
