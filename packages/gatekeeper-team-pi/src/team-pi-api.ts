@@ -164,7 +164,7 @@ export async function revokeRefreshToken(config: TeamPiConfig, refreshToken: str
 
 export class TeamPiApi {
   constructor(
-    private readonly getCredentials: () => Promise<TeamPiApiCredentials>,
+    private readonly getCredentials: (forceRefresh?: boolean) => Promise<TeamPiApiCredentials>,
     private readonly baseUrl: string,
   ) {}
 
@@ -329,95 +329,109 @@ export class TeamPiApi {
 
   private async request(method: "GET" | "POST" | "PUT" | "PATCH", path: string, params?: URLSearchParams, body?: unknown, maxStringLength = MAX_STRING_LENGTH): Promise<unknown> {
     const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-    const credentials = await abortable(this.getCredentials(), signal, "Team PI request timed out");
     const url = new URL(`${this.baseUrl}${path}`);
     if (params) url.search = params.toString();
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${credentials.accessToken}`,
-      Accept: "application/json",
-    };
-    if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
     let requestBody: string | undefined;
     if (body !== undefined) {
       requestBody = JSON.stringify(boundJsonValueWithLimit(body, 0, maxStringLength));
       if (new TextEncoder().encode(requestBody).byteLength > MAX_REQUEST_BYTES) {
         throw new TeamPiApiError("Team PI request body exceeded size limit");
       }
-      headers["Content-Type"] = "application/json";
     }
-    let response: Response;
-    try {
-      const requestInit: RequestInit = {
-        method,
-        redirect: "manual",
-        headers,
-        signal,
+    for (let attempt = 0; attempt < 2; ++attempt) {
+      const credentials = await abortable(this.getCredentials(attempt > 0), signal, "Team PI request timed out");
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${credentials.accessToken}`,
+        Accept: "application/json",
       };
-      if (method !== "GET") requestInit.body = requestBody;
-      response = await fetch(url, requestInit);
-    } catch (error) {
-      if (signal.aborted) throw new TeamPiApiError("Team PI request timed out");
-      throw error;
-    }
-    let json: Record<string, unknown>;
-    try {
-      json = await boundedJson(response, maxStringLength);
-    } catch (error) {
-      if (signal.aborted) throw new TeamPiApiError("Team PI request timed out", response.status);
-      throw error;
-    }
-    if (!response.ok) {
-      const code = typeof json.error === "string" ? json.error : undefined;
-      if (response.status === 401) {
+      if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
+      if (requestBody !== undefined) headers["Content-Type"] = "application/json";
+      let response: Response;
+      try {
+        const requestInit: RequestInit = { method, redirect: "manual", headers, signal };
+        if (method !== "GET") requestInit.body = requestBody;
+        response = await fetch(url, requestInit);
+      } catch (error) {
+        if (signal.aborted) throw new TeamPiApiError("Team PI request timed out");
+        throw error;
+      }
+      let json: Record<string, unknown>;
+      try {
+        json = await boundedJson(response, maxStringLength);
+      } catch (error) {
+        if (signal.aborted) throw new TeamPiApiError("Team PI request timed out", response.status);
+        throw error;
+      }
+      if (response.status === 401 && attempt === 0) {
+        if (method === "GET") continue;
+        await abortable(this.getCredentials(true), signal, "Team PI request timed out");
         throw new TeamPiApiError(
-          "Team PI rejected the stored credentials. Reconnect Team PI from Connections, then retry.",
+          "Team PI refreshed the stored credentials. Retry the operation.",
           response.status,
-          code,
+          typeof json.error === "string" ? json.error : undefined,
         );
       }
-      if (response.status === 403) {
-        throw new TeamPiApiError(
-          "Team PI denied access. Reconnect Team PI or connect the required provider/skill, then retry.",
-          response.status,
-          code,
-        );
+      if (!response.ok) {
+        const code = typeof json.error === "string" ? json.error : undefined;
+        if (response.status === 401) {
+          throw new TeamPiApiError(
+            "Team PI rejected the stored credentials. Reconnect Team PI from Connections, then retry.",
+            response.status,
+            code,
+          );
+        }
+        if (response.status === 403) {
+          throw new TeamPiApiError(
+            "Team PI denied access. Reconnect Team PI or connect the required provider/skill, then retry.",
+            response.status,
+            code,
+          );
+        }
+        throw new TeamPiApiError(`Team PI API failed: ${response.statusText}`, response.status, code);
       }
-      throw new TeamPiApiError(`Team PI API failed: ${response.statusText}`, response.status, code);
+      return boundJsonValueWithLimit(json, 0, maxStringLength);
     }
-    return boundJsonValueWithLimit(json, 0, maxStringLength);
+    throw new TeamPiApiError("Team PI request failed after refreshing credentials.");
   }
 
   private async binaryRequest(path: string): Promise<{ data: Uint8Array; name: string; contentType?: string }> {
     const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-    const credentials = await abortable(this.getCredentials(), signal, "Team PI attachment request timed out");
     const url = new URL(`${this.baseUrl}${path}`);
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${credentials.accessToken}`,
-      Accept: "application/octet-stream, application/pdf, image/*, */*;q=0.8",
-    };
-    if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
-    let response: Response;
-    try {
-      response = await fetch(url, { method: "GET", redirect: "manual", headers, signal });
-    } catch (error) {
-      if (signal.aborted) throw new TeamPiApiError("Team PI attachment request timed out");
-      throw error;
+    for (let attempt = 0; attempt < 2; ++attempt) {
+      const credentials = await abortable(this.getCredentials(attempt > 0), signal, "Team PI attachment request timed out");
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${credentials.accessToken}`,
+        Accept: "application/octet-stream, application/pdf, image/*, */*;q=0.8",
+      };
+      if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
+      let response: Response;
+      try {
+        response = await fetch(url, { method: "GET", redirect: "manual", headers, signal });
+      } catch (error) {
+        if (signal.aborted) throw new TeamPiApiError("Team PI attachment request timed out");
+        throw error;
+      }
+      if (response.status === 401 && attempt === 0) {
+        await response.body?.cancel();
+        continue;
+      }
+      if (response.status >= 300 && response.status < 400) {
+        await response.body?.cancel();
+        throw new TeamPiApiError("Team PI attachment redirect was blocked", response.status);
+      }
+      if (!response.ok) {
+        const code = response.headers.get("x-team-pi-error") ?? undefined;
+        await response.body?.cancel();
+        throw new TeamPiApiError(`Team PI attachment fetch failed: ${response.statusText}`, response.status, code);
+      }
+      const data = await boundedBytes(response, MAX_ATTACHMENT_BYTES, "Team PI attachment exceeded size limit");
+      return {
+        data,
+        name: contentDispositionName(response.headers.get("content-disposition")) ?? "attachment",
+        contentType: optionalHeader(response.headers.get("content-type")),
+      };
     }
-    if (response.status >= 300 && response.status < 400) {
-      await response.body?.cancel();
-      throw new TeamPiApiError("Team PI attachment redirect was blocked", response.status);
-    }
-    if (!response.ok) {
-      const code = response.headers.get("x-team-pi-error") ?? undefined;
-      await response.body?.cancel();
-      throw new TeamPiApiError(`Team PI attachment fetch failed: ${response.statusText}`, response.status, code);
-    }
-    const data = await boundedBytes(response, MAX_ATTACHMENT_BYTES, "Team PI attachment exceeded size limit");
-    return {
-      data,
-      name: contentDispositionName(response.headers.get("content-disposition")) ?? "attachment",
-      contentType: optionalHeader(response.headers.get("content-type")),
-    };
+    throw new TeamPiApiError("Team PI attachment request failed after refreshing credentials.");
   }
 }
 

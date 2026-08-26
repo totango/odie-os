@@ -117,10 +117,69 @@ describe("Team PI token refresh and API isolation", () => {
   });
 
   it("turns Team PI auth denials into actionable access errors", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "missing_id_token" }, 403));
+    vi.mocked(fetch).mockResolvedValue(response({ error: "missing_id_token" }, 403));
     const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
 
     await expect(api.listSkills()).rejects.toThrow(/denied access|Reconnect Team PI|required provider\/skill/);
+  });
+
+  it("refreshes credentials once and retries when Team PI rejects an access token", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ error: "expired_token" }, 401))
+      .mockResolvedValueOnce(response({ items: [] }));
+    const credentials = vi.fn(async (forceRefresh?: boolean) => ({
+      accessToken: forceRefresh ? "fresh-access" : "stale-access",
+      idToken: forceRefresh ? "fresh-identity" : "stale-identity",
+    }));
+
+    await expect(new TeamPiApi(credentials, config.baseUrl).listSkills()).resolves.toEqual({ items: [] });
+    expect(credentials).toHaveBeenNthCalledWith(1, false);
+    expect(credentials).toHaveBeenNthCalledWith(2, true);
+    expect(vi.mocked(fetch).mock.calls[1]?.[1]?.headers).toMatchObject({
+      Authorization: "Bearer fresh-access",
+      "X-Team-PI-ID-Token": "fresh-identity",
+    });
+  });
+
+  it("retries only once when refreshed credentials are also rejected", async () => {
+    vi.mocked(fetch).mockResolvedValue(response({ error: "expired_token" }, 401));
+    const credentials = vi.fn(async () => ({ accessToken: "access", idToken: "identity" }));
+
+    await expect(new TeamPiApi(credentials, config.baseUrl).listSkills()).rejects.toThrow(/rejected the stored credentials/);
+    expect(credentials).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes but does not replay a write rejected for stale credentials", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "expired_token" }, 401));
+    const credentials = vi.fn(async () => ({ accessToken: "access", idToken: "identity" }));
+
+    await expect(new TeamPiApi(credentials, config.baseUrl).installSkill("skill-1"))
+      .rejects.toThrow(/refreshed the stored credentials|Retry the operation/);
+    expect(credentials).toHaveBeenNthCalledWith(1, false);
+    expect(credentials).toHaveBeenNthCalledWith(2, true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes credentials and retries attachment reads rejected with 401", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+        headers: {
+          "Content-Disposition": "attachment; filename=report.pdf",
+          "Content-Type": "application/pdf",
+        },
+      }));
+    const credentials = vi.fn(async (forceRefresh?: boolean) => ({
+      accessToken: forceRefresh ? "fresh-access" : "stale-access",
+      idToken: "identity",
+    }));
+
+    await expect(new TeamPiApi(credentials, config.baseUrl).workItemsAttachmentContent("jira", "J-1", "attachment-1"))
+      .resolves.toEqual({ data: new Uint8Array([1, 2, 3]), name: "report.pdf", contentType: "application/pdf" });
+    expect(credentials).toHaveBeenNthCalledWith(1, false);
+    expect(credentials).toHaveBeenNthCalledWith(2, true);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 
   it("coalesces in-instance refreshes to avoid rotating refresh-token races", async () => {
@@ -147,6 +206,32 @@ describe("Team PI token refresh and API isolation", () => {
     expect(kv.get("idToken")).toBeUndefined();
     expect(kv.get("idTokenExpiresAt")).toBeUndefined();
     expect(kv.get("identity")).toBeUndefined();
+  });
+
+  it("replaces the stored refresh token during a forced API refresh", async () => {
+    const expiresAt = Date.now() + 60 * 60 * 1000;
+    const renewedIdToken = `e30.${btoa(JSON.stringify({ email: "renewed@totango.com", exp: Math.floor(expiresAt / 1000) }))}.sig`;
+    vi.mocked(fetch).mockResolvedValueOnce(response({
+      access_token: "renewed-access",
+      refresh_token: "rotated-refresh",
+      id_token: renewedIdToken,
+      expires_in: 3600,
+    }));
+    const kv = new Kv();
+    kv.put("refreshToken", "old-refresh");
+    kv.put("accessToken", "rejected-access");
+    kv.put("accessTokenExpiresAt", expiresAt);
+    kv.put("idToken", renewedIdToken);
+    kv.put("idTokenExpiresAt", expiresAt);
+    const account = new TeamPiAccount({} as never, configEnv());
+    (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv } };
+
+    await expect(account.getApiCredentials(true)).resolves.toEqual({
+      accessToken: "renewed-access",
+      idToken: renewedIdToken,
+    });
+    expect(kv.get("refreshToken")).toBe("rotated-refresh");
   });
 
   it("preserves a still-valid ID token when access-token refresh omits one", async () => {

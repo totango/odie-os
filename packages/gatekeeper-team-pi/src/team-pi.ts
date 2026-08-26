@@ -301,8 +301,16 @@ export class TeamPiAccount extends DurableObject<Env> {
     }
   }
 
-  async getApiCredentials(): Promise<{ accessToken: string; idToken?: string }> {
-    let accessToken = await this.getAccessToken();
+  async getApiCredentials(forceRefresh = false): Promise<{ accessToken: string; idToken?: string }> {
+    let accessToken: string;
+    if (forceRefresh) {
+      const refreshToken = this.ctx.storage.kv.get<string>("refreshToken");
+      if (!refreshToken) throw new Error("Team PI credentials have not been configured.");
+      await this.#refreshCredentials(refreshToken, true);
+      accessToken = this.ctx.storage.kv.get<string>("accessToken") ?? "";
+    } else {
+      accessToken = await this.getAccessToken();
+    }
     let idToken = this.ctx.storage.kv.get<string>("idToken");
     let idTokenExpiresAt = this.ctx.storage.kv.get<number>("idTokenExpiresAt") ?? 0;
     const lastIdTokenRefresh = this.ctx.storage.kv.get<number>("idTokenRefreshAttemptedAt") ?? 0;
@@ -406,7 +414,7 @@ export class TeamPiAccount extends DurableObject<Env> {
 @validateRpc()
 export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements GatekeeperUser {
   #account(): DurableObjectStub<TeamPiAccount> { return this.ctx.exports.TeamPiAccount.get(this.ctx.exports.TeamPiAccount.idFromString(this.ctx.props.accountId)); }
-  #api(): TeamPiApi { return new TeamPiApi(() => this.#account().getApiCredentials(), resolveConfig(this.env).baseUrl); }
+  #api(): TeamPiApi { return new TeamPiApi(forceRefresh => this.#account().getApiCredentials(forceRefresh), resolveConfig(this.env).baseUrl); }
   async describe(): Promise<AccountDescription> {
     const identity = await this.#account().describeIdentity();
     return {
@@ -556,7 +564,7 @@ export class TeamPiVerifier extends WorkerEntrypoint<Env> implements GatekeeperU
 @validateRpc()
 export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<TeamPiSession> {
   #account(): DurableObjectStub<TeamPiAccount> { return this.ctx.exports.TeamPiAccount.get(this.ctx.exports.TeamPiAccount.idFromString(this.ctx.props.accountId)); }
-  #api(): TeamPiApi { return new TeamPiApi(() => this.#account().getApiCredentials(), resolveConfig(this.env).baseUrl); }
+  #api(): TeamPiApi { return new TeamPiApi(forceRefresh => this.#account().getApiCredentials(forceRefresh), resolveConfig(this.env).baseUrl); }
   async describe(): Promise<ResourceDescription> { return { url: ACCOUNT_URL, title: "Team PI", snippet: "Private Team PI singleton with approved reads, Work Items search, and staged non-agent writes.", suggestedBindingName: "TEAM_PI", tsType: "TeamPiSession" }; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
