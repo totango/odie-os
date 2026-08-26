@@ -1,0 +1,13 @@
+{
+  "blueprintId": "starter.finance-operations-workbench",
+  "title": "Finance Operations Workbench",
+  "description": "An internal CFO and FP&A workbench for offline, manual, demo, CSV, and JSON variance review, contract intelligence, forecast review, and deterministic anomaly triage. No external connection is required; optional live sources may be wired later from the host Connections tab.",
+  "author": {
+    "type": "user",
+    "name": "Cloudflare",
+    "id": "agent@cloudflare.com"
+  },
+  "revision": 8,
+  "updatedAt": "2026-08-27T01:00:00.000Z",
+  "bindings": {}
+}

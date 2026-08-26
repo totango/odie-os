@@ -28,6 +28,7 @@ The currently shipped starters are:
 | Blueprint ID | Source directory | Purpose |
 | --- | --- | --- |
 | `starter.developer-delivery-kit` | `developer-delivery-kit/` | Repository health, review queues, releases, and delivery risks |
+| `starter.finance-operations-workbench` | `finance-operations-workbench/` | CFO setup, variance review, contract findings, forecasts, and deterministic anomaly triage |
 | `starter.incident-investigation-board` | `incident-investigation-board/` | Incident timeline, evidence, ownership, and decisions |
 | `starter.jira-delivery-risk` | `jira-delivery-risk/` | Release risks, blockers, mitigations, and executive summaries |
 | `starter.support-escalation-cockpit` | `support-escalation-cockpit/` | Support escalation triage, customer impact, and cross-functional ownership |
