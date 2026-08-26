@@ -30,11 +30,8 @@ describe("ODIE MCP configuration", () => {
     }
   });
 
-  it("requests only identity and ODIE MCP read scopes", () => {
+  it("requests only supported ODIE MCP read scopes", () => {
     expect(ODIE_KG_OAUTH_SCOPE.split(" ")).toEqual([
-      "openid",
-      "profile",
-      "email",
       "mcp:odie:kg:read",
       "mcp:odie:exports:read",
       "mcp:odie:skills:read",

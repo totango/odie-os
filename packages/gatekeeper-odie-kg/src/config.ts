@@ -17,9 +17,6 @@ export const ODIE_KG_EU_ENDPOINT = "https://api-agents.unison.totango.com/api/mc
 
 /** Least-privilege OAuth scopes requested from Agentic's Odie MCP resource. */
 export const ODIE_KG_OAUTH_SCOPE = [
-  "openid",
-  "profile",
-  "email",
   "mcp:odie:kg:read",
   "mcp:odie:exports:read",
   "mcp:odie:skills:read",

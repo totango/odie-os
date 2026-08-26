@@ -51,12 +51,6 @@ manually create, paste, or share an access token. Each employee must authorize t
 
 ## OAuth scopes
 
-Identity scopes:
-
-- `openid`
-- `profile`
-- `email`
-
 Read scopes used by this repository's Workshop connector:
 
 - `mcp:odie:kg:read`
@@ -83,7 +77,8 @@ The in-product Odie connector is the least-privilege form used by this repositor
   binding.
 - Human branding: the connector should be presented as **ODIE MCP**.
 - Authentication: browser OAuth with PKCE, one connected account per employee.
-- Authorization: request only the identity scopes and read scopes listed above.
+- Authorization: request only the read scopes listed above. The ODIE MCP authorization server does
+  not support OpenID Connect identity scopes on this resource.
 - Tool surface: expose exactly 36 read-only tools:
   - 12 `odie-kg-*` tools.
   - 6 customer context tools.
