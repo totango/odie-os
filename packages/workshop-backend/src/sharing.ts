@@ -205,6 +205,18 @@ export class SharingManager {
     return this.computeEffectiveRoles().get(profileId);
   }
 
+  /** Return a collaborator's role only when it was granted directly by the owner. */
+  getDirectOwnerRole(profileId: string): CollaboratorRole | undefined {
+    let record = this.storage.collaborators.get(profileId);
+    let result: CollaboratorRole | undefined;
+    for (let edge of record?.addedBy ?? []) {
+      if (edge.type !== "user" || edge.sharer !== this.ownerProfileId) continue;
+      let role = edgeGrantedRole(edge);
+      result = result ? maxRole(result, role) : role;
+    }
+    return result;
+  }
+
   /**
    * Redeem a raw share key on behalf of a user opening the gadget. If the key exists, ensures the
    * user is a collaborator with a `shareKey` edge for its link (adding the edge if missing, or

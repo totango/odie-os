@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -19,7 +19,13 @@ import type { CodingSessionOwner, CodingSessionToolHost, CodingSessionToolResult
 import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { getAiGatewayConfig } from "./ai-gateway.js";
-import { AdminSettings, AdminApiImpl } from "./admin-settings.js";
+import {
+  ADMIN_SETTINGS_SINGLETON_NAME,
+  AdminSettings,
+  AdminApiImpl,
+  type FinanceWorkspaceClaim,
+  type FinanceWorkspaceClaimResult,
+} from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID, type ProvidedAccountInfo } from "./user";
 import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
@@ -95,6 +101,136 @@ function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata
     metadata,
     screenshotUrl: blueprintScreenshotUrl(id, metadata),
   };
+}
+
+/** Resolve the fail-closed Finance entitlement returned by the authenticated API. */
+export function resolveFinanceHubStatus(
+    workspaceId: string | null, liveAuthorized: boolean, isAdmin: boolean): FinanceHubStatus {
+  if (workspaceId) {
+    return liveAuthorized
+      ? {authorized: true, workspaceId, canCreate: false}
+      : {authorized: false, canCreate: false};
+  }
+  if (isAdmin) return {authorized: true, canCreate: true};
+  return {authorized: false, canCreate: false};
+}
+
+/** Read the deployment claim and validate the caller against the live Finance permission graph. */
+export async function readFinanceHubStatus(
+    adminSettings: DurableObjectNamespace<AdminSettings>,
+    overseers: DurableObjectNamespace<OverseerDurableObject>,
+    userId: string, profileId: string, isAdmin: boolean): Promise<FinanceHubStatus> {
+  let claim: FinanceWorkspaceClaim | null;
+  try {
+    claim = await retryOnDoReset(() => adminSettings
+        .getByName(ADMIN_SETTINGS_SINGLETON_NAME).getFinanceWorkspaceClaim());
+  } catch (error) {
+    logger.warn("failed to read Finance workspace claim", {
+      event: "finance.claim.read.failed", error,
+    });
+    return {authorized: false, canCreate: false};
+  }
+  if (!claim) return resolveFinanceHubStatus(null, false, isAdmin);
+
+  try {
+    let workspace = overseers.get(overseers.idFromString(claim.workspaceId));
+    let authorized = await retryOnDoReset(
+        () => workspace.hasFinanceHubAccess(claim, userId, profileId));
+    return resolveFinanceHubStatus(claim.workspaceId, authorized, isAdmin);
+  } catch (error) {
+    logger.warn("failed to validate Finance workspace access", {
+      event: "finance.access.validate.failed", error,
+    });
+    return {authorized: false, canCreate: false};
+  }
+}
+
+/**
+ * Run blueprint workspace creation with deterministic resource cleanup. A fresh Finance claim
+ * owns its fresh registration; an exact retry preserves repairs made beneath the existing claim.
+ */
+type BlueprintWorkspaceCreationOps<T extends {[Symbol.dispose](): void}> = {
+  claim?: () => Promise<FinanceWorkspaceClaimResult>;
+  register: () => Promise<"inserted" | "existing" | void>;
+  open: () => Promise<T>;
+  finish: (opened: T) => Promise<void>;
+  rollbackRegistration?: () => Promise<void>;
+  releaseClaim?: () => Promise<unknown>;
+};
+
+export async function runBlueprintWorkspaceCreation<T extends {[Symbol.dispose](): void}>(
+    ops: BlueprintWorkspaceCreationOps<T>): Promise<T> {
+  let claimed = false;
+  let registered = false;
+  let opened: T | undefined;
+  try {
+    if (ops.claim) {
+      if (!ops.rollbackRegistration || !ops.releaseClaim) {
+        throw new TypeError("Claimed workspace creation requires rollback handlers.");
+      }
+      let claimResult = await ops.claim();
+      if (claimResult === "conflict") {
+        throw new Error("A Finance workspace already exists on this deployment.");
+      }
+      claimed = claimResult === "claimed";
+    }
+    registered = await ops.register() === "inserted";
+    opened = await ops.open();
+    await ops.finish(opened);
+    return opened;
+  } catch (error) {
+    let cleanupErrors: unknown[] = [];
+    try {
+      opened?.[Symbol.dispose]();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
+    }
+    if (claimed && registered && ops.rollbackRegistration) {
+      try {
+        await ops.rollbackRegistration();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (claimed && ops.releaseClaim) {
+      try {
+        await ops.releaseClaim();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      logger.error("blueprint workspace cleanup failed", {
+        event: "blueprint.workspace.cleanup.failed",
+        error: new AggregateError(cleanupErrors),
+      });
+    }
+    throw error;
+  }
+}
+
+/** Enforce the protected Finance bootstrap pairing and return whether it is that bootstrap. */
+export function assertBlueprintOriginAllowed(
+    blueprintId: string, originHubId: DeploymentHubId | undefined, isAdmin: boolean): boolean {
+  let isFinanceBlueprint = isFinanceOperationsWorkbenchBlueprintId(blueprintId);
+  if (isFinanceBlueprint) {
+    if (originHubId !== "finance" || !isAdmin) throw new Error("Blueprint not found.");
+  } else if (originHubId === "finance") {
+    throw new Error("Only the Finance Operations Workbench may use the Finance hub origin.");
+  }
+  return isFinanceBlueprint;
+}
+
+/** Remove the protected Finance starter from owner-scoped blueprint records. */
+export function visibleOwnBlueprints(
+    blueprints: BlueprintUserSummary[]): BlueprintUserSummary[] {
+  return blueprints.filter(({id}) => !isFinanceOperationsWorkbenchBlueprintId(id));
+}
+
+/** Return an owner-scoped blueprint only when it is not the protected Finance starter. */
+export function visibleOwnBlueprint(
+    blueprint: BlueprintUserSummary | null): BlueprintUserSummary | null {
+  return blueprint && !isFinanceOperationsWorkbenchBlueprintId(blueprint.id) ? blueprint : null;
 }
 
 // Re-export entrypoint types from ai-models.ts.
@@ -483,6 +619,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     if (originHubId !== undefined && !isDeploymentHubId(originHubId)) {
       throw new Error("Invalid deployment hub id.");
     }
+    if (originHubId === "finance") {
+      throw new Error("Finance workspaces must be created from the Finance hub.");
+    }
     let id = this.overseers.newUniqueId().toString();
     await this.#user.newGadget(id, "Untitled Workspace", originHubId);
     recordAnalytics(this.ctx, this.env, {
@@ -500,10 +639,19 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return result;
   }
 
+  async getFinanceHubStatus(): Promise<FinanceHubStatus> {
+    return readFinanceHubStatus(
+        this.adminSettings, this.overseers, this.#userId.toString(), this.#userId.name!,
+        this.#isAdmin());
+  }
+
   async updateProvisionalWorkspaceOrigin(
       workspaceId: string, originHubId: DeploymentHubId): Promise<void> {
     if (!isDeploymentHubId(originHubId)) {
       throw new Error("Invalid deployment hub id.");
+    }
+    if (originHubId === "finance") {
+      throw new Error("Finance workspaces must be created from the Finance hub.");
     }
     await this.#user.updateProvisionalWorkspaceOrigin(workspaceId, originHubId);
   }
@@ -571,31 +719,41 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async listOwnBlueprints(): Promise<BlueprintUserSummary[]> {
-    return retryOnDoReset(() => this.#user.listBlueprints());
+    return visibleOwnBlueprints(await retryOnDoReset(() => this.#user.listBlueprints()));
   }
 
   async getOwnBlueprint(blueprintId: string): Promise<BlueprintUserSummary | null> {
-    return retryOnDoReset(() => this.#user.getBlueprint(blueprintId));
+    if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) return null;
+    return visibleOwnBlueprint(await retryOnDoReset(() => this.#user.getBlueprint(blueprintId)));
   }
 
   async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {
-    return retryOnDoReset(() => this.#user.listLibraryBlueprints());
+    return (await retryOnDoReset(() => this.#user.listLibraryBlueprints()))
+        .filter(({id}) => !isFinanceOperationsWorkbenchBlueprintId(id));
   }
 
   async setBlueprintPinned(blueprintId: string, pinned: boolean): Promise<void> {
+    if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) {
+      throw new Error("Blueprint not found.");
+    }
     return this.#user.setBlueprintPinned(blueprintId, pinned);
   }
 
   async isBlueprintPinned(blueprintId: string): Promise<boolean> {
+    if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) return false;
     return retryOnDoReset(() => this.#user.isBlueprintPinned(blueprintId));
   }
 
   async listFeaturedBlueprints(): Promise<BlueprintPublicInfo[]> {
-    return (await listFeaturedBlueprintsFromKv(this.env)).map(
+    return (await listFeaturedBlueprintsFromKv(this.env))
+        .filter(({id}) => !isFinanceOperationsWorkbenchBlueprintId(id)).map(
         blueprint => publicBlueprintInfo(blueprint.id, blueprint.metadata));
   }
 
   async addBlueprintToLibrary(blueprintId: string): Promise<void> {
+    if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) {
+      throw new Error("Blueprint not found.");
+    }
     return this.#user.addBlueprintToLibrary(blueprintId);
   }
 
@@ -655,6 +813,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     if (originHubId !== undefined && !isDeploymentHubId(originHubId)) {
       throw new Error("Invalid deployment hub id.");
     }
+    let isFinanceBlueprint = assertBlueprintOriginAllowed(
+        blueprintId, originHubId, this.#isAdmin());
     // 1. Read blueprint from KV.
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) throw new Error("Blueprint not found.");
@@ -665,104 +825,118 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
-    await this.#user.newGadget(id, kvRecord.metadata.title, originHubId);
-    let overseerResult = await this.#openGadgetInternal(id, undefined, undefined, true);
+    let financeClaim: FinanceWorkspaceClaim | undefined = isFinanceBlueprint ? {
+      workspaceId: id,
+      ownerUserId: this.#userId.toString(),
+      ownerProfileId: this.#userId.name!,
+    } : undefined;
+    let adminSettings = this.adminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME);
+    let overseerResult = await runBlueprintWorkspaceCreation({
+      claim: financeClaim
+          ? () => adminSettings.claimFinanceWorkspace(financeClaim)
+          : undefined,
+      register: () => financeClaim
+          ? this.#user.registerFinanceGadget(id, kvRecord.metadata.title)
+          : this.#user.newGadget(id, kvRecord.metadata.title, originHubId),
+      open: () => this.#openGadgetInternal(id, undefined, undefined, true),
+      rollbackRegistration: financeClaim
+          ? () => retryOnDoReset(() => this.#user.deleteGadget(id))
+          : undefined,
+      releaseClaim: financeClaim
+          ? () => retryOnDoReset(() => this.adminSettings
+              .getByName(ADMIN_SETTINGS_SINGLETON_NAME).releaseFinanceWorkspace(financeClaim))
+          : undefined,
+      finish: async (openedOverseer) => {
+        // 4. Initialize from blueprint code.
+        let overseerDo = this.overseers.get(this.overseers.idFromString(id));
+        await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title,
+            deploymentOutputForBlueprint(await readAdminConfig(this.env), blueprintId,
+                sanitizeBlueprintOutput(kvRecord.metadata.output)));
 
-    // 4. Initialize from blueprint code.
-    let overseerDo = this.overseers.get(this.overseers.idFromString(id));
-    await overseerDo.initializeFromBlueprint(codeBytes, kvRecord.metadata.title,
-        deploymentOutputForBlueprint(await readAdminConfig(this.env), blueprintId,
-            sanitizeBlueprintOutput(kvRecord.metadata.output)));
+        // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
+        let metadata = await openedOverseer.getMetadata();
+        using gadget = await openedOverseer.getGadget(metadata.defaultGadgetId!);
 
-    // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
-    let metadata = await overseerResult.getMetadata();
-    using gadget = await overseerResult.getGadget(metadata.defaultGadgetId!);
+        // Defensively put blueprint bindings into a map (not a raw object) until validation.
+        let blueprintBindings = new Map(Object.entries(kvRecord.metadata.bindings));
+        let gadgetId = metadata.defaultGadgetId!;
 
-    // Defensively put blueprint bindings into a map (not a raw object) until we've had a chance to
-    // validate the names.
-    let blueprintBindings = new Map(Object.entries(kvRecord.metadata.bindings));
-    let gadgetId = metadata.defaultGadgetId!;
+        // Create non-spawner bindings first, then spawners whose env references those results.
+        let createdIds = new Map<string, WorkpieceId>();
+        let gkPromises: Promise<void>[] = [];
 
-    // Create gatekeepers in two phases: first every non-spawner binding (binding the
-    // non-spawnerOnly ones into the gadget, and recording each created gatekeeper's id by
-    // binding name), then the agent spawners, whose configs reference the phase-one results
-    // symbolically (see SpawnerEnvTarget).
-    let createdIds = new Map<string, WorkpieceId>();
-    let gkPromises: Promise<void>[] = [];
-
-    for (let [bindingName, assignment] of Object.entries(bindings)) {
-      let blueprintBinding = blueprintBindings.get(bindingName);
-      if (!blueprintBinding) {
-        throw new Error(`Unknown binding name: ${bindingName}`);
-      }
-
-      gkPromises.push((async () => {
-        let gk;
-        if (assignment.type === "gatekeeper") {
-          gk = await overseerResult.newGatekeeper(assignment.accountId, assignment.resourceUrl);
-          if (!gk) {
-            throw new Error(`Failed to create gatekeeper for binding "${bindingName}".`);
+        for (let [bindingName, assignment] of Object.entries(bindings)) {
+          let blueprintBinding = blueprintBindings.get(bindingName);
+          if (!blueprintBinding) {
+            throw new Error(`Unknown binding name: ${bindingName}`);
           }
-        } else if (assignment.type === "aiModel") {
-          gk = await overseerResult.newAiModelGatekeeper(assignment.modelId);
-        } else {
-          return;  // agent spawners are created in phase two
+
+          gkPromises.push((async () => {
+            let gk;
+            if (assignment.type === "gatekeeper") {
+              gk = await openedOverseer.newGatekeeper(
+                  assignment.accountId, assignment.resourceUrl);
+              if (!gk) {
+                throw new Error(`Failed to create gatekeeper for binding "${bindingName}".`);
+              }
+            } else if (assignment.type === "aiModel") {
+              gk = await openedOverseer.newAiModelGatekeeper(assignment.modelId);
+            } else {
+              return;  // agent spawners are created in phase two
+            }
+            try {
+              let id = await gk.getId();
+              createdIds.set(bindingName, id);
+              // A spawnerOnly binding feeds a spawner's env but is not bound into the gadget.
+              if (!blueprintBinding.spawnerOnly) {
+                await gadget.bind(bindingName, id);
+              }
+            } finally {
+              gk[Symbol.dispose]();
+            }
+          })());
         }
-        try {
-          let id = await gk.getId();
-          createdIds.set(bindingName, id);
-          // A spawnerOnly binding exists purely to feed some spawner's env; it is not bound
-          // into the gadget itself.
-          if (!blueprintBinding.spawnerOnly) {
-            await gadget.bind(bindingName, id);
+
+        await Promise.all(gkPromises);
+
+        for (let [bindingName, assignment] of Object.entries(bindings)) {
+          if (assignment.type !== "agentSpawner") continue;
+          let blueprintBinding = blueprintBindings.get(bindingName);
+          if (blueprintBinding?.type !== "agentSpawner") {
+            throw new Error(`Binding "${bindingName}" type mismatch.`);
           }
-        } finally {
-          gk[Symbol.dispose]();
-        }
-      })());
-    }
 
-    await Promise.all(gkPromises);
-
-    // Phase two: agent spawners, with the full AgentSpawnerConfig reconstructed -- displayName
-    // from the binding's title, modelId from the assignment, and env resolved against the
-    // phase-one gatekeepers and the new gadget.
-    for (let [bindingName, assignment] of Object.entries(bindings)) {
-      if (assignment.type !== "agentSpawner") continue;
-      let blueprintBinding = blueprintBindings.get(bindingName);
-      if (blueprintBinding?.type !== "agentSpawner") {
-        throw new Error(`Binding "${bindingName}" type mismatch.`);
-      }
-
-      let env: Record<string, WorkpieceId> = {};
-      for (let [envName, target] of Object.entries(blueprintBinding.env)) {
-        if (target.type === "gadget") {
-          env[envName] = gadgetId;
-        } else {
-          let id = createdIds.get(target.name);
-          if (id === undefined) {
-            throw new Error(`Agent spawner binding "${bindingName}" references binding ` +
-                `"${target.name}", which was not assigned.`);
+          let env: Record<string, WorkpieceId> = {};
+          for (let [envName, target] of Object.entries(blueprintBinding.env)) {
+            if (target.type === "gadget") {
+              env[envName] = gadgetId;
+            } else {
+              let id = createdIds.get(target.name);
+              if (id === undefined) {
+                throw new Error(`Agent spawner binding "${bindingName}" references binding ` +
+                    `"${target.name}", which was not assigned.`);
+              }
+              env[envName] = id;
+            }
           }
-          env[envName] = id;
+
+          let config: AgentSpawnerConfig = {
+            displayName: blueprintBinding.title,
+            modelId: assignment.modelId,
+            env,
+          };
+          using gk = await openedOverseer.newAgentSpawnerGatekeeper(config);
+          await gadget.bind(bindingName, await gk.getId());
         }
-      }
 
-      let config: AgentSpawnerConfig = {
-        displayName: blueprintBinding.title,
-        modelId: assignment.modelId,
-        env,
-      };
-      using gk = await overseerResult.newAgentSpawnerGatekeeper(config);
-      await gadget.bind(bindingName, await gk.getId());
-    }
-
-    recordAnalytics(this.ctx, this.env, {
-      event_name: "gadget_created",
-      user_id: this.#userId.toString(),
-      gadget_id: id,
-      blueprint_id: blueprintId,
-      source: "blueprint",
+        recordAnalytics(this.ctx, this.env, {
+          event_name: "gadget_created",
+          user_id: this.#userId.toString(),
+          gadget_id: id,
+          blueprint_id: blueprintId,
+          source: "blueprint",
+        });
+      },
     });
 
     // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
@@ -810,11 +984,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let adminUserId = this.#userId.name!;
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
-    return new AdminApiImpl(this.adminSettings.getByName(""), adminUserId);
+    return new AdminApiImpl(
+        this.adminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME), adminUserId);
   }
 }
 
 async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<Response> {
+  if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) {
+    return new Response("Not Found", {status: 404});
+  }
   let object = await env.BLUEPRINT_CONTENT.get(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${blueprintId}`);
   if (!object) return new Response("Not Found", {status: 404});
 
@@ -985,6 +1163,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async getBlueprint(id: string): Promise<BlueprintPublicInfo | null> {
+    if (isFinanceOperationsWorkbenchBlueprintId(id)) return null;
     let kvRecord = await readBlueprintKvRecord(this.env, id);
     if (!kvRecord) return null;
 
@@ -992,6 +1171,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async downloadBlueprint(id: string): Promise<ReadableStream<Uint8Array>> {
+    if (isFinanceOperationsWorkbenchBlueprintId(id)) throw new Error("Blueprint not found.");
     let kvRecord = await readBlueprintKvRecord(this.env, id);
     if (!kvRecord) throw new Error("Blueprint not found.");
 
@@ -1034,7 +1214,8 @@ export default {
       // and the DO is idempotent.
       if (!formatBlueprintInstallStarted) {
         formatBlueprintInstallStarted = true;
-        ctx.waitUntil(ctx.exports.AdminSettings.getByName("").ensureFormatBlueprintsInstalled()
+        ctx.waitUntil(ctx.exports.AdminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME)
+            .ensureFormatBlueprintsInstalled()
             .then((complete: boolean) => {
               // A partial install resolves rather than throwing, and nothing else will call the DO
               // from here, so clearing this is the whole retry: one bad archive would otherwise

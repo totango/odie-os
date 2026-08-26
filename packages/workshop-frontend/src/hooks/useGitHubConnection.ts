@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { RpcTarget } from 'capnweb'
+import { RpcTarget, type RpcPromise } from 'capnweb'
 import type { ConnectedAccountsSubscriber } from '@gadgets/workshop-shared/api'
 import type { AccountDescription, SupportedResource, VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from '../AuthContext'
@@ -61,7 +61,10 @@ export function useGitHubConnection(): GitHubConnectionState {
       }
     }
 
-    authenticatedApi.subscribeConnectedAccounts(new GitHubSubscriber()).then((stub) => {
+    const subscriptionPromise = authenticatedApi.subscribeConnectedAccounts(
+      new GitHubSubscriber(),
+    ) as unknown as RpcPromise<{}>
+    subscriptionPromise.then((stub) => {
       if (cancelled) stub[Symbol.dispose]()
       else subscription = stub
     }).catch(() => {

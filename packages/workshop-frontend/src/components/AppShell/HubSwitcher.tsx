@@ -16,7 +16,6 @@ export default function HubSwitcher() {
         {enabledHubs.map((id) => (
           <option key={id} value={id}>{HUB_DETAILS[id].label}</option>
         ))}
-        <option disabled>Finance (Coming soon)</option>
       </select>
       <CaretDown size={12} aria-hidden className="pointer-events-none absolute right-2.5 text-kumo-subtle" />
     </label>

@@ -1,9 +1,9 @@
-# Featured starter blueprints
+# Deployment starter blueprints
 
 This directory is the source of truth for deployment-provided starter applications. Each child
-directory is built into an ownerless ordinary blueprint and added to the deployment-wide featured
-collection. These starters are examples users can instantiate, inspect, and modify; they are not
-special runtime application types.
+directory is built into an ownerless ordinary blueprint. Most are added to the deployment-wide
+featured collection; protected hub content is installed without global discovery. These starters
+are not special runtime application types.
 
 For the general blueprint architecture, storage format, and user-published blueprint lifecycle, see
 [`docs/blueprints.md`](../../../docs/blueprints.md).
@@ -19,6 +19,10 @@ For the general blueprint architecture, storage format, and user-published bluep
   snapshot, and featured entry are installed directly by `AdminSettings`.
 - Starters are not output formats. They must never be added to `AdminConfig.formats`,
   `promotedFormatBlueprints`, or the New-output menu.
+- `starter.finance-operations-workbench` is protected Finance hub content. It is packaged and
+  installed like the other starters but excluded from `.featured`, Explore, Library, public
+  metadata/download/screenshot routes, and the generic agent catalog. Only the authenticated
+  Finance bootstrap path may instantiate it.
 - Every starter must work without external connections. The landing page therefore has no required
   blueprint bindings and lets the user create immediately. Optional connection discovery and skip
   controls live inside the created starter.
@@ -93,8 +97,9 @@ the next generated set omits them.
    cannot trigger format promotion.
 4. `installFeaturedBlueprints()` validates each ordinary archive, writes code to R2 at
    `<blueprintId>/<revision>`, and writes its ownerless public record to the `BLUEPRINTS` KV namespace.
-5. `AdminSettings` merges installed entries into its typed `featuredBlueprints` collection, writes
-   the reserved `.featured` KV snapshot, and preserves unrelated user-featured blueprints.
+5. `AdminSettings` merges discoverable installed entries into its typed `featuredBlueprints`
+   collection, explicitly removes protected Finance content, writes the reserved `.featured` KV
+   snapshot, and preserves unrelated user-featured blueprints.
 6. `AuthenticatedApi.listFeaturedBlueprints()` reads the cheap `.featured` KV snapshot used by
    Explore and by the agent blueprint catalog.
 

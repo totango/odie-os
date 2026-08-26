@@ -4,6 +4,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it } from 'vitest'
+import type { FinanceHubStatus } from '@gadgets/workshop-shared/api'
 import { HubProvider, useHub } from './HubContext'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -20,15 +21,20 @@ describe('HubProvider', () => {
   afterEach(async () => {
     await act(async () => root?.unmount())
     container?.remove()
+    root = undefined
+    container = undefined
     localStorage.clear()
   })
 
-  async function render(enabledHubs: Array<'ops' | 'revenue' | 'support'>) {
+  async function render(
+    enabledHubs: Array<'ops' | 'revenue' | 'support'>,
+    financeStatus?: FinanceHubStatus | null,
+  ) {
     container ??= document.createElement('div')
     if (!container.isConnected) document.body.append(container)
     root ??= createRoot(container)
     await act(async () => root!.render(
-      <HubProvider enabledHubs={enabledHubs}><Probe /></HubProvider>,
+      <HubProvider enabledHubs={enabledHubs} financeStatus={financeStatus}><Probe /></HubProvider>,
     ))
   }
 
@@ -43,5 +49,34 @@ describe('HubProvider', () => {
     await render(['ops', 'support'])
     expect(container!.textContent).toBe('ops')
     expect(localStorage.getItem('odie:selected-hub')).toBe('ops')
+  })
+
+  it('fails closed when local storage names Finance without server entitlement', async () => {
+    localStorage.setItem('odie:selected-hub', 'finance')
+    await render(['ops', 'revenue', 'support'])
+    expect(container!.textContent).toBe('ops')
+    expect(localStorage.getItem('odie:selected-hub')).toBe('ops')
+  })
+
+  it('restores Finance only after an authorized server status', async () => {
+    localStorage.setItem('odie:selected-hub', 'finance')
+    await render(
+      ['ops', 'revenue', 'support'],
+      { authorized: true, workspaceId: 'finance-workspace', canCreate: false },
+    )
+    expect(container!.textContent).toBe('finance')
+  })
+
+  it('preserves a stored Finance preference while entitlement is loading', async () => {
+    localStorage.setItem('odie:selected-hub', 'finance')
+    await render(['ops', 'revenue', 'support'], null)
+    expect(container!.textContent).toBe('ops')
+    expect(localStorage.getItem('odie:selected-hub')).toBe('finance')
+
+    await render(
+      ['ops', 'revenue', 'support'],
+      { authorized: true, workspaceId: 'finance-workspace', canCreate: false },
+    )
+    expect(container!.textContent).toBe('finance')
   })
 })

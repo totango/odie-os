@@ -907,6 +907,13 @@ export interface AuthenticatedApi extends RpcTarget {
   newGadget(originHubId?: DeploymentHubId): Promise<RpcStub<Overseer>>;
 
   /**
+   * Return the current user's entitlement to the invite-only Finance hub. Existing access is
+   * validated against the deployment's authoritative workspace and its live permission graph;
+   * only when no deployment workspace has been claimed may an admin bootstrap it.
+   */
+  getFinanceHubStatus(): Promise<FinanceHubStatus>;
+
+  /**
    * Assign the immutable hub origin for a provisional workspace created by this owner. The hub id is
    * presentation metadata only: it is never used for authorization, and legacy workspaces may omit
    * it. The update is idempotent for the same hub, rejects invalid hub ids, rejects missing
@@ -1315,19 +1322,67 @@ export const MAX_SITE_LOGO_BYTES = 256 * 1024;
 /** Maximum width or height of an admin-uploaded site logo in pixels. */
 export const MAX_SITE_LOGO_DIMENSION = 512;
 
-/** Deployment hubs that an administrator can offer and a user can select. */
-export const DEPLOYMENT_HUB_IDS = ["ops", "revenue", "support"] as const;
+/** Deployment hubs that may be recorded as a workspace origin. */
+export const DEPLOYMENT_HUB_IDS = ["ops", "revenue", "support", "finance"] as const;
 
-/** Identifier for a configurable deployment hub. */
+/** Identifier for any valid deployment hub origin, including entitlement-driven hubs. */
 export type DeploymentHubId = typeof DEPLOYMENT_HUB_IDS[number];
+
+/** Deployment hubs that administrators may offer globally to every authenticated user. */
+export const CONFIGURABLE_DEPLOYMENT_HUB_IDS = ["ops", "revenue", "support"] as const;
+
+/** Identifier for a deployment hub that may be enabled globally by an administrator. */
+export type ConfigurableDeploymentHubId = typeof CONFIGURABLE_DEPLOYMENT_HUB_IDS[number];
 
 /** Hub selected when a user has no available stored preference. */
 export const DEFAULT_DEPLOYMENT_HUB_ID: DeploymentHubId = "ops";
 
-/** Returns whether a value is a configurable deployment hub identifier. */
+/** Returns whether a value is any valid deployment hub origin identifier. */
 export function isDeploymentHubId(value: unknown): value is DeploymentHubId {
   return typeof value === "string" && DEPLOYMENT_HUB_IDS.includes(value as DeploymentHubId);
 }
+
+/** Returns whether a value is a globally configurable deployment hub identifier. */
+export function isConfigurableDeploymentHubId(value: unknown): value is ConfigurableDeploymentHubId {
+  return typeof value === "string" &&
+      CONFIGURABLE_DEPLOYMENT_HUB_IDS.includes(value as ConfigurableDeploymentHubId);
+}
+
+/** Stable blueprint identifier for the protected Finance Operations Workbench starter. */
+export const FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID =
+    "starter.finance-operations-workbench";
+
+/** Returns whether a blueprint identifier names the protected Finance Operations Workbench. */
+export function isFinanceOperationsWorkbenchBlueprintId(value: unknown): boolean {
+  return value === FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID;
+}
+
+/**
+ * Entitlement state for the invite-only Finance hub. A deployment singleton identifies its one
+ * workspace, whose live permission graph grants owner or use-collaborator access; only a deployment
+ * admin may bootstrap the workspace before that singleton is claimed.
+ */
+export type FinanceHubStatus =
+  | {
+      /** Whether the current user may select and render the Finance hub. */
+      authorized: false;
+      /** Finance creation is unavailable to an unauthorized user. */
+      canCreate: false;
+    }
+  | {
+      /** Whether the current user may select and render the Finance hub. */
+      authorized: true;
+      /** The deployment's authoritative shared Finance workspace to open. */
+      workspaceId: string;
+      /** Existing members open the shared workspace rather than creating another. */
+      canCreate: false;
+    }
+  | {
+      /** Whether the current user may select and render the Finance hub. */
+      authorized: true;
+      /** A deployment admin may create the first Finance workspace. */
+      canCreate: true;
+    };
 
 /** All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI. */
 export type AdminSettingsView = {
@@ -1345,8 +1400,8 @@ export type AdminSettingsView = {
   banner: BannerConfig;
   /** Accent color hex, or "" for the default theme. */
   accentColor: string;
-  /** Hubs offered to every user. Finance is a static coming-soon surface and is not configurable. */
-  enabledHubs: DeploymentHubId[];
+  /** Globally configurable hubs offered to every user; entitlement-driven Finance is never included. */
+  enabledHubs: ConfigurableDeploymentHubId[];
   /** Every bound gatekeeper and its resource types, with enabled state (not hidden when disabled). */
   resourceVendors: AdminResourceVendor[];
   /** The blueprints promoted as standard output formats, in menu order (including disabled ones). */
@@ -1459,7 +1514,7 @@ export interface AdminApi {
   setAccentColor(color: string): Promise<void>;
 
   /** Enable or disable a hub for every user. At least one configurable hub must remain enabled. */
-  setHubEnabled(hubId: DeploymentHubId, enabled: boolean): Promise<void>;
+  setHubEnabled(hubId: ConfigurableDeploymentHubId, enabled: boolean): Promise<void>;
 
   /**
    * Returns whether the blueprint is featured on the deployment. Returns null when the blueprint
@@ -1580,8 +1635,8 @@ export type ServerConfig = {
    */
   accentColor: string;
 
-  /** Hubs offered to every user. Users choose among these locally; Ops is the initial preference. */
-  enabledHubs: DeploymentHubId[];
+  /** Globally configurable hubs offered to every user; Ops is the initial preference. */
+  enabledHubs: ConfigurableDeploymentHubId[];
 };
 
 /**

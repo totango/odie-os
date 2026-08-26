@@ -1,0 +1,572 @@
+import { env } from "cloudflare:workers";
+import { beforeEach, describe, expect, it } from "vitest";
+import {
+  FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+  isFinanceOperationsWorkbenchBlueprintId,
+  type AiChatAuthorInfo,
+  type BlueprintUserSummary,
+} from "@gadgets/workshop-shared/api";
+import {
+  assertBlueprintOriginAllowed,
+  readFinanceHubStatus,
+  resolveFinanceHubStatus,
+  runBlueprintWorkspaceCreation,
+  visibleOwnBlueprint,
+  visibleOwnBlueprints,
+} from "../src/server.js";
+import {
+  assertCollaboratorInviteAllowed,
+  assertShareLinksAllowed,
+  effectiveCollaboratorRole,
+  type OverseerDurableObject,
+} from "../src/overseer.js";
+import type { AdminSettings, FinanceWorkspaceClaim } from "../src/admin-settings.js";
+import type { UserDurableObject } from "../src/user.js";
+
+declare module "cloudflare:workers" {
+  interface ProvidedEnv {
+    TEST_ADMIN: DurableObjectNamespace<AdminSettings>;
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+    TEST_USER: DurableObjectNamespace<UserDurableObject>;
+  }
+}
+
+const PASSWORD_HASH = new Uint8Array([1, 2, 3]);
+
+function username(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID()}@example.com`;
+}
+
+async function createUser(prefix: string) {
+  let profileId = username(prefix);
+  let id = env.TEST_USER.idFromName(profileId);
+  let user = env.TEST_USER.get(id);
+  await user.createAccount(profileId, prefix, PASSWORD_HASH);
+  return {id, profileId, user};
+}
+
+async function clearFinanceClaim(): Promise<void> {
+  let admin = env.TEST_ADMIN.getByName("");
+  let existing = await admin.getFinanceWorkspaceClaim();
+  if (existing) await admin.releaseFinanceWorkspace(existing);
+}
+
+async function expectOpenDenied(open: () => PromiseLike<unknown>): Promise<void> {
+  let denied = false;
+  try {
+    await open();
+  } catch {
+    denied = true;
+  }
+  expect(denied).toBe(true);
+}
+
+function blueprintSummary(id: string): BlueprintUserSummary {
+  return {
+    id,
+    title: id,
+    description: "",
+    source: {type: "imported"},
+    version: 1,
+    lastUpdated: new Date("2026-08-26T00:00:00Z"),
+  };
+}
+
+describe("Finance hub access policy", () => {
+  beforeEach(clearFinanceClaim);
+
+  it("fails closed and grants bootstrap only before an admin claim", () => {
+    expect(resolveFinanceHubStatus(null, false, false)).toEqual({
+      authorized: false,
+      canCreate: false,
+    });
+    expect(resolveFinanceHubStatus("finance-workspace", true, false)).toEqual({
+      authorized: true,
+      workspaceId: "finance-workspace",
+      canCreate: false,
+    });
+    expect(resolveFinanceHubStatus("finance-workspace", false, true)).toEqual({
+      authorized: false,
+      canCreate: false,
+    });
+    expect(resolveFinanceHubStatus(null, false, true)).toEqual({
+      authorized: true,
+      canCreate: true,
+    });
+  });
+
+  it("offers bootstrap through live status only to an admin when no singleton exists", async () => {
+    expect(await readFinanceHubStatus(
+        env.TEST_ADMIN, env.TEST_OVERSEER, "user-id", "user@example.com", false)).toEqual({
+      authorized: false,
+      canCreate: false,
+    });
+    expect(await readFinanceHubStatus(
+        env.TEST_ADMIN, env.TEST_OVERSEER, "admin-id", "admin@example.com", true)).toEqual({
+      authorized: true,
+      canCreate: true,
+    });
+  });
+
+  it("atomically permits one deployment claim and only idempotent exact retries", async () => {
+    let admin = env.TEST_ADMIN.getByName("");
+    let first: FinanceWorkspaceClaim = {
+      workspaceId: env.TEST_OVERSEER.newUniqueId().toString(),
+      ownerUserId: "owner-a",
+      ownerProfileId: "owner-a@example.com",
+    };
+    let second: FinanceWorkspaceClaim = {
+      workspaceId: env.TEST_OVERSEER.newUniqueId().toString(),
+      ownerUserId: "owner-b",
+      ownerProfileId: "owner-b@example.com",
+    };
+
+    let results = await Promise.all([
+      admin.claimFinanceWorkspace(first),
+      admin.claimFinanceWorkspace(second),
+    ]);
+    expect(results.toSorted()).toEqual(["claimed", "conflict"]);
+
+    let stored = await admin.getFinanceWorkspaceClaim();
+    expect(stored === null).toBe(false);
+    let winner = stored!.workspaceId === first.workspaceId ? first : second;
+    let loser = winner === first ? second : first;
+    expect(await admin.claimFinanceWorkspace(winner)).toBe("existing");
+    expect(await admin.claimFinanceWorkspace({...winner, ownerProfileId: "different"}))
+        .toBe("conflict");
+    expect(await admin.claimFinanceWorkspace(loser)).toBe("conflict");
+    expect(await admin.releaseFinanceWorkspace(loser)).toBe(false);
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(winner);
+    expect(await admin.releaseFinanceWorkspace(winner)).toBe(true);
+  });
+
+  it("fails closed without replacing a corrupt singleton claim", async () => {
+    let admin = env.TEST_ADMIN.getByName("");
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: "not-a-durable-object-id",
+      ownerUserId: "missing-owner",
+      ownerProfileId: "missing-owner@example.com",
+    };
+    expect(await admin.claimFinanceWorkspace(claim)).toBe("claimed");
+    expect(await readFinanceHubStatus(
+        env.TEST_ADMIN, env.TEST_OVERSEER,
+        claim.ownerUserId, claim.ownerProfileId, true)).toEqual({
+      authorized: false,
+      canCreate: false,
+    });
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(claim);
+    expect(await admin.claimFinanceWorkspace({...claim, workspaceId: "replacement"}))
+        .toBe("conflict");
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("validates owner and collaborator access live and denies a revoked stale listing", async () => {
+    let owner = await createUser("finance-owner");
+    let collaborator = await createUser("finance-collaborator");
+    let secondAdmin = await createUser("finance-second-admin");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: workspaceIdString,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    expect(await admin.claimFinanceWorkspace(claim)).toBe("claimed");
+    await owner.user.registerFinanceGadget(workspaceIdString, "Finance Operations Workbench");
+
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let session = await workspace.open(
+        owner.id.toString(), owner.profileId, () => {});
+
+    try {
+      expect(await readFinanceHubStatus(
+          env.TEST_ADMIN, env.TEST_OVERSEER,
+          owner.id.toString(), owner.profileId, true)).toEqual({
+        authorized: true,
+        workspaceId: workspaceIdString,
+        canCreate: false,
+      });
+
+      await session.addCollaborator(collaborator.profileId, "use");
+      let collaboratorSession = await workspace.open(
+          collaborator.id.toString(), collaborator.profileId, () => {});
+      collaboratorSession[Symbol.dispose]();
+      expect(await readFinanceHubStatus(
+          env.TEST_ADMIN, env.TEST_OVERSEER,
+          collaborator.id.toString(), collaborator.profileId, false)).toEqual({
+        authorized: true,
+        workspaceId: workspaceIdString,
+        canCreate: false,
+      });
+
+      expect(await readFinanceHubStatus(
+          env.TEST_ADMIN, env.TEST_OVERSEER,
+          secondAdmin.id.toString(), secondAdmin.profileId, true)).toEqual({
+        authorized: false,
+        canCreate: false,
+      });
+      expect(await admin.claimFinanceWorkspace({
+        workspaceId: env.TEST_OVERSEER.newUniqueId().toString(),
+        ownerUserId: secondAdmin.id.toString(),
+        ownerProfileId: secondAdmin.profileId,
+      })).toBe("conflict");
+
+      await session.removeCollaborator(collaborator.profileId, []);
+      await expectOpenDenied(() => workspace.open(
+          collaborator.id.toString(), collaborator.profileId, () => {}));
+      let ownerProfile: AiChatAuthorInfo = {
+        type: "user",
+        id: owner.profileId,
+        name: "finance-owner",
+      };
+      await collaborator.user.recordSharedGadgetOpen(
+          workspaceIdString, "Finance Operations Workbench", ownerProfile, "use", "finance");
+      expect(await collaborator.user.getGadget(workspaceIdString)).not.toBeNull();
+      expect(await readFinanceHubStatus(
+          env.TEST_ADMIN, env.TEST_OVERSEER,
+          collaborator.id.toString(), collaborator.profileId, false)).toEqual({
+        authorized: false,
+        canCreate: false,
+      });
+    } finally {
+      session[Symbol.dispose]();
+      await admin.releaseFinanceWorkspace(claim);
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("rolls back a failed Finance initialization, disposes its stub, and permits retry", async () => {
+    let owner = await createUser("finance-failed");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    let disposed = false;
+
+    await expect(runBlueprintWorkspaceCreation({
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: () => owner.user.registerFinanceGadget(
+          workspaceId, "Finance Operations Workbench"),
+      open: async () => ({[Symbol.dispose]() { disposed = true; }}),
+      finish: async () => { throw new Error("initialization failed"); },
+      rollbackRegistration: () => owner.user.deleteGadget(workspaceId),
+      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+    })).rejects.toThrow("initialization failed");
+
+    expect(disposed).toBe(true);
+    expect(await owner.user.getGadget(workspaceId)).toBeNull();
+    expect(await admin.getFinanceWorkspaceClaim()).toBeNull();
+    expect(await admin.claimFinanceWorkspace(claim)).toBe("claimed");
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("retains the singleton and owner record after successful Finance creation", async () => {
+    let owner = await createUser("finance-success");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    let disposed = false;
+
+    let opened = await runBlueprintWorkspaceCreation({
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: () => owner.user.registerFinanceGadget(
+          workspaceId, "Finance Operations Workbench"),
+      open: async () => ({[Symbol.dispose]() { disposed = true; }}),
+      finish: async () => {},
+      rollbackRegistration: () => owner.user.deleteGadget(workspaceId),
+      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+    });
+
+    expect(disposed).toBe(false);
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(claim);
+    expect(await owner.user.getGadget(workspaceId)).toEqual(
+        expect.objectContaining({id: workspaceId, originHubId: "finance"}));
+    opened[Symbol.dispose]();
+    await owner.user.deleteGadget(workspaceId);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("does not roll back a successful claim or registration during an exact replay failure", async () => {
+    let owner = await createUser("finance-replay");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    let creationOps = {
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: () => owner.user.registerFinanceGadget(
+          workspaceId, "Finance Operations Workbench"),
+      open: async () => ({[Symbol.dispose]() {}}),
+      rollbackRegistration: () => owner.user.deleteGadget(workspaceId),
+      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+    };
+
+    let opened = await runBlueprintWorkspaceCreation({...creationOps, finish: async () => {}});
+    opened[Symbol.dispose]();
+    await expect(runBlueprintWorkspaceCreation({
+      ...creationOps,
+      finish: async () => { throw new Error("replayed step failed"); },
+    })).rejects.toThrow("replayed step failed");
+
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(claim);
+    expect(await owner.user.getGadget(workspaceId)).toEqual(expect.objectContaining({
+      id: workspaceId,
+      title: "Finance Operations Workbench",
+      originHubId: "finance",
+    }));
+    await owner.user.deleteGadget(workspaceId);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("preserves a registration repaired beneath an existing exact claim", async () => {
+    let owner = await createUser("finance-repaired-registration");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    expect(await admin.claimFinanceWorkspace(claim)).toBe("claimed");
+    expect(await owner.user.getGadget(workspaceId)).toBeNull();
+    let creationOps = {
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: () => owner.user.registerFinanceGadget(
+          workspaceId, "Finance Operations Workbench"),
+      open: async () => ({[Symbol.dispose]() {}}),
+      rollbackRegistration: () => owner.user.deleteGadget(workspaceId),
+      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+    };
+
+    await expect(runBlueprintWorkspaceCreation({
+      ...creationOps,
+      finish: async () => { throw new Error("repair finish failed"); },
+    })).rejects.toThrow("repair finish failed");
+
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(claim);
+    expect(await owner.user.getGadget(workspaceId)).toEqual(expect.objectContaining({
+      id: workspaceId,
+      title: "Finance Operations Workbench",
+      originHubId: "finance",
+    }));
+    expect(await admin.claimFinanceWorkspace({...claim, workspaceId: "replacement"}))
+        .toBe("conflict");
+
+    let opened = await runBlueprintWorkspaceCreation({...creationOps, finish: async () => {}});
+    opened[Symbol.dispose]();
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(claim);
+    expect(await owner.user.getGadget(workspaceId)).not.toBeNull();
+    await owner.user.deleteGadget(workspaceId);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("denies an initialized Finance DO after fresh creation rollback removes its owner record", async () => {
+    let owner = await createUser("finance-initialized-rollback");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: workspaceIdString,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+
+    await expect(runBlueprintWorkspaceCreation({
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: () => owner.user.registerFinanceGadget(
+          workspaceIdString, "Finance Operations Workbench"),
+      open: async () => await workspace.open(owner.id.toString(), owner.profileId, () => {}),
+      finish: async () => { throw new Error("post-open initialization failed"); },
+      rollbackRegistration: () => owner.user.deleteGadget(workspaceIdString),
+      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+    })).rejects.toThrow("post-open initialization failed");
+
+    expect(await admin.getFinanceWorkspaceClaim()).toBeNull();
+    expect(await owner.user.getGadget(workspaceIdString)).toBeNull();
+    await expectOpenDenied(
+        () => workspace.open(owner.id.toString(), owner.profileId, () => {}));
+  });
+
+  it("denies an initialized ordinary workspace after its owner record is removed", async () => {
+    let owner = await createUser("ordinary-orphan");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Ordinary workspace", "ops");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let session = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+    session[Symbol.dispose]();
+    await owner.user.deleteGadget(workspaceIdString);
+
+    await expectOpenDenied(
+        () => workspace.open(owner.id.toString(), owner.profileId, () => {}));
+  });
+
+  it("fails direct Finance opens closed for missing or corrupt owner metadata", async () => {
+    let owner = await createUser("finance-corrupt-owner");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: workspaceIdString,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    await admin.claimFinanceWorkspace(claim);
+    await owner.user.registerFinanceGadget(workspaceIdString, "Finance Operations Workbench");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let session = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+    session[Symbol.dispose]();
+
+    await owner.user.deleteGadget(workspaceIdString);
+    await expectOpenDenied(
+        () => workspace.open(owner.id.toString(), owner.profileId, () => {}));
+    await owner.user.newGadget(workspaceIdString, "Corrupt", "support");
+    await expectOpenDenied(
+        () => workspace.open(owner.id.toString(), owner.profileId, () => {}));
+
+    await owner.user.deleteGadget(workspaceIdString);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("denies stale share keys after an ordinary workspace becomes the claimed Finance workspace", async () => {
+    let owner = await createUser("finance-stale-key-owner");
+    let collaborator = await createUser("finance-stale-key-collaborator");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Finance Operations Workbench");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ordinarySession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+    let {key} = await ordinarySession.createShareLink("use");
+    await owner.user.updateProvisionalWorkspaceOrigin(workspaceIdString, "finance");
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: workspaceIdString,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    await admin.claimFinanceWorkspace(claim);
+
+    await expectOpenDenied(() => workspace.open(
+        collaborator.id.toString(), collaborator.profileId, () => {}, key));
+    await expectOpenDenied(() => workspace.open(
+        owner.id.toString(), owner.profileId, () => {}, key));
+
+    ordinarySession[Symbol.dispose]();
+    await owner.user.deleteGadget(workspaceIdString);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("denies an orphan Finance-origin workspace with no deployment claim", async () => {
+    let owner = await createUser("finance-orphan");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    await owner.user.registerFinanceGadget(
+        workspaceId.toString(), "Finance Operations Workbench");
+
+    await expectOpenDenied(() => env.TEST_OVERSEER.get(workspaceId).open(
+        owner.id.toString(), owner.profileId, () => {}));
+    await owner.user.deleteGadget(workspaceId.toString());
+  });
+
+  it("filters protected Finance records from owner blueprint reads", () => {
+    let finance = blueprintSummary(FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID);
+    let ordinary = blueprintSummary("starter.ordinary");
+
+    expect(visibleOwnBlueprints([finance, ordinary])).toEqual([ordinary]);
+    expect(visibleOwnBlueprint(finance)).toBeNull();
+    expect(visibleOwnBlueprint(ordinary)).toBe(ordinary);
+  });
+
+  it("leaves ordinary blueprint creation outside the Finance claim lifecycle", async () => {
+    let owner = await createUser("ordinary-blueprint");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let opened = await runBlueprintWorkspaceCreation({
+      register: () => owner.user.newGadget(workspaceId, "Support", "support"),
+      open: async () => ({[Symbol.dispose]() {}}),
+      finish: async () => {},
+    });
+
+    expect(await owner.user.getGadget(workspaceId)).toEqual(
+        expect.objectContaining({id: workspaceId, originHubId: "support"}));
+    expect(await env.TEST_ADMIN.getByName("").getFinanceWorkspaceClaim()).toBeNull();
+    opened[Symbol.dispose]();
+    await owner.user.deleteGadget(workspaceId);
+  });
+
+  it("disposes an opened ordinary blueprint workspace when later initialization fails", async () => {
+    let owner = await createUser("ordinary-failed");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let disposed = false;
+    await expect(runBlueprintWorkspaceCreation({
+      register: () => owner.user.newGadget(workspaceId, "Support", "support"),
+      open: async () => ({[Symbol.dispose]() { disposed = true; }}),
+      finish: async () => { throw new Error("binding failed"); },
+    })).rejects.toThrow("binding failed");
+
+    expect(disposed).toBe(true);
+    expect(await owner.user.getGadget(workspaceId)).not.toBeNull();
+    expect(await env.TEST_ADMIN.getByName("").getFinanceWorkspaceClaim()).toBeNull();
+    await owner.user.deleteGadget(workspaceId);
+  });
+
+  it("allows only an admin Finance bootstrap with the protected blueprint-origin pair", () => {
+    expect(assertBlueprintOriginAllowed(
+      FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+      "finance",
+      true,
+    )).toBe(true);
+    expect(() => assertBlueprintOriginAllowed(
+      FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+      "finance",
+      false,
+    )).toThrow(/not found/i);
+    expect(() => assertBlueprintOriginAllowed(
+      FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+      "ops",
+      true,
+    )).toThrow(/not found/i);
+    expect(() => assertBlueprintOriginAllowed(
+      FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+      undefined,
+      true,
+    )).toThrow(/not found/i);
+  });
+
+  it("rejects Finance origins for ordinary blueprints and preserves ordinary creation", () => {
+    expect(() => assertBlueprintOriginAllowed("starter.ordinary", "finance", true))
+        .toThrow(/only the Finance Operations Workbench/i);
+    expect(assertBlueprintOriginAllowed("starter.ordinary", "support", false)).toBe(false);
+    expect(assertBlueprintOriginAllowed("starter.ordinary", undefined, false)).toBe(false);
+  });
+
+  it("recognizes only the exact protected blueprint id", () => {
+    expect(isFinanceOperationsWorkbenchBlueprintId(
+      FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+    )).toBe(true);
+    expect(isFinanceOperationsWorkbenchBlueprintId("starter.finance-copy")).toBe(false);
+  });
+
+  it("keeps ordinary sharing unchanged and makes Finance direct-invite, use-only", () => {
+    expect(effectiveCollaboratorRole("support", "build")).toBe("build");
+    expect(effectiveCollaboratorRole("finance", "build")).toBe("use");
+    expect(() => assertCollaboratorInviteAllowed(true, true, "use")).not.toThrow();
+    expect(() => assertCollaboratorInviteAllowed(true, true, "build"))
+        .toThrow(/Gadget-only/);
+    expect(() => assertCollaboratorInviteAllowed(true, false, "use"))
+        .toThrow(/owner/);
+    expect(() => assertShareLinksAllowed(true)).toThrow(/invite-only/);
+    expect(() => assertCollaboratorInviteAllowed(false, false, "build")).not.toThrow();
+    expect(() => assertShareLinksAllowed(false)).not.toThrow();
+  });
+});

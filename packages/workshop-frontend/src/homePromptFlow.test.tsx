@@ -20,13 +20,17 @@ const testState = vi.hoisted(() => {
   const newGadget = vi.fn<(hub?: string) => RpcStub<Overseer>>(
     () => overseer as unknown as RpcStub<Overseer>,
   );
+  const newGadgetFromBlueprint = vi.fn<() => RpcStub<Overseer>>(
+    () => overseer as unknown as RpcStub<Overseer>,
+  );
   return {
     addToast: vi.fn<(toast: unknown) => void>(),
-    authenticatedApi: { listModels, newGadget, updateProvisionalWorkspaceOrigin },
+    authenticatedApi: { listModels, newGadget, newGadgetFromBlueprint, updateProvisionalWorkspaceOrigin },
     currentUser: { id: "user-a", name: "User A" },
     listModels,
     navigate: vi.fn<(options: unknown) => void>(),
     newGadget,
+    newGadgetFromBlueprint,
     overseer,
     seeds: [] as Array<{ text?: string; nonce?: number }>,
     draftStorageKeys: [] as Array<string | undefined>,
@@ -123,6 +127,52 @@ describe("Home prompt route flow", () => {
       to: "/workspace/$id",
       params: { id: "workspace-1" },
       search: { chat: 7 },
+    });
+  });
+
+  it("opens the entitled shared Finance workspace without creating another", async () => {
+    localStorage.setItem("odie:selected-hub", "finance");
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <HubProvider
+        enabledHubs={["ops", "support"]}
+        financeStatus={{ authorized: true, workspaceId: "finance-shared", canCreate: false }}
+      >
+        <HomePageContent />
+      </HubProvider>,
+    ));
+
+    await act(async () => container!.querySelector("button")!.click());
+    expect(testState.newGadgetFromBlueprint).not.toHaveBeenCalled();
+    expect(testState.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id", params: { id: "finance-shared" }, search: {},
+    });
+  });
+
+  it("bootstraps Finance through the protected blueprint and disposes the pipelined stub", async () => {
+    localStorage.setItem("odie:selected-hub", "finance");
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root!.render(
+      <HubProvider
+        enabledHubs={["ops", "support"]}
+        financeStatus={{ authorized: true, canCreate: true }}
+      >
+        <HomePageContent />
+      </HubProvider>,
+    ));
+
+    await act(async () => container!.querySelector("button")!.click());
+    expect(testState.newGadgetFromBlueprint).toHaveBeenCalledWith(
+      "starter.finance-operations-workbench", {}, "finance",
+    );
+    expect(testState.overseer.getMetadata).toHaveBeenCalled();
+    expect(testState.overseer[Symbol.dispose]).toHaveBeenCalled();
+    expect(testState.navigate).toHaveBeenCalledWith({
+      to: "/workspace/$id", params: { id: "workspace-1" }, search: {},
     });
   });
 });

@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
-import { RpcTarget } from 'capnweb'
+import { RpcTarget, type RpcPromise } from 'capnweb'
 import {
   ArrowRight,
   CheckCircle,
@@ -152,7 +152,11 @@ function useGettingStartedReadiness(): ReadinessState {
     }
 
     const subscriber = new AccountsSubscriber()
-    authenticatedApi.subscribeConnectedAccounts(subscriber, { includeForcedAutoProvisionedAccounts: true })
+    const subscriptionPromise = authenticatedApi.subscribeConnectedAccounts(
+      subscriber,
+      { includeForcedAutoProvisionedAccounts: true },
+    ) as unknown as RpcPromise<{}>
+    subscriptionPromise
       .then((stub) => {
         if (cancelled) stub[Symbol.dispose]()
         else subscriptionRef.current = stub

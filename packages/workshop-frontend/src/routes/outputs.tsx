@@ -27,6 +27,7 @@ import { formatOf } from '../components/format/formats'
 import { FormatThumbnail, FormatTile } from '../components/format/FormatVisuals'
 import { useOutputFormats } from '../components/format/useOutputFormats'
 import { useHub } from '../HubContext'
+import { blueprintCreationOrigin } from '../blueprintCreationOrigin'
 import { isSupportOrigin, rankForSelectedHub } from '../supportCuration'
 import NewFormatRow from '../components/format/NewFormatRow'
 import DeleteConfirmationDialog from '../components/DeleteConfirmationDialog'
@@ -597,7 +598,7 @@ function OutputsPage() {
     const title = newGadgetTitle.trim()
     if (!title || creatingGadget) return
     setCreatingGadget(true)
-    const overseer = authenticatedApi.newGadget(hub)
+    const overseer = authenticatedApi.newGadget(blueprintCreationOrigin(hub))
     let gadget
     try {
       const [metadata] = await Promise.all([
