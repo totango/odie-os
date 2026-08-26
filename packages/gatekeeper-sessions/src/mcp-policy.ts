@@ -1,3 +1,18 @@
+import type { CodingSessionTool } from "@gadgets/workshop-shared/coding-sessions";
+
+const WORKSHOP_MCP_PROTOCOL_VERSION = "2025-06-18";
+const WORKSHOP_MCP_COMPATIBLE_PROTOCOL_VERSIONS = new Set([
+  WORKSHOP_MCP_PROTOCOL_VERSION,
+  "2025-03-26",
+]);
+
+/** Selects a supported MCP version from one validated initialize request. */
+export function negotiateWorkshopMcpProtocolVersion(requested: unknown): string | null {
+  if (typeof requested !== "string" || requested.length === 0 || requested.length > 32) return null;
+  return WORKSHOP_MCP_COMPATIBLE_PROTOCOL_VERSIONS.has(requested)
+    ? requested : WORKSHOP_MCP_PROTOCOL_VERSION;
+}
+
 /** Hostname used only inside the coding-session sandbox for Workshop MCP traffic. */
 export const WORKSHOP_MCP_HOST = "workshop-mcp.internal";
 
@@ -15,6 +30,24 @@ export function normalizeMcpToolInputSchema(input: unknown): Record<string, unkn
     delete schema.properties;
   }
   return schema;
+}
+
+/** Returns whether a JSON-RPC request id is a non-null string or finite number. */
+export function isValidWorkshopMcpRequestId(value: unknown): value is string | number {
+  return (typeof value === "string") || (typeof value === "number" && Number.isFinite(value));
+}
+
+/** Converts a Workshop tool contract into the standard MCP wire definition. */
+export function workshopMcpToolDefinition(tool: CodingSessionTool): Record<string, unknown> {
+  return {
+    name: tool.name,
+    title: tool.title,
+    description: tool.description,
+    inputSchema: normalizeMcpToolInputSchema(tool.inputSchema),
+    outputSchema: tool.outputSchema,
+    securitySchemes: tool.securitySchemes,
+    _meta: tool._meta,
+  };
 }
 
 /**

@@ -296,6 +296,18 @@ export class CodingSessionToolHostImpl
     return user.listCodingSessionTools(sessionId, sandboxId);
   }
 
+  async listResources(owner: CodingSessionOwner, sessionId: string, sandboxId: string) {
+    const user = this.#user(owner);
+    await user.assertRequiredConnectionsHealthy();
+    return user.listCodingSessionResources(sessionId, sandboxId);
+  }
+
+  async readResource(owner: CodingSessionOwner, sessionId: string, uri: string, sandboxId: string) {
+    const user = this.#user(owner);
+    await user.assertRequiredConnectionsHealthy();
+    return user.readCodingSessionResource(sessionId, uri, sandboxId);
+  }
+
   async callTool(owner: CodingSessionOwner, sessionId: string, name: string,
       args: Record<string, unknown> | undefined, sandboxId: string)
       : Promise<CodingSessionToolResult> {

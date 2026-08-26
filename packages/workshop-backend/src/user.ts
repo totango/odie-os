@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateCodingSessionFileUploadRequest, validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService, type ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
-import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
+import type { CodingSessionActivity, CodingSessionReadResourceResult, CodingSessionResource, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import { PRODUCT_FEEDBACK_MAX_DIAGNOSTIC_LENGTH, PRODUCT_FEEDBACK_MAX_DIAGNOSTICS, PRODUCT_FEEDBACK_MAX_TEXT_LENGTH, sanitizeProductFeedbackText, validateSubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
@@ -23,6 +23,13 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import {
+  assertCodingSessionMcpResponseSize,
+  namespaceCodingSessionResourceUri,
+  namespaceCodingSessionToolMetadata,
+  parseCodingSessionResourceUri,
+  selectCodingSessionResourceBinding,
+} from "./coding-session-mcp.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -2030,12 +2037,67 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         session?.[Symbol.dispose]();
       }
     }));
-    return catalogs.flatMap(({ binding, tools }) => tools.map(tool => ({
+    const tools = catalogs.flatMap(({ binding, tools: upstreamTools }) => upstreamTools.map(tool => ({
       name: this.#codingSessionToolName(binding.id, tool.name),
       title: tool.title,
       description: tool.description,
       inputSchema: tool.inputSchema,
+      outputSchema: tool.outputSchema,
+      securitySchemes: tool.securitySchemes,
+      _meta: namespaceCodingSessionToolMetadata(
+        binding.id, binding.generation, tool._meta),
     })));
+    assertCodingSessionMcpResponseSize({ tools });
+    return tools;
+  }
+
+  async listCodingSessionResources(
+    sessionId: string,
+    sandboxId: string,
+  ): Promise<CodingSessionResource[]> {
+    const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
+    const catalogs = await Promise.all((await this.#codingSessionBindings(repositories)).map(async binding => {
+      const session = await binding.facet.startSession(
+        new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+      try {
+        return { binding, resources: await session.listResources() };
+      } finally {
+        session[Symbol.dispose]();
+      }
+    }));
+    const resources = catalogs.flatMap(({ binding, resources: upstreamResources }) =>
+      upstreamResources.map(resource => ({
+        ...resource,
+        uri: namespaceCodingSessionResourceUri(binding.id, binding.generation, resource.uri),
+      })));
+    assertCodingSessionMcpResponseSize({ resources });
+    return resources;
+  }
+
+  async readCodingSessionResource(
+    sessionId: string,
+    uri: string,
+    sandboxId: string,
+  ): Promise<CodingSessionReadResourceResult> {
+    const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
+    const { bindingId, bindingGeneration, upstreamUri } = parseCodingSessionResourceUri(uri);
+    const binding = selectCodingSessionResourceBinding(
+      bindingId, bindingGeneration, await this.#codingSessionBindings(repositories));
+    const session = await binding.facet.startSession(
+      new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+    try {
+      const result = await session.readResource(upstreamUri);
+      const namespaced = {
+        contents: result.contents.map(content => ({
+          ...content,
+          uri: namespaceCodingSessionResourceUri(binding.id, binding.generation, content.uri),
+        })),
+      };
+      assertCodingSessionMcpResponseSize(namespaced);
+      return namespaced;
+    } finally {
+      session[Symbol.dispose]();
+    }
   }
 
   async callCodingSessionTool(
