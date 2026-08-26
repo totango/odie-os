@@ -25,10 +25,17 @@ function unavailable(retryAfterMs?: number): ContainerUnavailableError {
 
 function runWith(
   outcomes: unknown[],
-): { result: Promise<SandboxProcess>; attempts: () => number; delays: number[] } {
+): {
+  result: Promise<SandboxProcess>;
+  attempts: () => number;
+  delays: number[];
+  calls: Array<{ command: readonly string[]; options: unknown }>;
+} {
   let attempts = 0;
+  const calls: Array<{ command: readonly string[]; options: unknown }> = [];
   const sandbox = {
-    async exec() {
+    async exec(command: readonly string[], options: unknown) {
+      calls.push({ command, options });
       const outcome = outcomes[attempts++];
       if (outcome instanceof Error) throw outcome;
       return outcome as SandboxProcess;
@@ -39,6 +46,7 @@ function runWith(
     result: startNodeCanaryProcess(sandbox, async delayMs => { delays.push(delayMs); }),
     attempts: () => attempts,
     delays,
+    calls,
   };
 }
 
@@ -54,11 +62,15 @@ describe("native canary failure classification", () => {
 });
 
 describe("native canary initial Node readiness", () => {
-  it("returns the first successful exec without delay", async () => {
+  it("returns the first successful exec after scheduling output for log attachment", async () => {
     const run = runWith([process]);
     await expect(run.result).resolves.toBe(process);
     expect(run.attempts()).toBe(1);
     expect(run.delays).toEqual([]);
+    expect(run.calls[0]?.command.slice(0, 2)).toEqual(["node", "--eval"]);
+    expect(run.calls[0]?.command[2]).toContain("setTimeout(() => {");
+    expect(run.calls[0]?.command[2]).toContain("}, 5000)");
+    expect(run.calls[0]?.options).toEqual({ timeout: 30_000 });
   });
 
   it("retries the exact ContainerUnavailableError and honors retryAfterMs", async () => {
