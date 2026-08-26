@@ -21,6 +21,8 @@ import {
 } from "@gadgets/workshop-shared/api";
 import {
   type CodingSessionOwner,
+  type CodingSessionReadResourceResult,
+  type CodingSessionResource,
   type CodingSessionTool,
   type CodingSessionToolHost,
   type CodingSessionToolResult,
@@ -33,7 +35,9 @@ import {
   type GitHubInstallationToken,
 } from "./github-app.js";
 import {
-  normalizeMcpToolInputSchema,
+  isValidWorkshopMcpRequestId,
+  negotiateWorkshopMcpProtocolVersion,
+  workshopMcpToolDefinition,
   WORKSHOP_MCP_HOST,
   validateWorkshopMcpRequestTarget,
 } from "./mcp-policy.js";
@@ -601,13 +605,23 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       return mcpError(message.id ?? null, -32600, "Invalid Request");
     }
     if (message.method === "notifications/initialized") return new Response(null, { status: 202 });
+    if ((message.method === "initialize" || message.method === "tools/list" ||
+         message.method === "resources/list" || message.method === "resources/read" ||
+         message.method === "tools/call") && !isValidWorkshopMcpRequestId(message.id)) {
+      return mcpError(null, -32600, "A non-null request id is required");
+    }
     const policy = this.#policy();
     try {
       const sandboxId = required(policy.sandboxId, "Workshop MCP sandboxId");
       if (message.method === "initialize") {
+        const params = message.params as { protocolVersion?: unknown } | undefined;
+        const protocolVersion = negotiateWorkshopMcpProtocolVersion(params?.protocolVersion);
+        if (protocolVersion === null) {
+          return mcpError(message.id, -32602, "A valid protocolVersion is required");
+        }
         return mcpResult(message.id, {
-          protocolVersion: "2025-03-26",
-          capabilities: { tools: { listChanged: true } },
+          protocolVersion,
+          capabilities: { tools: {}, resources: {} },
           serverInfo: { name: "Workshop connections", version: "1.0.0" },
         });
       }
@@ -616,16 +630,12 @@ export class CodingSessionPolicy extends DurableObject<Env> {
           policy.owner, policy.sessionId, sandboxId) as unknown as CodingSessionTool[];
         return mcpResult(message.id, {
           tools: [
-            ...tools.map(tool => ({
-              name: tool.name,
-              title: tool.title,
-              description: tool.description,
-              inputSchema: normalizeMcpToolInputSchema(tool.inputSchema),
-            })),
+            ...tools.map(workshopMcpToolDefinition),
             {
               name: "workshop_action_result",
               title: "Collect an approved Workshop action",
               description: "Collect the result of a connected-service action after Workshop approval.",
+              _meta: { ui: { visibility: ["model"] } },
               inputSchema: {
                 type: "object",
                 properties: {
@@ -638,6 +648,20 @@ export class CodingSessionPolicy extends DurableObject<Env> {
             },
           ],
         });
+      }
+      if (message.method === "resources/list") {
+        const resources = await this.env.WORKSHOP_TOOLS.listResources(
+          policy.owner, policy.sessionId, sandboxId) as unknown as CodingSessionResource[];
+        return mcpResult(message.id, { resources });
+      }
+      if (message.method === "resources/read") {
+        const params = message.params as { uri?: unknown } | undefined;
+        if (typeof params?.uri !== "string") {
+          return mcpError(message.id, -32602, "uri is required");
+        }
+        const result = await this.env.WORKSHOP_TOOLS.readResource(
+          policy.owner, policy.sessionId, params.uri, sandboxId) as unknown as CodingSessionReadResourceResult;
+        return mcpResult(message.id, result);
       }
       if (message.method === "tools/call") {
         const params = message.params as { name?: unknown; arguments?: unknown } | undefined;
@@ -2621,15 +2645,12 @@ function yamlDoubleQuote(value: string): string {
 }
 
 function mcpResult(id: unknown, result: unknown): Response {
-  return Response.json({ jsonrpc: "2.0", id: id ?? null, result }, {
-    headers: { "MCP-Protocol-Version": "2025-03-26" },
-  });
+  // MCP-Protocol-Version is a client request header after initialize, not a server response header.
+  return Response.json({ jsonrpc: "2.0", id: id ?? null, result });
 }
 
 function mcpError(id: unknown, code: number, message: string): Response {
-  return Response.json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } }, {
-    headers: { "MCP-Protocol-Version": "2025-03-26" },
-  });
+  return Response.json({ jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 }
 
 function required(value: string | undefined, name: string): string {

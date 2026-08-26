@@ -46,6 +46,50 @@ export interface CodingSessionTool {
   description?: string;
   /** JSON Schema describing the tool arguments. */
   inputSchema?: unknown;
+  /** JSON Schema describing structured tool output. */
+  outputSchema?: unknown;
+  /** Standard MCP authorization schemes declared by the upstream tool. */
+  securitySchemes?: unknown[];
+  /** Standard MCP Apps metadata, with its resource URI rewritten by Workshop when proxied. */
+  _meta?: { ui?: { resourceUri?: string; visibility?: ("model" | "app")[] } };
+}
+
+/** One namespaced MCP Apps resource exposed to a coding session. */
+export interface CodingSessionResource {
+  /** Workshop-owned URI used for subsequent `resources/read` requests. */
+  uri: string;
+  /** Upstream resource name. */
+  name: string;
+  /** Optional upstream display title. */
+  title?: string;
+  /** Optional upstream resource description. */
+  description?: string;
+  /** Optional upstream media type. */
+  mimeType?: string;
+  /** Optional upstream resource size in bytes. */
+  size?: number;
+  /** Bounded standard metadata supplied with the resource. */
+  _meta?: Record<string, unknown>;
+}
+
+/** One resource body returned through the Workshop MCP proxy. */
+export interface CodingSessionResourceContent {
+  /** Workshop-owned URI corresponding to the requested upstream resource. */
+  uri: string;
+  /** Optional upstream media type. */
+  mimeType?: string;
+  /** UTF-8 resource body, when the upstream resource is textual. */
+  text?: string;
+  /** Base64 resource body, when the upstream resource is binary. */
+  blob?: string;
+  /** Bounded standard MCP Apps metadata supplied with the resource body. */
+  _meta?: Record<string, unknown>;
+}
+
+/** Result of reading one coding-session MCP Apps resource. */
+export interface CodingSessionReadResourceResult {
+  /** Resource bodies returned by the connected MCP server. */
+  contents: CodingSessionResourceContent[];
 }
 
 /** Result of invoking a coding-session MCP tool. */
@@ -97,6 +141,21 @@ export interface CodingSessionToolHost extends WorkerEntrypoint {
 
   /** Lists the current user's eligible connected MCP tools. */
   listTools(owner: CodingSessionOwner, sessionId: string, sandboxId: string): Promise<CodingSessionTool[]>;
+
+  /** Lists namespaced MCP Apps resources referenced by the current tool catalog. */
+  listResources(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    sandboxId: string,
+  ): Promise<CodingSessionResource[]>;
+
+  /** Reads one namespaced MCP Apps resource through its owning gatekeeper. */
+  readResource(
+    owner: CodingSessionOwner,
+    sessionId: string,
+    uri: string,
+    sandboxId: string,
+  ): Promise<CodingSessionReadResourceResult>;
 
   /** Calls one namespaced tool through its existing gatekeeper approval policy. */
   callTool(
