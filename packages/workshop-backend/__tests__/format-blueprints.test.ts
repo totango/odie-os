@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { FEATURED_BLUEPRINTS_KEY, parseBlueprintArchive, parseBlueprintKvRecord, parseFeaturedBlueprints, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from "../src/blueprint-archive.js";
 import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints } from "../src/format-blueprints.js";
@@ -94,6 +94,7 @@ function makeEnv() {
 
 type StarterSlug =
   | "developer-delivery-kit"
+  | "finance-operations-workbench"
   | "incident-investigation-board"
   | "jira-delivery-risk"
   | "support-escalation-cockpit";
@@ -160,6 +161,7 @@ function fakeCursor<T>(items: T[]) {
 
 const starterSlugs: StarterSlug[] = [
   "developer-delivery-kit",
+  "finance-operations-workbench",
   "incident-investigation-board",
   "jira-delivery-risk",
   "support-escalation-cockpit",
@@ -471,12 +473,17 @@ describe("featured starter server runtime smoke tests", () => {
     for (let slug of starterSlugs) {
       let {gadget} = await loadStarter(slug);
 
-      let state = await gadget.getState();
-      expect(state, slug).toMatchObject({skippedConnectors: expect.anything()});
+      let state = await gadget.getState() as {
+        skippedConnectors?: unknown;
+        skippedSources?: unknown;
+        connectors?: unknown[];
+        sources?: unknown[];
+      };
+      expect(state.skippedConnectors ?? state.skippedSources, slug).toBeDefined();
 
       let connectors = "listConnectors" in gadget
           ? await gadget.listConnectors()
-          : (state as {connectors: unknown[]}).connectors;
+          : (state.connectors ?? state.sources);
       expect(connectors, slug).toEqual(expect.arrayContaining([
         expect.objectContaining({status: expect.stringMatching(/missing|Missing/u)}),
       ]));
@@ -490,20 +497,24 @@ describe("featured starter server runtime smoke tests", () => {
       LINEAR_WORKSPACE: {},
       TEAM_PI: {},
       JARVIS: {},
+      GOOGLE_SHEET: {},
+      GOOGLE_DOC: {},
+      GMAIL_SEARCH: {},
+      SCHEDULER: {},
     };
 
     for (let slug of starterSlugs) {
       let {gadget} = await loadStarter(slug, representativeEnv);
-      let state = await gadget.getState();
+      let state = await gadget.getState() as {
+        connectors?: Array<{key: string}>;
+        sources?: Array<{key: string}>;
+      };
       let connectors = "listConnectors" in gadget
           ? await gadget.listConnectors()
-          : (state as {connectors: Array<{key: string}>}).connectors;
+          : (state.connectors ?? state.sources);
       let byKey = new Map((connectors as Array<{key: string, status: string, bindingName?: string | null}>).map(c => [c.key, c]));
 
-      for (let key of ["TEAM_PI", "JARVIS"]) {
-        expect(byKey.get(key)?.status, `${slug}:${key}`).toMatch(/connected|Connected/u);
-      }
-      for (let key of ["GITHUB_REPO", "GMAIL_INBOX", "LINEAR_WORKSPACE"]) {
+      for (let key of Object.keys(representativeEnv)) {
         if (byKey.has(key)) expect(byKey.get(key)?.status, `${slug}:${key}`).toMatch(/connected|Connected/u);
       }
     }
@@ -567,6 +578,138 @@ describe("featured starter server runtime smoke tests", () => {
     expect(jiraSaved.records[0].tags).toHaveLength(12);
     await jira.gadget.importText("title,program\nCSV risk,Program", "csv");
     expect((await jira.gadget.resetDemo() as {records: unknown[]}).records).toHaveLength(4);
+  });
+
+  it("keeps finance imports and empty workspaces stable across demo lifecycle operations", async () => {
+    let finance = await loadStarter("finance-operations-workbench");
+    let initial = (await finance.gadget.getState()) as {
+      financeRows: Array<{ id: string }>;
+      contracts: Array<{ id: string }>;
+      forecasts: Array<{ id: string }>;
+    };
+    expect(initial.financeRows).toHaveLength(5);
+
+    for (let record of initial.financeRows) await finance.gadget.deleteFinanceRow(record.id);
+    for (let record of initial.contracts) await finance.gadget.deleteContractFinding(record.id);
+    for (let record of initial.forecasts) await finance.gadget.deleteForecastRecord(record.id);
+    let empty = (await finance.gadget.getState()) as {
+      financeRows: unknown[];
+      contracts: unknown[];
+      forecasts: unknown[];
+    };
+    expect(empty).toMatchObject({ financeRows: [], contracts: [], forecasts: [] });
+
+    let imported = (await finance.gadget.importDataset(
+      "finance",
+      JSON.stringify([
+        {
+          id: "demo-custom",
+          period: "Jul 2026",
+          entity: "Corporate",
+          account: "Travel",
+          actual: 10,
+          budget: 10,
+        },
+        {
+          id: "demo-fin-1",
+          period: "Jul 2026",
+          entity: "Corporate",
+          account: "Reserved identity",
+          actual: 15,
+          budget: 15,
+        },
+        {
+          id: "same-id",
+          period: "Jul 2026",
+          entity: "Corporate",
+          account: "Travel",
+          actual: 20,
+          budget: 20,
+        },
+        {
+          id: "same-id",
+          period: "Aug 2026",
+          entity: "Corporate",
+          account: "Travel",
+          actual: 30,
+          budget: 30,
+        },
+      ]),
+      "json",
+    )) as {
+      imported: number;
+      state: {
+        financeRows: Array<{ id: string; period: string }>;
+        anomalies: Array<{ kind: string }>;
+      };
+    };
+    expect(imported.imported).toBe(3);
+    expect(imported.state.financeRows).toHaveLength(3);
+    expect(imported.state.financeRows.some((row) => row.id === "demo-custom")).toBe(true);
+    expect(imported.state.financeRows.some((row) => row.id === "demo-fin-1")).toBe(false);
+    expect(imported.state.financeRows.find((row) => row.id === "same-id")?.period).toBe("2026-08");
+    expect(imported.state.anomalies.some((item) => item.kind === "actual-spike-large-miss")).toBe(
+      true,
+    );
+
+    let refreshed = (await finance.gadget.refreshDemoData()) as {
+      financeRows: Array<{ id: string; source: string }>;
+    };
+    expect(
+      refreshed.financeRows.some((row) => row.source === "import" && row.id === "demo-custom"),
+    ).toBe(true);
+    expect(refreshed.financeRows.filter((row) => row.source === "import")).toHaveLength(3);
+  });
+
+  it("does not let finance demo refresh remove user records or evict them at capacity", async () => {
+    let finance = await loadStarter("finance-operations-workbench");
+    let initial = (await finance.gadget.getState()) as { financeRows: Array<{ id: string }> };
+    for (let record of initial.financeRows) await finance.gadget.deleteFinanceRow(record.id);
+
+    await finance.gadget.saveFinanceRow({
+      id: "manual-demo-source",
+      period: "2026-08",
+      entity: "Corporate",
+      account: "Manual row",
+      actual: 1,
+      budget: 1,
+      source: "demo",
+    });
+    await finance.gadget.importDataset(
+      "finance",
+      JSON.stringify(
+        Array.from({ length: 200 }, (_, index) => ({
+          id: `capacity-a-${index}`,
+          period: "2026-08",
+          entity: "Corporate",
+          account: `Imported A ${index}`,
+          actual: index,
+          budget: index,
+        })),
+      ),
+      "json",
+    );
+    await finance.gadget.importDataset(
+      "finance",
+      JSON.stringify(
+        Array.from({ length: 99 }, (_, index) => ({
+          id: `capacity-b-${index}`,
+          period: "2026-08",
+          entity: "Corporate",
+          account: `Imported B ${index}`,
+          actual: index,
+          budget: index,
+        })),
+      ),
+      "json",
+    );
+
+    let refreshed = (await finance.gadget.refreshDemoData()) as {
+      financeRows: Array<{ id: string }>;
+    };
+    expect(refreshed.financeRows).toHaveLength(300);
+    expect(refreshed.financeRows.some((row) => row.id === "manual-demo-source")).toBe(true);
+    expect(refreshed.financeRows.some((row) => row.id.startsWith("demo-fin-"))).toBe(false);
   });
 
   it("normalizes support escalation anchor fields from JSON and CSV imports", async () => {
@@ -741,5 +884,618 @@ describe("featured starter server runtime smoke tests", () => {
       expect(sync.results.find(result => result.key === "LINEAR_WORKSPACE")?.status, slug)
           .toBe("skipped");
     }
+  });
+
+  it("keeps finance getState presence-only and blocks skipped explicit reads", async () => {
+    let calls = 0;
+    let env = {
+      GOOGLE_SHEET: {
+        getSpreadsheet: async () => {
+          calls++;
+          throw new Error("unexpected Sheet read");
+        },
+        readRange: async () => {
+          calls++;
+          throw new Error("unexpected Sheet read");
+        },
+      },
+      GOOGLE_DOC: {
+        getMetadata: async () => {
+          calls++;
+          throw new Error("unexpected Doc read");
+        },
+        getContent: async () => {
+          calls++;
+          throw new Error("unexpected Doc read");
+        },
+      },
+      GMAIL_SEARCH: {
+        listThreads: async () => {
+          calls++;
+          throw new Error("unexpected Gmail read");
+        },
+      },
+    };
+    let { gadget } = await loadStarter("finance-operations-workbench", env);
+
+    let state = (await gadget.getState()) as { sources: Array<{ status: string }> };
+    expect(state.sources.filter((source) => source.status === "connected-not-read")).toHaveLength(
+      3,
+    );
+    expect(calls).toBe(0);
+
+    for (let key of ["GOOGLE_SHEET", "GOOGLE_DOC", "GMAIL_SEARCH"]) {
+      await gadget.setSourceSkipped(key, true);
+    }
+    await expect(
+      gadget.previewGoogleSheetRange({ dataset: "finance", range: "A1:B2" }),
+    ).rejects.toThrow(/skipped/iu);
+    await expect(gadget.captureGoogleDocEvidence()).rejects.toThrow(/skipped/iu);
+    await expect(gadget.captureGmailEvidence()).rejects.toThrow(/skipped/iu);
+    expect(calls).toBe(0);
+  });
+
+  it("keeps finance record timestamps stable except for the targeted mutation", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-08-26T20:00:00.000Z"));
+      let { gadget } = await loadStarter("finance-operations-workbench");
+      let initial = (await gadget.getState()) as {
+        financeRows: Array<Record<string, unknown> & { id: string; updatedAt: string }>;
+      };
+      let targeted = initial.financeRows.find((row) => row.id === "demo-fin-1")!;
+      let unrelated = initial.financeRows.find((row) => row.id === "demo-fin-2")!;
+
+      vi.setSystemTime(new Date("2026-08-26T21:00:00.000Z"));
+      let readAgain = (await gadget.getState()) as {
+        financeRows: Array<{ id: string; updatedAt: string }>;
+      };
+      expect(readAgain.financeRows.find((row) => row.id === unrelated.id)?.updatedAt).toBe(
+        unrelated.updatedAt,
+      );
+
+      let mutated = (await gadget.saveFinanceRow({ ...targeted, actual: 1300000 })) as {
+        financeRows: Array<{ id: string; updatedAt: string }>;
+      };
+      expect(mutated.financeRows.find((row) => row.id === unrelated.id)?.updatedAt).toBe(
+        unrelated.updatedAt,
+      );
+      expect(mutated.financeRows.find((row) => row.id === targeted.id)?.updatedAt).toBe(
+        "2026-08-26T21:00:00.000Z",
+      );
+      expect(mutated.financeRows.find((row) => row.id === targeted.id)?.updatedAt).not.toBe(
+        targeted.updatedAt,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("previews Sheets without persistence and imports mapped finance values with lineage", async () => {
+    let calls = { metadata: 0, range: 0 };
+    let { gadget } = await loadStarter("finance-operations-workbench", {
+      GOOGLE_SHEET: {
+        getSpreadsheet: async () => {
+          calls.metadata++;
+          return { id: "sheet-123", title: "Close Pack", sheets: [] };
+        },
+        readRange: async () => {
+          calls.range++;
+          return {
+            range: "'Ops'!A1:H2",
+            values: [
+              [
+                "Posting Period",
+                "Legal Entity",
+                "GL Account",
+                "Actual Amount",
+                "Approved Budget",
+                "Latest Estimate",
+                "Currency Code",
+                "Evidence Ref",
+              ],
+              ["Jul 2026", "EMEA", "Hosting", "$1.2k", "(€200)", "50%", "EUR", "doc:close"],
+            ],
+          };
+        },
+      },
+    });
+    let before = (await gadget.getState()) as { financeRows: unknown[]; importBatches: unknown[] };
+
+    let preview = (await gadget.previewGoogleSheetRange({
+      dataset: "finance",
+      range: "'Ops'!A1:H2",
+      valueMode: "formatted",
+    })) as {
+      records: Array<Record<string, unknown>>;
+      controlTotals: Array<Record<string, unknown>>;
+    };
+    let afterPreview = (await gadget.getState()) as {
+      financeRows: unknown[];
+      importBatches: unknown[];
+    };
+    expect(afterPreview.financeRows).toHaveLength(before.financeRows.length);
+    expect(afterPreview.importBatches).toHaveLength(0);
+    expect(preview.records[0]).toMatchObject({
+      period: "2026-07",
+      entity: "EMEA",
+      account: "Hosting",
+      actual: 1200,
+      budget: -200,
+      forecast: null,
+      currency: "EUR",
+    });
+    expect(preview.controlTotals).toEqual([
+      expect.objectContaining({ currency: "EUR", actual: 1200, budget: -200 }),
+    ]);
+
+    let imported = (await gadget.importGoogleSheetRange({
+      dataset: "finance",
+      range: "'Ops'!A1:H2",
+      valueMode: "formatted",
+    })) as {
+      state: {
+        financeRows: Array<{ account: string; sourceRefs: string[] }>;
+        importBatches: Array<{
+          sourceType: string;
+          rowCount: number;
+          acceptedCount: number;
+          controlTotals: unknown[];
+        }>;
+      };
+    };
+    let row = imported.state.financeRows.find((item) => item.account === "Hosting")!;
+    expect(row.sourceRefs).toEqual(
+      expect.arrayContaining(["doc:close", "google-sheet:sheet-123:Close Pack:'Ops'!A1:H2:row:2"]),
+    );
+    expect(imported.state.importBatches[0]).toMatchObject({
+      sourceType: "google-sheet",
+      rowCount: 1,
+      acceptedCount: 1,
+      status: "needs-review",
+    });
+    expect(imported.state.importBatches[0].controlTotals).toEqual([
+      expect.objectContaining({ currency: "EUR", actual: 1200, budget: -200 }),
+    ]);
+    expect(calls).toEqual({ metadata: 2, range: 2 });
+  });
+
+  it("upserts a changed Sheet row by stable source lineage", async () => {
+    let actual = 1200;
+    let idCell = "shared-external-id";
+    let { gadget } = await loadStarter("finance-operations-workbench", {
+      GOOGLE_SHEET: {
+        getSpreadsheet: async () => ({ id: "sheet-upsert", title: "Close Pack" }),
+        readRange: async () => ({
+          range: "'Ops'!A1:E2",
+          values: [
+            ["id", "Posting Period", "Legal Entity", "GL Account", "Actual Amount"],
+            [idCell, "Jul 2026", "EMEA", "Hosting", actual],
+          ],
+        }),
+      },
+    });
+    await gadget.saveFinanceRow({
+      id: "shared-external-id",
+      period: "2026-07",
+      entity: "EMEA",
+      account: "Manual control row",
+      actual: 55,
+      source: "manual",
+    });
+
+    let first = (await gadget.importGoogleSheetRange({
+      dataset: "finance",
+      range: "'Ops'!A1:E2",
+      valueMode: "raw",
+    })) as { state: { financeRows: Array<{ id: string; account: string; actual: number; source: string; sourceRefs: string[] }> } };
+    let sourceRef = "google-sheet:sheet-upsert:Close Pack:'Ops'!A1:E2:row:2";
+    let firstRow = first.state.financeRows.find((row) => row.sourceRefs.includes(sourceRef))!;
+    expect(firstRow.actual).toBe(1200);
+    expect(firstRow.id).toMatch(/^google-sheet:finance:/u);
+    expect(firstRow.id).not.toBe("shared-external-id");
+
+    actual = 1400;
+    idCell = "changed-external-id";
+    let second = (await gadget.importGoogleSheetRange({
+      dataset: "finance",
+      range: "'Ops'!A1:E2",
+      valueMode: "raw",
+    })) as { state: { financeRows: Array<{ id: string; account: string; actual: number; source: string; sourceRefs: string[] }> } };
+    let importedRows = second.state.financeRows.filter((row) => row.sourceRefs.includes(sourceRef));
+
+    expect(importedRows).toHaveLength(1);
+    expect(importedRows[0]).toMatchObject({ id: firstRow.id, actual: 1400 });
+    expect(importedRows[0].id).not.toBe("changed-external-id");
+    expect(second.state.financeRows.some((row) => row.actual === 1200 && row.sourceRefs.includes(sourceRef)))
+        .toBe(false);
+    expect(second.state.financeRows.find((row) => row.id === "shared-external-id")).toMatchObject({
+      account: "Manual control row",
+      actual: 55,
+      source: "manual",
+    });
+  });
+
+  it("uses the validated requested Sheet range for bounded data and stable lineage", async () => {
+    let extraHeaders = Array.from({ length: 1000 }, (_, index) => `Injected ${index}`);
+    let extraRows = Array.from({ length: 50 }, (_, index) => [
+      `Injected account ${index}`,
+      index + 1000,
+      "EUR",
+      ...extraHeaders.map(() => "injected"),
+    ]);
+    let { gadget } = await loadStarter("finance-operations-workbench", {
+      GOOGLE_SHEET: {
+        getSpreadsheet: async () => ({ id: "sheet-wide", title: "Untrusted response" }),
+        readRange: async () => ({
+          range: "A1:ZZ2",
+          values: [
+            ["GL Account", "Actual Amount", "Currency Code", ...extraHeaders],
+            ["Hosting", 100, "EUR", ...extraHeaders.map(() => "injected")],
+            ...extraRows,
+          ],
+        }),
+      },
+    });
+
+    for (let range of ["FY2026!A1:B2", "'FY2026'!A1:B2"]) {
+      let preview = (await gadget.previewGoogleSheetRange({
+        dataset: "finance",
+        range,
+        valueMode: "raw",
+      })) as {
+        mapping: Array<{ header: string; field: string }>;
+        records: Array<Record<string, unknown>>;
+      };
+
+      expect(preview.mapping).toEqual([
+        { header: "GL Account", field: "account" },
+        { header: "Actual Amount", field: "actual" },
+      ]);
+      expect(preview.records).toHaveLength(1);
+      expect(preview.records[0]).toMatchObject({ account: "Hosting", actual: 100, currency: "USD" });
+
+      let first = (await gadget.importGoogleSheetRange({
+        dataset: "finance",
+        range,
+        valueMode: "raw",
+      })) as {
+        state: { financeRows: Array<{ id: string; account: string; sourceRefs: string[] }> };
+      };
+      let sourceRef = `google-sheet:sheet-wide:Untrusted response:${range}:row:2`;
+      let firstRow = first.state.financeRows.find((row) => row.sourceRefs.includes(sourceRef))!;
+      expect(firstRow.id).toMatch(/^google-sheet:finance:/u);
+      expect(firstRow.sourceRefs.some((ref) => ref.includes("A1:ZZ2"))).toBe(false);
+      expect(
+        first.state.financeRows.some((row) => row.account.startsWith("Injected account")),
+      ).toBe(false);
+
+      let second = (await gadget.importGoogleSheetRange({
+        dataset: "finance",
+        range,
+        valueMode: "raw",
+      })) as {
+        state: { financeRows: Array<{ id: string; sourceRefs: string[] }> };
+      };
+      let importedRows = second.state.financeRows.filter((row) => row.sourceRefs.includes(sourceRef));
+      expect(importedRows).toHaveLength(1);
+      expect(importedRows[0].id).toBe(firstRow.id);
+    }
+  });
+
+  it("reports duplicate imports separately from true limit and capacity truncation", async () => {
+    let duplicateFinance = await loadStarter("finance-operations-workbench");
+    let duplicate = (await duplicateFinance.gadget.importDataset(
+      "finance",
+      JSON.stringify([
+        { id: "duplicate-row", period: "2026-07", account: "Travel", actual: 10 },
+        { id: "duplicate-row", period: "2026-08", account: "Travel", actual: 20 },
+      ]),
+      "json",
+    )) as {
+      imported: number;
+      truncated: boolean;
+      batch: {
+        acceptedCount: number;
+        duplicateCount: number;
+        truncatedCount: number;
+        warnings: string[];
+      };
+    };
+    expect(duplicate).toMatchObject({
+      imported: 1,
+      truncated: false,
+      batch: { acceptedCount: 1, duplicateCount: 1, truncatedCount: 0 },
+    });
+    expect(duplicate.batch.warnings.join(" ")).toMatch(/duplicate record ID/iu);
+    expect(duplicate.batch.warnings.join(" ")).not.toMatch(/200-record import limit/iu);
+
+    let limitFinance = await loadStarter("finance-operations-workbench");
+    let limited = (await limitFinance.gadget.importDataset(
+      "finance",
+      JSON.stringify(
+        Array.from({ length: 201 }, (_, index) => ({
+          id: `limit-${index}`,
+          period: "2026-08",
+          account: `Limited ${index}`,
+          actual: index,
+        })),
+      ),
+      "json",
+    )) as { imported: number; truncated: boolean; batch: { truncatedCount: number } };
+    expect(limited).toMatchObject({ imported: 200, truncated: true, batch: { truncatedCount: 1 } });
+
+    let capacityFinance = await loadStarter("finance-operations-workbench");
+    await capacityFinance.gadget.importDataset(
+      "finance",
+      JSON.stringify(
+        Array.from({ length: 200 }, (_, index) => ({
+          id: `capacity-a-${index}`,
+          period: "2026-08",
+          account: `Capacity A ${index}`,
+          actual: index,
+        })),
+      ),
+      "json",
+    );
+    await capacityFinance.gadget.importDataset(
+      "finance",
+      JSON.stringify(
+        Array.from({ length: 95 }, (_, index) => ({
+          id: `capacity-b-${index}`,
+          period: "2026-08",
+          account: `Capacity B ${index}`,
+          actual: index,
+        })),
+      ),
+      "json",
+    );
+    let capacity = (await capacityFinance.gadget.importDataset(
+      "finance",
+      JSON.stringify([
+        { id: "capacity-rejected", period: "2026-08", account: "Rejected", actual: 999 },
+        { id: "capacity-a-0", period: "2026-08", account: "Accepted update", actual: 7 },
+      ]),
+      "json",
+    )) as {
+      imported: number;
+      truncated: boolean;
+      batch: {
+        duplicateCount: number;
+        truncatedCount: number;
+        controlTotals: Array<{ actual: number }>;
+      };
+    };
+    expect(capacity).toMatchObject({
+      imported: 1,
+      truncated: true,
+      batch: { duplicateCount: 0, truncatedCount: 1 },
+    });
+    expect(capacity.batch.controlTotals).toEqual([expect.objectContaining({ actual: 7 })]);
+  });
+
+  it("does not persist malformed pasted imports or partial batches", async () => {
+    let { gadget } = await loadStarter("finance-operations-workbench");
+    let before = (await gadget.getState()) as { financeRows: unknown[]; importBatches: unknown[] };
+    await expect(gadget.importDataset("finance", '[{"actual": 1}', "json")).rejects.toThrow();
+    await expect(
+      gadget.importDataset("finance", 'period,actual\n"2026-07,10', "csv"),
+    ).rejects.toThrow(/unterminated/iu);
+    let after = (await gadget.getState()) as { financeRows: unknown[]; importBatches: unknown[] };
+    expect(after.financeRows).toHaveLength(before.financeRows.length);
+    expect(after.importBatches).toHaveLength(before.importBatches.length);
+  });
+
+  it("captures bounded Google Doc and Gmail evidence only on explicit invocation", async () => {
+    let docCalls = 0;
+    let disposedThreads = 0;
+    let gmail = fakeCursor(
+      Array.from({ length: 25 }, (_, index) => ({
+        info: { id: `thread-${index}`, subject: `Approval ${index}`, snippet: `Snippet ${index}` },
+        thread: {
+          [Symbol.dispose]() {
+            disposedThreads++;
+          },
+        },
+      })),
+    );
+    let { gadget } = await loadStarter("finance-operations-workbench", {
+      GOOGLE_DOC: {
+        getMetadata: async () => {
+          docCalls++;
+          return { title: "Close policy", lastModified: new Date("2026-08-20T12:00:00.000Z") };
+        },
+        getContent: async () => {
+          docCalls++;
+          return "x".repeat(5000);
+        },
+      },
+      GMAIL_SEARCH: { listThreads: async () => gmail.cursor },
+    });
+    expect(docCalls).toBe(0);
+
+    let doc = (await gadget.captureGoogleDocEvidence()) as {
+      evidence: { summary: string; reference: string };
+    };
+    expect(docCalls).toBe(2);
+    expect(doc.evidence.summary).toHaveLength(1500);
+    expect(doc.evidence.reference).toContain("Close policy:modified:2026-08-20T12:00:00.000Z");
+
+    let mail = (await gadget.captureGmailEvidence()) as {
+      captured: number;
+      state: {
+        evidenceItems: Array<{
+          sourceType: string;
+          summary: string;
+          reference: string;
+        }>;
+      };
+    };
+    expect(mail.captured).toBe(20);
+    expect(mail.state.evidenceItems.filter((item) => item.sourceType === "gmail")).toHaveLength(20);
+    expect(mail.state.evidenceItems.find((item) => item.sourceType === "gmail")).toMatchObject({
+      summary: expect.stringMatching(/^Snippet/u),
+      reference: expect.stringMatching(/^gmail-thread:/u),
+    });
+    expect(gmail.stats()).toMatchObject({ disposed: true, nextCalls: 1 });
+    expect(disposedThreads).toBe(25);
+  });
+
+  it("bounds and normalizes evidence imports", async () => {
+    let { gadget } = await loadStarter("finance-operations-workbench");
+    let first = Array.from({ length: 100 }, (_, index) => ({
+      id: `evidence-a-${index}`,
+      title: `<script>${"x".repeat(250)}</script>`,
+      sourceType: "not-valid",
+      confidence: 9,
+      tags: Array.from({ length: 30 }, (_, tagIndex) => `tag-${tagIndex}`),
+      summary: "y".repeat(1800),
+    }));
+    let second = Array.from({ length: 200 }, (_, index) => ({
+      id: `evidence-b-${index}`,
+      title: `B ${index}`,
+    }));
+    await gadget.importDataset("evidence", JSON.stringify(first), "json");
+    let result = (await gadget.importDataset("evidence", JSON.stringify(second), "json")) as {
+      state: {
+        evidenceItems: Array<{
+          title: string;
+          sourceType: string;
+          confidence: number;
+          tags: string[];
+          summary: string;
+        }>;
+      };
+    };
+    expect(result.state.evidenceItems).toHaveLength(300);
+    let imported = result.state.evidenceItems.find((item) => item.title.includes("<script>"))!;
+    expect(imported.title.length).toBeLessThanOrEqual(180);
+    expect(imported.sourceType).toBe("import");
+    expect(imported.confidence).toBe(1);
+    expect(imported.tags).toHaveLength(12);
+    expect(imported.summary).toHaveLength(1500);
+  });
+
+  it("generates deterministic history averages without overwriting approved forecasts", async () => {
+    let { gadget } = await loadStarter("finance-operations-workbench");
+    for (let [id, period, account, actual] of [
+      ["hist-1", "2026-01", "Travel", 100],
+      ["hist-2", "2026-02", "Travel", 300],
+      ["approved-hist-1", "2026-01", "Payroll", 1000],
+      ["approved-hist-2", "2026-02", "Payroll", 1200],
+    ])
+      await gadget.saveFinanceRow({
+        id,
+        period,
+        entity: "Corporate",
+        account,
+        actual,
+        currency: "USD",
+        sourceRefs: [`ledger:${id}`],
+      });
+    await gadget.saveForecastRecord({
+      id: "approved-target",
+      period: "2026-03",
+      entity: "Corporate",
+      lineItem: "Payroll",
+      amount: 9999,
+      currency: "USD",
+      status: "approved",
+    });
+    await gadget.saveForecastRecord({
+      id: "manual-target",
+      period: "2026-03",
+      entity: "Corporate",
+      lineItem: "Travel",
+      amount: 777,
+      currency: "USD",
+      scenario: "Manual downside",
+      assumption: "Controller-entered assumption",
+      owner: "Controller",
+      status: "in-review",
+      source: "manual",
+    });
+
+    let result = (await gadget.generateForecastBaselines({
+      targetPeriod: "2026-03",
+      lookbackPeriods: 2,
+    })) as {
+      generated: number;
+      skipped: number;
+      state: {
+        forecasts: Array<{
+          id: string;
+          period: string;
+          lineItem: string;
+          amount: number;
+          source: string;
+          status: string;
+          confidence: number;
+          assumption: string;
+          scenario: string;
+          owner: string;
+        }>;
+      };
+    };
+    let baseline = result.state.forecasts.find(
+      (item) => item.lineItem === "Travel" && item.source === "derived-baseline",
+    )!;
+    expect(baseline).toMatchObject({ amount: 200, status: "draft", confidence: 0.8 });
+    expect(baseline.assumption).toContain("2026-02, 2026-01");
+    expect(result.state.forecasts.find((item) => item.id === "manual-target")).toMatchObject({
+      amount: 777,
+      status: "in-review",
+      scenario: "Manual downside",
+      assumption: "Controller-entered assumption",
+      owner: "Controller",
+      source: "manual",
+    });
+    expect(
+      result.state.forecasts.filter(
+        (item) => item.lineItem === "Travel" && item.period === "2026-03",
+      ),
+    ).toHaveLength(2);
+    expect(result.state.forecasts.find((item) => item.id === "approved-target")?.amount).toBe(9999);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps prep, briefing, and reconciled batch review explicitly not certified", async () => {
+    let { gadget } = await loadStarter("finance-operations-workbench");
+    let imported = (await gadget.importDataset(
+      "finance",
+      JSON.stringify([
+        {
+          id: "review-row",
+          period: "2026-08",
+          entity: "Corporate",
+          account: "Travel",
+          actual: 100,
+          budget: 80,
+          currency: "USD",
+        },
+      ]),
+      "json",
+    )) as { state: { importBatches: Array<{ id: string }> } };
+    let reviewed = (await gadget.updateImportBatchReview(imported.state.importBatches[0].id, {
+      status: "reconciled",
+      reviewer: "Controller",
+      note: "Reviewed in workbench only",
+      evidenceRefs: ["evidence:review"],
+      acceptedCount: 999,
+    })) as {
+      readiness: { label: string };
+      briefing: { label: string };
+      briefingMarkdown: string;
+      prepTasks: Array<{ id: string }>;
+      importBatches: Array<{ status: string; acceptedCount: number }>;
+    };
+    expect(reviewed.importBatches[0]).toMatchObject({ status: "reconciled", acceptedCount: 1 });
+    expect(reviewed.readiness.label).toBe("Draft / derived - not certified");
+    expect(reviewed.briefing.label).toBe("Draft / derived - not certified");
+    expect(reviewed.briefingMarkdown).toContain("Draft / derived - not certified");
+    expect(reviewed.prepTasks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "source:netsuite" })]),
+    );
+    expect(reviewed.prepTasks.some((task) => task.id.startsWith("import:"))).toBe(false);
   });
 });
