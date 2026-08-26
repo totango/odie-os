@@ -2,7 +2,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } fr
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { DownloadSimple, List } from '@phosphor-icons/react'
 import { Overseer, CodeSubscriber, CodeUpdate } from '@gadgets/workshop-shared/api'
-import { RpcStub, RpcTarget } from 'capnweb'
+import { RpcPromise, RpcStub, RpcTarget } from 'capnweb'
 import * as Y from 'yjs'
 import FileSidebar from './FileSidebar'
 import type { FileChangeStatus, FileSidebarHandle } from './FileSidebar'
@@ -696,11 +696,12 @@ export default function GadgetCodeInterface({ overseer, filesRoot, height = '100
         }
 
         // Subscribe from the last known version (0 for initial load)
-        const subscriptionStub = await currentOverseerRef.current.subscribeToCode(
+        const subscriptionPromise = currentOverseerRef.current.subscribeToCode(
           subscriberImpl,
           serverVersionRef.current
-        )
-        subscriptionRef.current = subscriptionStub
+        ) as unknown as RpcPromise<{}>
+        const subscriptionStub = await subscriptionPromise
+        subscriptionRef.current = subscriptionStub as unknown as RpcStub<{}>
 
         // If this is a reconnection, the user can continue editing immediately
         if (!isInitialLoad) {
