@@ -161,6 +161,27 @@ describe("Team PI token refresh and API isolation", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes credentials and retries attachment reads rejected with 401", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(new Uint8Array([1, 2, 3]), {
+        headers: {
+          "Content-Disposition": "attachment; filename=report.pdf",
+          "Content-Type": "application/pdf",
+        },
+      }));
+    const credentials = vi.fn(async (forceRefresh?: boolean) => ({
+      accessToken: forceRefresh ? "fresh-access" : "stale-access",
+      idToken: "identity",
+    }));
+
+    await expect(new TeamPiApi(credentials, config.baseUrl).workItemsAttachmentContent("jira", "J-1", "attachment-1"))
+      .resolves.toEqual({ data: new Uint8Array([1, 2, 3]), name: "report.pdf", contentType: "application/pdf" });
+    expect(credentials).toHaveBeenNthCalledWith(1, false);
+    expect(credentials).toHaveBeenNthCalledWith(2, true);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces in-instance refreshes to avoid rotating refresh-token races", async () => {
     let resolveRefresh!: (response: Response) => void;
     vi.mocked(fetch).mockImplementation(() => new Promise<Response>(resolve => { resolveRefresh = resolve; }));
