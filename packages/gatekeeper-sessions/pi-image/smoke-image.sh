@@ -24,7 +24,7 @@ repository_pnpm_version="${repository_pnpm_version%%+*}"
 [[ "$(pnpm --version)" == "${agentic_pnpm_version}" ]] || fail "unexpected default pnpm version"
 sandbox_process_path="/usr/local/bin:/bin:/usr/bin"
 for command in node npm npx corepack pnpm pnpx; do
-  [[ -L "/usr/local/bin/$command" ]] || fail "Sandbox process PATH is not pinned for $command"
+  [[ "$(readlink "/usr/local/bin/$command")" == "/opt/node/bin/$command" ]] || fail "Sandbox process PATH is not pinned for $command"
 done
 [[ "$(env PATH="$sandbox_process_path" sh -c 'command -v node')" == "/usr/local/bin/node" ]] || fail "Sandbox process Node is not canonical"
 [[ "$(env PATH="$sandbox_process_path" node --version)" == "v${NODE_VERSION}" ]] || fail "Sandbox process Node version is not pinned"
