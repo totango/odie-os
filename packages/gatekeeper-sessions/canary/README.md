@@ -25,8 +25,11 @@ Installing `CANARY_TOKEN` creates a Worker version after the initial deploy. The
 operation can therefore hit the expected Durable Object code-update reset. Before the one-shot claim,
 the workflow calls the authenticated `/ready` endpoint. That endpoint performs only an idempotent
 recursive `mkdir` to start the runtime; it never claims the canary or starts a process. The workflow
-makes at most three bounded attempts and requires an exact closed success response. This moves any
-version reset outside process admission without weakening the one-shot `/run` contract.
+makes at most six bounded attempts and requires an exact closed success response. Three attempts
+proved too short for three native tiers while their container applications were still starting; one
+was observed healthy at the boundary, and a fourth tier succeeded only after one closed preflight
+failure. No failed tier reached `/run`. The expanded window stays idempotent and bounded and
+moves any version reset outside process admission without weakening the one-shot `/run` contract.
 
 A newly deployed workers.dev route or installed `CANARY_TOKEN` can briefly lag at the public edge.
 After preflight succeeds, the `/run` invocation retries only exact HTTP 404 or 401 responses, at most

@@ -181,7 +181,7 @@ jobs:
       matrix:
         instanceTier: [standard-1, standard-2, standard-3, standard-4]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     environment: production
     steps:
       - name: Check out exact candidate source
@@ -251,7 +251,7 @@ jobs:
           candidate="$(< candidate-artifact/cloudflare-image-digest.txt)"
           ready=false
           http_status=""
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4 5 6; do
             if http_status="$(curl --silent --show-error --max-time 120 --max-filesize 4096 \
               --output "$result" \
               --write-out '%{http_code}' \
@@ -269,7 +269,7 @@ jobs:
               ready=true
               break
             fi
-            if [ "$attempt" != 3 ]; then sleep 5; fi
+            if [ "$attempt" != 6 ]; then sleep 5; fi
           done
           if [ "$ready" != true ]; then
             printf 'Native %s Sandbox runtime preflight failed (last HTTP %s).\n' "$INSTANCE_TIER" "$http_status" >&2
