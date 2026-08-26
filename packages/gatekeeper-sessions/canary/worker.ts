@@ -12,7 +12,7 @@ import {
 import { claimCanaryRun, rejectCanaryRequest } from "./policy.js";
 
 const SANDBOX_ID = "one-shot";
-const CANARY_DEADLINE_MS = 180_000;
+const CANARY_DEADLINE_MS = 300_000;
 const POST_DESTROY_SETTLE_MS = 10_000;
 const DESTROY_TIMEOUT_MS = 30_000;
 
@@ -29,9 +29,10 @@ interface Env {
   SOURCE_SHA: string;
   CANDIDATE_IMAGE: string;
   EXPECTED_NODE_VERSION: string;
+  INSTANCE_TIER: string;
 }
 
-/** Ephemeral standard-3 Sandbox used only by the native candidate-image canary. */
+/** Ephemeral tier-specific Sandbox used only by the native candidate-image canary. */
 export class CodingSessionImageCanarySandbox extends Sandbox<Env> {
   sleepAfter = "1m";
   enableInternet = false;
@@ -48,7 +49,7 @@ export default {
     const rejection = await rejectCanaryRequest(request, env.CANARY_TOKEN);
     if (rejection) return rejection;
     if (!validSourceSha(env.SOURCE_SHA) || !validCandidateImage(env.CANDIDATE_IMAGE) ||
-        env.EXPECTED_NODE_VERSION !== EXPECTED_NODE_VERSION) {
+        env.EXPECTED_NODE_VERSION !== EXPECTED_NODE_VERSION || !validInstanceTier(env.INSTANCE_TIER)) {
       logger.error("native canary configuration is invalid", {
         event: "coding.session.canary.configuration.invalid",
         phase: "run",
@@ -85,6 +86,7 @@ export default {
       ok: true,
       sourceSha: env.SOURCE_SHA,
       candidateImage: env.CANDIDATE_IMAGE,
+      instanceTier: env.INSTANCE_TIER,
       checks: report.checks,
     }, 200);
   },
@@ -103,7 +105,7 @@ function extractFailureStage(error: unknown): CanaryFailureStage {
     if (seen.has(current)) continue;
     seen.add(current);
     inspected++;
-    if (current instanceof CanaryStageError && isCanaryStage(current.failureStage)) {
+    if (current instanceof CanaryStageError && isCanaryFailureStage(current.failureStage)) {
       return current.failureStage;
     }
     if (current instanceof AggregateError && Array.isArray(current.errors)) {
@@ -113,6 +115,10 @@ function extractFailureStage(error: unknown): CanaryFailureStage {
   return "lifecycle";
 }
 
+function isCanaryFailureStage(value: unknown): value is CanaryFailureStage {
+  return value === "lifecycle" || isCanaryStage(value);
+}
+
 function isCanaryStage(value: unknown): value is Exclude<CanaryFailureStage, "lifecycle"> {
   return value === "node" || value === "javascript" || value === "typescript" || value === "terminal" ||
     value === "code-server" || value === "cleanup";
@@ -120,6 +126,10 @@ function isCanaryStage(value: unknown): value is Exclude<CanaryFailureStage, "li
 
 function validSourceSha(value: string): boolean {
   return /^[0-9a-f]{40}$/.test(value);
+}
+
+function validInstanceTier(value: string): boolean {
+  return /^(?:standard-[1-4])$/.test(value);
 }
 
 function validCandidateImage(value: string): boolean {

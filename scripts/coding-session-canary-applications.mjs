@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NAME = /^odie-coding-canary-[1-9][0-9]*-container$/;
+const NAME = /^odie-coding-canary-[1-9][0-9]*-standard-[1-4]-container$/;
 const MAX_PAGES = 1_000;
 
 /** Walks every Containers applications page and returns the sole exact-name UUID, or null. */

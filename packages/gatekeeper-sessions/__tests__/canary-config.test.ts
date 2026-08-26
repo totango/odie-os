@@ -18,16 +18,17 @@ const provenance = {
 };
 
 describe("native canary config", () => {
-  it("generates one isolated standard-3 application", () => {
+  it("generates one isolated tier-specific application", () => {
     const generated = generateCanaryConfig({
-      accountId: ACCOUNT, sourceSha: SHA, workflowRunId: "12345",
+      accountId: ACCOUNT, sourceSha: SHA, workflowRunId: "12345", instanceTier: "standard-2",
       workspace: "/repo", ghcrImage: GHCR, cloudflareImage: CLOUDFLARE,
     });
-    expect(generated.workerName).toBe("odie-coding-canary-12345");
-    expect(generated.applicationName).toBe("odie-coding-canary-12345-container");
+    expect(generated.workerName).toBe("odie-coding-canary-12345-standard-2");
+    expect(generated.applicationName).toBe("odie-coding-canary-12345-standard-2-container");
     expect(generated.config.containers).toEqual([expect.objectContaining({
-      name: generated.applicationName, image: CLOUDFLARE, instance_type: "standard-3", max_instances: 1,
+      name: generated.applicationName, image: CLOUDFLARE, instance_type: "standard-2", max_instances: 1,
     })]);
+    expect(generated.config.vars.INSTANCE_TIER).toBe("standard-2");
     expect(generated.config.vars.EXPECTED_NODE_VERSION).toBe("v24.14.0");
     expect(generated.config.durable_objects.bindings).toEqual([
       { name: "CANARY_SANDBOX", class_name: "CodingSessionImageCanarySandbox" },
@@ -75,10 +76,11 @@ describe("native canary config", () => {
   });
 
   it("rejects malformed inputs and overlong derived names", () => {
-    const base = { accountId: ACCOUNT, sourceSha: SHA, workflowRunId: "1", workspace: "/repo", ghcrImage: GHCR, cloudflareImage: CLOUDFLARE };
+    const base = { accountId: ACCOUNT, sourceSha: SHA, workflowRunId: "1", instanceTier: "standard-1", workspace: "/repo", ghcrImage: GHCR, cloudflareImage: CLOUDFLARE };
     expect(() => generateCanaryConfig({ ...base, accountId: ACCOUNT.toUpperCase() })).toThrow();
     expect(() => generateCanaryConfig({ ...base, sourceSha: `${SHA}0` })).toThrow();
     expect(() => generateCanaryConfig({ ...base, workflowRunId: "9".repeat(60) })).toThrow();
+    expect(() => generateCanaryConfig({ ...base, instanceTier: "standard-5" })).toThrow();
     expect(() => generateCanaryConfig({ ...base, cloudflareImage: `${CLOUDFLARE}:tag` })).toThrow();
   });
 });

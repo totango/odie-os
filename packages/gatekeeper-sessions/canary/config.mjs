@@ -6,6 +6,7 @@ const PROVENANCE_KEYS = [
   "schemaVersion", "repository", "ref", "sourceSha", "workflowRunId",
   "ghcrImage", "cloudflareImage",
 ];
+export const CANARY_TIERS = ["standard-1", "standard-2", "standard-3", "standard-4"];
 const CHECKS = ["node", "javascript", "typescript", "terminal", "code-server", "cleanup"];
 const VERSIONS = JSON.parse(readFileSync(new URL("./versions.json", import.meta.url), "utf8"));
 const MAX_DIGEST_FILE_BYTES = 512;
@@ -38,12 +39,13 @@ export function validateProvenance(value, expected) {
   return value;
 }
 
-/** Generates the isolated standard-3 Wrangler config after exact provenance validation. */
+/** Generates one isolated, tier-specific Wrangler config after exact provenance validation. */
 export function generateCanaryConfig(input) {
   requireMatch(input.accountId, /^[0-9a-f]{32}$/, "CLOUDFLARE_ACCOUNT_ID");
   requireMatch(input.sourceSha, /^[0-9a-f]{40}$/, "source SHA");
   requireMatch(input.workflowRunId, /^[1-9][0-9]*$/, "workflow run ID");
-  const workerName = `odie-coding-canary-${input.workflowRunId}`;
+  requireTier(input.instanceTier);
+  const workerName = `odie-coding-canary-${input.workflowRunId}-${input.instanceTier}`;
   const applicationName = `${workerName}-container`;
   for (const [label, name] of [["Worker", workerName], ["container application", applicationName]]) {
     if (name.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(name)) {
@@ -74,12 +76,13 @@ export function generateCanaryConfig(input) {
         SOURCE_SHA: input.sourceSha,
         CANDIDATE_IMAGE: input.cloudflareImage,
         EXPECTED_NODE_VERSION: VERSIONS.node,
+        INSTANCE_TIER: input.instanceTier,
       },
       containers: [{
         name: applicationName,
         class_name: "CodingSessionImageCanarySandbox",
         image: input.cloudflareImage,
-        instance_type: "standard-3",
+        instance_type: input.instanceTier,
         max_instances: 1,
       }],
       durable_objects: { bindings: [{
@@ -131,8 +134,9 @@ function generateCommand(args, env) {
   if (statSync(provenanceFile).size > MAX_PROVENANCE_FILE_BYTES) throw new Error("Provenance file is too large.");
   const provenance = JSON.parse(readFileSync(provenanceFile, "utf8"));
   validateProvenance(provenance, { sourceSha, workflowRunId, ghcrImage, cloudflareImage });
+  const instanceTier = required(args.get("--tier"), "--tier");
   const generated = generateCanaryConfig({
-    accountId, sourceSha, workflowRunId, workspace, ghcrImage, cloudflareImage,
+    accountId, sourceSha, workflowRunId, instanceTier, workspace, ghcrImage, cloudflareImage,
   });
   writeFileSync(out, `${JSON.stringify(generated.config, null, 2)}\n`, { mode: 0o600 });
 }
@@ -150,6 +154,11 @@ export function parseArgs(values, allowed) {
   return result;
 }
 
+export function requireTier(value) {
+  if (!CANARY_TIERS.includes(value)) throw new Error("instance tier is invalid.");
+  return value;
+}
+
 function required(value, name) {
   if (typeof value !== "string" || value.length === 0) throw new Error(`${name} is required.`);
   return value;
@@ -164,6 +173,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   if (command === "provenance") provenanceCommand(parseArgs(process.argv.slice(3),
     new Set(["--ghcr-file", "--cloudflare-file", "--out"])), process.env);
   else if (command === "generate") generateCommand(parseArgs(process.argv.slice(3),
-    new Set(["--ghcr-file", "--cloudflare-file", "--provenance-file", "--out"])), process.env);
+    new Set(["--ghcr-file", "--cloudflare-file", "--provenance-file", "--tier", "--out"])), process.env);
   else throw new Error("Expected provenance or generate command.");
 }
