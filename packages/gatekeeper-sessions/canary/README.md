@@ -34,8 +34,10 @@ candidate attempts each exhausted the former three-attempt limit at the Node sta
 can distinguish longer cold readiness from persistent failure. A valid non-negative integer
 `retryAfterMs` is used up to 10 seconds; otherwise fallback waits grow from one second and cap at 10
 seconds. If all attempts remain pre-admission, the closed response reports `lifecycle`; `node` is
-reserved for a process that was admitted but failed its output or runtime assertions. No later stage,
-process output or readiness wait, admitted operation, `OperationInterruptedError`,
+reserved for a process that was admitted but failed its output or runtime assertions. The short Node
+probe schedules its fixed output five seconds after process start so the SDK can attach before it exits;
+the 30-second remote timeout still bounds it. No later stage, process output or readiness wait,
+admitted operation, `OperationInterruptedError`,
 `RPCTransportError`, other class, or other status is retried. The caller allows 10 minutes so the
 five-minute run plus both bounded destroy/verify passes and settlement can return its closed result.
 

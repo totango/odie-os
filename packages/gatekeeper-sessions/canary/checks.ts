@@ -230,7 +230,7 @@ export async function startNodeCanaryProcess(
     try {
       return await sandbox.exec([
         "node", "--eval",
-        "process.stdout.write(`odie-node-version:${process.version}\\nodie-node-stdout:42\\n`); process.stderr.write('odie-node-stderr:ok\\n')",
+        "setTimeout(() => { process.stdout.write(`odie-node-version:${process.version}\\nodie-node-stdout:42\\n`); process.stderr.write('odie-node-stderr:ok\\n'); }, 5000)",
       ], { timeout: PROCESS_TIMEOUT_MS });
     } catch (error) {
       if (!(error instanceof ContainerUnavailableError) || attempt >= NODE_EXEC_MAX_ATTEMPTS) throw error;

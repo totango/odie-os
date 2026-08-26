@@ -43,7 +43,7 @@ class FakeSandbox {
   async exec(command: readonly [string, ...string[]], options?: unknown) {
     const editor = command[0] === "code-server";
     if (editor) { this.editorCommand = command; this.editorOptions = options; }
-    if (!editor) Function(command[2])();
+    if (!editor) Function(command[2]);
     const self = this;
     return {
       id: editor ? "editor" : "node", pid: editor ? 2 : 1, exitCode: Promise.resolve(0),
