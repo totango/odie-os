@@ -8,7 +8,7 @@
 // changed by a compromised admin session. Everything here is enabled by default; the admin UI opts
 // things *out*.
 
-import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, DEFAULT_BANNER_COLOR, DEPLOYMENT_HUB_IDS, DeploymentHubId, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isDeploymentHubId, isOutputIcon } from "@gadgets/workshop-shared/api";
+import { AmbientGatekeeperMode, BannerConfig, BlueprintBinding, BlueprintMetadata, BlueprintOutput, CONFIGURABLE_DEPLOYMENT_HUB_IDS, ConfigurableDeploymentHubId, DEFAULT_BANNER_COLOR, OutputFormatOffer, isAmbientGatekeeperMode, isBannerColor, isConfigurableDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, isOutputIcon } from "@gadgets/workshop-shared/api";
 import { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import { ADMIN_CONFIG_KEY, BlueprintKvEnv, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive.js";
 
@@ -35,7 +35,7 @@ export type AdminConfig = {
   /** Accent (brand) color hex, or "" for the default theme. */
   accentColor: string;
   /** Hubs offered to all users. Selection is a client preference, not an authorization boundary. */
-  enabledHubs: DeploymentHubId[];
+  enabledHubs: ConfigurableDeploymentHubId[];
   /** Disabled gatekeeper resources: vendorId -> disabled resource urlPatterns. */
   disabledResources: Record<string, string[]>;
   /** Fully-disabled gatekeeper vendor ids. */
@@ -89,7 +89,7 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
   announcement: "",
   banner: { text: "", color: DEFAULT_BANNER_COLOR },
   accentColor: "",
-  enabledHubs: [...DEPLOYMENT_HUB_IDS],
+  enabledHubs: [...CONFIGURABLE_DEPLOYMENT_HUB_IDS],
   disabledResources: {},
   disabledGatekeepers: [],
   ambientGatekeeperModes: {},
@@ -112,6 +112,7 @@ function parseFormats(value: unknown): FormatCuration[] {
     if (!raw || typeof raw !== "object") continue;
     let {blueprintId, enabled, agentHint, overrides} = raw as Partial<FormatCuration>;
     if (typeof blueprintId !== "string" || !blueprintId) continue;
+    if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) continue;
     if (seen.has(blueprintId)) continue;
     seen.add(blueprintId);
     let entry: FormatCuration = {blueprintId, enabled: enabled !== false};
@@ -267,6 +268,7 @@ export async function listFormatOffers(env: BlueprintKvEnv, config: AdminConfig)
 
   let offers: FormatOffer[] = [];
   for (let {entry, metadata, output} of await listPromotedFormats(env, enabled)) {
+    if (isFinanceOperationsWorkbenchBlueprintId(entry.blueprintId)) continue;
     if (!metadata || !output) continue;
     offers.push({
       blueprintId: entry.blueprintId,
@@ -285,10 +287,12 @@ function strings(value: unknown): string[] {
 }
 
 /** Returns a unique, valid, non-empty enabled-hub list for stored deployment configuration. */
-export function normalizeEnabledHubs(value: unknown): DeploymentHubId[] {
-  if (!Array.isArray(value)) return [...DEPLOYMENT_HUB_IDS];
-  let hubs = new Set(value.filter(isDeploymentHubId));
-  return hubs.size > 0 ? DEPLOYMENT_HUB_IDS.filter(hub => hubs.has(hub)) : [...DEPLOYMENT_HUB_IDS];
+export function normalizeEnabledHubs(value: unknown): ConfigurableDeploymentHubId[] {
+  if (!Array.isArray(value)) return [...CONFIGURABLE_DEPLOYMENT_HUB_IDS];
+  let hubs = new Set(value.filter(isConfigurableDeploymentHubId));
+  return hubs.size > 0
+    ? CONFIGURABLE_DEPLOYMENT_HUB_IDS.filter(hub => hubs.has(hub))
+    : [...CONFIGURABLE_DEPLOYMENT_HUB_IDS];
 }
 
 export function parseAdminConfig(raw: string | null): AdminConfig {

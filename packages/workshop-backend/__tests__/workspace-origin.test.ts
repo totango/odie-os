@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import {
+  CONFIGURABLE_DEPLOYMENT_HUB_IDS,
+  DEFAULT_DEPLOYMENT_HUB_ID,
   getProvisionalWorkspaceOriginErrorCode,
+  isConfigurableDeploymentHubId,
   isDeploymentHubId,
   PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES,
   type AiChatAuthorInfo,
@@ -34,8 +37,27 @@ const output: BlueprintOutput = {
 describe("workspace origin hub persistence", () => {
   it("rejects unknown deployment hub identifiers", () => {
     expect(isDeploymentHubId("support")).toBe(true);
+    expect(isDeploymentHubId("finance")).toBe(true);
+    expect(isConfigurableDeploymentHubId("finance")).toBe(false);
+    expect(CONFIGURABLE_DEPLOYMENT_HUB_IDS).toEqual(["ops", "revenue", "support"]);
+    expect(DEFAULT_DEPLOYMENT_HUB_ID).toBe("ops");
     expect(isDeploymentHubId("sales")).toBe(false);
     expect(isDeploymentHubId(123)).toBe(false);
+  });
+
+  it("registers at most one Finance workspace for an owner", async () => {
+    await withUser("finance-owner", async (user) => {
+      expect(await user.registerFinanceGadget(
+          "finance-1", "Finance Operations Workbench")).toBe("inserted");
+      expect(await user.registerFinanceGadget(
+          "finance-1", "Finance Operations Workbench")).toBe("existing");
+      expect(await user.getGadget("finance-1")).toEqual(
+          expect.objectContaining({id: "finance-1", originHubId: "finance"}));
+      await expect(user.registerFinanceGadget("finance-1", "Wrong title"))
+          .rejects.toThrow(/conflicts/);
+      await expect(user.registerFinanceGadget("finance-2", "Duplicate"))
+          .rejects.toThrow(/already exists/);
+    });
   });
 
   it("stores the origin when a workspace is created", async () => {

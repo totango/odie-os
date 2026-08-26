@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isFinanceOperationsWorkbenchBlueprintId, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -25,6 +25,10 @@ import { deploymentOutputForBlueprint, FormatOffer, isResourceDisabled, listForm
 import { foldProposedChanges, isCompactionTurn, type ChangeBatch } from "./agent-compaction";
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, sanitizeBlueprintOutput } from "./blueprint-archive";
+import {
+  ADMIN_SETTINGS_SINGLETON_NAME,
+  type FinanceWorkspaceClaim,
+} from "./admin-settings.js";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
@@ -5993,6 +5997,7 @@ class OverseerImpl implements AgentHooks {
     let sections: string[] = [];
     let add = (id: string, title: string, source: string, description: string,
                bindings?: Record<string, BlueprintBinding>) => {
+      if (isFinanceOperationsWorkbenchBlueprintId(id)) return;
       if (seen.has(id)) return;
       seen.add(id);
       let lines = [
@@ -6081,6 +6086,10 @@ class OverseerImpl implements AgentHooks {
   // links), so possession of the id is sufficient to read it. Throws agent-readable errors.
   async fetchBlueprint(blueprintId: string)
       : Promise<{files: Record<string, string>, notes: string, output?: BlueprintOutput}> {
+    if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) {
+      throw new Error(`No such blueprint: ${blueprintId}. Use listBlueprints to see available ` +
+          `blueprints.`);
+    }
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) {
       throw new Error(`No such blueprint: ${blueprintId}. Use listBlueprints to see available ` +
@@ -6714,6 +6723,40 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.outputsSnapshot();
   }
 
+  #financeRole(
+      claim: FinanceWorkspaceClaim,
+      ownerRecord: GadgetMetadata | null,
+      userId: string,
+      profileId: string): CollaboratorRole | undefined {
+    if (claim.workspaceId !== this.impl.ctx.id.toString() ||
+        this.impl.ownerId !== claim.ownerUserId ||
+        this.impl.users.idFromName(claim.ownerProfileId).toString() !== claim.ownerUserId ||
+        this.impl.users.idFromName(profileId).toString() !== userId ||
+        !ownerRecord || ownerRecord.id !== claim.workspaceId || ownerRecord.owner ||
+        ownerRecord.originHubId !== "finance") {
+      return undefined;
+    }
+    if (userId === claim.ownerUserId) {
+      return profileId === claim.ownerProfileId ? "build" : undefined;
+    }
+    if (profileId === claim.ownerProfileId) return undefined;
+    let sharing = new SharingManager(this.impl.storage, claim.ownerProfileId);
+    return sharing.getDirectOwnerRole(profileId) === "use" ? "use" : undefined;
+  }
+
+  /**
+   * Check Finance entitlement without opening a session, redeeming a key, or updating a user
+   * listing. The deployment claim identifies the expected owner; the owner's live record confirms
+   * this workspace is still the Finance-origin workspace before the sharing graph is consulted.
+   */
+  async hasFinanceHubAccess(
+      claim: FinanceWorkspaceClaim, userId: string, profileId: string): Promise<boolean> {
+    let owner = this.impl.users.get(this.impl.users.idFromString(claim.ownerUserId));
+    let ownerRecord = await retryOnDoReset(
+        () => owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger);
+    return this.#financeRole(claim, ownerRecord, userId, profileId) !== undefined;
+  }
+
   /**
    * `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
    * by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
@@ -6722,30 +6765,41 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
              notifyClosed: NativeRpcStub<() => void>,
              shareKey?: string,
              configureObservers?: RpcStub<ObserverConfigCallback>): Promise<Overseer> {
+    let deploymentClaim: FinanceWorkspaceClaim | null;
+    try {
+      deploymentClaim = await retryOnDoReset(() => this.impl.ctx.exports.AdminSettings
+          .getByName(ADMIN_SETTINGS_SINGLETON_NAME).getFinanceWorkspaceClaim(), this.impl.logger);
+    } catch {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+    let financeClaim = deploymentClaim?.workspaceId === this.impl.ctx.id.toString()
+        ? deploymentClaim : undefined;
     let firstOpen = !this.impl.ownerId;
     if (firstOpen) {
       // This Overseer hasn't been initialized yet.
       await this.ctx.blockConcurrencyWhile(async () => {
         // Verify that the owner believes it exists. The owner account must be initialized with
         // any new gadgets first before the gadget is actually opened.
-        let owner = this.impl.users.get(this.impl.users.idFromString(userId));
+        if (financeClaim && (userId !== financeClaim.ownerUserId ||
+            profileId !== financeClaim.ownerProfileId ||
+            this.impl.users.idFromName(profileId).toString() !== userId)) {
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+        }
+        let ownerId = financeClaim?.ownerUserId ?? userId;
+        let owner = this.impl.users.get(this.impl.users.idFromString(ownerId));
         let meta = await owner.getGadget(this.ctx.id.toString());
-        if (!meta) {
+        if (!meta || meta.id !== this.impl.ctx.id.toString() || meta.owner ||
+            (!financeClaim && meta.originHubId === "finance")) {
           throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
         }
-        if (meta.owner) {
-          // The user's DO contains a record indicating that this gadget was shared to them by
-          // some other owner. This gadget may have existed in the past, and then was deleted,
-          // which does not proactively clean up share recipient's references. We need to treat
-          // this as missing otherwise we'll inadvertently create a new gadget with this ID
-          // belonging to a different user than the original.
-          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+        if (financeClaim && meta.originHubId !== "finance") {
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
         }
 
         // Owner says we exist, so let's initialize ourselves.
-        this.impl.ownerId = userId;
+        this.impl.ownerId = ownerId;
 
-        this.impl.storage.ownerId.put(userId);
+        this.impl.storage.ownerId.put(ownerId);
 
         this.#initializeEmptyCodeSnapshot();
       });
@@ -6775,6 +6829,21 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let clientUser = isOwner
         ? owner
         : this.impl.users.get(this.impl.users.idFromString(userId));
+    let ownerRecord = await retryOnDoReset(
+        () => owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger);
+    if (!ownerRecord || ownerRecord.id !== this.impl.ctx.id.toString() || ownerRecord.owner) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+    if (!financeClaim && ownerRecord?.originHubId === "finance") {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+    let financeRole = financeClaim
+        ? this.#financeRole(financeClaim, ownerRecord, userId, profileId)
+        : undefined;
+    if (financeClaim && (!financeRole || shareKey)) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+    let financeWorkspace = financeClaim !== undefined;
 
     // Refresh the owner's outputs index. Pushes are best-effort, and workspaces predating the
     // index have never pushed at all, so re-syncing on open is what corrects both.
@@ -6783,7 +6852,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     // The caller's effective role. The owner always has "build".
-    let role: CollaboratorRole = "build";
+    let role: CollaboratorRole = financeRole ?? "build";
 
     if (!isOwner) {
       if (this.impl.storage.prohibitAllSharing.get()) {
@@ -6811,11 +6880,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // An unauthorized caller (no effective role -- never had access, or was removed) gets a
       // distinct denial without workspace metadata. A removed collaborator who reconnects after
       // their session is force-restarted lands here and sees the terminal access-denied page.
-      let effectiveRole = sharing.getEffectiveRole(profileId);
-      if (!effectiveRole) {
-        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      if (!financeWorkspace) {
+        let effectiveRole = sharing.getEffectiveRole(profileId);
+        if (!effectiveRole) {
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+        }
+        role = effectiveCollaboratorRole(ownerRecord?.originHubId, effectiveRole);
       }
-      role = effectiveRole;
 
       // Ambient reconciliation may attach Gatekeepers after open() starts. Finish it before taking
       // the observer snapshot so every capability exposed to this collaborator has an observer.
@@ -6833,10 +6904,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       let gadgetId = this.impl.ctx.id.toString();
       void (async () => {
         try {
-          const [ownerProfile, ownerRecord] = await Promise.all([
-            owner.whoami(),
-            owner.getGadget(gadgetId),
-          ]);
+          const ownerProfile = await owner.whoami();
           await clientUser.recordSharedGadgetOpen(
               gadgetId, title, ownerProfile, role, ownerRecord?.originHubId);
         } catch (err) {
@@ -7513,9 +7581,31 @@ function joinSessionPresence(
   };
 }
 
+/** Restrict every collaborator session on a Finance-origin workspace to Gadget-only access. */
+export function effectiveCollaboratorRole(
+    originHubId: GadgetMetadata["originHubId"], role: CollaboratorRole): CollaboratorRole {
+  return originHubId === "finance" ? "use" : role;
+}
+
+/** Enforce the owner-only, use-role direct-invite policy for Finance-origin workspaces. */
+export function assertCollaboratorInviteAllowed(
+    financeWorkspace: boolean, isOwner: boolean, role: CollaboratorRole): void {
+  if (financeWorkspace && (!isOwner || role !== "use")) {
+    throw new Error("Finance collaborators must be invited by the owner with Gadget-only access.");
+  }
+}
+
+/** Enforce the immutable no-bearer-link policy for Finance-origin workspaces. */
+export function assertShareLinksAllowed(financeWorkspace: boolean): void {
+  if (financeWorkspace) {
+    throw new Error("Finance workspaces are invite-only and do not support share links.");
+  }
+}
+
 @validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
+  #financeWorkspacePromise: Promise<boolean> | undefined;
 
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
@@ -7573,6 +7663,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     const profilePromise = this.#clientProfilePromise!;
     return profilePromise;
+  }
+
+  async #isFinanceWorkspace(): Promise<boolean> {
+    this.#financeWorkspacePromise ??= retryOnDoReset(
+        () => this.#owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger)
+        .then(record => record?.originHubId === "finance");
+    return this.#financeWorkspacePromise;
   }
 
   async getMetadata(): Promise<GadgetMetadata> {
@@ -9118,6 +9215,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
+    assertCollaboratorInviteAllowed(await this.#isFinanceWorkspace(), this.isOwner, role);
     // Look up the user DO to check if the account exists.
     let userDoId = this.impl.users.idFromName(username);
     let userDo = this.impl.users.get(userDoId);
@@ -9185,6 +9283,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async createShareLink(role: CollaboratorRole, note?: string)
       : Promise<{ key: string; linkId: string }> {
+    assertShareLinksAllowed(await this.#isFinanceWorkspace());
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
@@ -9196,6 +9295,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
+    assertShareLinksAllowed(await this.#isFinanceWorkspace());
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +

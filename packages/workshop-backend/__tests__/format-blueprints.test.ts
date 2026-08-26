@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
-import { FEATURED_BLUEPRINTS_KEY, parseBlueprintArchive, parseBlueprintKvRecord, parseFeaturedBlueprints, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from "../src/blueprint-archive.js";
+import { FEATURED_BLUEPRINTS_KEY, listFeaturedBlueprintsFromKv, parseBlueprintArchive, parseBlueprintKvRecord, parseFeaturedBlueprints, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from "../src/blueprint-archive.js";
 import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints } from "../src/format-blueprints.js";
 import { FEATURED_BLUEPRINTS, FORMAT_BLUEPRINTS } from "../src/generated/format-blueprints.js";
 
@@ -72,6 +72,7 @@ function makeEnv() {
     r2,
     env: {
       BLUEPRINTS: {
+        get: async (key: string) => kv.get(key) ?? null,
         put: async (key: string, value: string) => { kv.set(key, value); },
       },
       BLUEPRINT_CONTENT: {
@@ -415,6 +416,20 @@ describe("bundled featured starter blueprints", () => {
       let content = r2.get(`${entry.blueprintId}/${record.metadata.version}`)!;
       expect(await readInstalledFiles(content)).toEqual(files);
     });
+  });
+
+  it("installs protected Finance content but excludes it from global featured discovery", async () => {
+    let {kv, env} = makeEnv();
+    let installed = await installFeaturedBlueprints(env);
+    let financeId = "starter.finance-operations-workbench";
+
+    expect(installed.some(({id}) => id === financeId)).toBe(true);
+    expect(kv.has(financeId)).toBe(true);
+    kv.set(FEATURED_BLUEPRINTS_KEY, serializeFeaturedBlueprints(installed));
+
+    let discoverable = await listFeaturedBlueprintsFromKv(env);
+    expect(discoverable.some(({id}) => id === financeId)).toBe(false);
+    expect(discoverable.some(({id}) => id === "starter.developer-delivery-kit")).toBe(true);
   });
 
   it("changes the featured fingerprint on starter metadata or revision changes", async () => {

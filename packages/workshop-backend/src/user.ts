@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
@@ -912,6 +912,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.gadgets.put({id, title, created, ...(originHubId ? {originHubId} : {})});
   }
 
+  /** Atomically register the deployment's one Finance workspace for this owner. */
+  async registerFinanceGadget(id: string, title: string): Promise<"inserted" | "existing"> {
+    let exact = this.storage.gadgets.get(id);
+    if (exact && (exact.owner || exact.originHubId !== "finance" || exact.title !== title)) {
+      throw new Error("The Finance workspace registration conflicts with an existing workspace.");
+    }
+    for (let gadget of this.storage.gadgets.list()) {
+      if (gadget.originHubId === "finance") {
+        if (gadget.id !== id || gadget.title !== title || gadget.owner) {
+          throw new Error("A Finance workspace already exists for this user.");
+        }
+      }
+    }
+    if (exact) return "existing";
+    this.storage.gadgets.put({id, title, created: new Date(), originHubId: "finance"});
+    return "inserted";
+  }
+
   async ensureGadgetRegistered(id: string, title: string, originHubId?: DeploymentHubId): Promise<void> {
     if (this.storage.gadgets.get(id)) return;
     await this.newGadget(id, title, originHubId);
@@ -1080,6 +1098,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async setBlueprintPinned(id: string, pinned: boolean): Promise<void> {
+    if (isFinanceOperationsWorkbenchBlueprintId(id)) {
+      throw new Error("Blueprint not found.");
+    }
     let pinnedBlueprints = this.storage.pinnedBlueprints.get().filter(existing => existing !== id);
 
     if (pinned) {
@@ -1093,6 +1114,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async addBlueprintToLibrary(id: string): Promise<void> {
+    if (isFinanceOperationsWorkbenchBlueprintId(id)) {
+      throw new Error("Blueprint not found.");
+    }
     let kvRecord = await readBlueprintKvRecord(this.env, id);
     if (!kvRecord) {
       throw new Error("Blueprint not found.");
@@ -1128,6 +1152,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async isBlueprintInLibrary(id: string): Promise<{ uploaded: boolean } | null> {
+    if (isFinanceOperationsWorkbenchBlueprintId(id)) return null;
     const record = this.storage.libraryBlueprints.get(id);
     if (!record) return null;
     return { uploaded: record.uploaded };
@@ -1235,6 +1260,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let result: BlueprintLibrarySummary[] = [];
     let pinnedBlueprintIds = new Set(this.storage.pinnedBlueprints.get());
     for (let record of this.storage.libraryBlueprints.list()) {
+      if (isFinanceOperationsWorkbenchBlueprintId(record.id)) continue;
       result.push({
         id: record.id,
         metadata: record.metadata,

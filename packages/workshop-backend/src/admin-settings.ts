@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, DeploymentHubId, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isDeploymentHubId, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, ConfigurableDeploymentHubId, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isConfigurableDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -10,11 +10,24 @@ import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defa
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, defaultAmbientGatekeeperMode } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
-import { UserDurableObject } from './user.js';
+import type { UserDurableObject } from './user.js';
 import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints } from './format-blueprints.js';
 import { FEATURED_BLUEPRINTS, FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
+
+/** Stable name of the deployment-wide AdminSettings singleton. */
+export const ADMIN_SETTINGS_SINGLETON_NAME = "";
+
+/** Authoritative deployment claim for the single Finance workspace. */
+export type FinanceWorkspaceClaim = {
+  workspaceId: string;
+  ownerUserId: string;
+  ownerProfileId: string;
+};
+
+/** Outcome of atomically attempting to claim the deployment's Finance workspace. */
+export type FinanceWorkspaceClaimResult = "claimed" | "existing" | "conflict";
 
 function makeAdminSettingsStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
@@ -45,6 +58,10 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // exactly once per blueprint: an admin who then removes a format keeps it removed, while a
       // deployment that installed before curation existed still gets promoted.
       promotedFormatBlueprints: <string[]>[],
+
+      // The one Finance workspace for this deployment. This lives beside admin configuration
+      // because the singleton DO, rather than any one user's listing, is the coordination point.
+      financeWorkspace: <FinanceWorkspaceClaim | null>null,
     },
   });
 }
@@ -54,8 +71,8 @@ type AdminSettingsStorage = ReturnType<typeof makeAdminSettingsStorage>;
 /**
  * Deployment-wide admin settings singleton.
  *
- * This durable object is always addressed as `getByName("")`. It contains settings that only
- * admins may modify. Settings modified through this DO are published to KV so that user requests
+ * This durable object is always addressed as `getByName(ADMIN_SETTINGS_SINGLETON_NAME)`. It
+ * contains settings that only admins may modify. Settings modified through this DO are published to KV so that user requests
  * do not have to access the AdminSettings DO directly (which they could otherwise overload), but
  * having a singleton DO writing to KV avoids race conditions when updating KV.
  */
@@ -78,6 +95,40 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
+  }
+
+  /** Return the authoritative Finance workspace claim, if one has been made. */
+  getFinanceWorkspaceClaim(): FinanceWorkspaceClaim | null {
+    return this.storage.financeWorkspace.get();
+  }
+
+  /**
+   * Atomically claim the deployment's Finance workspace. An exact retry is idempotent; no other
+   * workspace or owner can replace an existing claim.
+   */
+  claimFinanceWorkspace(claim: FinanceWorkspaceClaim): FinanceWorkspaceClaimResult {
+    let existing = this.storage.financeWorkspace.get();
+    if (existing) {
+      return existing.workspaceId === claim.workspaceId &&
+          existing.ownerUserId === claim.ownerUserId &&
+          existing.ownerProfileId === claim.ownerProfileId
+        ? "existing"
+        : "conflict";
+    }
+    this.storage.financeWorkspace.put(claim);
+    return "claimed";
+  }
+
+  /** Release a failed bootstrap claim only when every identity field still matches. */
+  releaseFinanceWorkspace(claim: FinanceWorkspaceClaim): boolean {
+    let existing = this.storage.financeWorkspace.get();
+    if (!existing || existing.workspaceId !== claim.workspaceId ||
+        existing.ownerUserId !== claim.ownerUserId ||
+        existing.ownerProfileId !== claim.ownerProfileId) {
+      return false;
+    }
+    this.storage.financeWorkspace.put(null);
+    return true;
   }
 
   /**
@@ -132,7 +183,11 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       let installed = await installFeaturedBlueprints(this.env);
       if (installed.length > 0) {
         for (let publicInfo of installed) {
-          this.storage.featuredBlueprints.put(publicInfo);
+          if (isFinanceOperationsWorkbenchBlueprintId(publicInfo.id)) {
+            this.storage.featuredBlueprints.delete(publicInfo.id);
+          } else {
+            this.storage.featuredBlueprints.put(publicInfo);
+          }
         }
         await this.#writeFeaturedSnapshot();
       }
@@ -184,13 +239,15 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 
   async #writeFeaturedSnapshot(): Promise<void> {
-    let featured = [...this.storage.featuredBlueprints.list()];
+    let featured = [...this.storage.featuredBlueprints.list()]
+        .filter(({id}) => !isFinanceOperationsWorkbenchBlueprintId(id));
     await this.env.BLUEPRINTS.put(FEATURED_BLUEPRINTS_KEY, serializeFeaturedBlueprints(featured));
   }
 
   // Reconcile the mirrored featured list to match the authoritative bit stored in the owner
   // User DO, while also refreshing stale metadata snapshots for featured entries.
   async #syncFeaturedMirror(publicInfo: BlueprintPublicInfo, featured: boolean): Promise<void> {
+    if (isFinanceOperationsWorkbenchBlueprintId(publicInfo.id)) featured = false;
     let existing = this.storage.featuredBlueprints.get(publicInfo.id);
     let changed = false;
 
@@ -291,7 +348,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // deployment to upgrade hits `undefined` on it.
   #config(): AdminConfig {
     let config = { ...DEFAULT_ADMIN_CONFIG, ...this.storage.adminConfig.get() };
-    return { ...config, enabledHubs: normalizeEnabledHubs(config.enabledHubs) };
+    return {
+      ...config,
+      enabledHubs: normalizeEnabledHubs(config.enabledHubs),
+      formats: config.formats.filter(
+          ({blueprintId}) => !isFinanceOperationsWorkbenchBlueprintId(blueprintId)),
+    };
   }
 
   getAdminConfig(): AdminConfig {
@@ -388,6 +450,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 
   async promoteFormat(blueprintId: string): Promise<void> {
+    if (isFinanceOperationsWorkbenchBlueprintId(blueprintId)) {
+      throw new Error("Blueprint not found.");
+    }
     let record = await readBlueprintKvRecord(this.env, blueprintId);
     if (!record) {
       throw new Error("Blueprint not found.");
@@ -462,7 +527,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  async setHubEnabled(hubId: DeploymentHubId, enabled: boolean): Promise<void> {
+  async setHubEnabled(hubId: ConfigurableDeploymentHubId, enabled: boolean): Promise<void> {
     await this.#mutateAdminConfig(config => {
       let hubs = new Set(normalizeEnabledHubs(config.enabledHubs));
       if (enabled) hubs.add(hubId); else hubs.delete(hubId);
@@ -672,8 +737,8 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
     await this.admin.updateAdminConfig({ accentColor: color });
   }
 
-  setHubEnabled(hubId: DeploymentHubId, enabled: boolean): Promise<void> {
-    if (!isDeploymentHubId(hubId)) {
+  setHubEnabled(hubId: ConfigurableDeploymentHubId, enabled: boolean): Promise<void> {
+    if (!isConfigurableDeploymentHubId(hubId)) {
       throw new Error(`Invalid hub id: ${hubId}`);
     }
     return this.admin.setHubEnabled(hubId, enabled);

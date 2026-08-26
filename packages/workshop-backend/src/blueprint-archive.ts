@@ -4,7 +4,7 @@
 // content byte length), followed by UTF-8 JSON metadata and the gzip-compressed Yjs snapshot.
 // See docs/blueprints.md for the full format description.
 
-import { BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, isOutputIcon } from '@gadgets/workshop-shared/api';
+import { BlueprintMetadata, BlueprintOutput, BlueprintPublicInfo, isFinanceOperationsWorkbenchBlueprintId, isOutputIcon } from '@gadgets/workshop-shared/api';
 
 export const FEATURED_BLUEPRINTS_KEY = '.featured';
 
@@ -119,7 +119,8 @@ export async function listFeaturedBlueprintsFromKv(
     return [];
   }
 
-  return parseFeaturedBlueprints(raw);
+  return parseFeaturedBlueprints(raw)
+      .filter(({id}) => !isFinanceOperationsWorkbenchBlueprintId(id));
 }
 
 /**

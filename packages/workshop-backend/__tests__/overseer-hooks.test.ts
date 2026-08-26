@@ -152,12 +152,18 @@ async function makeTargetOverseer(
       users: {
         idFromString: (id: string) => id,
         get: () => ({
+          getGadget: async () => ({id: "workspace-id", title: "Test workspace", created: new Date()}),
           whoami: async () => ({id: "profile-id", name: "Test User"}),
         }),
       },
       ctx: {
         id: {toString: () => "workspace-id"},
-        exports: {GatekeeperHookLoopback: ({props}: {props: object}) => props},
+        exports: {
+          AdminSettings: {
+            getByName: () => ({getFinanceWorkspaceClaim: async () => null}),
+          },
+          GatekeeperHookLoopback: ({props}: {props: object}) => props,
+        },
       },
       storage: {
         prohibitAllSharing: {get: () => false},

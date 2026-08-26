@@ -5,6 +5,13 @@ variance analysis, contracts, and deterministic forecasts. It is not an accounti
 reconciliation engine, or a certified source of truth. The trust label is always **Draft / derived -
 not certified**, including when an import batch is marked `reconciled`.
 
+## Access
+
+This workbench exists only in the invite-only Finance hub as one shared Finance-origin workspace.
+The deployment admin bootstraps it, and membership is represented by direct workspace collaborators.
+Collaborators receive Gadget-only (`use`) access; bearer share links are disabled, so collaborators
+cannot edit code, reshare the workspace, or grant additional access.
+
 ## Workflows
 
 1. **Setup:** nine controlled questions retain fiscal calendar, entity, currency, materiality,

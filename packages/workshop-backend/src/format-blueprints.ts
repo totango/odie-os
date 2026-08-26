@@ -114,9 +114,9 @@ export async function installFormatBlueprints(env: InstallEnv): Promise<Blueprin
 }
 
 /**
- * Install every bundled featured starter blueprint. These are ordinary ownerless blueprints and are
- * mirrored to the deployment featured collection by AdminSettings, but are never promoted as output
- * formats.
+ * Install every bundled starter blueprint. These are ordinary ownerless blueprints; AdminSettings
+ * mirrors discoverable starters to the deployment featured collection and keeps protected hub
+ * content out of that mirror. They are never promoted as output formats.
  */
 export async function installFeaturedBlueprints(env: InstallEnv): Promise<BlueprintPublicInfo[]> {
   let installed: BlueprintPublicInfo[] = [];
