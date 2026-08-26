@@ -43,7 +43,7 @@ function runWith(
   };
   const delays: number[] = [];
   return {
-    result: startNodeCanaryProcess(sandbox, async delayMs => { delays.push(delayMs); }),
+    result: startNodeCanaryProcess(sandbox, "/tmp/node-ready", async delayMs => { delays.push(delayMs); }),
     attempts: () => attempts,
     delays,
     calls,
@@ -62,14 +62,16 @@ describe("native canary failure classification", () => {
 });
 
 describe("native canary initial Node readiness", () => {
-  it("returns the first successful exec after scheduling output for log attachment", async () => {
+  it("returns the first successful exec waiting for the log-subscription handshake", async () => {
     const run = runWith([process]);
     await expect(run.result).resolves.toBe(process);
     expect(run.attempts()).toBe(1);
     expect(run.delays).toEqual([]);
     expect(run.calls[0]?.command.slice(0, 2)).toEqual(["node", "--eval"]);
-    expect(run.calls[0]?.command[2]).toContain("setTimeout(() => {");
-    expect(run.calls[0]?.command[2]).toContain("}, 5000)");
+    expect(run.calls[0]?.command[2]).toContain('require("node:fs")');
+    expect(run.calls[0]?.command[2]).toContain('const ready = "/tmp/node-ready"');
+    expect(run.calls[0]?.command[2]).toContain("if (!existsSync(ready)) return");
+    expect(run.calls[0]?.command[2]).toContain("}, 25)");
     expect(run.calls[0]?.options).toEqual({ timeout: 30_000 });
   });
 

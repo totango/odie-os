@@ -22,10 +22,14 @@ class FakeSandbox {
   editorCommand: readonly string[] | undefined;
   editorOptions: unknown;
   editorReadiness: unknown;
+  nodeLogOptions: { replay?: boolean; follow?: boolean; signal?: AbortSignal } | undefined;
+  nodeReadyFile: string | undefined;
+  nodeReadyContent: string | undefined;
   destroyed = false;
   destroyCalls = 0;
   fail: "node" | "javascript" | "typescript" | "terminal" | "code-server" | undefined;
   private contextNumber = 0;
+  private nodeLogController: ReadableStreamDefaultController<unknown> | undefined;
 
   interpreter = {
     createCodeContext: async (options: { language?: string; cwd?: string }) => ({
@@ -47,9 +51,11 @@ class FakeSandbox {
     const self = this;
     return {
       id: editor ? "editor" : "node", pid: editor ? 2 : 1, exitCode: Promise.resolve(0),
-      async output() {
-        if (self.fail === "node") throw new Error("injected node failure");
-        return { stdout: "odie-node-version:v24.14.0\nodie-node-stdout:42\n", stderr: "odie-node-stderr:ok\n", exitCode: 0, timedOut: false, truncated: false };
+      async logs(options: { replay?: boolean; follow?: boolean; signal?: AbortSignal }) {
+        self.nodeLogOptions = options;
+        return new ReadableStream({
+          start(controller) { self.nodeLogController = controller; },
+        });
       },
       async waitForPort(port: number, options: unknown) {
         if (editor) self.editorReadiness = { port, options };
@@ -91,7 +97,22 @@ class FakeSandbox {
   }
 
   async mkdir() {}
-  async writeFile() {}
+  async writeFile(path?: string, content?: string) {
+    const controller = this.nodeLogController;
+    if (!controller) return;
+    this.nodeLogController = undefined;
+    this.nodeReadyFile = path;
+    this.nodeReadyContent = content;
+    if (this.fail === "node") {
+      controller.error(new Error("injected node failure"));
+      return;
+    }
+    const timestamp = "now";
+    controller.enqueue({ type: "stdout", cursor: "1", timestamp, data: new TextEncoder().encode("odie-node-version:v24.14.0\nodie-node-stdout:42\n") });
+    controller.enqueue({ type: "stderr", cursor: "2", timestamp, data: new TextEncoder().encode("odie-node-stderr:ok\n") });
+    controller.enqueue({ type: "terminal", state: "exited", cursor: "3", timestamp, exit: { code: 0, timedOut: false } });
+    controller.close();
+  }
   async containerFetch() { return new Response("ready", { status: 200 }); }
   async listProcesses() { return this.destroyed ? [] : [{ id: "node", state: "exited" }]; }
   async listTerminals() { return []; }
@@ -108,6 +129,10 @@ describe("native canary cleanup", () => {
       resourceIds: { process: ["node", "editor"], terminal: ["terminal"] },
     });
     expect(sandbox.deletedContexts).toHaveLength(2);
+    expect(sandbox.nodeLogOptions).toMatchObject({ replay: true, follow: true });
+    expect(sandbox.nodeLogOptions?.signal).toBeInstanceOf(AbortSignal);
+    expect(sandbox.nodeReadyFile).toMatch(/^\/tmp\/odie-canary-node-ready-[0-9a-f-]+$/);
+    expect(sandbox.nodeReadyContent).toBe("ready");
     expect(sandbox.terminalTerminateCount).toBe(1);
     expect(sandbox.editorKillCount).toBe(1);
     expect(sandbox.editorCommand).toEqual([
