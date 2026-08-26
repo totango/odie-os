@@ -32,6 +32,21 @@ describe("native canary workflow cleanup", () => {
     expect(cleanup).not.toContain("packages: write");
   });
 
+  it("preflights the runtime idempotently before the one-shot invocation", () => {
+    const preflight = workflow.slice(
+      workflow.indexOf("      - name: Preflight isolated tier runtime before one-shot claim"),
+      workflow.indexOf("      - name: Invoke, validate and record tier canary"),
+    );
+    expect(preflight).toContain("for attempt in 1 2 3; do");
+    expect(preflight).toContain("--max-time 120 --max-filesize 4096");
+    expect(preflight).toContain('"https://${worker}.odie-os.workers.dev/ready"');
+    expect(preflight).toContain('keys == ["candidateImage", "instanceTier", "ok", "ready", "sourceSha"]');
+    expect(preflight).toContain(".ok == true and .ready == true");
+    expect(preflight).toContain('if [ "$attempt" != 3 ]; then sleep 5; fi');
+    expect(preflight.match(/curl/g)).toHaveLength(1);
+    expect(preflight).not.toContain('cat "$result"');
+  });
+
   it("captures the canary response without printing its body and validates closed schemas", () => {
     const invocation = workflow.slice(
       workflow.indexOf("      - name: Invoke, validate and record tier canary"),

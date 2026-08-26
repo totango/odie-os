@@ -29,10 +29,10 @@ export function claimCanaryRun(
   storage.put("claimed", true);
 }
 
-/** Returns a bounded rejection response, or null when the one-shot request may run. */
+/** Returns a bounded rejection response, or null for an authenticated canary endpoint request. */
 export async function rejectCanaryRequest(request: Request, expectedToken: string): Promise<Response | null> {
   const url = new URL(request.url);
-  if (url.pathname !== "/run") return boundedResponse("Not found.", 404);
+  if (url.pathname !== "/ready" && url.pathname !== "/run") return boundedResponse("Not found.", 404);
   if (request.method !== "POST") return boundedResponse("Method not allowed.", 405);
   if (!(await hasValidCanaryAuthorization(request.headers.get("Authorization"), expectedToken))) {
     return boundedResponse("Unauthorized.", 401);

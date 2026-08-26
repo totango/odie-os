@@ -17,7 +17,7 @@ const POST_DESTROY_SETTLE_MS = 10_000;
 const DESTROY_TIMEOUT_MS = 30_000;
 
 type CanaryLogFields = {
-  phase?: "run" | "destroy" | "verify";
+  phase?: "preflight" | "run" | "destroy" | "verify";
   failureStage?: CanaryFailureStage;
 };
 
@@ -58,6 +58,27 @@ export default {
     }
 
     const sandbox = getSandbox(env.CANARY_SANDBOX, SANDBOX_ID, { normalizeId: true });
+    if (new URL(request.url).pathname === "/ready") {
+      try {
+        // Wake the runtime before the one-shot claim so a post-secret code reset is safe to retry.
+        await sandbox.mkdir("/workspace/.odie-canary-preflight", { recursive: true });
+      } catch (error) {
+        logger.warn("native canary runtime preflight failed", {
+          event: "coding.session.canary.preflight.failed",
+          phase: "preflight",
+          error,
+        });
+        return jsonResponse({ ok: false, ready: false }, 503);
+      }
+      return jsonResponse({
+        ok: true,
+        ready: true,
+        sourceSha: env.SOURCE_SHA,
+        candidateImage: env.CANDIDATE_IMAGE,
+        instanceTier: env.INSTANCE_TIER,
+      }, 200);
+    }
+
     let report: CanaryChecksReport;
     try {
       report = await runClaimedCanaryLifecycle(
