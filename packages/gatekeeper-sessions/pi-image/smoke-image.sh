@@ -22,6 +22,13 @@ agentic_pnpm_version="${agentic_pnpm_version%%+*}"
 repository_pnpm_version="${REPOSITORY_PNPM_PACKAGE_MANAGER#pnpm@}"
 repository_pnpm_version="${repository_pnpm_version%%+*}"
 [[ "$(pnpm --version)" == "${agentic_pnpm_version}" ]] || fail "unexpected default pnpm version"
+sandbox_process_path="/usr/local/bin:/bin:/usr/bin"
+for command in node npm npx corepack pnpm pnpx; do
+  [[ "$(readlink "/usr/local/bin/$command")" == "/opt/node/bin/$command" ]] || fail "Sandbox process PATH is not pinned for $command"
+done
+[[ "$(env PATH="$sandbox_process_path" sh -c 'command -v node')" == "/usr/local/bin/node" ]] || fail "Sandbox process Node is not canonical"
+[[ "$(env PATH="$sandbox_process_path" node --version)" == "v${NODE_VERSION}" ]] || fail "Sandbox process Node version is not pinned"
+[[ "$(env PATH="$sandbox_process_path" pnpm --version)" == "${agentic_pnpm_version}" ]] || fail "Sandbox process pnpm version is not pinned"
 [[ "$(node -p 'process.arch')" == "x64" ]] || fail "unexpected Node architecture"
 [[ "$(uname -m)" == "x86_64" ]] || fail "unexpected machine architecture"
 
