@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react'
 import { createRootRoute, Outlet, useRouterState } from '@tanstack/react-router'
 import { TooltipProvider, Toasty } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
-import { AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import { AuthenticatedApi, type FinanceHubStatus } from '@gadgets/workshop-shared/api'
 import { useRpcStub, useConnectionLost } from '../RpcContext'
 import { useAuth, CF_ACCESS_MODE } from '../useAuth'
 import { AuthProvider } from '../AuthContext'
@@ -143,6 +143,7 @@ function AuthenticatedShell({
   const enabledHubs = useEnabledHubs()
   // null = still checking, true = needs onboarding, false = onboarding done
   const [onboardingNeeded, setOnboardingNeeded] = useState<boolean | null>(null)
+  const [financeStatus, setFinanceStatus] = useState<FinanceHubStatus | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -152,6 +153,17 @@ function AuthenticatedShell({
       logRpcFailure('Failed to check onboarding status:', err)
       // If the check fails, skip onboarding to avoid blocking the user
       if (!cancelled) setOnboardingNeeded(false)
+    })
+    return () => { cancelled = true }
+  }, [authenticatedApi])
+
+  useEffect(() => {
+    let cancelled = false
+    authenticatedApi.getFinanceHubStatus().then((status) => {
+      if (!cancelled) setFinanceStatus(status)
+    }).catch((err) => {
+      logRpcFailure('Failed to check Finance hub access:', err)
+      if (!cancelled) setFinanceStatus({ authorized: false, canCreate: false })
     })
     return () => { cancelled = true }
   }, [authenticatedApi])
@@ -175,7 +187,7 @@ function AuthenticatedShell({
   // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
   const fullscreen = isWorkspaceEditor
   return (
-    <HubProvider enabledHubs={enabledHubs}>
+    <HubProvider enabledHubs={enabledHubs} financeStatus={financeStatus}>
       <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
         <AccountSelectionModal />
         {fullscreen ? (

@@ -121,6 +121,7 @@ const SUGGESTIONS: Record<DeploymentHubId, TaskSuggestion[]> = {
   ops: OPS_SUGGESTIONS,
   revenue: REVENUE_SUGGESTIONS,
   support: SUPPORT_SUGGESTIONS,
+  finance: [],
 }
 
 // One row, shared by every suggestion so the list reads as one kind of offer.

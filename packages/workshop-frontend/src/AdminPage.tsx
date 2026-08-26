@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, SquaresFour, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, DEPLOYMENT_HUB_IDS, type DeploymentHubId, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, CONFIGURABLE_DEPLOYMENT_HUB_IDS, type ConfigurableDeploymentHubId, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -89,8 +89,8 @@ export default function AdminPage() {
   const [formats, setFormats] = useState<AdminFormat[]>([])
 
   // Deployment-wide navigation curation. This is not an authorization boundary.
-  const [enabledHubs, setEnabledHubs] = useState<DeploymentHubId[]>([])
-  const [hubBusy, setHubBusy] = useState<DeploymentHubId | null>(null)
+  const [enabledHubs, setEnabledHubs] = useState<ConfigurableDeploymentHubId[]>([])
+  const [hubBusy, setHubBusy] = useState<ConfigurableDeploymentHubId | null>(null)
 
   const resourceKey = (vendorId: string, urlPattern: string) => `${vendorId}\u0000${urlPattern}`
 
@@ -240,12 +240,12 @@ export default function AdminPage() {
     }
   }
 
-  const handleHubToggle = async (hubId: DeploymentHubId, enabled: boolean) => {
+  const handleHubToggle = async (hubId: ConfigurableDeploymentHubId, enabled: boolean) => {
     if (!admin) return
     setHubBusy(hubId)
     try {
       await admin.api.setHubEnabled(hubId, enabled)
-      const next = DEPLOYMENT_HUB_IDS.filter((id) =>
+      const next = CONFIGURABLE_DEPLOYMENT_HUB_IDS.filter((id) =>
         id === hubId ? enabled : enabledHubs.includes(id))
       setEnabledHubs(next)
       updateServerConfig({ enabledHubs: next })
@@ -456,7 +456,7 @@ export default function AdminPage() {
           </div>
 
           <div className="mt-6 divide-y divide-kumo-line rounded-xl border border-kumo-line">
-            {DEPLOYMENT_HUB_IDS.map((hubId) => {
+            {CONFIGURABLE_DEPLOYMENT_HUB_IDS.map((hubId) => {
               const enabled = enabledHubs.includes(hubId)
               const lastEnabled = enabled && enabledHubs.length === 1
               return (

@@ -22,6 +22,7 @@ import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './components/menuStyl
 import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { useHub } from './HubContext'
+import { blueprintCreationOrigin } from './blueprintCreationOrigin'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -566,7 +567,11 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
 
     setCreating(true)
     setError(null)
-    const overseer = authenticatedApi.newGadgetFromBlueprint(id, draftAssignments, hub)
+    const overseer = authenticatedApi.newGadgetFromBlueprint(
+      id,
+      draftAssignments,
+      blueprintCreationOrigin(hub),
+    )
     try {
       let metadata = await overseer.getMetadata()
       window.location.href = `/workspace/${metadata.id}`

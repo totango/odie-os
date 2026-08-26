@@ -8,6 +8,7 @@ import type { RpcStub } from 'capnweb'
 import type { DeploymentHubId, Overseer, OutputFormatOffer } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useHub } from '../../HubContext'
+import { blueprintCreationOrigin } from '../../blueprintCreationOrigin'
 import { isSupportCuratedAsset, rankForSelectedHub } from '../../supportCuration'
 
 type AuthenticatedApiStub = ReturnType<typeof useAuthenticatedApi>['authenticatedApi']
@@ -68,7 +69,11 @@ export async function createFromFormat(
   // anywhere in the bundle is a parse error that fails the whole chunk.
   let overseer: RpcStub<Overseer> | undefined
   try {
-    overseer = await api.newGadgetFromBlueprint(format.blueprintId, {}, originHubId)
+    overseer = await api.newGadgetFromBlueprint(
+      format.blueprintId,
+      {},
+      originHubId ? blueprintCreationOrigin(originHubId) : undefined,
+    )
     const { id } = await overseer.getMetadata()
     navigate({ to: '/workspace/$id', params: { id } })
   } catch (err) {

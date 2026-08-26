@@ -14,6 +14,7 @@ import {
   ChatAttachmentHandle,
   MessageFormatRef,
   SlashCommandRequest,
+  FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
 } from "@gadgets/workshop-shared/api";
 import {
   getStoredSelectedModel,
@@ -41,6 +42,77 @@ function HomePage() {
 }
 
 export function HomePageContent({ prompt }: HomeSearch) {
+  const { hub } = useHub();
+  if (hub === 'finance') return <FinanceHomePageContent />;
+  return <GenericHomePageContent prompt={prompt} />;
+}
+
+function FinanceHomePageContent() {
+  const { financeStatus } = useHub();
+  const { authenticatedApi } = useAuthenticatedApi();
+  const navigate = useNavigate();
+  const toasts = useKumoToastManager();
+  const [creating, setCreating] = useState(false);
+  useDocumentTitle('Finance');
+
+  if (!financeStatus?.authorized) return null;
+
+  const openOrCreate = async () => {
+    if ('workspaceId' in financeStatus) {
+      navigate({ to: '/workspace/$id', params: { id: financeStatus.workspaceId }, search: {} });
+      return;
+    }
+    if (!financeStatus.canCreate || creating) return;
+
+    setCreating(true);
+    const overseer = authenticatedApi.newGadgetFromBlueprint(
+      FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+      {},
+      'finance',
+    );
+    try {
+      const { id } = await overseer.getMetadata();
+      navigate({ to: '/workspace/$id', params: { id }, search: {} });
+    } catch (err) {
+      logRpcFailure('Failed to create Finance workspace:', err, { reportSite: 'finance.create' });
+      toasts.add({ title: 'Failed to create Finance workspace', variant: 'error' });
+    } finally {
+      overseer[Symbol.dispose]();
+      setCreating(false);
+    }
+  };
+
+  return (
+    <div className="relative isolate flex min-h-full w-full items-start justify-center px-4 pb-16 pt-12 sm:px-8 sm:pt-20">
+      <section className="w-full max-w-3xl overflow-hidden rounded-3xl border border-kumo-line bg-kumo-base shadow-sm">
+        <div className="border-b border-kumo-line bg-kumo-tint/60 px-6 py-5 sm:px-8">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-kumo-brand">Invite-only Finance hub</p>
+          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-kumo-default">Finance Operations Workbench</h1>
+        </div>
+        <div className="px-6 py-7 sm:px-8 sm:py-9">
+          <p className="max-w-2xl text-[15px] leading-6 text-kumo-subtle">
+            Review bounded finance working data, evidence, variances, contract findings, and forecasts in one shared workspace. Access is managed through direct collaborator invitations.
+          </p>
+          <button
+            type="button"
+            onClick={openOrCreate}
+            disabled={creating}
+            className="mt-7 inline-flex h-10 items-center justify-center rounded-xl bg-kumo-brand px-5 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+          >
+            {'workspaceId' in financeStatus
+              ? 'Open Finance Operations Workbench'
+              : creating ? 'Creating workbench…' : 'Create Finance Operations Workbench'}
+          </button>
+          <p className="mt-4 text-xs leading-5 text-kumo-inactive">
+            Collaborators receive Gadget-only access. Bearer share links are disabled.
+          </p>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function GenericHomePageContent({ prompt }: HomeSearch) {
   const { hub } = useHub();
   const hubDetails = HUB_DETAILS[hub];
   useDocumentTitle(hubDetails.label);

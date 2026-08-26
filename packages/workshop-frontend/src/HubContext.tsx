@@ -1,7 +1,9 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   DEFAULT_DEPLOYMENT_HUB_ID,
+  type ConfigurableDeploymentHubId,
   type DeploymentHubId,
+  type FinanceHubStatus,
 } from '@gadgets/workshop-shared/api'
 
 const STORAGE_KEY = 'odie:selected-hub'
@@ -26,6 +28,11 @@ export const HUB_DETAILS: Record<DeploymentHubId, {
     heading: 'What customer issue should we resolve?',
     description: 'Bring together account context, support history, and engineering signals.',
   },
+  finance: {
+    label: 'Finance',
+    heading: 'Finance Operations Workbench',
+    description: 'Review bounded finance working data, evidence, variances, contracts, and forecasts.',
+  },
 }
 
 function resolveSelectedHub(
@@ -41,43 +48,55 @@ type HubContextValue = {
   hub: DeploymentHubId
   enabledHubs: DeploymentHubId[]
   selectHub: (hub: DeploymentHubId) => void
+  financeStatus: FinanceHubStatus | null
 }
 
 const HubContext = createContext<HubContextValue>({
   hub: DEFAULT_DEPLOYMENT_HUB_ID,
   enabledHubs: [DEFAULT_DEPLOYMENT_HUB_ID],
   selectHub: () => {},
+  financeStatus: null,
 })
 
 export function HubProvider({
   enabledHubs,
+  financeStatus,
   children,
 }: {
-  enabledHubs: DeploymentHubId[]
+  enabledHubs: ConfigurableDeploymentHubId[]
+  financeStatus?: FinanceHubStatus | null
   children: ReactNode
 }) {
+  const financeStatusLoading = financeStatus === null
+  const selectableHubs: DeploymentHubId[] = financeStatus?.authorized
+    ? [...enabledHubs, 'finance']
+    : enabledHubs
+  const storedPreference = (() => {
+    try { return localStorage.getItem(STORAGE_KEY) } catch { return null }
+  })()
+  const pendingFinancePreference = useRef(
+    financeStatusLoading && storedPreference === 'finance' ? 'finance' : null,
+  )
   const [hub, setHub] = useState<DeploymentHubId>(() => {
-    try {
-      return resolveSelectedHub(localStorage.getItem(STORAGE_KEY), enabledHubs)
-    } catch {
-      return resolveSelectedHub(null, enabledHubs)
-    }
+    return resolveSelectedHub(storedPreference, selectableHubs)
   })
 
   useEffect(() => {
-    const resolved = resolveSelectedHub(hub, enabledHubs)
+    if (financeStatusLoading && pendingFinancePreference.current) return
+    const resolved = resolveSelectedHub(pendingFinancePreference.current ?? hub, selectableHubs)
+    pendingFinancePreference.current = null
     if (resolved !== hub) setHub(resolved)
     try { localStorage.setItem(STORAGE_KEY, resolved) } catch {}
-  }, [enabledHubs, hub])
+  }, [financeStatusLoading, selectableHubs, hub])
 
   const selectHub = (next: DeploymentHubId) => {
-    if (!enabledHubs.includes(next)) return
+    if (!selectableHubs.includes(next)) return
     setHub(next)
     try { localStorage.setItem(STORAGE_KEY, next) } catch {}
   }
 
   return (
-    <HubContext.Provider value={{ hub, enabledHubs, selectHub }}>
+    <HubContext.Provider value={{ hub, enabledHubs: selectableHubs, selectHub, financeStatus: financeStatus ?? null }}>
       {children}
     </HubContext.Provider>
   )

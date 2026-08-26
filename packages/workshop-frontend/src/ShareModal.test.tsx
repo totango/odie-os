@@ -174,7 +174,7 @@ describe('ShareModal', () => {
     container = undefined
   })
 
-  async function render(overseer: RpcStub<Overseer>) {
+  async function render(overseer: RpcStub<Overseer>, metadata: GadgetMetadata = METADATA) {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -184,7 +184,7 @@ describe('ShareModal', () => {
           open
           onClose={() => {}}
           overseer={overseer}
-          metadata={METADATA}
+          metadata={metadata}
           currentUser={CURRENT_USER}
           authenticatedApi={fakeAuthenticatedApi}
         />,
@@ -269,6 +269,20 @@ describe('ShareModal', () => {
     expect(rendered.textContent).toContain('Couldn’t check')
     // The rest of the modal still works.
     expect(rendered.textContent).toContain('People with access')
+  })
+
+  it('renders Finance as invite-only with no build-role or share-link controls', async () => {
+    const rendered = await render(fakeOverseer({ shareLinks: [SHARE_LINK] }), {
+      ...METADATA,
+      originHubId: 'finance',
+    })
+
+    expect(rendered.textContent).toContain('Invite-only Finance workspace')
+    expect(rendered.textContent).toContain('Gadget only')
+    expect(rendered.textContent).not.toContain('Create a share link')
+    expect(rendered.textContent).not.toContain('Share links')
+    expect([...rendered.querySelectorAll('[data-testid="role-option"]')]
+      .some(option => option.textContent?.startsWith('Workspace'))).toBe(false)
   })
 
   it('refreshes requirements when the modal regains focus', async () => {

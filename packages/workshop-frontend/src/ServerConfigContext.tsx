@@ -1,5 +1,5 @@
 import { createContext, useContext } from 'react'
-import { ServerConfig, AuthVendorInfo, DEPLOYMENT_HUB_IDS, type DeploymentHubId, resolveSiteName } from '@gadgets/workshop-shared/api'
+import { ServerConfig, AuthVendorInfo, CONFIGURABLE_DEPLOYMENT_HUB_IDS, type ConfigurableDeploymentHubId, resolveSiteName } from '@gadgets/workshop-shared/api'
 
 export type ServerConfigUpdate = Partial<ServerConfig>
 
@@ -45,6 +45,6 @@ export function useCloudflareLimitsEnabled(): boolean {
 }
 
 /** Convenience: the globally curated hubs, with launch defaults while config is loading. */
-export function useEnabledHubs(): DeploymentHubId[] {
-  return useContext(ServerConfigContext)?.enabledHubs ?? [...DEPLOYMENT_HUB_IDS]
+export function useEnabledHubs(): ConfigurableDeploymentHubId[] {
+  return useContext(ServerConfigContext)?.enabledHubs ?? [...CONFIGURABLE_DEPLOYMENT_HUB_IDS]
 }

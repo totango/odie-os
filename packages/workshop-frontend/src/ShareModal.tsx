@@ -372,6 +372,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
 
   const isOwner = !metadata.owner
   const sharingProhibited = metadata.sharingProhibited === true
+  const financeWorkspace = metadata.originHubId === 'finance'
 
   const loadData = useCallback(async () => {
     try {
@@ -399,10 +400,10 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     const refresh = () => {
       const thisRequest = ++requestId
       setRequirementsFailed(false)
-      Promise.all([
-        overseer.listObserverRequirements('use'),
-        overseer.listObserverRequirements('build'),
-      ])
+      const useRequirements = overseer.listObserverRequirements('use')
+      Promise.all(financeWorkspace
+        ? [useRequirements, useRequirements]
+        : [useRequirements, overseer.listObserverRequirements('build')])
         .then(([use, build]) => {
           if (!cancelled && thisRequest === requestId) setRequirements({ use, build })
         })
@@ -417,13 +418,14 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       cancelled = true
       window.removeEventListener('focus', refresh)
     }
-  }, [open, overseer])
+  }, [financeWorkspace, open, overseer])
 
   useEffect(() => {
     if (open) {
       loadData()
       if (!wasOpenRef.current) {
         setAddUsername('')
+        setAddRole('use')
         setNewShareLink(null)
         setNewShareLinkId(null)
         setNewShareLinkCopied(false)
@@ -563,7 +565,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     addingRef.current = true
     setAdding(true)
     try {
-      const result = await overseer.addCollaborator(username, addRole, undefined)
+      const result = await overseer.addCollaborator(
+        username, financeWorkspace ? 'use' : addRole, undefined)
       if (result === null) {
         toasts.add({ title: 'No account found for that username.', variant: 'error' })
       } else {
@@ -584,7 +587,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   }
 
   const handleCreateShareLink = async () => {
-    if (sharingProhibited || creatingLinkRef.current) return
+    if (financeWorkspace || sharingProhibited || creatingLinkRef.current) return
     creatingLinkRef.current = true
     setCreatingLink(true)
     try {
@@ -610,7 +613,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   // Copy a share link again. Secrets are never stored, so the previously-shown URL can't be
   // re-displayed. We mint a new secret for the same logical link and copy that.
   const handleCopyShareLink = async (linkId: string) => {
-    if (sharingProhibited || copyingLinkRef.current) return
+    if (financeWorkspace || sharingProhibited || copyingLinkRef.current) return
     copyingLinkRef.current = true
     setCopyingLinkId(linkId)
     try {
@@ -792,6 +795,12 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
           ) : (
           <>
           <div className={`sticky top-0 z-10 bg-kumo-base pb-3 transition-shadow duration-200 ${scrolled ? 'themed-bottom-shadow border-b border-kumo-line/60' : ''}`}>
+          {financeWorkspace && (
+            <div className="mb-3 rounded-xl border border-kumo-line bg-kumo-tint/60 px-3 py-2.5 text-[12px] leading-[18px] text-kumo-subtle">
+              <span className="font-semibold text-kumo-default">Invite-only Finance workspace.</span>{' '}
+              Add existing accounts directly. Collaborators receive Gadget-only access, and share links are disabled.
+            </div>
+          )}
           <div
             className="themed-compact-shadow grid min-h-12 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 rounded-2xl border border-kumo-line/80 bg-kumo-base p-1.5 pl-3 transition-[border-color,box-shadow] focus-within:border-kumo-fill sm:flex sm:overflow-hidden"
             data-keeper-ignore="true"
@@ -822,13 +831,17 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
               className="h-9 min-w-0 flex-1 appearance-none border-0 bg-transparent p-0 text-[14px] leading-5 tracking-[-0.25px] text-kumo-default outline-none placeholder:text-kumo-inactive disabled:cursor-not-allowed [&::-webkit-search-cancel-button]:hidden"
               disabled={sharingProhibited}
             />
-            <RoleMenu
-              ariaLabel="Access to grant"
-              value={addRole}
-              onValueChange={setAddRole}
-              disabled={sharingProhibited}
-              container={menuContainer}
-            />
+            {financeWorkspace ? (
+              <span className="px-2 text-[12px] font-medium text-kumo-subtle">Gadget only</span>
+            ) : (
+              <RoleMenu
+                ariaLabel="Access to grant"
+                value={addRole}
+                onValueChange={setAddRole}
+                disabled={sharingProhibited}
+                container={menuContainer}
+              />
+            )}
             <WorkshopButton
               tone="primary"
               className="col-span-3 w-full !rounded-xl sm:col-span-1 sm:w-auto sm:min-w-[68px]"
@@ -868,7 +881,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             </div>
           )}
 
-          <div className="mt-2">
+          {!financeWorkspace && <div className="mt-2">
             {(showLinkComposer || newShareLink) ? (
               newShareLink ? (
                 <div className="themed-compact-shadow flex flex-wrap items-center gap-3 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 py-2.5 share-fade-in">
@@ -937,7 +950,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                 <Link size={14} /> Create a share link
               </button>
             )}
-          </div>
+          </div>}
           </div>
 
           {recipientVerification}
@@ -1015,7 +1028,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             </div>
           </section>
 
-          {shareLinks.length > 0 && (
+          {!financeWorkspace && shareLinks.length > 0 && (
           <section aria-labelledby="links-heading" className="mt-4">
             <div className="mb-2 px-1">
               <h3 id="links-heading" className="text-[12px] leading-4 font-medium tracking-[-0.15px] text-kumo-subtle">
