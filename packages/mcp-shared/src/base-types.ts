@@ -22,6 +22,26 @@ export type McpContent =
   | { type: "resource_link"; uri: string; name?: string; description?: string; mimeType?: string }
   | { type: "resource"; resource: { uri: string; mimeType?: string; text?: string; blob?: string } };
 
+/** A resource referenced by an MCP Apps tool. */
+export type McpResource = {
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+  _meta?: Record<string, unknown>;
+};
+
+/** Resource content returned by an MCP server. */
+export type McpResourceContent = {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+  _meta?: Record<string, unknown>;
+};
+
 /**
  * Outcome of \`callTool\` or \`getActionResult\`.
  *
@@ -83,6 +103,12 @@ export type McpToolInfo = {
   classifiedBy: "server-annotation" | "default";
   /** JSON Schema for the tool's arguments when it fits the connector's definition budget. */
   inputSchema?: unknown;
+  /** JSON Schema for structured tool output when the server supplied one. */
+  outputSchema?: unknown;
+  /** MCP authorization schemes declared for this tool. OAuth remains owned by the gatekeeper. */
+  securitySchemes?: unknown[];
+  /** Bounded MCP Apps metadata retained from the upstream tool. */
+  _meta?: { ui?: { resourceUri?: string; visibility?: ("model" | "app")[] } };
 };
 
 /** Bounded search result. Request the exact name through \`listTools({ name })\` for its schema. */

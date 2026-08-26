@@ -486,6 +486,20 @@ describe("McpClient.listTools", () => {
     expect(tool.inputSchema).toBeUndefined();
   });
 
+  it("retains bounded MCP Apps and structured-output tool fields", async () => {
+    const outputSchema = { type: "object", properties: { value: { type: "string" } } };
+    const securitySchemes = [{ type: "oauth2", scopes: ["read"] }];
+    stubPages([{ tools: [{
+      name: "interactive", inputSchema: { type: "object" }, outputSchema, securitySchemes,
+      _meta: { ui: { resourceUri: "ui://weather/dashboard" }, ignored: "not retained" },
+    }] }]);
+    const client = new McpClient("https://mcp.example.com/mcp", async () => null);
+    await expect(client.listTools(10)).resolves.toMatchObject({ tools: [{
+      outputSchema, securitySchemes,
+      _meta: { ui: { resourceUri: "ui://weather/dashboard" } },
+    }] });
+  });
+
   it("refuses a response too large to buffer", async () => {
     // The catalog caps bound what is *kept*; the body still has to be read whole before anything can
     // parse it, and a `tools/call` result is not bounded at all. A server answering one request with
@@ -573,6 +587,84 @@ describe("McpClient.listTools", () => {
     expect(tools).toHaveLength(1);
     expect(tools[0]).not.toHaveProperty("vendorBlob");
     expect(truncated).toBe(false);
+  });
+});
+
+describe("McpClient resources", () => {
+  it("paginates resource discovery and reads resource contents", async () => {
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body));
+      requests.push(request);
+      const result = request.method === "resources/list"
+        ? request.params.cursor === undefined
+          ? { resources: [{ uri: "ui://one", name: "One", mimeType: "text/html" }], nextCursor: "next" }
+          : { resources: [{ uri: "ui://two", name: "Two" }] }
+        : { contents: [{ uri: request.params.uri, mimeType: "text/html", text: "<main>App</main>" }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    });
+    const client = new McpClient("https://mcp.example.com/mcp", async () => "server-token");
+    await expect(client.listResources(10)).resolves.toEqual({
+      resources: [
+        { uri: "ui://one", name: "One", mimeType: "text/html" },
+        { uri: "ui://two", name: "Two" },
+      ], truncated: false,
+    });
+    await expect(client.readResource("ui://two")).resolves.toEqual({
+      contents: [{ uri: "ui://two", mimeType: "text/html", text: "<main>App</main>" }],
+    });
+    expect(requests.map(request => request.method)).toEqual([
+      "resources/list", "resources/list", "resources/read",
+    ]);
+  });
+
+
+  it("reports resource catalog truncation without falsely truncating an exact terminal page", async () => {
+    const respond = (result: unknown) => vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    });
+    const resources = [{ uri: "ui://one", name: "One" }, { uri: "ui://two", name: "Two" }];
+    const client = new McpClient("https://mcp.example.com/mcp", async () => null);
+
+    respond({ resources });
+    await expect(client.listResources(2)).resolves.toMatchObject({ truncated: false });
+    respond({ resources, nextCursor: "more" });
+    await expect(client.listResources(2)).resolves.toMatchObject({ truncated: true });
+  });
+
+  it("enforces resource content count, body shape, URI, and canonical base64 bounds", async () => {
+    const client = new McpClient("https://mcp.example.com/mcp", async () => null);
+    const read = async (contents: unknown[]) => {
+      vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+        const request = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { contents } }), {
+          status: 200, headers: { "Content-Type": "application/json" },
+        });
+      });
+      return client.readResource("ui://app/main");
+    };
+
+    await expect(read(Array.from({ length: 8 }, (_, index) => ({
+      uri: `ui://app/${index}`, text: "ok",
+    })))).resolves.toHaveProperty("contents.length", 8);
+    await expect(read(Array.from({ length: 9 }, (_, index) => ({
+      uri: `ui://app/${index}`, text: "too many",
+    })))).rejects.toThrow(/invalid.*contents/i);
+    await expect(read([{ uri: "ui://app/main" }])).rejects.toThrow(/exactly one/);
+    await expect(read([{ uri: "ui://app/main", text: "x", blob: "eA==" }]))
+      .rejects.toThrow(/exactly one/);
+    await expect(read([{ uri: "ui://app/main", blob: "not base64" }]))
+      .rejects.toThrow(/valid text or blob/);
+    await expect(read([{ uri: "ui://app/main", blob: "eA==" }])).resolves.toMatchObject({
+      contents: [{ blob: "eA==" }],
+    });
+    await expect(read([{ uri: `ui://app/${"x".repeat(4097)}`, text: "x" }]))
+      .rejects.toThrow(/invalid.*content/i);
   });
 });
 
