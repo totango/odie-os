@@ -11,6 +11,8 @@ import type { ActionDescription, ActionKind, ApprovalQueue }
 import {
   MAX_TOOL_NAME_CHARS,
   type McpClient,
+  type McpReadResourceResult,
+  type McpResource,
 } from "./client.js";
 import type { WithClientOptions } from "./connection.js";
 import { isWholeEndpoint, type ToolScope } from "./scope.js";
@@ -199,6 +201,50 @@ export class McpSessionBase extends RpcTarget {
     return (await this.#host.tools())
       .filter(entry => matchesToolQuery(entry.tool, terms))
       .slice(0, MAX_SEARCH_RESULTS);
+  }
+
+  /** Lists resources referenced by the granted tool catalog. */
+  async listResources(): Promise<McpResource[]> {
+    const allowedUris = await this.#appResourceUris();
+    if (allowedUris.size === 0) return [];
+    const catalog = await this.#host.call(client => client.listResources(200));
+    if (catalog.truncated) {
+      throw new Error("The MCP Apps resource catalog exceeded its bounded listing limit.");
+    }
+    await this.#queue.authorizeObservation({
+      title: `${this.#host.serverName}: list app resources`,
+      description: `Read the MCP Apps resource catalog of **${this.#host.serverName}** ` +
+        `(\`${this.#host.endpoint}\`).`,
+    });
+    return catalog.resources.filter(resource => allowedUris.has(resource.uri));
+  }
+
+  /** Reads one resource referenced by a granted tool. */
+  async readResource(uri: string): Promise<McpReadResourceResult> {
+    if (typeof uri !== "string" || uri.length === 0 || uri.length > 4096) {
+      throw new Error("readResource() requires a valid resource URI.");
+    }
+    if (!(await this.#appResourceUris()).has(uri)) {
+      throw new Error("This resource is not referenced by an available MCP tool.");
+    }
+    const result = await this.#host.call(client => client.readResource(uri));
+    if (result.contents.some(content => content.uri !== uri)) {
+      throw new Error("The MCP server returned content for a different resource URI.");
+    }
+    await this.#queue.authorizeObservation({
+      title: `${this.#host.serverName}: read app resource`,
+      description: `Read an MCP Apps resource from **${this.#host.serverName}** ` +
+        `(\`${this.#host.endpoint}\`).`,
+    });
+    return result;
+  }
+
+  async #appResourceUris(): Promise<Set<string>> {
+    const tools = await this.#host.tools();
+    return new Set(tools.flatMap(({ tool }) => {
+      const uri = tool._meta?.ui?.resourceUri;
+      return typeof uri === "string" ? [uri] : [];
+    }));
   }
 
   async callTool(name: string, args?: Record<string, unknown>): Promise<McpCallResult> {

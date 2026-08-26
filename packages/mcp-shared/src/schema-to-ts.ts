@@ -365,6 +365,10 @@ export function generateSessionTypes(args: {
   lines.push("  /** Returns zero or one exact granted tool definition by wire name. */");
   lines.push("  listTools(options: { name: string; search?: never }): Promise<McpToolInfo[]>;");
   lines.push("  listTools(options: McpToolListOptions): Promise<McpToolInfo[] | McpToolSummary[]>;");
+  lines.push("  /** Lists MCP Apps resources referenced by the granted tools. */");
+  lines.push("  listResources(): Promise<McpResource[]>;");
+  lines.push("  /** Reads one MCP Apps resource by its exact URI. */");
+  lines.push("  readResource(uri: string): Promise<{ contents: McpResourceContent[] }>;");
   lines.push("");
 
   // One named method per tool, which is how a Gadget is expected to call them.

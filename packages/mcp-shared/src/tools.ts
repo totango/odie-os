@@ -96,6 +96,9 @@ export function toolInfo(entry: ClassifiedTool): McpToolInfo {
     mode: entry.mode,
     classifiedBy: entry.classifiedBy,
     inputSchema: entry.tool.inputSchema,
+    ...(entry.tool.outputSchema === undefined ? {} : { outputSchema: entry.tool.outputSchema }),
+    ...(entry.tool.securitySchemes === undefined ? {} : { securitySchemes: entry.tool.securitySchemes }),
+    ...(entry.tool._meta === undefined ? {} : { _meta: entry.tool._meta }),
   };
 }
 

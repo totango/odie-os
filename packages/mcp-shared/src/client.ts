@@ -1,6 +1,6 @@
 // Minimal Model Context Protocol client over the Streamable HTTP transport. Implements
-// `initialize`, `tools/list`, and `tools/call`; prompts, resources, sampling, and elicitation are
-// out of scope (see README).
+// `initialize`, tool discovery/calls, and resource discovery/reads; prompts, sampling, and
+// elicitation are out of scope (see README).
 //
 // The transport accepts either a single JSON response or an SSE stream for any POST, so responses
 // are parsed both ways. Servers that hand out an `Mcp-Session-Id` get it echoed back on subsequent
@@ -69,6 +69,7 @@ export function isValidToolName(value: unknown): value is string {
 
 // Independent bound for a non-terminating cursor that returns only tiny or empty pages.
 const MAX_TOOL_PAGES = 50;
+const MAX_RESOURCE_CONTENTS = 8;
 
 // Caps on the size of a tool catalog, as opposed to its length. `maxTools` alone bounds nothing:
 // descriptions and JSON Schemas are server-controlled and arbitrarily large, and the catalog is
@@ -109,14 +110,45 @@ export type McpWireTool = Tool;
 /** Selects which wire tools count toward a bounded catalog. */
 export type McpToolFilter = (tool: McpWireTool) => boolean;
 
+/** Bounded MCP Apps metadata retained from a tool definition. */
+export type McpToolMetadata = { ui?: { resourceUri?: string; visibility?: ("model" | "app")[] } };
+
 export type McpTool = {
   name: string;
   title?: string;
   description?: string;
   inputSchema?: JsonSchema;
   outputSchema?: JsonSchema;
+  securitySchemes?: unknown[];
+  _meta?: McpToolMetadata;
   annotations?: McpToolAnnotations;
 };
+
+/** One resource advertised by an MCP server. */
+export type McpResource = {
+  uri: string;
+  name: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+  _meta?: Record<string, unknown>;
+};
+
+/** One resource body returned by an MCP server. */
+export type McpResourceContent = {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+  _meta?: Record<string, unknown>;
+};
+
+/** Result of MCP `resources/list`. */
+export type McpResourceCatalog = { resources: McpResource[]; truncated: boolean };
+
+/** Result of MCP `resources/read`. */
+export type McpReadResourceResult = { contents: McpResourceContent[] };
 
 /** The subset of JSON Schema this gatekeeper understands when generating TypeScript. */
 export type JsonSchema = {
@@ -325,6 +357,24 @@ function clampText(value: unknown, max: number): string | undefined {
   return value.length > max ? `${value.slice(0, max)}\u2026` : value;
 }
 
+function hasControlCharacters(value: string): boolean {
+  return [...value].some(character => {
+    const code = character.charCodeAt(0);
+    return code <= 0x1f || code === 0x7f;
+  });
+}
+
+function clampMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  return JSON.stringify(value).length <= MAX_TOOL_SCHEMA_CHARS
+    ? value as Record<string, unknown> : undefined;
+}
+
+function isCanonicalBase64(value: string): boolean {
+  return value.length % 4 === 0 &&
+    /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+}
+
 // Trims one tool down to what is worth keeping, before it reaches storage or the agent. A schema too
 // large to render is dropped rather than clipped, so the generated method degrades to
 // `Record<string, unknown>`.
@@ -353,6 +403,21 @@ export function clampToolDefinition(tool: McpWireTool | McpTool): McpTool {
     : undefined;
   const oversized = schema !== undefined &&
     JSON.stringify(schema).length > MAX_TOOL_SCHEMA_CHARS;
+  const wire = tool as McpTool;
+  const outputSchema = wire.outputSchema && typeof wire.outputSchema === "object"
+    ? wire.outputSchema : undefined;
+  const outputOversized = outputSchema !== undefined &&
+    JSON.stringify(outputSchema).length > MAX_TOOL_SCHEMA_CHARS;
+  const securitySchemes = Array.isArray(wire.securitySchemes) &&
+      JSON.stringify(wire.securitySchemes).length <= MAX_TOOL_SCHEMA_CHARS
+    ? wire.securitySchemes : undefined;
+  const resourceUri = typeof wire._meta?.ui?.resourceUri === "string" &&
+      wire._meta.ui.resourceUri.length <= 4096 && wire._meta.ui.resourceUri.startsWith("ui://") &&
+      !hasControlCharacters(wire._meta.ui.resourceUri)
+    ? wire._meta.ui.resourceUri : undefined;
+  const visibility = Array.isArray(wire._meta?.ui?.visibility) &&
+      wire._meta.ui.visibility.every(value => value === "model" || value === "app")
+    ? [...new Set(wire._meta.ui.visibility)] : undefined;
   return {
     // Pick known fields rather than spreading an untrusted JSON object. Unknown extensions are not
     // used anywhere, and retaining one would let it bypass every per-field cap before caching.
@@ -360,6 +425,11 @@ export function clampToolDefinition(tool: McpWireTool | McpTool): McpTool {
     title: clampText(tool.title, MAX_TOOL_DESCRIPTION_CHARS),
     description: clampText(tool.description, MAX_TOOL_DESCRIPTION_CHARS),
     inputSchema: oversized ? undefined : schema,
+    outputSchema: outputOversized ? undefined : outputSchema,
+    securitySchemes,
+    _meta: resourceUri === undefined ? undefined : {
+      ui: { resourceUri, ...(visibility === undefined ? {} : { visibility }) },
+    },
     annotations: clampAnnotations(tool.annotations),
   };
 }
@@ -697,6 +767,86 @@ export class McpClient {
       cursor = nextCursor;
     }
     return scanLimit();
+  }
+
+  /** Lists a bounded resource catalog, following pagination cursors. */
+  async listResources(maxResources: number): Promise<McpResourceCatalog> {
+    const resources: McpResource[] = [];
+    let budget = MAX_CATALOG_BYTES;
+    let scannedBytes = 0;
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+      const measured = await this.#callMeasured<{ resources?: unknown; nextCursor?: unknown }>(
+        "resources/list", cursor === undefined ? {} : { cursor });
+      scannedBytes += measured.responseBytes;
+      if (scannedBytes > MAX_SCANNED_TOOL_BYTES) return { resources, truncated: true };
+      const result = measured.result;
+      if (!Array.isArray(result.resources)) {
+        throw new McpProtocolError('MCP server returned invalid "resources/list" resources.');
+      }
+      for (const [index, candidate] of result.resources.entries()) {
+        if (typeof candidate !== "object" || candidate === null) continue;
+        const resource = candidate as Partial<McpResource>;
+        if (typeof resource.uri !== "string" || resource.uri.length > 4096 ||
+            typeof resource.name !== "string") continue;
+        const retained: McpResource = {
+          uri: resource.uri,
+          name: clampText(resource.name, MAX_TOOL_DESCRIPTION_CHARS) ?? resource.uri.slice(0, 512),
+          title: clampText(resource.title, MAX_TOOL_DESCRIPTION_CHARS),
+          description: clampText(resource.description, MAX_TOOL_DESCRIPTION_CHARS),
+          mimeType: clampText(resource.mimeType, 256),
+          size: typeof resource.size === "number" && Number.isSafeInteger(resource.size) && resource.size >= 0
+            ? resource.size : undefined,
+          _meta: clampMetadata(resource._meta),
+        };
+        const bytes = encoder.encode(JSON.stringify(retained)).byteLength + 1;
+        if (bytes > budget) return { resources, truncated: true };
+        budget -= bytes;
+        resources.push(retained);
+        if (resources.length >= maxResources) {
+          return {
+            resources,
+            truncated: index < result.resources.length - 1 || result.nextCursor !== undefined,
+          };
+        }
+      }
+      if (result.nextCursor === undefined) return { resources, truncated: false };
+      if (typeof result.nextCursor !== "string") {
+        throw new McpProtocolError('MCP server returned an invalid "resources/list" cursor.');
+      }
+      cursor = result.nextCursor;
+    }
+    return { resources, truncated: true };
+  }
+
+  /** Reads one resource by its exact upstream URI. */
+  async readResource(uri: string): Promise<McpReadResourceResult> {
+    const result = await this.#call<McpReadResourceResult>("resources/read", { uri });
+    if (!Array.isArray(result.contents) || result.contents.length > MAX_RESOURCE_CONTENTS) {
+      throw new McpProtocolError('MCP server returned invalid "resources/read" contents.');
+    }
+    const contents = result.contents.map(candidate => {
+      if (typeof candidate !== "object" || candidate === null ||
+          typeof candidate.uri !== "string" || candidate.uri.length === 0 ||
+          candidate.uri.length > 4096 || hasControlCharacters(candidate.uri)) {
+        throw new McpProtocolError('MCP server returned invalid "resources/read" content.');
+      }
+      const record = candidate as unknown as Record<string, unknown>;
+      const hasText = Object.hasOwn(record, "text");
+      const hasBlob = Object.hasOwn(record, "blob");
+      if (hasText === hasBlob || (hasText && typeof record.text !== "string") ||
+          (hasBlob && (typeof record.blob !== "string" || !isCanonicalBase64(record.blob)))) {
+        throw new McpProtocolError(
+          'MCP server resource content must contain exactly one valid text or blob body.');
+      }
+      return {
+        uri: candidate.uri,
+        mimeType: clampText(candidate.mimeType, 256),
+        ...(hasText ? { text: record.text as string } : { blob: record.blob as string }),
+        _meta: clampMetadata(candidate._meta),
+      };
+    });
+    return { contents };
   }
 
   /** Invokes one tool. A tool-level failure arrives as `isError`, not as a thrown error. */
