@@ -25,6 +25,8 @@ describe("native canary workflow cleanup", () => {
     expect(workflow).toContain("instanceTier: [standard-1, standard-2, standard-3, standard-4]");
     expect(workflow.match(/max-parallel: 1/g)).toHaveLength(2);
     expect(workflow.match(/fail-fast: false/g)).toHaveLength(2);
+    const canary = workflow.slice(workflow.indexOf("  canary:"), workflow.indexOf("  cleanup:"));
+    expect(canary).toContain("    timeout-minutes: 30");
     expect(workflow).toContain("  publish:\n    permissions:");
     expect(workflow).toContain("packages: write");
     const cleanup = workflow.slice(workflow.indexOf("  cleanup:"));
@@ -37,12 +39,12 @@ describe("native canary workflow cleanup", () => {
       workflow.indexOf("      - name: Preflight isolated tier runtime before one-shot claim"),
       workflow.indexOf("      - name: Invoke, validate and record tier canary"),
     );
-    expect(preflight).toContain("for attempt in 1 2 3; do");
+    expect(preflight).toContain("for attempt in 1 2 3 4 5 6; do");
     expect(preflight).toContain("--max-time 120 --max-filesize 4096");
     expect(preflight).toContain('"https://${worker}.odie-os.workers.dev/ready"');
     expect(preflight).toContain('keys == ["candidateImage", "instanceTier", "ok", "ready", "sourceSha"]');
     expect(preflight).toContain(".ok == true and .ready == true");
-    expect(preflight).toContain('if [ "$attempt" != 3 ]; then sleep 5; fi');
+    expect(preflight).toContain('if [ "$attempt" != 6 ]; then sleep 5; fi');
     expect(preflight.match(/curl/g)).toHaveLength(1);
     expect(preflight).not.toContain('cat "$result"');
   });
