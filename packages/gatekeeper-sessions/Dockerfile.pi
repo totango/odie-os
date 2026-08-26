@@ -60,6 +60,8 @@ ENV PATH="/opt/node/bin:${PATH}" \
 
 # Prime Agent uses ripgrep for fast model-driven repository search. Install it in the image because
 # coding sessions run offline and cannot satisfy the CLI's best-effort package-manager fallback.
+# Sandbox processes use the launcher's compatibility PATH rooted at /usr/local/bin rather than the
+# image ENV PATH, so the reviewed Node/Corepack tools are mirrored there without removing global apps.
 RUN mkdir -p /opt/node \
     && tar -xzf /tmp/node.tar.gz -C /opt/node --strip-components=1 \
     && rm -f /tmp/node.tar.gz \
@@ -68,6 +70,9 @@ RUN mkdir -p /opt/node \
     && corepack enable pnpm \
     && COREPACK_ENABLE_NETWORK=1 corepack install --global "$REPOSITORY_PNPM_PACKAGE_MANAGER" \
     && COREPACK_ENABLE_NETWORK=1 corepack install --global "$PNPM_PACKAGE_MANAGER" \
+    && for command in node npm npx corepack pnpm pnpx; do \
+      ln -sfn "/opt/node/bin/$command" "/usr/local/bin/$command"; \
+    done \
     && apt-get update \
     && apt-get install --yes --no-install-recommends ripgrep \
     && rm -rf /var/lib/apt/lists/* \
@@ -92,6 +97,8 @@ RUN mkdir -p /opt/node \
 # Prime kernel uses a pinned uv image, exact Python version, and hash-locked Python dependencies.
 RUN test "$(node --version)" = "v${NODE_VERSION}" \
     && test "pnpm@$(pnpm --version)" = "${PNPM_PACKAGE_MANAGER%%+*}" \
+    && test "$(env PATH=/usr/local/bin:/bin:/usr/bin node --version)" = "v${NODE_VERSION}" \
+    && test "pnpm@$(env PATH=/usr/local/bin:/bin:/usr/bin pnpm --version)" = "${PNPM_PACKAGE_MANAGER%%+*}" \
     && test "$(node -p 'process.arch')" = "x64" \
     && test "$(uname -m)" = "x86_64" \
     && for command in ps pgrep pkill setsid stdbuf timeout tail tee flock du df truncate jq curl git bash tini; do command -v "$command" >/dev/null; done \
