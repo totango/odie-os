@@ -1,4 +1,4 @@
-import type { SandboxProcess, Terminal } from "@cloudflare/sandbox";
+import type { ProcessExit, ProcessLogEvent, SandboxProcess, Terminal } from "@cloudflare/sandbox";
 import { ContainerUnavailableError } from "@cloudflare/sandbox/errors";
 import type { CodeContext, ExecutionResult, Interpreter } from "@cloudflare/sandbox/interpreter";
 import versions from "./versions.json";
@@ -9,6 +9,8 @@ const NODE_EXEC_MAX_ATTEMPTS = 6;
 const NODE_EXEC_DEFAULT_RETRY_DELAY_MS = 1_000;
 const NODE_EXEC_MAX_RETRY_DELAY_MS = 10_000;
 const MAX_INTERPRETER_STDOUT_BYTES = 4_096;
+const MAX_PROCESS_LOG_BYTES = 4_096;
+const MAX_PROCESS_LOG_EVENTS = 128;
 const MAX_TERMINAL_BYTES = 16 * 1024;
 const MAX_TERMINAL_EVENTS = 128;
 export const EXPECTED_NODE_VERSION = versions.node;
@@ -77,13 +79,20 @@ export async function runCanary(
 
   try {
     options.beforeStage?.("node");
-    const node = await startNodeCanaryProcess(sandbox);
+    const nodeReadyFile = `/tmp/odie-canary-node-ready-${crypto.randomUUID()}`;
+    const node = await startNodeCanaryProcess(sandbox, nodeReadyFile);
     processes.push(node);
-    const nodeOutput = await node.output({ encoding: "utf8", timeout: PROCESS_TIMEOUT_MS, maxBytes: 4096 });
+    const nodeLogs = await node.logs({
+      replay: true,
+      follow: true,
+      signal: AbortSignal.timeout(PROCESS_TIMEOUT_MS),
+    });
+    await sandbox.writeFile(nodeReadyFile, "ready");
+    const nodeOutput = await collectProcessOutput(nodeLogs);
     assert(nodeOutput.stdout === `odie-node-version:${EXPECTED_NODE_VERSION}\nodie-node-stdout:42\n`,
       "Node version/stdout did not match.");
     assert(nodeOutput.stderr === "odie-node-stderr:ok\n", "Node stderr did not match.");
-    assert(nodeOutput.exitCode === 0 && !nodeOutput.timedOut && !nodeOutput.truncated,
+    assert(nodeOutput.exit.code === 0 && !nodeOutput.exit.timedOut,
       "Node process did not exit cleanly.");
 
     operationStage = "javascript";
@@ -224,14 +233,16 @@ export function classifyCanaryOperationFailure(
 /** Starts the initial Node check, retrying only pre-admission container unavailability. */
 export async function startNodeCanaryProcess(
   sandbox: Pick<CanarySandboxClient, "exec">,
+  readyFile: string,
   sleep: (delayMs: number) => Promise<void> = delay,
 ): Promise<SandboxProcess> {
+  const script = `const { existsSync } = require("node:fs"); const ready = ${JSON.stringify(readyFile)}; ` +
+    "const timer = setInterval(() => { if (!existsSync(ready)) return; clearInterval(timer); " +
+    "process.stdout.write(`odie-node-version:${process.version}\\nodie-node-stdout:42\\n`); " +
+    "process.stderr.write('odie-node-stderr:ok\\n'); }, 25);";
   for (let attempt = 1; ; attempt++) {
     try {
-      return await sandbox.exec([
-        "node", "--eval",
-        "setTimeout(() => { process.stdout.write(`odie-node-version:${process.version}\\nodie-node-stdout:42\\n`); process.stderr.write('odie-node-stderr:ok\\n'); }, 5000)",
-      ], { timeout: PROCESS_TIMEOUT_MS });
+      return await sandbox.exec(["node", "--eval", script], { timeout: PROCESS_TIMEOUT_MS });
     } catch (error) {
       if (!(error instanceof ContainerUnavailableError) || attempt >= NODE_EXEC_MAX_ATTEMPTS) throw error;
       await sleep(nodeExecRetryDelay(error.context.retryAfterMs, attempt));
@@ -388,6 +399,43 @@ async function stopProcess(process: SandboxProcess): Promise<void> {
   await process.kill(9);
   const killed = await process.waitForExit({ timeout: 5_000 });
   assert(!killed.timedOut, "Process SIGKILL timed out.");
+}
+
+async function collectProcessOutput(
+  stream: ReadableStream<ProcessLogEvent>,
+): Promise<{ stdout: string; stderr: string; exit: ProcessExit }> {
+  const reader = stream.getReader();
+  const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+  let stdout = "";
+  let stderr = "";
+  let bytes = 0;
+  let events = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error("Node process log stream ended without an exit event.");
+      events++;
+      if (events > MAX_PROCESS_LOG_EVENTS) throw new Error("Node process log event count exceeded its bound.");
+      if ("data" in value) {
+        bytes += value.data.byteLength;
+        if (bytes > MAX_PROCESS_LOG_BYTES) throw new Error("Node process logs exceeded their bound.");
+        const text = decoders[value.type].decode(value.data, { stream: true });
+        if (value.type === "stdout") stdout += text;
+        else stderr += text;
+      } else if (value.type === "truncated") {
+        throw new Error("Node process logs were truncated.");
+      } else if (value.state === "error") {
+        throw new Error("Node process failed.");
+      } else {
+        stdout += decoders.stdout.decode();
+        stderr += decoders.stderr.decode();
+        return { stdout, stderr, exit: value.exit };
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }
 
 function assertInterpreterOutput(result: ExecutionResult, expected: string): void {
