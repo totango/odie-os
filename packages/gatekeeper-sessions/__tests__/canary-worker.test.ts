@@ -3,12 +3,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const sandbox = {
   claimed: false,
   destroyCalls: 0,
+  mkdirCalls: [] as Array<{ path: string; options: unknown }>,
+  async mkdir(path: string, options: unknown) {
+    this.mkdirCalls.push({ path, options });
+    if (preflightFailure) throw preflightFailure;
+  },
   async claimOneShot() {
     if (this.claimed) throw new Error("duplicate");
     this.claimed = true;
   },
 };
 let lifecycleFailure: unknown;
+let preflightFailure: unknown;
 let lifecycleOptions: { runTimeoutMs: number; settleTimeoutMs: number; destroyTimeoutMs: number } | undefined;
 
 vi.mock("@cloudflare/sandbox", () => ({
@@ -53,8 +59,8 @@ const env = {
   INSTANCE_TIER: "standard-3",
 };
 
-function request() {
-  return new Request("https://canary.example/run", {
+function request(path = "/run") {
+  return new Request(`https://canary.example${path}`, {
     method: "POST", headers: { Authorization: `Bearer ${TOKEN}` },
   });
 }
@@ -63,8 +69,44 @@ describe("native canary Worker endpoint", () => {
   beforeEach(() => {
     sandbox.claimed = false;
     sandbox.destroyCalls = 0;
+    sandbox.mkdirCalls = [];
     lifecycleFailure = undefined;
+    preflightFailure = undefined;
     lifecycleOptions = undefined;
+  });
+
+  it("preflights the runtime idempotently without claiming the one-shot run", async () => {
+    const first = await worker.fetch(request("/ready"), env as never);
+    const second = await worker.fetch(request("/ready"), env as never);
+    for (const response of [first, second]) {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        ok: true,
+        ready: true,
+        sourceSha: env.SOURCE_SHA,
+        candidateImage: env.CANDIDATE_IMAGE,
+        instanceTier: env.INSTANCE_TIER,
+      });
+    }
+    expect(sandbox.mkdirCalls).toEqual([
+      { path: "/workspace/.odie-canary-preflight", options: { recursive: true } },
+      { path: "/workspace/.odie-canary-preflight", options: { recursive: true } },
+    ]);
+    expect(sandbox.claimed).toBe(false);
+    expect(sandbox.destroyCalls).toBe(0);
+
+    await expect(worker.fetch(request(), env as never)).resolves.toMatchObject({ status: 200 });
+    expect(sandbox.claimed).toBe(true);
+  });
+
+  it("returns a closed retryable preflight failure without claiming or leaking the cause", async () => {
+    preflightFailure = new Error("sensitive preflight detail");
+    const response = await worker.fetch(request("/ready"), env as never);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.text()).toBe('{"ok":false,"ready":false}');
+    expect(sandbox.claimed).toBe(false);
+    expect(sandbox.destroyCalls).toBe(0);
   });
 
   it("bounds a cold native run with the five-minute lifecycle deadline", async () => {

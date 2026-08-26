@@ -22,7 +22,7 @@ describe("native canary request policy", () => {
     expect(() => claimCanaryRun(storage)).toThrow("already claimed");
   });
 
-  it("rejects all methods and paths except authenticated POST /run", async () => {
+  it("rejects all methods and paths except authenticated POST /ready and /run", async () => {
     const response404 = await rejectCanaryRequest(new Request("https://canary.example/other", { method: "POST" }), TOKEN);
     expect(response404?.status).toBe(404);
     const response405 = await rejectCanaryRequest(new Request("https://canary.example/run"), TOKEN);
@@ -33,9 +33,11 @@ describe("native canary request policy", () => {
       expect(response?.headers.get("Cache-Control")).toBe("no-store");
       expect((await response!.text()).length).toBeLessThan(32);
     }
-    const accepted = await rejectCanaryRequest(new Request("https://canary.example/run", {
-      method: "POST", headers: { Authorization: `Bearer ${TOKEN}` },
-    }), TOKEN);
-    expect(accepted).toBeNull();
+    for (const path of ["/ready", "/run"]) {
+      const accepted = await rejectCanaryRequest(new Request(`https://canary.example${path}`, {
+        method: "POST", headers: { Authorization: `Bearer ${TOKEN}` },
+      }), TOKEN);
+      expect(accepted).toBeNull();
+    }
   });
 });

@@ -242,6 +242,40 @@ jobs:
           printf '%s' "$token" | pnpm exec wrangler secret put CANARY_TOKEN --config "$CANARY_CONFIG"
           printf 'CANARY_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
 
+      - name: Preflight isolated tier runtime before one-shot claim
+        env:
+          INSTANCE_TIER: ${{ matrix.instanceTier }}
+        run: |
+          worker="odie-coding-canary-${GITHUB_RUN_ID}-${INSTANCE_TIER}"
+          result="$RUNNER_TEMP/canary-preflight-result.json"
+          candidate="$(< candidate-artifact/cloudflare-image-digest.txt)"
+          ready=false
+          http_status=""
+          for attempt in 1 2 3; do
+            if http_status="$(curl --silent --show-error --max-time 120 --max-filesize 4096 \
+              --output "$result" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $CANARY_TOKEN" \
+              "https://${worker}.odie-os.workers.dev/ready")" &&
+                [ "$http_status" = 200 ] && jq --exit-status \
+                  --arg sha "$GITHUB_SHA" \
+                  --arg candidate "$candidate" \
+                  --arg tier "$INSTANCE_TIER" \
+                  'keys == ["candidateImage", "instanceTier", "ok", "ready", "sourceSha"] and
+                   .ok == true and .ready == true and .sourceSha == $sha and
+                   .candidateImage == $candidate and .instanceTier == $tier' \
+                  "$result" >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            if [ "$attempt" != 3 ]; then sleep 5; fi
+          done
+          if [ "$ready" != true ]; then
+            printf 'Native %s Sandbox runtime preflight failed (last HTTP %s).\n' "$INSTANCE_TIER" "$http_status" >&2
+            exit 1
+          fi
+
       - name: Invoke, validate and record tier canary
         env:
           INSTANCE_TIER: ${{ matrix.instanceTier }}

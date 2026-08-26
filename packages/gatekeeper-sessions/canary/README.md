@@ -21,11 +21,18 @@ one of `node`, `javascript`, `typescript`, `terminal`, `code-server`, `cleanup`,
 Caught messages, sandbox output, resource IDs, and other untrusted details are never returned or
 printed by the workflow. Internal stage errors retain their causes for focused tests and debugging.
 
+Installing `CANARY_TOKEN` creates a Worker version after the initial deploy. The first waking Sandbox
+operation can therefore hit the expected Durable Object code-update reset. Before the one-shot claim,
+the workflow calls the authenticated `/ready` endpoint. That endpoint performs only an idempotent
+recursive `mkdir` to start the runtime; it never claims the canary or starts a process. The workflow
+makes at most three bounded attempts and requires an exact closed success response. This moves any
+version reset outside process admission without weakening the one-shot `/run` contract.
+
 A newly deployed workers.dev route or installed `CANARY_TOKEN` can briefly lag at the public edge.
-The workflow retries only exact HTTP 404 or 401 responses, at most six attempts with five seconds
-between attempts. Both happen before the Worker reaches the one-shot claim or any Sandbox call, so
-these retries cannot duplicate canary work. Transport errors, malformed responses, and every other
-HTTP status fail without retry.
+After preflight succeeds, the `/run` invocation retries only exact HTTP 404 or 401 responses, at most
+six attempts with five seconds between attempts. Both happen before the Worker reaches the one-shot
+claim or any Sandbox call, so these retries cannot duplicate canary work. Transport errors, malformed
+responses, and every other HTTP status fail without retry.
 
 The claimed canary also handles native container readiness at the smallest safe boundary. Only the
 initial Node `sandbox.exec()` retries `ContainerUnavailableError`, which means the operation was not
