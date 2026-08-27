@@ -287,6 +287,12 @@ added to its fixed allowlist.
   binding as authority to create, publish, request, run, and generate data in ODIE MCP.
 - When connecting directly to the public MCP endpoint, grant only the scopes needed for the task.
 - Keep searches bounded to the accounts and domains needed for the task.
+- Prefer structured ODIE account facts from account, property, dashboard, prediction, and public
+  account tools before interactions, notes, documents, or meeting titles.
+- Treat interactions, notes, documents, and meeting titles as non-canonical for account roles,
+  names, identity, and gender. Use them only as weak context and verify with structured sources.
+- Report ambiguity, missing facts, and conflicts explicitly. Do not infer role, name, identity, or
+  gender from weak evidence.
 - Treat skill-running, draft creation, publishing, export requests, action-running, and brief
   generation as side-effecting operations.
 - Direct public clients should ask before invoking tools that create, publish, request, run, or

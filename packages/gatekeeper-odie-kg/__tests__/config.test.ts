@@ -64,7 +64,7 @@ describe("ODIE MCP configuration", () => {
 
   it("classifies the fixed first-party catalog and auto-approves every action", () => {
     const tool = (name: string): ClassifiedTool => ({
-      tool: { name, inputSchema: { type: "object" } },
+      tool: { name, description: "Remote description.", inputSchema: { type: "object" } },
       mode: "action",
       autoApprovable: true,
       classifiedBy: "server-annotation",
@@ -84,5 +84,35 @@ describe("ODIE MCP configuration", () => {
         classifiedBy: "default",
       });
     }
+  });
+
+  it("adds bounded local retrieval-quality guidance without changing the fixed policy", () => {
+    const tool = (name: string): ClassifiedTool => ({
+      tool: { name, description: "Remote description.", inputSchema: { type: "object" } },
+      mode: "action",
+      autoApprovable: true,
+      classifiedBy: "server-annotation",
+    });
+
+    expect(applyOdieKgToolPolicy(tool("get_customer_property"))).toMatchObject({
+      mode: "read",
+      autoApprovable: false,
+      tool: {
+        description: expect.stringContaining("structured account/property/dashboard source"),
+      },
+    });
+    expect(applyOdieKgToolPolicy(tool("get_customer_interaction"))).toMatchObject({
+      mode: "read",
+      autoApprovable: false,
+      tool: {
+        description: expect.stringContaining(
+          "Non-canonical for account role, name, identity, or gender"),
+      },
+    });
+    expect(applyOdieKgToolPolicy(tool("odie-skill-run"))).toMatchObject({
+      mode: "action",
+      autoApprovable: true,
+      tool: { description: "Remote description." },
+    });
   });
 });

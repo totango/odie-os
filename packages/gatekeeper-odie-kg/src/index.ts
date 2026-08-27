@@ -1,10 +1,12 @@
-import { RpcStub, WorkerEntrypoint } from "cloudflare:workers";
+import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   boundAgentCatalog,
   stripTrailingSlashes,
   type AccountDescription,
+  type ActionDescription,
+  type ApprovalQueue,
   type AgentCatalog,
   type AvatarImage,
   type ConnectionHealthStatus,
@@ -14,7 +16,11 @@ import {
   type GatekeeperUser,
   type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
+  type HookController,
+  type HookDescription,
   type ObservationAuthorizer,
+  type ObservationDescription,
+  type ObservationDomainSharingPolicy,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
@@ -65,6 +71,11 @@ const logger = createLogger<McpLogFields>({
   component: "gatekeeper.odie-kg",
   vendorId: VENDOR_ID,
 });
+
+const TOTANGO_DOMAIN_SHARING_POLICY = {
+  type: "verified-sso-email-domain",
+  emailDomain: "totango.com",
+} as const satisfies ObservationDomainSharingPolicy;
 
 const ODIE_KG_ICON: AvatarImage = {
   url: "data:image/svg+xml," + encodeURIComponent(
@@ -398,9 +409,19 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
     return [];
   }
 
-  /** Refuses attempts to mint URL-addressed facets from the singleton account. */
-  getGatekeeperClassFor(_url: string): never {
-    throw new Error("ODIE MCP is an ambient singleton, not a URL resource.");
+  /** Returns the singleton class when an agent explicitly attaches the fixed account resource. */
+  async getGatekeeperClassFor(url: string): Promise<{
+    class: DurableObjectClass<Gatekeeper<unknown>>;
+    resource: SupportedResource;
+  }> {
+    const config = readOdieKgConfig(this.env);
+    if (!config || !sameEndpoint(url, config.endpoint)) {
+      throw new Error("Unsupported ODIE MCP resource.");
+    }
+    return {
+      class: (await this.getSingletonGatekeeperAuthority()).class,
+      resource: odieKgResource(config),
+    };
   }
 
   /** This singleton has no resource configurator. */
@@ -408,7 +429,7 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
     throw new Error("ODIE MCP has no resource configurator.");
   }
 
-  /** Returns the required verifier token; the singleton itself refuses every observer. */
+  /** Returns the required verifier token for organization-scoped sharing. */
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
     return (this.ctx as ExportContext<McpGatekeeperUserProps>).exports.OdieKgVerifier({});
@@ -420,13 +441,36 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
   }
 }
 
-/** Opaque same-vendor verifier; owner-only facets never interrogate it. */
+/** Opaque same-vendor verifier; Workshop enforces the Totango SSO domain before observer use. */
 @validateRpc()
 export class OdieKgVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
   verify(): void {}
 }
 
-/** Owner-only facet exposing the exact ODIE MCP tool surface. */
+class DomainSharingApprovalQueue extends RpcTarget implements ApprovalQueue {
+  constructor(private readonly inner: RpcStub<ApprovalQueue>, private readonly ownsInner = false) { super(); }
+  dup(): RpcStub<ApprovalQueue> {
+    return new DomainSharingApprovalQueue(this.inner.dup(), true) as unknown as RpcStub<ApprovalQueue>;
+  }
+  [Symbol.dispose](): void { if (this.ownsInner) this.inner[Symbol.dispose](); }
+  async authorizeObservation(description: ObservationDescription): Promise<void> {
+    await this.inner.authorizeObservation({
+      ...description,
+      domainSharingPolicy: description.domainSharingPolicy ?? TOTANGO_DOMAIN_SHARING_POLICY,
+    });
+  }
+  getSessionSurface(): Promise<"chat" | "code"> { return this.inner.getSessionSurface(); }
+  submitAction(action: number, description: ActionDescription): Promise<void> {
+    return this.inner.submitAction(action, description);
+  }
+  bindHook<Hook extends RpcTarget>(
+      _controller: Fetcher<HookController<Hook>>, _callback: RpcStub<Hook>,
+      _description: HookDescription): Promise<void> {
+    throw new Error("ODIE MCP sessions cannot register persistent hooks.");
+  }
+}
+
+/** Organization-scoped facet exposing the exact ODIE MCP tool surface. */
 export class OdieKgGatekeeper
   extends McpFacetBase<Env, OdieKgGatekeeperProps, OdieKgSession> {
   protected get log() {
@@ -460,6 +504,17 @@ export class OdieKgGatekeeper
     );
     return new OdieKgConnectionAccount(this.env, account, this.ctx.props.endpoint);
   }
+
+  /** Admit domain-policy collaborators; Workshop verifies @totango.com SSO before calling this. */
+  override async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
+
+  /** Apply the Totango organization sharing policy to every ODIE MCP session observation. */
+  override async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<OdieKgSession> {
+    return await super.startSession(
+        new DomainSharingApprovalQueue(approvalQueue) as unknown as RpcStub<ApprovalQueue>);
+  }
+
+  override async removeObserver(_id: string): Promise<void> {}
 
   /** Filters the cached remote catalog to fixed tools and overrides remote annotations. */
   override async tools() {
@@ -517,6 +572,7 @@ export class OdieKgGatekeeper
         snippet: `Unavailable: ${message}`,
         suggestedBindingName: "TOTANGO_KG",
         tsType: sessionTypeName(ODIE_KG_SERVER_ID, this.resourceUrl),
+        domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY,
       };
     }
     return {
@@ -525,6 +581,7 @@ export class OdieKgGatekeeper
       snippet: `${tools.length} organization-bound ODIE MCP tools with first-party actions enabled.`,
       suggestedBindingName: "TOTANGO_KG",
       tsType: sessionTypeName(ODIE_KG_SERVER_ID, this.resourceUrl),
+      domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY,
     };
   }
 
@@ -566,6 +623,7 @@ export class OdieKgGatekeeper
     await authorizer.authorizeObservation({
       title: unavailable ? "ODIE MCP unavailable" : "ODIE MCP catalog",
       description: unavailable ?? `Listed ${catalog.entries.length} organization-bound read tool(s).`,
+      domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY,
     });
     return catalog;
   }

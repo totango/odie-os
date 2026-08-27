@@ -2,10 +2,10 @@
 // endpoint. It deliberately exposes only a fixed read/support allowlist and relies on
 // @gadgets/mcp-shared for MCP cataloging, tool classification, sessions, and action handling.
 
-import { RpcStub, WorkerEntrypoint } from "cloudflare:workers";
+import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
-import { boundAgentCatalog, type AccountDescription, type AgentCatalog, type AppUiContext, type AvatarImage, type Gatekeeper, type GatekeeperConnectCallback, type GatekeeperConnectOptions, type GatekeeperUiFrame, type GatekeeperUser, type GatekeeperUserVerifier, type GatekeeperVendor as GatekeeperVendorIface, type ObservationAuthorizer, type ResourceDescription, type SupportedResource, type VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { boundAgentCatalog, type AccountDescription, type ActionDescription, type AgentCatalog, type AppUiContext, type ApprovalQueue, type AvatarImage, type Gatekeeper, type GatekeeperConnectCallback, type GatekeeperConnectOptions, type GatekeeperUiFrame, type GatekeeperUser, type GatekeeperUserVerifier, type GatekeeperVendor as GatekeeperVendorIface, type HookController, type HookDescription, type ObservationAuthorizer, type ObservationDescription, type ObservationDomainSharingPolicy, type ResourceDescription, type SupportedResource, type VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { MCP_BASE_TYPES } from "@gadgets/mcp-shared/base-types";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import type { McpLogFields } from "@gadgets/mcp-shared/log";
@@ -44,6 +44,11 @@ type JarvisLogFields = McpLogFields & {
 const logger = createLogger<JarvisLogFields>({
   component: "gatekeeper.jarvis", vendorId: VENDOR_ID,
 });
+
+const TOTANGO_DOMAIN_SHARING_POLICY = {
+  type: "verified-sso-email-domain",
+  emailDomain: "totango.com",
+} as const satisfies ObservationDomainSharingPolicy;
 
 const JARVIS_ICON: AvatarImage = {
   url: "data:image/svg+xml," + encodeURIComponent(
@@ -272,18 +277,41 @@ export class JarvisAccount
     return null;
   }
 
-  /** Returns a verifier object; observers are refused by the facet before it is consulted. */
+  /** Returns a same-vendor verifier object; Workshop performs collaborator policy checks. */
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
     return (this.ctx as ExportContext<JarvisAccountProps>).exports.JarvisVerifier({});
   }
 }
 
-/** Verifier required by the GatekeeperUser contract; JARVIS facets refuse observers. */
+/** Verifier required by the GatekeeperUser contract for organization-scoped sharing. */
 @validateRpc()
 export class JarvisVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
-  /** No-op verifier because observers are never admitted. */
+  /** No-op verifier; Workshop enforces the Totango SSO domain before admitting observers. */
   verify(): void {}
+}
+
+class DomainSharingApprovalQueue extends RpcTarget implements ApprovalQueue {
+  constructor(private readonly inner: RpcStub<ApprovalQueue>, private readonly ownsInner = false) { super(); }
+  dup(): RpcStub<ApprovalQueue> {
+    return new DomainSharingApprovalQueue(this.inner.dup(), true) as unknown as RpcStub<ApprovalQueue>;
+  }
+  [Symbol.dispose](): void { if (this.ownsInner) this.inner[Symbol.dispose](); }
+  async authorizeObservation(description: ObservationDescription): Promise<void> {
+    await this.inner.authorizeObservation({
+      ...description,
+      domainSharingPolicy: description.domainSharingPolicy ?? TOTANGO_DOMAIN_SHARING_POLICY,
+    });
+  }
+  getSessionSurface(): Promise<"chat" | "code"> { return this.inner.getSessionSurface(); }
+  submitAction(action: number, description: ActionDescription): Promise<void> {
+    return this.inner.submitAction(action, description);
+  }
+  bindHook<Hook extends RpcTarget>(
+      _controller: Fetcher<HookController<Hook>>, _callback: RpcStub<Hook>,
+      _description: HookDescription): Promise<void> {
+    throw new Error("JARVIS MCP sessions cannot register persistent hooks.");
+  }
 }
 
 /** Durable Object facet implementing the JARVIS MCP singleton. */
@@ -328,6 +356,17 @@ export class JarvisGatekeeper
       this.env, this.ctx.storage, this.ctx.props.endpoint);
   }
 
+  /** Admit domain-policy collaborators; Workshop verifies @totango.com SSO before calling this. */
+  override async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
+
+  /** Apply the Totango organization sharing policy to every JARVIS MCP session observation. */
+  override async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<JarvisSession> {
+    return await super.startSession(
+        new DomainSharingApprovalQueue(approvalQueue) as unknown as RpcStub<ApprovalQueue>);
+  }
+
+  override async removeObserver(_id: string): Promise<void> {}
+
   /** Returns only fixed-policy JARVIS tools; upstream annotations cannot weaken approval rules. */
   async tools() {
     return (await super.tools())
@@ -342,19 +381,14 @@ export class JarvisGatekeeper
 
   /** Describes the JARVIS singleton binding. */
   async describe(): Promise<ResourceDescription> {
-    const allTools = await this.tools();
     const chatAllowed = new Set((this.ctx.props.chatScope ?? this.ctx.props.scope).tools ?? []);
     const codeAllowed = new Set((this.ctx.props.codeScope ?? this.ctx.props.scope).tools ?? []);
-    const chatTools = allTools.filter(entry => chatAllowed.has(entry.tool.name));
-    const codeTools = allTools.filter(entry => codeAllowed.has(entry.tool.name));
-    const chatReads = chatTools.filter(entry => entry.mode === "read").length;
-    const codeReads = codeTools.filter(entry => entry.mode === "read").length;
+    const chatToolCount = [...chatAllowed].filter(isJarvisAllowedTool).length;
+    const codeToolCount = [...codeAllowed].filter(isJarvisAllowedTool).length;
     const scopeSummary = chatAllowed.size === codeAllowed.size &&
         [...chatAllowed].every(name => codeAllowed.has(name))
-      ? `${chatTools.length} approved JARVIS MCP tools (${chatReads} read-only, ` +
-        `${chatTools.length - chatReads} requiring approval)`
-      : `Chat: ${chatTools.length} tools (${chatReads} read-only); code: ${codeTools.length} tools ` +
-        `(${codeReads} read-only)`;
+      ? `${chatToolCount} approved read-only JARVIS MCP tools`
+      : `Chat: ${chatToolCount} read-only tools; code: ${codeToolCount} read-only tools`;
     return {
       url: this.resourceUrl,
       title: JARVIS_DISPLAY_NAME,
@@ -362,6 +396,7 @@ export class JarvisGatekeeper
         `${scopeSummary}. Escalation and skill-creation tools are not exposed.`,
       suggestedBindingName: JARVIS_DISPLAY_NAME,
       tsType: sessionTypeName(JARVIS_SERVER_ID, this.resourceUrl),
+      domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY,
     };
   }
 
@@ -399,6 +434,7 @@ export class JarvisGatekeeper
     await authorizer.authorizeObservation({
       title: "JARVIS catalog",
       description: `Listed ${catalog.entries.length} available JARVIS tool(s).`,
+      domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY,
     });
     return catalog;
   }
