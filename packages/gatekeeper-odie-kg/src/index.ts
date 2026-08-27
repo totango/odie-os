@@ -73,7 +73,7 @@ const ODIE_KG_ICON: AvatarImage = {
     "</svg>"),
 };
 
-const ODIE_MCP_SCOPE_VERSION = 1;
+const ODIE_MCP_SCOPE_VERSION = 2;
 const ODIE_MCP_SCOPE_VERSION_KEY = "odieMcpScopeVersion";
 
 type OdieKgGatekeeperProps = McpGatekeeperUserProps & {
@@ -152,8 +152,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       color: "#5b4bdb",
       tagline: config ? "Connect your organization's customer context" : "Not configured",
       description:
-        "Use organization-bound Knowledge Graph, customer context, export retrieval, skill " +
-        "discovery, and supported Leviosa public data as an always-available read-only source.",
+        "Use organization-bound Knowledge Graph, customer context, interviews, skills, exports, " +
+        "briefs, actions, and supported Leviosa public data.",
       providesAuth: config !== null,
     };
   }
@@ -254,7 +254,7 @@ export class OdieKgAccount extends McpAccountBase<Env> {
     }
   }
 
-  /** Reports whether this account completed OAuth for the current ODIE MCP read-scope revision. */
+  /** Reports whether this account completed OAuth for the current ODIE MCP scope revision. */
   hasCurrentScopeGrant(): boolean {
     return this.ctx.storage.kv.get<number>(ODIE_MCP_SCOPE_VERSION_KEY) === ODIE_MCP_SCOPE_VERSION;
   }
@@ -274,11 +274,11 @@ export class OdieKgAccount extends McpAccountBase<Env> {
       if (!this.hasCurrentScopeGrant()) {
         return {
           state: "expired",
-          message: "Reconnect ODIE MCP to authorize the expanded read-only scopes.",
+          message: "Reconnect ODIE MCP to authorize the expanded scopes.",
         };
       }
 
-      return { state: "healthy", message: "ODIE MCP is connected for the current read scopes." };
+      return { state: "healthy", message: "ODIE MCP is connected for the current scopes." };
     } catch (error) {
       return classifyOdieKgStatusError(error);
     }
@@ -362,12 +362,12 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
     };
   }
 
-  /** Returns the owner-scoped fixed-read KG singleton class. */
+  /** Returns the owner-scoped fixed-tool ODIE MCP singleton class. */
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<unknown>>> {
     return (await this.getSingletonGatekeeperAuthority()).class;
   }
 
-  /** Returns the immutable facet revision for the current ODIE MCP read scope. */
+  /** Returns the immutable facet revision for the current ODIE MCP scope. */
   async getSingletonGatekeeperAuthority(): Promise<{
     key: string;
     class: DurableObjectClass<Gatekeeper<unknown>>;
@@ -380,7 +380,7 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
       account.hasCurrentScopeGrant(),
     ]);
     if (!sameEndpoint(server.endpoint, config.endpoint) || !hasCurrentScopeGrant) {
-      throw new Error("Reconnect ODIE MCP to authorize the current endpoint and read-only scopes.");
+      throw new Error("Reconnect ODIE MCP to authorize the current endpoint and scopes.");
     }
     const props: OdieKgGatekeeperProps = {
       accountObjectId: this.ctx.props.accountObjectId,
@@ -388,7 +388,7 @@ export class OdieKgUser extends McpGatekeeperUserBase<Env> implements Gatekeeper
       scope: odieKgToolScope(),
     };
     return {
-      key: `odie-mcp-read-v${ODIE_MCP_SCOPE_VERSION}:${endpointTag(config.endpoint)}`,
+      key: `odie-mcp-v${ODIE_MCP_SCOPE_VERSION}:${endpointTag(config.endpoint)}`,
       class: (this.ctx as ExportContext<McpGatekeeperUserProps>).exports.OdieKgGatekeeper({ props }),
     };
   }
@@ -426,7 +426,7 @@ export class OdieKgVerifier extends WorkerEntrypoint<Env> implements GatekeeperU
   verify(): void {}
 }
 
-/** Owner-only facet exposing the exact ODIE MCP read surface. */
+/** Owner-only facet exposing the exact ODIE MCP tool surface. */
 export class OdieKgGatekeeper
   extends McpFacetBase<Env, OdieKgGatekeeperProps, OdieKgSession> {
   protected get log() {
@@ -461,7 +461,7 @@ export class OdieKgGatekeeper
     return new OdieKgConnectionAccount(this.env, account, this.ctx.props.endpoint);
   }
 
-  /** Filters the cached remote catalog to fixed reads and overrides remote annotations. */
+  /** Filters the cached remote catalog to fixed tools and overrides remote annotations. */
   override async tools() {
     const configured = readOdieKgConfig(this.env)?.endpoint;
     if (!configured || !sameEndpoint(configured, this.ctx.props.endpoint)) {
@@ -474,7 +474,7 @@ export class OdieKgGatekeeper
       const missingTools = missingOdieMcpTools(tools);
       if (missingTools.length > 0) {
         throw new Error(
-          `ODIE MCP is missing ${missingTools.length} required read-only tool(s). Reconnect the account.`,
+          `ODIE MCP is missing ${missingTools.length} required tool(s). Reconnect the account.`,
         );
       }
       return tools;
@@ -490,7 +490,7 @@ export class OdieKgGatekeeper
       if (/403|does not have access|refused/i.test(message)) {
         throw new Error(
           "ODIE MCP refused access. Ask an administrator to grant the connected account access " +
-          "to the required read scopes and tools.",
+          "to the required scopes and tools.",
           { cause: error },
         );
       }
@@ -522,7 +522,7 @@ export class OdieKgGatekeeper
     return {
       url: this.resourceUrl,
       title: ODIE_KG_DISPLAY_NAME,
-      snippet: `${tools.length} organization-bound ODIE MCP tools, all read-only.`,
+      snippet: `${tools.length} organization-bound ODIE MCP tools with first-party actions enabled.`,
       suggestedBindingName: "TOTANGO_KG",
       tsType: sessionTypeName(ODIE_KG_SERVER_ID, this.resourceUrl),
     };

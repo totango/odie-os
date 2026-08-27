@@ -13,6 +13,7 @@ import {
 } from "@gadgets/integration-tests/harness";
 import { NetworkInterceptor, type Handler } from "@gadgets/integration-tests/network-interceptor";
 import {
+  ODIE_KG_ACTION_TOOLS,
   ODIE_KG_ALLOWED_TOOLS,
   ODIE_KG_DISPLAY_NAME,
   ODIE_KG_EU_ENDPOINT,
@@ -24,15 +25,6 @@ const ODIE_KG_DIR = new URL("..", import.meta.url).pathname;
 const ODIE_KG_BINDING = "ODIE_KG";
 const MCP_ENDPOINT = ODIE_KG_EU_ENDPOINT;
 const AUTH_ISSUER = "https://auth.test";
-const SIDE_EFFECTING_TOOLS = [
-  "odie-skill-run",
-  "odie-skill-create-draft",
-  "odie-skill-publish",
-  "odie-export-request",
-  "run_odie_skill",
-  "generate_brief",
-] as const;
-
 type JsonRpcRequest = {
   id?: number | string | null;
   method?: string;
@@ -60,20 +52,15 @@ function rpcResult(id: JsonRpcRequest["id"], result: unknown, init: ResponseInit
 }
 
 function allRemoteTools(scenario: RemoteScenario = {}) {
-  return ([
-    ...ODIE_KG_ALLOWED_TOOLS.map(name => ({
+  return ODIE_KG_ALLOWED_TOOLS.map(name => ({
       name,
       title: name,
-      description: `Read fixture data through ${name}.`,
+      description: `Fixture tool ${name}.`,
       inputSchema: { type: "object", additionalProperties: true },
-      annotations: name === "odie-kg-status" ? {} : { readOnlyHint: true },
-    })),
-    ...SIDE_EFFECTING_TOOLS.map(name => ({
-      name,
-      title: `Forbidden action ${name}`,
-      annotations: {readOnlyHint: false},
-    })),
-  ]).filter(tool => tool.name !== scenario.omitTool);
+      annotations: {
+        readOnlyHint: !(ODIE_KG_ACTION_TOOLS as readonly string[]).includes(name),
+      },
+    })).filter(tool => tool.name !== scenario.omitTool);
 }
 
 function odieOauthAndMcpHandler(seen: string[]): Handler {
@@ -288,11 +275,9 @@ describe("ODIE MCP integration", () => {
       using session = await gatekeeper.openSession() as unknown as McpSessionStub;
       const tools = await session.listTools();
       expect(tools.map(tool => tool.name)).toEqual([...ODIE_KG_ALLOWED_TOOLS]);
-      expect(tools).toEqual(ODIE_KG_ALLOWED_TOOLS.map(name => expect.objectContaining({
-        name,
-        mode: "read",
-        classifiedBy: "default",
-      })));
+      expect(tools.filter(tool => tool.mode === "action").map(tool => tool.name))
+        .toEqual([...ODIE_KG_ACTION_TOOLS]);
+      expect(tools.every(tool => tool.classifiedBy === "default")).toBe(true);
       await expect(session.callTool("odie-kg-status", {domain: "acme"})).resolves.toMatchObject({
         status: "ok",
         text: "KG odie-kg-status returned data",
@@ -333,7 +318,7 @@ describe("ODIE MCP integration", () => {
       using overseer = await api.newGadget();
       using gatekeeper = await overseer.getGatekeeperById(0);
       await expect(gatekeeper.describe()).resolves.toMatchObject({
-        snippet: expect.stringMatching(/36 organization-bound/i),
+        snippet: expect.stringMatching(/54 organization-bound/i),
       });
 
       remoteScenario = { listStatus: 403 };
@@ -344,7 +329,7 @@ describe("ODIE MCP integration", () => {
       })]);
       await expect(gatekeeper.describe()).resolves.toMatchObject({
         suggestedBindingName: "TOTANGO_KG",
-        snippet: expect.stringMatching(/36 organization-bound/i),
+        snippet: expect.stringMatching(/54 organization-bound/i),
       });
     });
   });

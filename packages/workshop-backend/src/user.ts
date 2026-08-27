@@ -627,12 +627,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     );
   }
 
+  #isTeamPiCodexOnly(): boolean {
+    return this.env.TEAM_PI_CODEX_ONLY === "true";
+  }
+
   #getUserConfiguredModel(id: string): UserAiModelRecord | undefined {
     const model = this.storage.aiModels.get(id);
     return model && !isTeamPiCodexMarkerConfig(model.config) ? model : undefined;
   }
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
+    if (this.#isTeamPiCodexOnly()) {
+      return this.#canUseTeamPiCodex() ? getTeamPiCodexModelList(this.env) : [];
+    }
+
     let result: AiChatAuthorInfo[] = [];
     let reservedModelIds = new Set<string>();
 
@@ -662,6 +670,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    if (this.#isTeamPiCodexOnly()) {
+      throw new Error("This deployment only supports Team PI Codex models.");
+    }
     if (isTeamPiCodexMarkerConfig(config)) {
       throw new Error("Team PI Codex models are deployment-provided and cannot be added manually.");
     }
@@ -693,10 +704,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async setQuickModel(id: string | null): Promise<void> {
+    if (this.#isTeamPiCodexOnly() && id !== null &&
+        (!this.#canUseTeamPiCodex() || !resolveTeamPiCodexModel(this.env, id))) {
+      throw new Error(`No such model: ${id}`);
+    }
     this.storage.quickModel.put(id);
   }
 
   async getQuickModel(): Promise<null | string> {
+    if (this.#isTeamPiCodexOnly()) {
+      if (!this.#canUseTeamPiCodex()) return null;
+      const selected = this.storage.quickModel.get();
+      return (selected ? resolveTeamPiCodexModel(this.env, selected)?.profile.id : undefined) ??
+          getDefaultTeamPiCodexModel(this.env, this.storage.profile.get().id)?.profile.id ?? null;
+    }
     let result = this.storage.quickModel.get();
     if (result && this.#getUserConfiguredModel(result)) {
       return result;
@@ -707,6 +728,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getPreferredModel(): Promise<string | null> {
     const preferred = this.storage.preferredModel.get();
+    if (this.#isTeamPiCodexOnly()) {
+      if (!this.#canUseTeamPiCodex()) return null;
+      return (preferred ? resolveTeamPiCodexModel(this.env, preferred)?.profile.id : undefined) ??
+          getDefaultTeamPiCodexModel(this.env, this.storage.profile.get().id)?.profile.id ?? null;
+    }
     if (preferred && !preferred.startsWith("team-pi-codex/")) return preferred;
     return (preferred && this.#canUseTeamPiCodex() && resolveTeamPiCodexModel(this.env, preferred)
       ? preferred
@@ -719,10 +745,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async setPreferredModel(id: string | null): Promise<void> {
     if (id !== null) {
       // Validate that the model exists in the user's configured models or as a gateway model.
-      let gwConfig = getAiGatewayConfig(this.env);
-      let exists = !!this.#getUserConfiguredModel(id) || !!gwConfig?.resolveModel(id) ||
-          (this.#canUseTeamPiCodex() &&
-           !!resolveTeamPiCodexModel(this.env, id));
+      let exists = this.#isTeamPiCodexOnly()
+        ? this.#canUseTeamPiCodex() && !!resolveTeamPiCodexModel(this.env, id)
+        : !!this.#getUserConfiguredModel(id) || !!getAiGatewayConfig(this.env)?.resolveModel(id) ||
+          (this.#canUseTeamPiCodex() && !!resolveTeamPiCodexModel(this.env, id));
       if (!exists) {
         throw new Error(`No such model: ${id}`);
       }
@@ -827,26 +853,33 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * via retryOnDoReset, so it must stay free of writes and side effects. */
   async getChatContext(modelId: string | null): Promise<UserChatContext> {
     let gwConfig = getAiGatewayConfig(this.env);
+    const teamPiOnly = this.#isTeamPiCodexOnly();
 
     let result: UserChatContext = {
       profile: this.storage.profile.get()
     };
     if (modelId) {
-      // In AI Gateway mode, resolve gateway models first.
-      if (gwConfig) {
+      if (teamPiOnly && this.#canUseTeamPiCodex()) {
+        result.aiModel = resolveTeamPiCodexModel(this.env, modelId);
+      } else if (gwConfig) {
+        // In AI Gateway mode, resolve gateway models first.
         result.aiModel = gwConfig.resolveModel(modelId);
       }
-      if (!result.aiModel && this.#canUseTeamPiCodex()) {
+      if (!result.aiModel && !teamPiOnly && this.#canUseTeamPiCodex()) {
         result.aiModel = resolveTeamPiCodexModel(this.env, modelId);
       }
-      if (!result.aiModel) {
+      if (!result.aiModel && !teamPiOnly) {
         result.aiModel = this.#getUserConfiguredModel(modelId);
       }
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
     }
 
     // Resolve the quick model (used for lightweight tasks like title generation).
-    if (gwConfig) {
+    if (teamPiOnly && this.#canUseTeamPiCodex()) {
+      const selected = this.storage.quickModel.get();
+      result.quickModel = (selected ? resolveTeamPiCodexModel(this.env, selected)?.config : undefined) ??
+          getDefaultTeamPiCodexModel(this.env, result.profile.id)?.config;
+    } else if (gwConfig) {
       // In AI Gateway mode, always use the hardcoded quick model.
       result.quickModel = gwConfig.getQuickModelConfig();
     } else {

@@ -6958,6 +6958,15 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       };
     }
 
+    try {
+      await caller.assertRequiredConnectionsHealthy();
+    } catch {
+      return {
+        accepted: false,
+        message: "Reconnect the required services before using workspace agents.",
+      };
+    }
+
     // Create the Gadget if it doesn't exist yet.
     let ownerId = this.impl.ownerId;
     if (!ownerId) {

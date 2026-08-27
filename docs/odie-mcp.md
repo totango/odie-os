@@ -5,15 +5,15 @@ skill, export, and Leviosa public-reader access. This repository uses that publi
 two different ways:
 
 1. **Public MCP service**: compatible MCP clients can connect directly to the public endpoint. It
-   advertises all 42 tools listed in [Public MCP tool catalog](#public-mcp-tool-catalog-42-tools).
+   advertises all 54 tools listed in [ODIE MCP tool catalog](#odie-mcp-tool-catalog-54-tools).
 2. **Workshop ambient connector**: this repository's `packages/gatekeeper-odie-kg` package connects
-   each Workshop user through browser OAuth and exposes only a least-privilege, read-only subset to
-   agents. The package name and paths remain `gatekeeper-odie-kg`; the ambient binding name remains
-   `TOTANGO_KG`; the human-facing brand is **ODIE MCP**.
+   each Workshop user through browser OAuth and exposes a fixed first-party catalog to agents. The
+   package name and paths remain `gatekeeper-odie-kg`; the ambient binding name remains `TOTANGO_KG`;
+   the human-facing brand is **ODIE MCP**.
 
-Do not treat these two surfaces as equivalent. The public service exposes side-effecting tools when
-the user grants the corresponding scopes. The Workshop connector must request only read scopes and
-must expose exactly 36 read-only tools.
+The Workshop connector explicitly requests every currently supported scope and exposes the exact
+54-tool catalog. Its connector-owned policy classifies 42 observations and 12 auto-approvable actions;
+unknown future tools remain excluded.
 
 ## Endpoint
 
@@ -51,22 +51,23 @@ manually create, paste, or share an access token. Each employee must authorize t
 
 ## OAuth scopes
 
-Read scopes used by this repository's Workshop connector:
+Scopes explicitly requested by this repository's Workshop connector:
 
 - `mcp:odie:kg:read`
 - `mcp:odie:exports:read`
-- `mcp:odie:skills:read`
-- `mcp:odie:customers:read`
-- `mcp:odie:public-api:read`
-
-Additional scopes advertised by the public MCP service, required only for the corresponding
-side-effecting public tools:
-
 - `mcp:odie:exports:write`
+- `mcp:odie:skills:read`
 - `mcp:odie:skills:run`
 - `mcp:odie:skills:write`
+- `mcp:odie:customers:read`
+- `mcp:odie:lenses:read`
+- `mcp:accounts:read`
 - `mcp:odie:actions:run`
 - `mcp:odie:briefs:generate`
+- `mcp:odie:public-api:read`
+- `mcp:odie:interviews:read`
+- `mcp:odie:interviews:write`
+- `mcp:odie:interviews:publish`
 
 ## Workshop ambient connector contract
 
@@ -77,28 +78,16 @@ The in-product Odie connector is the least-privilege form used by this repositor
   binding.
 - Human branding: the connector should be presented as **ODIE MCP**.
 - Authentication: browser OAuth with PKCE, one connected account per employee.
-- Authorization: request only the read scopes listed above. The ODIE MCP authorization server does
-  not support OpenID Connect identity scopes on this resource.
-- Tool surface: expose exactly 36 read-only tools:
-  - 12 `odie-kg-*` tools.
-  - 6 customer context tools.
-  - `odie-skills-list`.
-  - `odie-export-status`.
-  - `odie-export-download`.
-  - 15 `leviosa_public_*` readers.
-- Tool classification is connector-owned: all exposed tools are treated as reads regardless of
-  upstream MCP annotations.
-- The connector must exclude the six side-effecting public tools:
-  - `odie-skill-run`
-  - `odie-skill-create-draft`
-  - `odie-skill-publish`
-  - `odie-export-request`
-  - `run_odie_skill`
-  - `generate_brief`
+- Authorization: request the explicit 15-scope set above. Do not dynamically adopt future
+  `scopes_supported` entries. The authorization server does not support OpenID Connect identity
+  scopes on this resource.
+- Tool surface: expose exactly 54 hardcoded tools: 42 observations and 12 actions.
+- Tool classification is connector-owned and does not trust upstream annotations.
+- Actions are auto-approvable because the connector is pinned to Totango's fixed EU endpoint and
+  exact tool names. Unknown future tools are excluded.
 
-Accounts connected before this 36-tool scope expansion must reconnect once. The required-connection
-health gate recognizes the previous connector name and requests reauthorization rather than exposing
-a partially authorized singleton.
+Accounts connected before this scope revision must reconnect once. The required-connection health
+gate requests reauthorization rather than exposing a partially authorized singleton.
 
 This source is separate from JARVIS Graphify. Use ODIE MCP for customer, account, CSM,
 product-usage, and internal business questions. Use Graphify for repository topology,
@@ -206,10 +195,9 @@ and begins PKCE authorization.
 The OAuth resource value must remain the exact ODIE MCP endpoint. Clients must not substitute the API
 origin or the Unison MCP endpoint.
 
-## Public MCP tool catalog: 42 tools
+## ODIE MCP tool catalog: 54 tools
 
-The public MCP endpoint advertises all tools below. This catalog describes the public service, not
-the repository's least-privilege `TOTANGO_KG` ambient connector.
+The public MCP endpoint and the fixed `TOTANGO_KG` ambient connector expose the tools below.
 
 ### Knowledge graph read tools: 12
 
@@ -271,20 +259,38 @@ the repository's least-privilege `TOTANGO_KG` ambient connector.
 - `leviosa_public_get_work_item`
 - `leviosa_public_list_email_suppressions`
 
-The tools a public client can invoke depend on granted scopes and organization permissions. The
-Workshop connector includes only the 36 read tools identified in
-[Workshop ambient connector contract](#workshop-ambient-connector-contract).
+### Interviews: 9
+
+- `odie-interviews-open`
+- `odie-interview-account-search`
+- `odie-interview-resume`
+- `odie-interview-start`
+- `odie-interview-start-topic`
+- `odie-interview-restart-topic`
+- `odie-interview-submit`
+- `odie-interview-draft`
+- `odie-interview-approve`
+
+### Interactive views: 3
+
+- `show_lens`
+- `show_account`
+- `show_account_risk`
+
+The tools a client can invoke depend on granted scopes and organization permissions. The Workshop
+connector requests all current scopes, but still excludes any future tool name until reviewed and
+added to its fixed allowlist.
 
 ## Safe usage guidance
 
-- Prefer the Workshop `TOTANGO_KG` ambient connector for in-product agents because it exposes only
-  the 36 read-only tools and excludes side-effecting public tools.
+- The Workshop `TOTANGO_KG` connector auto-approves its 12 hardcoded first-party actions. Treat the
+  binding as authority to create, publish, request, run, and generate data in ODIE MCP.
 - When connecting directly to the public MCP endpoint, grant only the scopes needed for the task.
 - Keep searches bounded to the accounts and domains needed for the task.
 - Treat skill-running, draft creation, publishing, export requests, action-running, and brief
   generation as side-effecting operations.
-- Ask the user before invoking any public tool that may create, publish, request, run, or generate
-  something.
+- Direct public clients should ask before invoking tools that create, publish, request, run, or
+  generate something unless their own policy explicitly permits automatic execution.
 - Do not paste access tokens, refresh tokens, OAuth codes, customer secrets, or credentials into
   prompts, logs, tickets, or documentation.
 - Disconnect and reauthorize after selecting the wrong organization.
@@ -318,7 +324,7 @@ parameters and wait for confirmation before calling generate_brief.
 | Admin-required response | The operation requires organization-admin permission | Ask an organization administrator to perform or approve it. |
 | Tools do not appear | Wrong URL or unsupported transport | Confirm the EU URL and Streamable HTTP support, then restart the client. |
 | OAuth repeatedly loops | Stale client or registration | Update the client, remove the saved connection, and authorize again. |
-| Side-effecting tools appear in Workshop | Connector policy is wrong | The `TOTANGO_KG` connector must expose only the 36 read-only tools and exclude the six side-effecting tools listed above. |
+| Unknown tools appear in Workshop | Connector policy is wrong | The `TOTANGO_KG` connector must expose exactly the reviewed 54-tool allowlist. |
 | `leviosa_public_list_property_definitions` fails | Known upstream issue | Track [AI-3580](https://catalystsoftware.atlassian.net/browse/AI-3580) and use verified KG/customer tools meanwhile. |
 | Agent answers repository questions from ODIE MCP | Wrong source selection | Use Graphify for repository engineering/topology questions; use ODIE MCP for customer/account/CSM/product-usage/internal-business questions. |
 

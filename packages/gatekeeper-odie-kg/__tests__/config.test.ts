@@ -4,9 +4,11 @@ import {
   applyOdieKgToolPolicy,
   odieKgResourceUrl,
   readOdieKgConfig,
+  ODIE_KG_ACTION_TOOLS,
   ODIE_KG_ALLOWED_TOOLS,
   ODIE_KG_EU_ENDPOINT,
   ODIE_KG_OAUTH_SCOPE,
+  ODIE_KG_READ_TOOLS,
 } from "../src/config.js";
 
 function env(values: Record<string, string> = {}): Env {
@@ -30,46 +32,55 @@ describe("ODIE MCP configuration", () => {
     }
   });
 
-  it("requests only supported ODIE MCP read scopes", () => {
+  it("requests the complete explicit ODIE MCP scope set", () => {
     expect(ODIE_KG_OAUTH_SCOPE.split(" ")).toEqual([
       "mcp:odie:kg:read",
       "mcp:odie:exports:read",
+      "mcp:odie:exports:write",
       "mcp:odie:skills:read",
+      "mcp:odie:skills:run",
+      "mcp:odie:skills:write",
       "mcp:odie:customers:read",
+      "mcp:odie:lenses:read",
+      "mcp:accounts:read",
+      "mcp:odie:actions:run",
+      "mcp:odie:briefs:generate",
       "mcp:odie:public-api:read",
+      "mcp:odie:interviews:read",
+      "mcp:odie:interviews:write",
+      "mcp:odie:interviews:publish",
     ]);
-    expect(ODIE_KG_OAUTH_SCOPE).not.toMatch(/:write|:run|:generate/);
   });
 
-  it("uses the exact 36 read-tool names in the singleton discriminator", () => {
-    expect(ODIE_KG_ALLOWED_TOOLS).toHaveLength(36);
+  it("uses the exact 54-tool catalog in the singleton discriminator", () => {
+    expect(ODIE_KG_READ_TOOLS).toHaveLength(42);
+    expect(ODIE_KG_ACTION_TOOLS).toHaveLength(12);
+    expect(ODIE_KG_ALLOWED_TOOLS).toHaveLength(54);
     const url = odieKgResourceUrl("https://api.example.com/api/mcp/odie");
     for (const tool of ODIE_KG_ALLOWED_TOOLS) {
       expect(url).toContain(`tool=${encodeURIComponent(tool)}`);
     }
   });
 
-  it("drops side effects and forces every allowlisted tool to a connector-owned read", () => {
+  it("classifies the fixed first-party catalog and auto-approves every action", () => {
     const tool = (name: string): ClassifiedTool => ({
       tool: { name, inputSchema: { type: "object" } },
       mode: "action",
       autoApprovable: true,
       classifiedBy: "server-annotation",
     });
-    for (const name of [
-      "odie-skill-run",
-      "odie-skill-create-draft",
-      "odie-skill-publish",
-      "odie-export-request",
-      "run_odie_skill",
-      "generate_brief",
-    ]) {
-      expect(applyOdieKgToolPolicy(tool(name))).toBeNull();
-    }
-    for (const name of ODIE_KG_ALLOWED_TOOLS) {
+    expect(applyOdieKgToolPolicy(tool("unknown-future-tool"))).toBeNull();
+    for (const name of ODIE_KG_READ_TOOLS) {
       expect(applyOdieKgToolPolicy(tool(name))).toMatchObject({
         mode: "read",
         autoApprovable: false,
+        classifiedBy: "default",
+      });
+    }
+    for (const name of ODIE_KG_ACTION_TOOLS) {
+      expect(applyOdieKgToolPolicy(tool(name))).toMatchObject({
+        mode: "action",
+        autoApprovable: true,
         classifiedBy: "default",
       });
     }

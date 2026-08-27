@@ -21,11 +21,11 @@
     "CF_ACCESS_ISS": "https://weathered-moon-e011.cloudflareaccess.com",
     "CF_AI_GATEWAY": "odie-os-ai",
     "CF_AI_GATEWAY_ACCOUNT_ID": "286469790a4362a2e194b32045c5eca7",
-    "CF_AI_GATEWAY_PROVIDERS": "cloudflare",
     "CODING_SESSION_PI_RUNTIME_ENABLED": "true",
     "DEPLOY_URL": "https://os.cloudflare.app/deploy/?instance=0b25cd3c-6772-4200-be89-353ceea1c63e",
     "PUBLIC_BASE_URL": "https://odie-os.odie-os.workers.dev",
-    "REQUIRED_HEALTHY_CONNECTIONS": "team_pi,odie_kg"
+    "REQUIRED_HEALTHY_CONNECTIONS": "team_pi,odie_kg",
+    "TEAM_PI_CODEX_ONLY": "true"
   },
   "browser": { "binding": "BROWSER" },
   "ai": { "binding": "WORKERS_AI" },

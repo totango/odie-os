@@ -15,17 +15,27 @@ export const ODIE_KG_DISPLAY_NAME = "ODIE MCP";
 /** The only ODIE MCP endpoint enabled for the hosted Odie deployment. */
 export const ODIE_KG_EU_ENDPOINT = "https://api-agents.unison.totango.com/api/mcp/odie";
 
-/** Least-privilege OAuth scopes requested from Agentic's Odie MCP resource. */
+/** Complete, explicitly versioned OAuth scope set supported by Agentic's Odie MCP resource. */
 export const ODIE_KG_OAUTH_SCOPE = [
   "mcp:odie:kg:read",
   "mcp:odie:exports:read",
+  "mcp:odie:exports:write",
   "mcp:odie:skills:read",
+  "mcp:odie:skills:run",
+  "mcp:odie:skills:write",
   "mcp:odie:customers:read",
+  "mcp:odie:lenses:read",
+  "mcp:accounts:read",
+  "mcp:odie:actions:run",
+  "mcp:odie:briefs:generate",
   "mcp:odie:public-api:read",
+  "mcp:odie:interviews:read",
+  "mcp:odie:interviews:write",
+  "mcp:odie:interviews:publish",
 ].join(" ");
 
-/** Exact read-only ODIE MCP tools exposed by this connector. */
-export const ODIE_KG_ALLOWED_TOOLS = [
+/** Exact observation-only ODIE MCP tools exposed by this connector. */
+export const ODIE_KG_READ_TOOLS = [
   "odie-kg-status",
   "odie-kg-domains",
   "odie-kg-accounts",
@@ -62,6 +72,34 @@ export const ODIE_KG_ALLOWED_TOOLS = [
   "leviosa_public_list_work_items",
   "leviosa_public_get_work_item",
   "leviosa_public_list_email_suppressions",
+  "odie-interviews-open",
+  "odie-interview-account-search",
+  "odie-interview-resume",
+  "show_lens",
+  "show_account",
+  "show_account_risk",
+] as const;
+
+/** Exact mutating ODIE MCP tools exposed and auto-approved by this first-party connector. */
+export const ODIE_KG_ACTION_TOOLS = [
+  "odie-export-request",
+  "odie-skill-run",
+  "odie-skill-create-draft",
+  "odie-skill-publish",
+  "run_odie_skill",
+  "generate_brief",
+  "odie-interview-start",
+  "odie-interview-start-topic",
+  "odie-interview-restart-topic",
+  "odie-interview-submit",
+  "odie-interview-draft",
+  "odie-interview-approve",
+] as const;
+
+/** Exact ODIE MCP tool catalog available through the owner-only ambient singleton. */
+export const ODIE_KG_ALLOWED_TOOLS = [
+  ...ODIE_KG_READ_TOOLS,
+  ...ODIE_KG_ACTION_TOOLS,
 ] as const;
 
 /** One validated deployment-owned ODIE MCP endpoint. */
@@ -113,8 +151,13 @@ export function odieKgResource(config: OdieKgConfig): SupportedResource {
   };
 }
 
-/** Applies the connector-owned read-only contract instead of trusting remote annotations. */
+/** Applies the connector-owned fixed policy instead of trusting remote annotations. */
 export function applyOdieKgToolPolicy(entry: ClassifiedTool): ClassifiedTool | null {
-  if (!(ODIE_KG_ALLOWED_TOOLS as readonly string[]).includes(entry.tool.name)) return null;
-  return { ...entry, mode: "read", autoApprovable: false, classifiedBy: "default" };
+  if ((ODIE_KG_READ_TOOLS as readonly string[]).includes(entry.tool.name)) {
+    return { ...entry, mode: "read", autoApprovable: false, classifiedBy: "default" };
+  }
+  if ((ODIE_KG_ACTION_TOOLS as readonly string[]).includes(entry.tool.name)) {
+    return { ...entry, mode: "action", autoApprovable: true, classifiedBy: "default" };
+  }
+  return null;
 }
