@@ -34,6 +34,7 @@ const testState = vi.hoisted(() => {
     overseer,
     seeds: [] as Array<{ text?: string; nonce?: number }>,
     draftStorageKeys: [] as Array<string | undefined>,
+    sendingStatusLabels: [] as Array<string | undefined>,
     updateProvisionalWorkspaceOrigin,
   };
 });
@@ -55,16 +56,19 @@ vi.mock("./AuthContext", () => ({
 }));
 
 vi.mock("./ChatInterface", () => ({
-  ChatInput: ({ seedText, seedNonce, draftStorageKey, onSend }: {
+  ChatInput: ({ seedText, seedNonce, draftStorageKey, onSend, onInputIntent, sendingStatusLabel }: {
     seedText?: string;
     seedNonce?: number;
     draftStorageKey?: string;
     onSend?: (message: string | SlashCommandRequest, modelId: string | null) => Promise<void>;
+    onInputIntent?: () => void;
+    sendingStatusLabel?: string;
   }) => {
     testState.seeds.push({ text: seedText, nonce: seedNonce });
     testState.draftStorageKeys.push(draftStorageKey);
+    testState.sendingStatusLabels.push(sendingStatusLabel);
     return <>
-      <textarea aria-label="Prompt" readOnly value={seedText ?? ""} />
+      <textarea aria-label="Prompt" readOnly value={seedText ?? ""} onFocus={onInputIntent} />
       <button onClick={() => onSend?.("Ship it", null)}>Send</button>
     </>;
   },
@@ -75,7 +79,7 @@ vi.mock("./components/AppShell/HomeTaskSuggestions", () => ({ default: () => nul
 vi.mock("./useDocumentTitle", () => ({ useDocumentTitle: () => {} }));
 
 import { HomePageContent } from "./routes/index";
-import { HubProvider } from "./HubContext";
+import { HubProvider, useHub } from "./HubContext";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -89,6 +93,7 @@ describe("Home prompt route flow", () => {
     localStorage.clear();
     testState.seeds.length = 0;
     testState.draftStorageKeys.length = 0;
+    testState.sendingStatusLabels.length = 0;
     vi.clearAllMocks();
   });
 
@@ -105,9 +110,10 @@ describe("Home prompt route flow", () => {
     expect(testState.navigate).toHaveBeenCalledWith({ to: "/", search: {}, replace: true });
     expect(testState.newGadget).not.toHaveBeenCalled();
     expect(testState.draftStorageKeys).toContain("gadgets:composer-draft:v1:user-a:home:ops");
+    expect(testState.sendingStatusLabels).toContain("Starting workspace…");
   });
 
-  it("submits the selected hub when creating and stamping the provisional workspace", async () => {
+  it("pre-creates the selected hub on composer intent and skips restamping that same hub", async () => {
     localStorage.setItem("odie:selected-hub", "support");
     container = document.createElement("div");
     document.body.append(container);
@@ -118,16 +124,63 @@ describe("Home prompt route flow", () => {
         <HomePageContent />
       </HubProvider>,
     ));
+    await act(async () => container!.querySelector("textarea")!.focus());
+    expect(testState.newGadget).toHaveBeenCalledWith("support");
+    expect(testState.updateProvisionalWorkspaceOrigin).not.toHaveBeenCalled();
+
     await act(async () => container!.querySelector("button")!.click());
 
-    expect(testState.newGadget).toHaveBeenCalledWith("support");
-    expect(testState.updateProvisionalWorkspaceOrigin).toHaveBeenCalledWith("workspace-1", "support");
+    expect(testState.newGadget).toHaveBeenCalledTimes(1);
+    expect(testState.updateProvisionalWorkspaceOrigin).not.toHaveBeenCalled();
     expect(testState.overseer.newChat).toHaveBeenCalledWith("Ship it", null, undefined, undefined, undefined);
     expect(testState.navigate).toHaveBeenCalledWith({
       to: "/workspace/$id",
       params: { id: "workspace-1" },
       search: { chat: 7 },
     });
+  });
+
+  it("stamps a pre-created provisional workspace after a last-second hub switch", async () => {
+    function SwitchableHome() {
+      const { selectHub } = useHub();
+      return <>
+        <button onClick={() => selectHub("support")}>Switch to support</button>
+        <HomePageContent />
+      </>;
+    }
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(
+      <HubProvider enabledHubs={["ops", "support"]}>
+        <SwitchableHome />
+      </HubProvider>,
+    ));
+    await act(async () => container!.querySelector("textarea")!.focus());
+    expect(testState.newGadget).toHaveBeenCalledWith("ops");
+
+    await act(async () => Array.from(container!.querySelectorAll("button")).find((button) => button.textContent === "Switch to support")!.click());
+    await act(async () => Array.from(container!.querySelectorAll("button")).find((button) => button.textContent === "Send")!.click());
+
+    expect(testState.updateProvisionalWorkspaceOrigin).toHaveBeenCalledWith("workspace-1", "support");
+    expect(testState.overseer.newChat).toHaveBeenCalledOnce();
+  });
+
+  it("ignores duplicate Home sends while workspace start is pending", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => root!.render(<HomePageContent />));
+    const sendButton = container.querySelector("button")!;
+    await act(async () => {
+      sendButton.click();
+      sendButton.click();
+    });
+
+    expect(testState.overseer.newChat).toHaveBeenCalledOnce();
   });
 
   it("opens the entitled shared Finance workspace without creating another", async () => {

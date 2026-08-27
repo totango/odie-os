@@ -8,6 +8,7 @@ import {
   Plugs,
   RocketLaunch,
   SquaresFour,
+  Ticket,
 } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from '../../AuthContext'
@@ -17,6 +18,7 @@ import { createFromFormat } from '../format/useOutputFormats'
 import { useGatekeeperApps } from '../../useGatekeeperApps'
 import { useHub } from '../../HubContext'
 import { isSupportCuratedAsset, isSupportOrigin, rankForSelectedHub } from '../../supportCuration'
+import { CREATE_JIRA_ISSUE_PROMPT } from '../../createJiraIssuePrompt'
 
 // A ⌘K command palette: jump to a workspace or a primary destination. Because it's keyboard-driven
 // and opened many times a day, it deliberately has *no* open/close animation (instant feels faster
@@ -260,6 +262,13 @@ export default function CommandPalette({
         label: 'New workspace',
         icon: <Plus size={15} weight="bold" />,
         run: () => navigate({ to: '/' }),
+      },
+      {
+        id: 'action-create-jira-issue',
+        label: 'Create Jira issue',
+        hint: 'Action',
+        icon: <Ticket size={15} />,
+        run: () => navigate({ to: '/', search: { prompt: CREATE_JIRA_ISSUE_PROMPT } }),
       },
       ...formatCommands,
       {
