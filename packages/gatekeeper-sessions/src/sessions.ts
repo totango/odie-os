@@ -11,6 +11,8 @@ import {
   type CodingSessionDevelopmentPlan,
   type CodingSessionDevelopmentStatus,
   type CodingSessionEditorCapability,
+  type CodingSessionFileUploadRequest,
+  type CodingSessionFileUploadResult,
   type CodingSessionInstanceTier,
   type CodingSessionRepository,
   type CodingSessionRuntime,
@@ -25,6 +27,7 @@ import {
   type CodingSessionToolHost,
   type CodingSessionToolResult,
   type CodingSessionsService,
+  validateCodingSessionFileUploadRequest,
 } from "@gadgets/workshop-shared/coding-sessions";
 import type { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -92,6 +95,7 @@ const MAX_SESSIONS_PER_USER = 5;
 const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
 const OPENCODE_CONFIG_DIR = "/workspace/.odie-opencode";
+const UPLOAD_DIR = "/workspace/.odie-uploads";
 const STARTUP_ALARM_DELAY_MS = 1_000;
 const STARTUP_MAX_ATTEMPTS = 3;
 const STARTUP_CLONE_CONCURRENCY = 2;
@@ -245,29 +249,18 @@ type StartupSandbox = {
   createTerminal(options: StartupTerminalOptions): Promise<Terminal>;
   listTerminals(): Promise<Terminal[]>;
   mkdir(path: string, options?: { recursive?: boolean }): Promise<unknown>;
-  writeFile(path: string, content: string): Promise<unknown>;
+  writeFile(path: string, content: string | ReadableStream<Uint8Array>, options?: { encoding?: string }): Promise<unknown>;
 };
 
 /** Isolated Linux environment used by one coding session. */
 export class CodingSessionSandbox extends Sandbox<Env> {
   sleepAfter = "10m";
-  enableInternet = false;
+  enableInternet = true;
   interceptHttps = true;
   entrypoint = [
     "sh", "-lc",
     "cp /etc/cloudflare/certs/cloudflare-containers-ca.crt /usr/local/share/ca-certificates/cloudflare-containers-ca.crt && update-ca-certificates && exec /usr/bin/tini -- /container-server/sandbox",
   ];
-  allowedHosts = [
-    "github.com",
-    "registry.npmjs.org",
-    "pypi.org",
-    "files.pythonhosted.org",
-    "proxy.golang.org",
-    "sum.golang.org",
-    "team-pi-proxy.unison.totango.com",
-    WORKSHOP_MCP_HOST,
-  ];
-
   /** Installs GitHub authentication in the Worker-side credential proxy. */
   async configureGitHubAuth(token: string): Promise<void> {
     await this.registerGitAuthInterceptor({
@@ -1657,6 +1650,46 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return { url: `${baseUrl}/c/${token}/`, expiresAt };
   }
 
+  /** Writes one validated file into this running session's private upload directory. */
+  async uploadFile(
+    owner: CodingSessionOwner,
+    request: CodingSessionFileUploadRequest,
+  ): Promise<CodingSessionFileUploadResult> {
+    const upload = validateCodingSessionFileUploadRequest(request);
+    const record = this.#get(upload.sessionId);
+    if (!record || record.status !== "running" || !record.terminalId) {
+      throw new Error("Coding session is not running.");
+    }
+    if (!(await this.#runningPrimaryTerminal(record))) {
+      throw new Error("Coding session environment expired. Restart the session to continue.");
+    }
+    await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).configure({
+      sessionId: record.id,
+      sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
+      owner,
+      repositories: record.repositories,
+    });
+
+    const current = this.#get(upload.sessionId);
+    if (!current || current.status !== "running" || current.sandboxId !== record.sandboxId ||
+        storedSessionGeneration(current) !== storedSessionGeneration(record) || current.terminalId !== record.terminalId) {
+      throw new Error("Coding session is not running.");
+    }
+    const sandbox = sandboxFor(this.env, storedSessionTier(record), record.sandboxId) as unknown as StartupSandbox;
+    const path = `${UPLOAD_DIR}/${crypto.randomUUID()}-${upload.filename}`;
+    await sandbox.mkdir(UPLOAD_DIR, { recursive: true });
+    await sandbox.writeFile(path, bytesToStream(upload.content));
+    const latest = this.#get(upload.sessionId);
+    if (!latest || latest.status !== "running" || latest.sandboxId !== record.sandboxId ||
+        storedSessionGeneration(latest) !== storedSessionGeneration(record) || latest.terminalId !== record.terminalId) {
+      throw new Error("Coding session is not running.");
+    }
+    this.#put({ ...latest, lastActiveAt: new Date() });
+    return { filename: upload.filename, path, bytesWritten: upload.content.byteLength };
+  }
+
   /** Records that the persisted primary terminal can no longer serve this session. */
   markTerminalUnavailable(
     sessionId: string, sandboxId: string, terminalId: string | undefined, reason: string, generation = 0,
@@ -2193,6 +2226,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     applicationId: string,
   ): Promise<CodingSessionApplicationCapability> {
     return registryFor(this.ctx, owner.userId).mintApplicationCapability(sessionId, applicationId);
+  }
+
+  /** Uploads one file into a running session owned by the supplied authenticated owner. */
+  uploadFile(
+    owner: CodingSessionOwner,
+    request: CodingSessionFileUploadRequest,
+  ): Promise<CodingSessionFileUploadResult> {
+    return registryFor(this.ctx, owner.userId).uploadFile(owner, request);
   }
 }
 
@@ -2760,6 +2801,15 @@ function bytesToBase64Url(value: Uint8Array): string {
   let binary = "";
   for (const byte of value) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function bytesToStream(value: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(value);
+      controller.close();
+    },
+  });
 }
 
 function bytesToHex(value: Uint8Array): string {
