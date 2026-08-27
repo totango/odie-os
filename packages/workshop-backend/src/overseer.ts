@@ -6958,9 +6958,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       };
     }
 
+    let requiredConnectionStatuses;
     try {
-      await caller.assertRequiredConnectionsHealthy();
-    } catch {
+      requiredConnectionStatuses = await caller.getRequiredConnectionStatuses();
+    } catch (error) {
+      this.impl.logger.error("failed to verify required connections for external message", {
+        event: "external.message.required-connections.verify.failed",
+        error,
+      });
+      return {
+        accepted: false,
+        message: "Could not verify the required services. Please try again later.",
+      };
+    }
+    if (requiredConnectionStatuses.some(({ state }) => state !== "healthy")) {
       return {
         accepted: false,
         message: "Reconnect the required services before using workspace agents.",
