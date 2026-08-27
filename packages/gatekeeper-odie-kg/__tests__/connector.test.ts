@@ -48,12 +48,12 @@ describe("ODIE MCP connector", () => {
     expect(description.singleton?.tsType).toContain("TotangoKg");
     expect(description.singleton?.revisionedAuthority).toBe(true);
     const authority = await user.getSingletonGatekeeperAuthority();
-    expect(authority.key).toMatch(/^odie-mcp-read-v1:/);
+    expect(authority.key).toMatch(/^odie-mcp-v2:/);
     const singleton = await user.getSingletonGatekeeperClass() as unknown as { props: unknown };
     expect(singleton.props).toMatchObject({ endpoint: ENDPOINT, accountObjectId: "account-id" });
   });
 
-  it("requires legacy-branded accounts to reconnect for the expanded read scopes", async () => {
+  it("requires legacy accounts to reconnect for the expanded scopes", async () => {
     const account = {
       getServer: vi.fn(async () => ({ endpoint: ENDPOINT, serverName: "Totango Knowledge Graph" })),
       hasCurrentScopeGrant: vi.fn(async () => false),

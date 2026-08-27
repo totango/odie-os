@@ -16,6 +16,13 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: '2026-02-02',
         compatibilityFlags: ['experimental', 'nodejs_compat'],
+        bindings: {
+          TEAM_PI_CODEX_BASE_URL: 'https://team-pi.example/proxy',
+          TEAM_PI_CODEX_HMAC_SECRET: 'team-pi-secret',
+          TEAM_PI_CODEX_MODELS:
+            'gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.5,gpt-5.4,gpt-5.4-mini',
+          TEAM_PI_CODEX_ONLY: 'true',
+        },
         kvNamespaces: ['BLUEPRINTS'],
         durableObjects: {
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },

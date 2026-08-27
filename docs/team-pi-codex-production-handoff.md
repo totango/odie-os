@@ -99,10 +99,16 @@ Required backend environment values:
 
 ```text
 TEAM_PI_CODEX_BASE_URL=https://team-pi-proxy.unison.totango.com/api/odie
-TEAM_PI_CODEX_MODELS=gpt-5.6-sol
+TEAM_PI_CODEX_MODELS=gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.5,gpt-5.4,gpt-5.4-mini
 TEAM_PI_CODEX_HMAC_SECRET=<secret>
+TEAM_PI_CODEX_ONLY=true
 CF_AI_GATEWAY_API_TOKEN=<secret>
 ```
+
+The Odie production configuration enables `TEAM_PI_CODEX_ONLY` and does not enable any
+`CF_AI_GATEWAY_PROVIDERS`. For eligible Totango accounts, model listing, preferred and quick model
+selection, and chat resolution then fail closed to the configured Team PI model IDs. The Workers AI
+binding remains deployed but is not an available LLM route for those accounts.
 
 Secret locations:
 
