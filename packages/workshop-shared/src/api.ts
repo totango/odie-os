@@ -615,6 +615,26 @@ export const EMPTY_OPENCODE_USER_CUSTOMIZATION: OpenCodeUserCustomization = {
   skills: [],
 };
 
+/** Request to upload one file into an owned running coding session. */
+export interface CodingSessionFileUploadRequest {
+  /** Opaque running session identifier returned by `createCodingSession()` or `listCodingSessions()`. */
+  sessionId: string;
+  /** User-supplied filename; servers sanitize this to a safe basename before writing. */
+  filename: string;
+  /** Exact binary bytes to write. Must be non-empty and no larger than the server upload limit. */
+  content: Uint8Array;
+}
+
+/** Result of uploading one file into a coding session. */
+export interface CodingSessionFileUploadResult {
+  /** Safe basename selected by the server after stripping directories and unsafe characters. */
+  filename: string;
+  /** Absolute sandbox path where the bytes were written under `/workspace/.odie-uploads`. */
+  path: string;
+  /** Number of bytes accepted and written to the sandbox. */
+  bytesWritten: number;
+}
+
 /** Short-lived, single-use terminal attachment capability. */
 export interface CodingSessionAttachCapability {
   /** Same-origin WebSocket URL accepted by the Sessions worker. */
@@ -816,6 +836,9 @@ export interface AuthenticatedApi extends RpcTarget {
     sessionId: string,
     applicationId: string,
   ): Promise<CodingSessionApplicationCapability>;
+
+  /** Uploads one non-empty bounded file into an owned running coding session. */
+  uploadCodingSessionFile(request: CodingSessionFileUploadRequest): Promise<CodingSessionFileUploadResult>;
 
   /** Lists coding-session tool activity, optionally narrowed to one session. */
   listCodingSessionActivity(sessionId?: string): Promise<import("./coding-sessions.js").CodingSessionActivity[]>;
