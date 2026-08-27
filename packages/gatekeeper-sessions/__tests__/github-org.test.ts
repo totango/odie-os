@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RpcStub } from "cloudflare:workers";
 import type { ApprovalQueue } from "@gadgets/workshop-shared/gatekeeper";
 import {
+  GitHubOrganizationGatekeeper,
   GitHubOrganizationSessionImpl,
   GitHubSourceRepositoryImpl,
 } from "../src/github-org.js";
@@ -49,6 +50,9 @@ describe("GitHub organization source", () => {
       expect.objectContaining({ name: "odie-os", fullName: "totango/odie-os" }),
     ]);
     expect(approval.authorizeObservation).toHaveBeenCalledOnce();
+    expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
+    }));
   });
 
   it("reads bounded UTF-8 source and records the exact path", async () => {
@@ -76,7 +80,16 @@ describe("GitHub organization source", () => {
     });
     expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({
       description: expect.stringContaining("src/answer.ts"),
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
     }));
+  });
+
+  it("declares Totango SSO sharing and admits observers", async () => {
+    const gatekeeper = Object.create(GitHubOrganizationGatekeeper.prototype) as GitHubOrganizationGatekeeper;
+    await expect(gatekeeper.describe()).resolves.toMatchObject({
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
+    });
+    await expect(gatekeeper.addObserver("observer", {} as never)).resolves.toBeUndefined();
   });
 
   it("rejects traversal, oversized files, and excessive limits", async () => {

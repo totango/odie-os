@@ -217,6 +217,12 @@ export class SharingManager {
     return result;
   }
 
+  /** True if the user currently has an explicit user-to-user invite edge, not just a share key. */
+  hasDirectInvite(profileId: string): boolean {
+    return (this.storage.collaborators.get(profileId)?.addedBy ?? [])
+      .some(edge => edge.type === "user");
+  }
+
   /**
    * Redeem a raw share key on behalf of a user opening the gadget. If the key exists, ensures the
    * user is a collaborator with a `shareKey` edge for its link (adding the edge if missing, or

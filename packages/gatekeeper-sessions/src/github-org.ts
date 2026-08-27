@@ -15,6 +15,8 @@ import type {
   GatekeeperUser,
   GatekeeperUserVerifier,
   GatekeeperVendor,
+  ObservationDescription,
+  ObservationDomainSharingPolicy,
   ResourceConfiguratorFrame,
   ResourceDescription,
   SupportedResource,
@@ -47,6 +49,14 @@ const MAX_SEARCH_RESULTS = 50;
 const MAX_TREE_ENTRIES = 1_000;
 const MAX_FILE_BYTES = 256 * 1024;
 const TOKEN_CACHE_KEY = "githubOrgToken";
+const TOTANGO_DOMAIN_SHARING_POLICY = {
+  type: "verified-sso-email-domain",
+  emailDomain: "totango.com",
+} as const satisfies ObservationDomainSharingPolicy;
+
+function orgObservation(title: string, description: string): ObservationDescription {
+  return { title, description, domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY };
+}
 
 const GITHUB_ICON = {
   url: "data:image/svg+xml," + encodeURIComponent(
@@ -93,10 +103,10 @@ export class GitHubOrganizationSessionImpl extends RpcTarget implements GitHubOr
       .filter(repo => `${repo.name}\n${repo.description ?? ""}`.toLowerCase().includes(normalizedQuery))
       .slice(0, boundedLimit)
       .map(repositorySummary);
-    await this.approvalQueue.authorizeObservation({
-      title: "Search Totango GitHub repositories",
-      description: `Searched installed repositories for \`${normalizedQuery}\` and found ${matches.length} result(s).`,
-    });
+    await this.approvalQueue.authorizeObservation(orgObservation(
+      "Search Totango GitHub repositories",
+      `Searched installed repositories for \`${normalizedQuery}\` and found ${matches.length} result(s).`,
+    ));
     return matches;
   }
 
@@ -233,7 +243,7 @@ export class GitHubSourceRepositoryImpl extends RpcTarget implements GitHubSourc
   }
 
   private authorize(title: string, description: string): Promise<void> {
-    return this.approvalQueue.authorizeObservation({ title, description });
+    return this.approvalQueue.authorizeObservation(orgObservation(title, description));
   }
 }
 
@@ -253,6 +263,7 @@ export class GitHubOrganizationGatekeeper
         "questions.",
       suggestedBindingName: "GITHUB_ORG",
       tsType: "GitHubOrganizationSession",
+      domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY,
     };
   }
 
@@ -272,9 +283,8 @@ export class GitHubOrganizationGatekeeper
       () => this.installationToken(), approvalQueue.dup());
   }
 
-  /** Refuses sharing because this broad binding can reveal private organization source. */
+  /** Admits observers after the Workshop verifies the Totango SSO domain policy. */
   async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
-    throw new Error("The Totango GitHub organization source binding cannot be shared.");
   }
 
   /** Removes no observer state because observers are never admitted. */

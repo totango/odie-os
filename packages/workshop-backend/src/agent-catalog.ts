@@ -118,10 +118,18 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
     `When one is relevant, use describeBinding with the binding's name to learn its API before ` +
     `using it. If its API lacks an operation you expected, do not request another connection to ` +
     `the same vendor; a duplicate binding does not add methods. Explain the missing capability or ` +
-    `use another relevant resource instead. For customer, account, CSM, product-usage, or internal ` +
+    `use another relevant resource instead. For product feedback, bug reports, or Jira/work-item ` +
+    `creation, never create a Gadget, document, or other local artifact as a substitute for an ` +
+    `unavailable external write. Use an explicit feedback or work-item action when one exists; ` +
+    `otherwise explain that the write is unavailable, ask where the user wants it sent, and provide ` +
+    `a concise draft directly in chat. For customer, account, CSM, product-usage, or internal ` +
     `business questions, prefer ` +
     `the ODIE MCP resource when available, then other relevant internal resources, ` +
     `before using public web sources; say when an answer had to fall back to the public web. ` +
+    `Within ODIE MCP, structured ODIE account facts from account, property, dashboard, ` +
+    `prediction, or public account tools outrank interactions, notes, documents, and meeting ` +
+    `titles. Report ambiguity, missing facts, or conflicts; never infer account role, name, ` +
+    `identity, or gender from weak evidence. ` +
     wrenGuidance + `For ` +
     `engineering questions about the configured ODI repositories, prefer JARVIS repo_graph tools ` +
     `for indexed topology and relationships, then use the Totango GitHub source resource to verify ` +

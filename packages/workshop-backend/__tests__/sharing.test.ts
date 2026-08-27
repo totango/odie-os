@@ -97,6 +97,15 @@ describe("authorization", () => {
     expect(mgr.getEffectiveRole("b")).toBe("build");
   });
 
+  it("distinguishes explicit user invites from share-key access", () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "k1", OWNER);
+    seedCollaborator(storage, "link-user", [keyEdge("k1")]);
+    seedCollaborator(storage, "invited-user", [userEdge(OWNER)]);
+    expect(mgr.hasDirectInvite("link-user")).toBe(false);
+    expect(mgr.hasDirectInvite("invited-user")).toBe(true);
+  });
+
   it("hasAnyShares reflects current reachability, not table membership", () => {
     let { storage, mgr } = makeManager();
     expect(mgr.hasAnyShares()).toBe(false);
