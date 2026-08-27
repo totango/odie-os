@@ -41,7 +41,7 @@ export default function SessionsSidebar({ collapsed = false }: { collapsed?: boo
         {!loaded ? <p className="px-2 py-4 text-sm text-kumo-subtle">Loading…</p> : visibleSessions.length === 0 ? (
           <p className="px-2 py-8 text-center text-sm text-kumo-subtle">{showArchived ? 'No archived sessions.' : 'No open sessions.'}</p>
         ) : visibleSessions.map((session) => (
-          <SessionRow key={session.id} session={session} active={activeId === session.id} onOpen={() => session.status === 'running' && setActiveId(session.id)} onArchive={() => archiveSession(session.id)} />
+          <SessionRow key={session.id} session={session} active={activeId === session.id} onOpen={() => setActiveId(session.id)} onArchive={() => archiveSession(session.id)} />
         ))}
       </div>
     </div>
@@ -62,7 +62,7 @@ function SessionRow({ session, active, onOpen, onArchive }: { session: CodingSes
       {!session.archivedAt && (
         <WorkshopIconButton aria-label={`Archive ${session.title}`} onClick={onArchive} className="opacity-0 group-hover:opacity-100 focus:opacity-100"><Archive size={14} /></WorkshopIconButton>
       )}
-      {session.status === 'running' && <CaretRight size={14} className="mt-1 text-kumo-inactive" />}
+      {!session.archivedAt && <CaretRight size={14} className="mt-1 text-kumo-inactive" />}
     </div>
   )
 }

@@ -6,6 +6,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import CommandPalette from './CommandPalette'
+import { CREATE_JIRA_ISSUE_PROMPT } from '../../createJiraIssuePrompt'
 
 const authenticatedApi = {
   listGadgets: vi.fn<() => Promise<never[]>>(async () => []),
@@ -61,5 +62,27 @@ describe('CommandPalette', () => {
     await act(async () => { button.click(); await Promise.resolve() })
 
     expect(router.state.location.pathname).toBe('/gatekeepers/team-pi')
+  })
+
+  it('seeds the Home composer for first-class Jira creation', async () => {
+    const rootRoute = createRootRoute({ component: () => <CommandPalette open onClose={() => {}} /> })
+    const router = createRouter({
+      history: createMemoryHistory({ initialEntries: ['/workspaces'] }),
+      routeTree: rootRoute,
+    })
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+
+    await act(async () => root!.render(<RouterProvider router={router} />))
+    expect(container.textContent).toContain('Create Jira issue')
+
+    const button = [...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((node) => node.textContent?.includes('Create Jira issue'))
+    if (!button) throw new Error('Missing Create Jira issue command')
+    await act(async () => { button.click(); await Promise.resolve() })
+
+    expect(router.state.location.pathname).toBe('/')
+    expect(router.state.location.search).toEqual({ prompt: CREATE_JIRA_ISSUE_PROMPT })
   })
 })

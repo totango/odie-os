@@ -64,11 +64,20 @@ export function RequiredConnectionsGate({ authenticatedApi, pathname, children }
   useEffect(() => {
     if (escapeRoute) return
     let cancelled = false
+    let refreshScheduled = false
     let subscription: { [Symbol.dispose](): void } | null = null
+    const scheduleRefresh = () => {
+      if (cancelled || refreshScheduled) return
+      refreshScheduled = true
+      queueMicrotask(() => {
+        refreshScheduled = false
+        if (!cancelled) void refresh()
+      })
+    }
     const subscriber = new AccountsSubscriberAdapter({
-      add() { if (!cancelled) void refresh() },
-      remove() { if (!cancelled) void refresh() },
-      ready() { if (!cancelled) void refresh() },
+      add: scheduleRefresh,
+      remove: scheduleRefresh,
+      ready: scheduleRefresh,
     })
 
     authenticatedApi.subscribeConnectedAccounts(subscriber, { includeForcedAutoProvisionedAccounts: true })

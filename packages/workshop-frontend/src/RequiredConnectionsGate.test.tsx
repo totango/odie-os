@@ -149,6 +149,8 @@ describe('RequiredConnectionsGate', () => {
 
     await act(async () => {
       api.subscriber!.add(1, { displayName: 'Team PI' } as never, { displayName: 'Team PI' } as never, [], true, 'team_pi')
+    })
+    await act(async () => {
       api.subscriber!.ready()
     })
     expect(rendered.textContent).toContain('Unlocked app')
@@ -169,6 +171,22 @@ describe('RequiredConnectionsGate', () => {
 
     await act(async () => {
       api.subscriber!.add(1, { displayName: 'GitHub' } as never, { displayName: 'GitHub' } as never, [], true, 'github')
+    })
+
+    expect(api.getRequiredConnectionStatuses).toHaveBeenCalledTimes(2)
+    expect(rendered.textContent).toContain('Unlocked app')
+  })
+
+  it('coalesces connected-account add and ready bursts into one required-status refresh', async () => {
+    const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
+    api.getRequiredConnectionStatuses
+      .mockResolvedValueOnce([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
+      .mockResolvedValueOnce([{ vendorId: 'github', displayName: 'GitHub', state: 'healthy' }])
+    const rendered = await renderGate(api, '/')
+
+    await act(async () => {
+      api.subscriber!.add(1, { displayName: 'GitHub' } as never, { displayName: 'GitHub' } as never, [], true, 'github')
+      api.subscriber!.ready()
     })
 
     expect(api.getRequiredConnectionStatuses).toHaveBeenCalledTimes(2)

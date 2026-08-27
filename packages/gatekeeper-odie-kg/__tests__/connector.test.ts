@@ -25,7 +25,9 @@ describe("ODIE MCP connector", () => {
       displayName: "ODIE MCP",
       providesAuth: true,
     });
-    expect(await vendor.getSupportedResources()).toHaveLength(1);
+    expect(await vendor.getSupportedResources()).toEqual([
+      expect.objectContaining({ urlPattern: ENDPOINT, providedBySingleton: true }),
+    ]);
   });
 
   it("turns a connected user account into an ambient singleton", async () => {
@@ -51,6 +53,12 @@ describe("ODIE MCP connector", () => {
     expect(authority.key).toMatch(/^odie-mcp-v2:/);
     const singleton = await user.getSingletonGatekeeperClass() as unknown as { props: unknown };
     expect(singleton.props).toMatchObject({ endpoint: ENDPOINT, accountObjectId: "account-id" });
+    await expect(user.getGatekeeperClassFor(ENDPOINT)).resolves.toMatchObject({
+      resource: { urlPattern: ENDPOINT, providedBySingleton: true },
+      class: { props: { endpoint: ENDPOINT, accountObjectId: "account-id" } },
+    });
+    await expect(user.getGatekeeperClassFor("https://example.com/api/mcp/odie"))
+      .rejects.toThrow(/unsupported ODIE MCP resource/i);
   });
 
   it("requires legacy accounts to reconnect for the expanded scopes", async () => {
@@ -76,10 +84,9 @@ describe("ODIE MCP connector", () => {
     await expect(user.getSingletonGatekeeperClass()).rejects.toThrow(/reconnect ODIE MCP/i);
   });
 
-  it("refuses observers and uses the validated MCP session subclass", async () => {
+  it("admits policy-verified observers and uses the validated MCP session subclass", async () => {
     const facet = Object.create(OdieKgGatekeeper.prototype) as OdieKgGatekeeper;
-    await expect(facet.addObserver("observer", {} as never))
-      .rejects.toThrow(/only be opened by its owner/i);
+    await expect(facet.addObserver("observer", {} as never)).resolves.toBeUndefined();
     expect(OdieKgSession.prototype).toBeInstanceOf(McpSessionBase);
   });
 

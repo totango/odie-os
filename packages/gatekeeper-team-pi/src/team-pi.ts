@@ -18,6 +18,8 @@ import {
   type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
   type ObservationAuthorizer,
+  type ObservationDescription,
+  type ObservationDomainSharingPolicy,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
@@ -45,6 +47,8 @@ import APP_HTML from "./generated/app.txt";
 import type {
   TeamPiActionResult,
   TeamPiConnection,
+  TeamPiCreateJiraIssueRequest,
+  TeamPiCreateJiraIssueResult,
   TeamPiQueuedAction,
   TeamPiSession,
   TeamPiSkill,
@@ -83,6 +87,14 @@ import type {
 type TeamPiLogFields = { event?: string; vendorId?: string; accountId?: string; status?: number; error?: unknown };
 
 const logger = createLogger<TeamPiLogFields>({ component: "gatekeeper.team-pi", vendorId: "team-pi" });
+const TOTANGO_DOMAIN_SHARING_POLICY = {
+  type: "verified-sso-email-domain",
+  emailDomain: "totango.com",
+} as const satisfies ObservationDomainSharingPolicy;
+
+function teamPiObservation(title: string, description: string): ObservationDescription {
+  return { title, description, domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY };
+}
 const ICON = { url: "data:image/svg+xml," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'><rect width='256' height='256' rx='56' fill='#111827'/><text x='50%' y='54%' dominant-baseline='middle' text-anchor='middle' font-family='Arial' font-size='82' fill='white'>PI</text></svg>") };
 const WORK_ITEMS_ICON = { url: "data:image/svg+xml," + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'><rect width='256' height='256' rx='56' fill='#0f172a'/><rect x='58' y='46' width='140' height='164' rx='18' fill='#f8fafc'/><path d='M90 42h76a18 18 0 0 1 18 18v10H72V60a18 18 0 0 1 18-18Z' fill='#38bdf8'/><path d='m82 110 14 14 28-32' fill='none' stroke='#10b981' stroke-width='13' stroke-linecap='round' stroke-linejoin='round'/><path d='M138 108h36M138 150h36M82 154l13 13 27-31' fill='none' stroke='#334155' stroke-width='12' stroke-linecap='round' stroke-linejoin='round'/></svg>") };
 const CONNECT_TIMEOUT_MS = 15 * 60 * 1000;
@@ -111,8 +123,9 @@ const ACCOUNT_RESOURCE: SupportedResource = {
 type StoredDevice = { nonce: string; deviceCode: string; userCode: string; verificationUri: string; verificationUriComplete?: string; expiresAt: number; intervalMs: number };
 type StoredIdentity = { displayName?: string; uniqueName?: string };
 type Props = { accountId: string };
-type PendingAction = { kind: "installSkill"; skillId: string } | { kind: "startConnection"; provider: TeamPiProvider };
+type PendingAction = { kind: "installSkill"; skillId: string } | { kind: "startConnection"; provider: TeamPiProvider } | { kind: "createJiraIssue"; request: NormalizedCreateJiraIssueRequest };
 type ApplyingAction = PendingAction & { claimedAt: number };
+type NormalizedCreateJiraIssueRequest = Required<Pick<TeamPiCreateJiraIssueRequest, "projectKey" | "issueType" | "summary" | "description">> & Pick<TeamPiCreateJiraIssueRequest, "priority">;
 type WorkItemProviderSearchResult =
   | { source: WorkItemProviderKind; page: WorkItemSearchPage }
   | { source: WorkItemProviderKind; error: WorkItemProviderError };
@@ -125,7 +138,7 @@ const PROVIDER_CATALOG_ENTRIES: AgentCatalogEntry[] = [
   { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
   { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
   { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
-  { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through the read-only Team PI workItemsSearch(request) API." },
+  { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through Team PI Work Items, and request approved Jira issue creation with createJiraIssue(request)." },
   { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
 ];
 
@@ -176,7 +189,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       logo: ICON,
       color: "#111827",
       tagline: "Use your per-user Team PI skills and connected work apps",
-      description: "Connect Team PI with Auth0 device authorization to expose approved per-user skills, Work Items/Jira search, calendar, Gmail, Chorus, Zendesk, and Salesforce reads to agents. Management UI writes stay admin-only.",
+      description: "Connect Team PI with Auth0 device authorization to expose approved per-user skills, Work Items/Jira search, approval-backed Jira issue creation, calendar, Gmail, Chorus, Zendesk, and Salesforce reads to agents. Management UI writes stay admin-only.",
     };
   }
 
@@ -565,7 +578,7 @@ export class TeamPiVerifier extends WorkerEntrypoint<Env> implements GatekeeperU
 export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<TeamPiSession> {
   #account(): DurableObjectStub<TeamPiAccount> { return this.ctx.exports.TeamPiAccount.get(this.ctx.exports.TeamPiAccount.idFromString(this.ctx.props.accountId)); }
   #api(): TeamPiApi { return new TeamPiApi(forceRefresh => this.#account().getApiCredentials(forceRefresh), resolveConfig(this.env).baseUrl); }
-  async describe(): Promise<ResourceDescription> { return { url: ACCOUNT_URL, title: "Team PI", snippet: "Private Team PI singleton with approved reads, Work Items search, and staged non-agent writes.", suggestedBindingName: "TEAM_PI", tsType: "TeamPiSession" }; }
+  async describe(): Promise<ResourceDescription> { return { url: ACCOUNT_URL, title: "Team PI", snippet: "Totango SSO-shareable Team PI singleton with approved reads, Work Items search, approval-backed Jira issue creation, and staged non-agent writes.", suggestedBindingName: "TEAM_PI", tsType: "TeamPiSession", domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY }; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TeamPiSession> { return new TeamPiSessionImpl(this.#api(), approvalQueue.dup(), this.ctx.storage.kv); }
@@ -573,20 +586,17 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
     try {
       const skills = await this.#api().listSkills({ limit: 12 });
       const entries = [...catalogEntries("skill", skillsFromEnvelope(skills)), ...PROVIDER_CATALOG_ENTRIES];
-      await authorizer.authorizeObservation({
-        title: "Read Team PI skill, provider, and Work Items catalog",
-        description: "Listed bounded Team PI skill manifests, provider capabilities, and the read-only Work Items/Jira search capability for agent discovery.",
-      });
+      await authorizer.authorizeObservation(teamPiObservation(
+        "Read Team PI skill, provider, and Work Items catalog",
+        "Listed bounded Team PI skill manifests, provider capabilities, Work Items/Jira search, and approval-backed Jira issue creation capability for agent discovery.",
+      ));
       return boundAgentCatalog(entries);
     } catch (error) {
       logger.warn("team pi catalog fallback used", {
         event: "team_pi.catalog.fallback.used", accountId: this.ctx.props.accountId, error,
       });
       const message = boundString(error instanceof Error ? error.message : String(error), 512);
-      await authorizer.authorizeObservation({
-        title: "Team PI catalog unavailable",
-        description: message,
-      });
+      await authorizer.authorizeObservation(teamPiObservation("Team PI catalog unavailable", message));
       return boundAgentCatalog([{
         id: "team-pi:catalog-unavailable",
         title: "Team PI unavailable",
@@ -594,23 +604,20 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
       }]);
     }
   }
-  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> { throw new Error("Team PI observations are private to the connected user and cannot be observed by collaborators."); }
+  async addObserver(_id: string, _user: Fetcher<GatekeeperUserVerifier>): Promise<void> {}
   async removeObserver(_id: string): Promise<void> {}
   async applyAction(action: number): Promise<void> {
     const pending = claimPendingAction(this.ctx.storage.kv, action);
     if (!pending) return;
     try {
-      const raw = pending.kind === "installSkill" ? await this.#api().installSkill(pending.skillId) : await this.#api().startConnection(pending.provider);
-      const result = pending.kind === "installSkill"
-        ? sanitizeInstallSkillResult(raw)
-        : sanitizeStartConnectionResult(pending.provider, raw, resolveConfig(this.env).baseUrl);
+      const raw = await applyPendingAction(this.#api(), pending);
+      const result = sanitizePendingActionResult(pending, raw, resolveConfig(this.env).baseUrl);
       this.ctx.storage.kv.put(resultKey(action), { status: "ready", result });
     } catch (error) {
-      this.ctx.storage.kv.put(resultKey(action), {
-        status: "unknown",
-        message: boundString(error instanceof Error ? error.message : String(error), 512),
-        canRetry: false,
-      });
+      const message = boundString(error instanceof Error ? error.message : String(error), 512);
+      this.ctx.storage.kv.put(resultKey(action), pending.kind === "createJiraIssue" && isDefiniteCreateRejection(error)
+        ? { status: "failed", message }
+        : { status: "unknown", message, canRetry: false });
     }
     this.ctx.storage.kv.delete(applyingKey(action));
   }
@@ -639,6 +646,14 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
   async salesforceAccount(accountId: string): Promise<unknown> { return this.read("Read Team PI Salesforce account", `Read Salesforce account ${accountId}.`, () => this.api.salesforceAccount(accountId)); }
   async installSkill(skillId: string): Promise<TeamPiQueuedAction> { return this.queue({ kind: "installSkill", skillId }, `Install Team PI skill ${skillId}`, `Install Team PI skill \`${escapeMd(skillId)}\`.`); }
   async startConnection(provider: TeamPiProvider): Promise<TeamPiQueuedAction> { const safe = safeProvider(provider); return this.queue({ kind: "startConnection", provider: safe }, `Start Team PI connection ${safe}`, `Start Team PI connection \`${escapeMd(safe)}\`.`); }
+  async createJiraIssue(request: TeamPiCreateJiraIssueRequest): Promise<TeamPiQueuedAction<TeamPiCreateJiraIssueResult>> {
+    const normalized = normalizeCreateJiraIssueRequest(request);
+    return this.queue(
+      { kind: "createJiraIssue", request: normalized },
+      `Create Jira issue ${normalized.projectKey} ${normalized.issueType}`,
+      createJiraIssueApprovalDescription(normalized),
+    );
+  }
   async getActionResult(actionId: number): Promise<TeamPiActionResult> { return getStoredActionResult(this.kv, actionId); }
   async workItemsSearch(request: WorkItemSearchRequest): Promise<WorkItemSearchPage> { return this.read("Search Team PI Work Items", "Searched Jira and Zendesk Work Items through Team PI.", () => searchWorkItems(this.api, request)); }
   async readZendeskTicket(request: ZendeskTicketReadRequest): Promise<WorkItemRead> {
@@ -661,9 +676,10 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
   async searchZendeskTicketMemory(request: ZendeskTicketMemorySearchRequest): Promise<ZendeskTicketMemorySearchResult> {
     const search = await readZendeskTicketMemory(this.kv, request);
     await this.approvalQueue.authorizeObservation({
-      title: "Search Team PI Zendesk ticket memory",
-      description: "Searched minimized local Zendesk ticket memory for one exact strict partition. Results are non-authoritative and require live read before use.",
-      prohibitAllSharing: true,
+      ...teamPiObservation(
+        "Search Team PI Zendesk ticket memory",
+        "Searched minimized local Zendesk ticket memory for one exact strict partition. Results are non-authoritative and require live read before use.",
+      ),
     });
     try {
       touchZendeskTicketMemoryPartition(this.kv, search.keyHash, Date.now());
@@ -675,14 +691,14 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
     }
     return { items: search.items };
   }
-  private async read<T>(title: string, description: string, fn: () => Promise<T>): Promise<T> { const result = await fn(); await this.approvalQueue.authorizeObservation({ title, description, prohibitAllSharing: true }); return result; }
+  private async read<T>(title: string, description: string, fn: () => Promise<T>): Promise<T> { const result = await fn(); await this.approvalQueue.authorizeObservation(teamPiObservation(title, description)); return result; }
   private async queue(action: PendingAction, title: string, description: string): Promise<TeamPiQueuedAction> {
     const actionId = (this.kv.get<number>("nextActionId") ?? 1);
     this.kv.put("nextActionId", actionId + 1);
     this.kv.put(pendingKey(actionId), action);
     this.kv.put(resultKey(actionId), { status: "pending" });
     try {
-      await this.approvalQueue.submitAction(actionId, { title, description, implementsRevert: false, awaitDecision: true, actionKind: { tag: `team-pi.${action.kind}`, label: action.kind === "installSkill" ? "Install Team PI skill" : "Start Team PI connection" } });
+      await this.approvalQueue.submitAction(actionId, { title, description, implementsRevert: false, awaitDecision: true, actionKind: actionKindFor(action) });
     } catch (error) {
       this.kv.delete(pendingKey(actionId));
       this.kv.delete(resultKey(actionId));
@@ -690,6 +706,82 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
     }
     return { actionId, status: "pending", pollAfterMs: 1000 };
   }
+}
+
+async function applyPendingAction(api: TeamPiApi, pending: PendingAction): Promise<unknown> {
+  if (pending.kind === "installSkill") return api.installSkill(pending.skillId);
+  if (pending.kind === "startConnection") return api.startConnection(pending.provider);
+  if (pending.kind === "createJiraIssue") return api.workItemsCreateJiraIssue(pending.request);
+  throw new Error("Unknown Team PI action kind.");
+}
+
+function sanitizePendingActionResult(pending: PendingAction, raw: unknown, baseUrl: string): unknown {
+  if (pending.kind === "installSkill") return sanitizeInstallSkillResult(raw);
+  if (pending.kind === "startConnection") return sanitizeStartConnectionResult(pending.provider, raw, baseUrl);
+  if (pending.kind === "createJiraIssue") return createJiraIssueResultFromEnvelope(raw);
+  throw new Error("Unknown Team PI action kind.");
+}
+
+function actionKindFor(action: PendingAction): ActionKind {
+  if (action.kind === "installSkill") return { tag: "team-pi.installSkill", label: "Install Team PI skill" };
+  if (action.kind === "startConnection") return { tag: "team-pi.startConnection", label: "Start Team PI connection" };
+  if (action.kind === "createJiraIssue") return { tag: "team-pi.createJiraIssue", label: "Create Jira issue" };
+  throw new Error("Unknown Team PI action kind.");
+}
+
+function isDefiniteCreateRejection(error: unknown): boolean {
+  return error instanceof TeamPiApiError && [400, 401, 403, 404, 422].includes(error.status ?? 0);
+}
+
+function normalizeCreateJiraIssueRequest(request: TeamPiCreateJiraIssueRequest): NormalizedCreateJiraIssueRequest {
+  const projectKey = normalizeRequiredJiraString(request?.projectKey ?? "AI", "projectKey", 40, false).toUpperCase();
+  const issueType = normalizeRequiredJiraString(request?.issueType ?? "Story", "issueType", 80, false);
+  const summary = normalizeRequiredJiraString(request?.summary, "summary", 300, false);
+  const description = normalizeRequiredJiraString(request?.description, "description", WORK_ITEM_BODY_MAX, true).replace(/\r\n?/g, "\n");
+  if (description.split("\n").length > 80) {
+    throw new Error("Team PI Jira description must contain at most 80 lines.");
+  }
+  const priority = typeof request?.priority === "string" ? normalizeOptionalJiraString(request.priority, 80) : undefined;
+  return priority ? { projectKey, issueType, summary, description, priority } : { projectKey, issueType, summary, description };
+}
+
+function normalizeRequiredJiraString(value: unknown, name: string, max: number, allowMultiline: boolean): string {
+  if (typeof value !== "string") throw new Error(`Team PI Jira ${name} is required.`);
+  const out = boundString(value.trim(), max);
+  if (!out) throw new Error(`Team PI Jira ${name} is required.`);
+  if (hasJiraControlCharacter(out, allowMultiline)) throw new Error(`Invalid Team PI Jira ${name}.`);
+  return out;
+}
+
+function normalizeOptionalJiraString(value: string, max: number): string | undefined {
+  const out = boundString(value.trim(), max);
+  if (!out) return undefined;
+  if (hasJiraControlCharacter(out, false)) throw new Error("Invalid Team PI Jira field.");
+  return out;
+}
+
+function hasJiraControlCharacter(value: string, allowMultiline: boolean): boolean {
+  for (let i = 0; i < value.length; ++i) {
+    const code = value.charCodeAt(i);
+    if (code < 32 && !(allowMultiline && (code === 9 || code === 10 || code === 13))) return true;
+  }
+  return false;
+}
+
+function createJiraIssueApprovalDescription(request: NormalizedCreateJiraIssueRequest): string {
+  const lines = [
+    "Create a Jira issue through Team PI Work Items with these exact submitted details:",
+    `- Project key: ${escapeMd(request.projectKey)}`,
+    `- Issue type: ${escapeMd(request.issueType)}`,
+    `- Summary: ${escapeMd(request.summary)}`,
+  ];
+  if (request.priority) lines.push(`- Priority: ${escapeMd(request.priority)}`);
+  lines.push("- Description:", escapeMd(request.description));
+  return lines.join("\n");
+}
+
+function createJiraIssueResultFromEnvelope(value: unknown): TeamPiCreateJiraIssueResult {
+  return detailFromEnvelope(value);
 }
 
 function publicDevice(device: StoredDevice): Omit<StoredDevice, "nonce" | "deviceCode"> {
@@ -1484,7 +1576,9 @@ export function rejectPendingAction(kv: DurableObjectStorage["kv"], action: numb
   kv.delete(pendingKey(action));
   kv.put(resultKey(action), { status: "rejected" });
 }
-function escapeMd(value: string): string { return value.replace(/[\\`*_{}[\]()#+\-.!|>]/g, "\\$&"); }
+function escapeMd(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/[\\`*_{}[\]()#+\-.!|>]/g, "\\$&");
+}
 
 function connectPage(accountId: string, nonce: string): { body: string; csp: string } {
   void accountId;

@@ -12,6 +12,10 @@ import {
   type GatekeeperUser,
   type GatekeeperUserVerifier,
   type GatekeeperVendor as GatekeeperVendorIface,
+  type HookController,
+  type HookDescription,
+  type ObservationDescription,
+  type ObservationDomainSharingPolicy,
   type ResourceConfiguratorFrame,
   type ResourceDescription,
   type SupportedResource,
@@ -83,6 +87,12 @@ const VENDOR_ID = "github";
 const logger = obsContext.createLogger({
   component: "gatekeeper.github", vendorId: VENDOR_ID,
 });
+
+const TOTANGO_GITHUB_ORG = "totango";
+const TOTANGO_DOMAIN_SHARING_POLICY = {
+  type: "verified-sso-email-domain",
+  emailDomain: "totango.com",
+} as const satisfies ObservationDomainSharingPolicy;
 
 type Env = Cloudflare.Env & {
   BASE_URL?: string;
@@ -1467,6 +1477,29 @@ export class GitHubVerifier extends WorkerEntrypoint<Env, GitHubVerifierProps>
       if (repos.length < VERIFIER_REPOSITORY_PAGE_SIZE) break;
     }
     return results;
+  }
+}
+
+class DomainSharingApprovalQueue extends RpcTarget implements ApprovalQueue {
+  constructor(private readonly inner: RpcStub<ApprovalQueue>, private readonly ownsInner = false) { super(); }
+  dup(): RpcStub<ApprovalQueue> {
+    return new DomainSharingApprovalQueue(this.inner.dup(), true) as unknown as RpcStub<ApprovalQueue>;
+  }
+  [Symbol.dispose](): void { if (this.ownsInner) this.inner[Symbol.dispose](); }
+  async authorizeObservation(description: ObservationDescription): Promise<void> {
+    await this.inner.authorizeObservation({
+      ...description,
+      domainSharingPolicy: description.domainSharingPolicy ?? TOTANGO_DOMAIN_SHARING_POLICY,
+    });
+  }
+  getSessionSurface(): Promise<"chat" | "code"> { return this.inner.getSessionSurface(); }
+  submitAction(action: number, description: ActionDescription): Promise<void> {
+    return this.inner.submitAction(action, description);
+  }
+  bindHook<Hook extends RpcTarget>(
+      _controller: Fetcher<HookController<Hook>>, _callback: RpcStub<Hook>,
+      _description: HookDescription): Promise<void> {
+    throw new Error("GitHub sessions cannot register persistent hooks.");
   }
 }
 
@@ -3271,6 +3304,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async describe(): Promise<ResourceDescription> {
+    const domainSharingPolicy = this.ctx.props.owner.toLowerCase() === TOTANGO_GITHUB_ORG
+      ? TOTANGO_DOMAIN_SHARING_POLICY
+      : undefined;
     switch (this.ctx.props.resourceKind) {
       case "repo": {
         const repo = await this.#getRepoMetadata();
@@ -3280,6 +3316,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           snippet: repo.description ?? `GitHub repository ${repo.fullName}`,
           suggestedBindingName: "GITHUB_REPO",
           tsType: "GitHubRepo",
+          domainSharingPolicy,
         };
       }
       case "issue": {
@@ -3290,6 +3327,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           snippet: textSnippet(issue.bodyMarkdown, `${issue.state} issue in ${issue.repo.fullName}`),
           suggestedBindingName: "GITHUB_ISSUE",
           tsType: "GitHubIssue",
+          domainSharingPolicy,
         };
       }
       case "pull": {
@@ -3300,6 +3338,7 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
           snippet: textSnippet(pull.bodyMarkdown, `${pull.state} pull request in ${pull.repo.fullName}`),
           suggestedBindingName: "GITHUB_PULL_REQUEST",
           tsType: "GitHubPullRequest",
+          domainSharingPolicy,
         };
       }
     }
@@ -3332,7 +3371,9 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
-    const queue = approvalQueue.dup();
+    const queue = this.ctx.props.owner.toLowerCase() === TOTANGO_GITHUB_ORG
+      ? new DomainSharingApprovalQueue(approvalQueue) as unknown as RpcStub<ApprovalQueue>
+      : approvalQueue.dup();
     switch (this.ctx.props.resourceKind) {
       case "repo":
         return new GitHubRepoSessionImpl(this, queue);
