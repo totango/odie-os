@@ -15,6 +15,7 @@ import type {
   CreateCodingSessionRequest,
   OpenCodeUserCustomization,
 } from "./api.js";
+import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult } from "./product-feedback.js";
 
 /** Maximum number of repositories accepted for one coding session. */
 export const MAX_CODING_SESSION_REPOSITORIES = 8;
@@ -125,6 +126,52 @@ export interface CodingSessionToolHost extends WorkerEntrypoint {
   ): Promise<CodingSessionToolResult>;
 }
 
+/** Server-collected, sanitized evidence bundle for first-party product feedback automation. */
+export interface ProductFeedbackEvidenceBundle {
+  /** Stable evidence identifier minted by Workshop. */
+  id: string;
+  /** Feedback category selected by the user. */
+  kind: "bug" | "feedback";
+  /** Bounded title authored by the submitter. */
+  title: string;
+  /** Bounded details authored by the submitter. */
+  description: string;
+  /** Verified submitting user email. */
+  submitterEmail: string;
+  /** Authenticated owner used only to authorize the isolated model relay and repository policy. */
+  owner: CodingSessionOwner;
+  /** Normalized route pathname only. */
+  pathname: string;
+  /** Server-authorized optional workspace context. */
+  workspace?: {
+    /** Workspace durable object ID. */
+    id: string;
+    /** Workspace title. */
+    title?: string;
+    /** Current chat ID, when supplied and authorized. */
+    chatId?: number;
+    /** Bounded visible transcript summary or omission notice. */
+    transcript?: string[];
+    /** Bounded sanitized action or observation summaries. */
+    activity?: string[];
+    /** Omission reasons for policy-tainted or unavailable evidence. */
+    omissions?: string[];
+  };
+  /** Bounded frontend diagnostics captured from the current browser tab. */
+  diagnostics?: Array<{ timestamp: Date; level: "log" | "info" | "warn" | "error"; message: string }>;
+  /** Bounded coding-session summaries and activity collected through owner-bound APIs. */
+  codingSessions?: {
+    /** Bounded public coding-session summaries. */
+    sessions: CodingSessionSummary[];
+    /** Bounded activity summaries. */
+    activity: string[];
+    /** Omission reasons for unavailable or policy-tainted evidence. */
+    omissions?: string[];
+  };
+  /** Expiration time for private raw evidence. */
+  expiresAt: Date;
+}
+
 /** Private control-plane RPC implemented by the Sessions service. */
 export interface CodingSessionsService extends WorkerEntrypoint {
   /** Reports whether a separate-origin browser VS Code runtime is configured. */
@@ -209,6 +256,18 @@ export interface CodingSessionsService extends WorkerEntrypoint {
     owner: CodingSessionOwner,
     request: CodingSessionFileUploadRequest,
   ): Promise<CodingSessionFileUploadResult>;
+
+  /** Durably enqueue a first-party feedback automation job using private sanitized evidence. */
+  submitProductFeedback(
+    owner: CodingSessionOwner,
+    evidence: ProductFeedbackEvidenceBundle,
+  ): Promise<ProductFeedbackSubmissionResult>;
+
+  /** List recent first-party feedback automation statuses owned by the supplied user. */
+  listProductFeedbackStatuses(owner: CodingSessionOwner): Promise<ProductFeedbackStatus[]>;
+
+  /** Read one first-party feedback automation status owned by the supplied user. */
+  getProductFeedbackStatus(owner: CodingSessionOwner, id: string): Promise<ProductFeedbackStatus | undefined>;
 }
 
 /** Returns whether a value is a canonical GitHub repository name accepted by Coding Sessions. */
