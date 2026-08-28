@@ -51,7 +51,7 @@ describe("GitHub App token scopes", () => {
     });
     expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toEqual({
       repositories: ["odie-os"],
-      permissions: { contents: "read", metadata: "read", pull_requests: "write", issues: "write" },
+      permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
     });
   });
 });

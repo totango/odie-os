@@ -44,7 +44,7 @@ export function mintGitHubProductFeedbackReadToken(env: GitHubAppEnv): Promise<G
 export function mintGitHubProductFeedbackToken(env: GitHubAppEnv): Promise<GitHubInstallationToken> {
   return mintGitHubInstallationToken(env, {
     repositories: ["odie-os"],
-    permissions: { contents: "read", metadata: "read", pull_requests: "write", issues: "write" },
+    permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
   });
 }
 
