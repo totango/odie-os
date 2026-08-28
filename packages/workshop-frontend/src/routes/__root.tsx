@@ -17,6 +17,7 @@ import { SessionsProvider } from '../components/sessions/SessionsContext'
 import { RequiredConnectionsGate } from '../RequiredConnectionsGate'
 import { HubProvider } from '../HubContext'
 import { useEnabledHubs } from '../ServerConfigContext'
+import ProductFeedbackButton from '../ProductFeedbackButton'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -191,12 +192,14 @@ function AuthenticatedShell({
       <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
         <AccountSelectionModal />
         {fullscreen ? (
-          <main className="h-full min-h-0">
+          <main className="relative h-full min-h-0">
+            <div className="absolute right-3 top-3 z-30"><ProductFeedbackButton pathname={pathname} /></div>
             <Outlet />
           </main>
         ) : (
           <SessionsProvider loadRepositories={pathname === '/sessions'}>
             <AppShell>
+              <div className="fixed bottom-4 right-4 z-30"><ProductFeedbackButton pathname={pathname} /></div>
               <Outlet />
             </AppShell>
           </SessionsProvider>
