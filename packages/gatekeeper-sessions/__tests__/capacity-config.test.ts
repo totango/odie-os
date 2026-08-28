@@ -30,6 +30,7 @@ const expectedClasses = [
   ["CodingSessionSandboxStandard2", "standard-2", CAPACITY_LIMITS["standard-2"].global],
   ["CodingSessionSandboxStandard3", "standard-3", CAPACITY_LIMITS["standard-3"].global],
   ["CodingSessionSandboxStandard4", "standard-4", CAPACITY_LIMITS["standard-4"].global],
+  ["ProductFeedbackSandbox", "standard-1", 4],
 ] as const;
 
 const expectedBindings = [
@@ -37,6 +38,7 @@ const expectedBindings = [
   ["SESSION_SANDBOX_STANDARD_2", "CodingSessionSandboxStandard2"],
   ["SESSION_SANDBOX_STANDARD_3", "CodingSessionSandboxStandard3"],
   ["SESSION_SANDBOX_STANDARD_4", "CodingSessionSandboxStandard4"],
+  ["PRODUCT_FEEDBACK_SANDBOX", "ProductFeedbackSandbox"],
   ["SESSION_CAPACITY", "CodingSessionCapacity"],
   ["SESSION_POLICIES", "CodingSessionPolicy"],
   ["SESSION_APPLICATION_PREVIEWS", "CodingSessionApplicationPreview"],
@@ -78,8 +80,8 @@ describe.each([
     expect(config.vars?.APPLICATION_PREVIEW_COOKIE_ISOLATION_VERIFIED).toBeUndefined();
   });
 
-  it("keeps capacity migration v3 and adds only the preview relay in v4", () => {
-    expect(config.migrations.at(-2)).toEqual({
+  it("keeps the capacity and preview migrations before the feedback sandbox migration", () => {
+    expect(config.migrations.at(-3)).toEqual({
       tag: "v3",
       new_sqlite_classes: [
         "CodingSessionSandboxStandard2",
@@ -88,9 +90,13 @@ describe.each([
         "CodingSessionCapacity",
       ],
     });
-    expect(config.migrations.at(-1)).toEqual({
+    expect(config.migrations.at(-2)).toEqual({
       tag: "v4",
       new_sqlite_classes: ["CodingSessionApplicationPreview"],
+    });
+    expect(config.migrations.at(-1)).toEqual({
+      tag: "v5",
+      new_sqlite_classes: ["ProductFeedbackSandbox"],
     });
   });
 });
