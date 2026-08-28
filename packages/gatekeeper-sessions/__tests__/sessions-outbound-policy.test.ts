@@ -14,7 +14,7 @@ vi.mock("../src/github-app.js", () => ({
   mintGitHubCodingSessionToken: vi.fn(async () => ({ token: "github-token", expiresAt: Date.now() + 60_000 })),
 }));
 
-const { CodingSessionSandbox } = await import("../src/sessions.js");
+const { CodingSessionSandbox, ProductFeedbackSandbox } = await import("../src/sessions.js");
 
 describe("coding session sandbox outbound policy", () => {
   it("enables general internet while retaining host interceptors for special hosts", () => {
@@ -32,5 +32,11 @@ describe("coding session sandbox outbound policy", () => {
       "proxy.golang.org": expect.any(Function),
       "sum.golang.org": expect.any(Function),
     });
+  });
+
+  it("restricts autonomous feedback execution to GitHub and the model relay", () => {
+    const sandbox = new (ProductFeedbackSandbox as any)();
+    expect(sandbox.enableInternet).toBe(false);
+    expect(sandbox.allowedHosts).toEqual(["github.com", "team-pi-proxy.unison.totango.com"]);
   });
 });

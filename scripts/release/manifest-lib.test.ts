@@ -227,6 +227,11 @@ test("worker entries carry the deploy contract", () => {
     },
     {
       type: "durable_object_namespace",
+      name: "PRODUCT_FEEDBACK_SANDBOX",
+      class_name: "ProductFeedbackSandbox",
+    },
+    {
+      type: "durable_object_namespace",
       name: "SESSION_CAPACITY",
       class_name: "CodingSessionCapacity",
     },
@@ -279,8 +284,14 @@ test("worker entries carry the deploy contract", () => {
       instance_type: "standard-4",
       max_instances: 2,
     },
+    {
+      class_name: "ProductFeedbackSandbox",
+      image: sessionImage,
+      instance_type: "standard-1",
+      max_instances: 4,
+    },
   ]);
-  assert.deepEqual(sessions.migrations.at(-2), {
+  assert.deepEqual(sessions.migrations.at(-3), {
     tag: "v3",
     new_sqlite_classes: [
       "CodingSessionSandboxStandard2",
@@ -289,9 +300,13 @@ test("worker entries carry the deploy contract", () => {
       "CodingSessionCapacity",
     ],
   });
-  assert.deepEqual(sessions.migrations.at(-1), {
+  assert.deepEqual(sessions.migrations.at(-2), {
     tag: "v4",
     new_sqlite_classes: ["CodingSessionApplicationPreview"],
+  });
+  assert.deepEqual(sessions.migrations.at(-1), {
+    tag: "v5",
+    new_sqlite_classes: ["ProductFeedbackSandbox"],
   });
 
   // Ambient gatekeepers are preinstalled on every core deploy; preinstalls must take no

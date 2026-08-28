@@ -33,6 +33,12 @@
       "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
       "instance_type": "standard-4",
       "max_instances": 2
+    },
+    {
+      "class_name": "ProductFeedbackSandbox",
+      "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+      "instance_type": "standard-1",
+      "max_instances": 4
     }
   ],
   "durable_objects": {
@@ -41,6 +47,7 @@
       { "name": "SESSION_SANDBOX_STANDARD_2", "class_name": "CodingSessionSandboxStandard2" },
       { "name": "SESSION_SANDBOX_STANDARD_3", "class_name": "CodingSessionSandboxStandard3" },
       { "name": "SESSION_SANDBOX_STANDARD_4", "class_name": "CodingSessionSandboxStandard4" },
+      { "name": "PRODUCT_FEEDBACK_SANDBOX", "class_name": "ProductFeedbackSandbox" },
       { "name": "SESSION_CAPACITY", "class_name": "CodingSessionCapacity" },
       { "name": "SESSION_POLICIES", "class_name": "CodingSessionPolicy" },
       { "name": "SESSION_APPLICATION_PREVIEWS", "class_name": "CodingSessionApplicationPreview" },
@@ -75,6 +82,10 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["CodingSessionApplicationPreview"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["ProductFeedbackSandbox"]
     }
   ],
   "observability": {

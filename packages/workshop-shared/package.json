@@ -27,6 +27,10 @@
       "types": "./src/coding-sessions.ts",
       "import": "./src/coding-sessions.ts"
     },
+    "./product-feedback": {
+      "types": "./src/product-feedback.ts",
+      "import": "./src/product-feedback.ts"
+    },
     "./limits": {
       "types": "./src/limits.ts",
       "import": "./src/limits.ts"

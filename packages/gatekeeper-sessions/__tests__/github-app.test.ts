@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   mintGitHubCodingSessionToken,
   mintGitHubOrganizationToken,
+  mintGitHubProductFeedbackReadToken,
+  mintGitHubProductFeedbackToken,
   type GitHubAppEnv,
 } from "../src/github-app.js";
 
@@ -33,6 +35,8 @@ describe("GitHub App token scopes", () => {
 
     await mintGitHubOrganizationToken(env);
     await mintGitHubCodingSessionToken(env, ["odie-os", "unison"]);
+    await mintGitHubProductFeedbackReadToken(env);
+    await mintGitHubProductFeedbackToken(env);
 
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
       permissions: { contents: "read", metadata: "read" },
@@ -40,6 +44,14 @@ describe("GitHub App token scopes", () => {
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
       repositories: ["odie-os", "unison"],
       permissions: { contents: "write", metadata: "read" },
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[2][1]?.body))).toEqual({
+      repositories: ["odie-os"],
+      permissions: { contents: "read", metadata: "read" },
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[3][1]?.body))).toEqual({
+      repositories: ["odie-os"],
+      permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
     });
   });
 });

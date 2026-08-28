@@ -33,6 +33,7 @@ function createKv() {
   return {
     get: vi.fn(<T>(key: string): T | undefined => values.get(key) as T | undefined),
     put: vi.fn((key: string, value: unknown) => { values.set(key, value); }),
+    delete: vi.fn((key: string) => values.delete(key)),
     list: vi.fn(<T,>({ prefix }: { prefix: string }): Map<string, T> => new Map([...values].filter(([key]) => key.startsWith(prefix)) as Array<[string, T]>)),
     values,
   };
@@ -47,13 +48,13 @@ function createRegistry(record: StoredRecord) {
   };
   const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
     env: Record<string, unknown>;
-    ctx: { storage: { kv: typeof kv } };
+    ctx: { storage: { kv: typeof kv; getAlarm: ReturnType<typeof vi.fn>; setAlarm: ReturnType<typeof vi.fn>; deleteAlarm: ReturnType<typeof vi.fn> } };
   };
   registry.env = {
     SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
     SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policies },
   };
-  registry.ctx = { storage: { kv } };
+  registry.ctx = { storage: { kv, getAlarm: vi.fn(async () => null), setAlarm: vi.fn(), deleteAlarm: vi.fn() } };
   return { registry, kv, policies };
 }
 
@@ -96,6 +97,34 @@ describe("coding session terminal expiry", () => {
     expect(stored?.shellTerminalId).toBeUndefined();
     expect(stored?.error).toContain("Restart the session");
     expect(policies.configure).not.toHaveBeenCalled();
+  });
+
+  it("deletes expired private feedback evidence, logs, patches, and status", async () => {
+    const { registry, kv } = createRegistry(runningRecord());
+    kv.put("feedback:feedback-1", {
+      id: "feedback-1", kind: "bug", title: "Private title", state: "failed", stage: "done",
+      attempts: 3, createdAt: new Date(0), updatedAt: new Date(0),
+    });
+    kv.put("feedback-evidence:feedback-1", {
+      id: "feedback-1", kind: "bug", title: "Private title", description: "Private evidence",
+      submitterEmail: "user@totango.com", owner: { userId: "user-1", email: "user@totango.com" },
+      pathname: "/", expiresAt: new Date(0),
+    });
+    kv.put("feedback-diff:feedback-1", "private patch");
+    kv.put("feedback-log:feedback-1", "private log");
+    kv.put("feedback-evidence:orphan", {
+      id: "orphan", kind: "feedback", title: "Orphan", description: "Orphan evidence",
+      submitterEmail: "user@totango.com", owner: { userId: "user-1", email: "user@totango.com" },
+      pathname: "/", expiresAt: new Date(0),
+    });
+
+    await registry.alarm();
+
+    expect(kv.get("feedback:feedback-1")).toBeUndefined();
+    expect(kv.get("feedback-evidence:feedback-1")).toBeUndefined();
+    expect(kv.get("feedback-diff:feedback-1")).toBeUndefined();
+    expect(kv.get("feedback-log:feedback-1")).toBeUndefined();
+    expect(kv.get("feedback-evidence:orphan")).toBeUndefined();
   });
 
   it("does not create an empty shell replacement container when the primary terminal is gone", async () => {

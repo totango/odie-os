@@ -1,6 +1,6 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { zstdDecompressSync } from "node:zlib";
-import { ContainerProxy, Sandbox, type Terminal } from "@cloudflare/sandbox";
+import { ContainerProxy, getSandbox, Sandbox, type Terminal } from "@cloudflare/sandbox";
 import type { OutboundHandlerContext } from "@cloudflare/containers";
 import { validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
@@ -27,11 +27,15 @@ import {
   type CodingSessionToolHost,
   type CodingSessionToolResult,
   type CodingSessionsService,
+  type ProductFeedbackEvidenceBundle,
   validateCodingSessionFileUploadRequest,
 } from "@gadgets/workshop-shared/coding-sessions";
+import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult } from "@gadgets/workshop-shared/product-feedback";
+import type { ProductFeedbackNotifier } from "@gadgets/workshop-shared/product-feedback";
 import type { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
   mintGitHubCodingSessionToken,
+  mintGitHubProductFeedbackReadToken,
   type GitHubAppEnv,
   type GitHubInstallationToken,
 } from "./github-app.js";
@@ -85,6 +89,14 @@ import {
   primeAgentExtensionSource,
   primeAgentSettings,
 } from "./runtime.js";
+import {
+  createDraftPullRequest,
+  feedbackBranch,
+  productFeedbackPrompt,
+  PRODUCT_FEEDBACK_REPOSITORY,
+  validateSafeDiff,
+  type ProductFeedbackJob,
+} from "./product-feedback.js";
 
 export { ContainerProxy, CodingSessionApplicationPreview };
 
@@ -129,6 +141,8 @@ interface Env extends GitHubAppEnv, ApplicationPreviewEnv {
   TEAM_PI_CODEX_HMAC_SECRET?: string;
   CODING_SESSION_PI_RUNTIME_ENABLED?: string;
   CODING_SESSION_DURABLE_LIFECYCLE_ENABLED?: string;
+  PRODUCT_FEEDBACK_NOTIFIER?: Service<ProductFeedbackNotifier>;
+  PRODUCT_FEEDBACK_SANDBOX: DurableObjectNamespace<ProductFeedbackSandbox>;
 }
 
 type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
@@ -228,6 +242,10 @@ type RestartRecord = {
   phase: "prepare" | "cleanup" | "destroy" | "transfer" | "schedule";
 };
 
+type FeedbackSandbox = StartupSandbox & {
+  readFile: InstanceType<typeof CodingSessionSandbox>["readFile"];
+};
+
 type StartupProcess = {
   id: string;
   kill(signal?: number): Promise<void>;
@@ -279,6 +297,12 @@ export class CodingSessionSandboxStandard3 extends CodingSessionSandbox {}
 /** Standard-4 isolated Linux environment for one heavy coding-session generation. */
 export class CodingSessionSandboxStandard4 extends CodingSessionSandbox {}
 
+/** Deny-by-default sandbox used only for autonomous product-feedback analysis. */
+export class ProductFeedbackSandbox extends CodingSessionSandbox {
+  override enableInternet = false;
+  override allowedHosts = ["github.com", "team-pi-proxy.unison.totango.com"];
+}
+
 // Assignment must invoke Container's inherited static setter, which installs these handlers in the
 // registry used by ContainerProxy. A static class field would shadow the setter without registering.
 const codingSessionOutboundHandlers = {
@@ -298,6 +322,8 @@ CodingSessionSandbox.outboundByHost = codingSessionOutboundHandlers;
 CodingSessionSandboxStandard2.outboundByHost = codingSessionOutboundHandlers;
 CodingSessionSandboxStandard3.outboundByHost = codingSessionOutboundHandlers;
 CodingSessionSandboxStandard4.outboundByHost = codingSessionOutboundHandlers;
+// The SDK registry is shared across subclasses; ProductFeedbackSandbox.allowedHosts is its narrower authority.
+ProductFeedbackSandbox.outboundByHost = codingSessionOutboundHandlers;
 
 /** Durable repository and model egress policy for one sandbox instance. */
 export class CodingSessionPolicy extends DurableObject<Env> {
@@ -982,6 +1008,17 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   /** Retries durable restart work and capacity releases after pre-arming the next wakeup. */
   async alarm(): Promise<void> {
     if (this.#hasRegistryWork()) await this.#requireRegistryRetryAlarm();
+    for (const [storageKey, evidence] of this.ctx.storage.kv.list<ProductFeedbackEvidenceBundle>({ prefix: "feedback-evidence:" })) {
+      if (evidence.expiresAt.valueOf() > Date.now()) continue;
+      const id = storageKey.slice("feedback-evidence:".length);
+      const job = this.ctx.storage.kv.get<ProductFeedbackJob>(`feedback:${id}`);
+      this.ctx.storage.kv.delete(`feedback:${id}`);
+      this.ctx.storage.kv.delete(storageKey);
+      this.ctx.storage.kv.delete(`feedback-diff:${id}`);
+      this.ctx.storage.kv.delete(`feedback-log:${id}`);
+      await bestEffortDestroyFeedbackSandbox(this.env, job?.sandboxId ?? `feedback-${id}`);
+      await bestEffortDestroyFeedbackSandbox(this.env, job?.publisherSandboxId ?? `feedback-publish-${id}`);
+    }
     for (const [, stop] of this.ctx.storage.kv.list<StopRecord>({ prefix: "stop:" })) {
       try {
         await this.#resumeStop(stop);
@@ -1013,12 +1050,39 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         });
       }
     }
-    if (!this.#hasRegistryWork()) {
+    for (const [, job] of this.ctx.storage.kv.list<ProductFeedbackJob>({ prefix: "feedback:" })) {
+      if (["no-safe-fix", "failed"].includes(job.state) || (job.state === "pr-created" && job.stage !== "slack")) continue;
       try {
-        await this.ctx.storage.deleteAlarm();
+        await this.#resumeFeedbackJob(job);
       } catch (error) {
-        logger.warn("coding session registry retry alarm could not be cleared", {
-          event: "coding.session.registry.retry.clear.failed", error,
+        const current = this.ctx.storage.kv.get<ProductFeedbackJob>(`feedback:${job.id}`) ?? job;
+        const exhausted = current.attempts >= 2;
+        this.ctx.storage.kv.put(`feedback:${job.id}`, {
+          ...current,
+          state: exhausted ? "failed" : "queued",
+          attempts: current.attempts + 1,
+          message: exhausted ? boundedError(error) : "Feedback automation will retry.",
+          updatedAt: new Date(),
+        });
+        if (exhausted) {
+          await bestEffortDestroyFeedbackSandbox(this.env, current.sandboxId ?? `feedback-${job.id}`);
+          await bestEffortDestroyFeedbackSandbox(this.env,
+            current.publisherSandboxId ?? `feedback-publish-${job.id}`);
+        }
+        await this.#scheduleRegistryRetry();
+        logger.warn("product feedback job will retry", {
+          event: "product.feedback.job.retry", sessionId: job.id, error,
+        });
+      }
+    }
+    if (!this.#hasRegistryWork()) {
+      const evidenceExpiry = this.#nextFeedbackEvidenceExpiry();
+      try {
+        if (evidenceExpiry === undefined) await this.ctx.storage.deleteAlarm();
+        else await this.ctx.storage.setAlarm(evidenceExpiry);
+      } catch (error) {
+        logger.warn("coding session registry alarm could not be updated", {
+          event: "coding.session.registry.alarm.update.failed", error,
         });
       }
     }
@@ -2025,7 +2089,19 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     for (const _entry of this.ctx.storage.kv.list({ prefix: "restart:" })) return true;
     for (const _entry of this.ctx.storage.kv.list({ prefix: "stop:" })) return true;
     for (const _entry of this.ctx.storage.kv.list({ prefix: "pending-release:" })) return true;
+    for (const [, job] of this.ctx.storage.kv.list<ProductFeedbackJob>({ prefix: "feedback:" })) {
+      if (!["no-safe-fix", "pr-created", "failed"].includes(job.state) || job.stage === "slack") return true;
+    }
     return false;
+  }
+
+  #nextFeedbackEvidenceExpiry(): number | undefined {
+    let next: number | undefined;
+    for (const [, evidence] of this.ctx.storage.kv.list<ProductFeedbackEvidenceBundle>({ prefix: "feedback-evidence:" })) {
+      const expiry = evidence.expiresAt.valueOf();
+      if (next === undefined || expiry < next) next = expiry;
+    }
+    return next;
   }
 
   #requireRegistryRetryAlarm(): Promise<void> {
@@ -2040,6 +2116,189 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         event: "coding.session.registry.retry.schedule.failed", error,
       });
     }
+  }
+
+  /** Enqueues first-party feedback automation and stores private evidence with a 30-day TTL. */
+  async submitProductFeedback(evidence: ProductFeedbackEvidenceBundle): Promise<ProductFeedbackSubmissionResult> {
+    const existing = this.ctx.storage.kv.get<ProductFeedbackJob>(`feedback:${evidence.id}`);
+    if (existing) return { id: evidence.id, status: publicFeedbackStatus(existing) };
+    // A harmless empty wakeup is preferable to a durable job stranded by a crash after storage.
+    await this.#requireRegistryRetryAlarm();
+    const now = new Date();
+    const job: ProductFeedbackJob = {
+      id: evidence.id,
+      kind: evidence.kind,
+      title: evidence.title,
+      state: "queued",
+      createdAt: now,
+      updatedAt: now,
+      attempts: 0,
+      stage: "queued",
+      sandboxId: `feedback-${evidence.id}`,
+      publisherSandboxId: `feedback-publish-${evidence.id}`,
+    };
+    this.ctx.storage.kv.put(`feedback-evidence:${evidence.id}`, evidence);
+    this.ctx.storage.kv.put(`feedback:${evidence.id}`, job);
+    return { id: evidence.id, status: publicFeedbackStatus(job) };
+  }
+
+  /** Lists display-safe product feedback statuses newest first. */
+  listProductFeedbackStatuses(): ProductFeedbackStatus[] {
+    return [...this.ctx.storage.kv.list<ProductFeedbackJob>({ prefix: "feedback:" })].map(([, value]) => value)
+      .map(publicFeedbackStatus)
+      .toSorted((a, b) => b.createdAt.valueOf() - a.createdAt.valueOf());
+  }
+
+  /** Reads one display-safe product feedback status. */
+  getProductFeedbackStatus(id: string): ProductFeedbackStatus | undefined {
+    const job = this.ctx.storage.kv.get<ProductFeedbackJob>(`feedback:${id}`);
+    return job && publicFeedbackStatus(job);
+  }
+
+  async #resumeFeedbackJob(job: ProductFeedbackJob): Promise<void> {
+    let current = this.ctx.storage.kv.get<ProductFeedbackJob>(`feedback:${job.id}`) ?? job;
+    const evidence = this.ctx.storage.kv.get<ProductFeedbackEvidenceBundle>(`feedback-evidence:${job.id}`);
+    if (!evidence) {
+      this.ctx.storage.kv.delete(`feedback:${job.id}`);
+      this.ctx.storage.kv.delete(`feedback-diff:${job.id}`);
+      this.ctx.storage.kv.delete(`feedback-log:${job.id}`);
+      await bestEffortDestroyFeedbackSandbox(this.env, current.sandboxId ?? `feedback-${job.id}`);
+      await bestEffortDestroyFeedbackSandbox(this.env,
+        current.publisherSandboxId ?? `feedback-publish-${job.id}`);
+      return;
+    }
+    if (current.state === "queued") {
+      const stage = current.stage === undefined || current.stage === "queued" ? "sandbox" : current.stage;
+      current = { ...current, state: "running", stage, updatedAt: new Date() };
+      this.ctx.storage.kv.put(`feedback:${job.id}`, current);
+    }
+    const branch = current.branch ?? feedbackBranch(job.id);
+    const sandboxId = current.sandboxId ?? `feedback-${job.id}`;
+    const sandbox = getSandbox(this.env.PRODUCT_FEEDBACK_SANDBOX, sandboxId) as unknown as FeedbackSandbox;
+    if (current.stage === "sandbox" || current.stage === "queued" || current.stage === undefined) {
+      const policyId = this.env.PRODUCT_FEEDBACK_SANDBOX.idFromName(sandboxId).toString();
+      await policyFor(this.env, policyId).configure({
+        sessionId: `product-feedback:${job.id}`,
+        sandboxId: policyId,
+        owner: evidence.owner,
+        repositories: [PRODUCT_FEEDBACK_REPOSITORY],
+      });
+      await sandbox.configureGitHubAuth((await mintGitHubProductFeedbackReadToken(this.env)).token);
+      await waitForOk(await sandbox.exec(["rm", "-rf", `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`], { timeout: 30_000 }), 35_000);
+      await waitForOk(await sandbox.exec(["git", "clone", `https://github.com/totango/${PRODUCT_FEEDBACK_REPOSITORY}.git`, `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`], { timeout: 180_000 }), 190_000);
+      await sandbox.writeFile("/tmp/odie-feedback-prompt.txt", productFeedbackPrompt(evidence));
+      const { owner: _owner, ...agentEvidence } = evidence;
+      await sandbox.writeFile("/tmp/odie-feedback-evidence.json", JSON.stringify(agentEvidence, null, 2));
+      const agentProcess = await sandbox.exec([
+        "sh", "-lc",
+        "opencode run --pure --auto --model openai/gpt-5.6-sol \"$(cat /tmp/odie-feedback-prompt.txt)\" > /tmp/feedback-agent.log 2>&1",
+      ], {
+        cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`,
+        env: opencodeEnvironment(this.env, { plugins: [], skills: [] }, false),
+        timeout: 20 * 60_000,
+      });
+      const agentExit = await agentProcess.waitForExit({ timeout: 21 * 60_000 });
+      const agentLog = await readSandboxText(sandbox, "/tmp/feedback-agent.log", 8_000);
+      if (agentExit.code !== 0 || agentExit.timedOut) {
+        this.ctx.storage.kv.put(`feedback:${job.id}`, {
+          ...current, state: "failed", stage: "done", message: "OpenCode feedback agent failed.", updatedAt: new Date(),
+        });
+        this.ctx.storage.kv.put(`feedback-log:${job.id}`, agentLog);
+        await bestEffortDestroy(sandbox);
+        return;
+      }
+      await waitForOk(await sandbox.exec(["git", "add", "-N", "."], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      await waitForOk(await sandbox.exec(["git", "diff", "--binary"], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      await waitForOk(await sandbox.exec(["sh", "-lc", "git diff --binary > /tmp/feedback.diff"], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      current = { ...current, branch, sandboxId, stage: "diff", updatedAt: new Date() };
+      this.ctx.storage.kv.put(`feedback:${job.id}`, current);
+    }
+    if (current.stage === "diff") {
+      const diffKey = `feedback-diff:${job.id}`;
+      const diff = this.ctx.storage.kv.get<string>(diffKey) ??
+        await readSandboxText(sandbox, "/tmp/feedback.diff", 128 * 1024);
+      const safe = validateSafeDiff(diff, evidence);
+      if (!safe.ok) {
+        this.ctx.storage.kv.put(`feedback:${job.id}`, {
+          ...current, state: "no-safe-fix", stage: "done", message: safe.reason, updatedAt: new Date(),
+        });
+        await bestEffortDestroy(sandbox);
+        return;
+      }
+      this.ctx.storage.kv.put(diffKey, diff);
+      await bestEffortDestroy(sandbox);
+      const publisherSandboxId = current.publisherSandboxId ?? `feedback-publish-${job.id}`;
+      const publisher = getSandbox(this.env.PRODUCT_FEEDBACK_SANDBOX, publisherSandboxId) as unknown as FeedbackSandbox;
+      await publisher.configureGitHubAuth((await mintGitHubProductFeedbackReadToken(this.env)).token);
+      await waitForOk(await publisher.exec(["rm", "-rf", `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`], { timeout: 30_000 }), 35_000);
+      await waitForOk(await publisher.exec(["git", "clone", `https://github.com/totango/${PRODUCT_FEEDBACK_REPOSITORY}.git`, `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`], { timeout: 180_000 }), 190_000);
+      await publisher.writeFile("/tmp/feedback.diff", diff);
+      await waitForOk(await publisher.exec(["git", "checkout", "-B", branch], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      await waitForOk(await publisher.exec(["git", "apply", "--index", "--whitespace=error-all", "/tmp/feedback.diff"], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      await waitForOk(await publisher.exec(["sh", "-lc", "git diff --cached --binary > /tmp/feedback-staged.diff"], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      const stagedDiff = await readSandboxText(publisher, "/tmp/feedback-staged.diff", 128 * 1024);
+      const stagedSafe = validateSafeDiff(stagedDiff, evidence);
+      if (!stagedSafe.ok) {
+        this.ctx.storage.kv.put(`feedback:${job.id}`, {
+          ...current, state: "no-safe-fix", stage: "done", message: stagedSafe.reason, updatedAt: new Date(),
+        });
+        await bestEffortDestroy(publisher);
+        return;
+      }
+      await waitForOk(await publisher.exec(["git", "config", "user.name", "Odie Product Feedback"], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      await waitForOk(await publisher.exec(["git", "config", "user.email", "odie-feedback@totango.com"], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      await waitForOk(await publisher.exec(["git", "-c", "core.hooksPath=/dev/null", "commit", "--no-verify", "-m", `Product feedback ${job.id}`], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 60_000 }), 65_000);
+      await waitForOk(await publisher.exec(["sh", "-lc", "git show --format= --binary HEAD > /tmp/feedback-committed.diff"], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 30_000 }), 35_000);
+      const committedDiff = await readSandboxText(publisher, "/tmp/feedback-committed.diff", 128 * 1024);
+      const committedSafe = validateSafeDiff(committedDiff, evidence);
+      if (!committedSafe.ok || committedDiff !== stagedDiff) {
+        this.ctx.storage.kv.put(`feedback:${job.id}`, {
+          ...current, state: "no-safe-fix", stage: "done",
+          message: committedSafe.ok ? "Committed diff did not match the validated patch." : committedSafe.reason,
+          updatedAt: new Date(),
+        });
+        await bestEffortDestroy(publisher);
+        return;
+      }
+      current = { ...current, publisherSandboxId, stage: "push", updatedAt: new Date() };
+      this.ctx.storage.kv.put(`feedback:${job.id}`, current);
+    }
+    if (current.stage === "push") {
+      const publisher = getSandbox(this.env.PRODUCT_FEEDBACK_SANDBOX,
+        required(current.publisherSandboxId, "feedback publisherSandboxId")) as unknown as FeedbackSandbox;
+      await publisher.configureGitHubAuth((await mintGitHubCodingSessionToken(this.env, [PRODUCT_FEEDBACK_REPOSITORY])).token);
+      await waitForOk(await publisher.exec(["git", "-c", "core.hooksPath=/dev/null", "push", "--no-verify", "origin", branch], { cwd: `/workspace/${PRODUCT_FEEDBACK_REPOSITORY}`, timeout: 120_000 }), 125_000);
+      current = { ...current, stage: "pr", updatedAt: new Date() };
+      this.ctx.storage.kv.put(`feedback:${job.id}`, current);
+      this.ctx.storage.kv.delete(`feedback-diff:${job.id}`);
+      await bestEffortDestroy(publisher);
+    }
+    const pr = current.prUrl && current.prNumber
+      ? { url: current.prUrl, number: current.prNumber }
+      : await createDraftPullRequest(this.env, evidence, branch);
+    current = { ...current, state: "pr-created", prUrl: pr.url, prNumber: pr.number, stage: "slack", updatedAt: new Date() };
+    this.ctx.storage.kv.put(`feedback:${job.id}`, current);
+    try {
+      await notifyFeedbackSlack(this.env, current);
+    } catch (error) {
+      const slackAttempts = (current.slackAttempts ?? 0) + 1;
+      const retrying = slackAttempts < 3;
+      this.ctx.storage.kv.put(`feedback:${job.id}`, {
+        ...current,
+        slackAttempts,
+        stage: retrying ? "slack" : "done",
+        message: retrying ? "Draft PR created; Slack notification will retry." : "Draft PR created; Slack notification failed.",
+        updatedAt: new Date(),
+      });
+      if (retrying) await this.#scheduleRegistryRetry();
+      logger.warn("product feedback Slack notification failed", {
+        event: "product.feedback.slack.failed", sessionId: job.id, error,
+      });
+      await bestEffortDestroy(sandbox);
+      return;
+    }
+    this.ctx.storage.kv.put(`feedback:${job.id}`, { ...current, stage: "done", updatedAt: new Date() });
+    await bestEffortDestroy(sandbox);
   }
 
   async #releaseCapacity(lease: CapacityReservationKey): Promise<void> {
@@ -2234,6 +2493,27 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     request: CodingSessionFileUploadRequest,
   ): Promise<CodingSessionFileUploadResult> {
     return registryFor(this.ctx, owner.userId).uploadFile(owner, request);
+  }
+
+  /** Durably enqueues a first-party feedback automation job. */
+  submitProductFeedback(
+    owner: CodingSessionOwner,
+    evidence: ProductFeedbackEvidenceBundle,
+  ): Promise<ProductFeedbackSubmissionResult> {
+    if (owner.email !== evidence.submitterEmail || owner.email !== evidence.owner.email || owner.userId !== evidence.owner.userId) {
+      throw new Error("Feedback submitter mismatch.");
+    }
+    return registryFor(this.ctx, owner.userId).submitProductFeedback(evidence);
+  }
+
+  /** Lists first-party feedback automation statuses for the supplied owner. */
+  listProductFeedbackStatuses(owner: CodingSessionOwner): Promise<ProductFeedbackStatus[]> {
+    return registryFor(this.ctx, owner.userId).listProductFeedbackStatuses();
+  }
+
+  /** Reads one first-party feedback automation status for the supplied owner. */
+  getProductFeedbackStatus(owner: CodingSessionOwner, id: string): Promise<ProductFeedbackStatus | undefined> {
+    return registryFor(this.ctx, owner.userId).getProductFeedbackStatus(id);
   }
 }
 
@@ -2477,6 +2757,53 @@ function publicSummary(record: SessionRecord): CodingSessionSummary {
   return { ...summary, runtime: storedSessionRuntime(record) };
 }
 
+function publicFeedbackStatus(job: ProductFeedbackJob): ProductFeedbackStatus {
+  const {
+    attempts: _attempts,
+    branch: _branch,
+    prNumber: _prNumber,
+    publisherSandboxId: _publisherSandboxId,
+    sandboxId: _sandboxId,
+    stage: _stage,
+    slackAttempts: _slackAttempts,
+    ...status
+  } = job;
+  return status;
+}
+
+async function readSandboxText(sandbox: FeedbackSandbox, path: string, limit: number): Promise<string> {
+  const result = await sandbox.readFile(path, { encoding: "utf-8" });
+  const content = typeof result.content === "string" ? result.content : new TextDecoder().decode(result.content);
+  return content.length <= limit ? content : `${content.slice(0, limit - 1)}…`;
+}
+
+async function bestEffortDestroy(sandbox: { destroy(): Promise<void> }): Promise<void> {
+  try { await sandbox.destroy(); } catch (error) {
+    logger.warn("product feedback sandbox cleanup failed", {
+      event: "product.feedback.sandbox.cleanup.failed", error,
+    });
+  }
+}
+
+async function bestEffortDestroyFeedbackSandbox(env: Env, sandboxId: string): Promise<void> {
+  try {
+    await getSandbox(env.PRODUCT_FEEDBACK_SANDBOX, sandboxId).destroy();
+  } catch (error) {
+    logger.warn("product feedback sandbox cleanup failed", {
+      event: "product.feedback.sandbox.cleanup.failed", error,
+    });
+  }
+}
+
+async function notifyFeedbackSlack(env: Env, job: ProductFeedbackJob): Promise<void> {
+  if (!env.PRODUCT_FEEDBACK_NOTIFIER || !job.prUrl) return;
+  await env.PRODUCT_FEEDBACK_NOTIFIER.notifyProductFeedbackPr({
+    jobId: job.id,
+    prUrl: job.prUrl,
+    idempotencyKey: `product-feedback:${job.id}:pr:${job.prNumber ?? "unknown"}`,
+  });
+}
+
 function primaryTerminalOptions(
   runtime: CodingSessionRuntime,
   repository: CodingSessionRepository,
@@ -2559,7 +2886,11 @@ function assertRuntimeConfigured(env: Env, runtime: CodingSessionRuntime): void 
   required(env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
 }
 
-function opencodeEnvironment(env: Env, customization: OpenCodeUserCustomization): Record<string, string> {
+function opencodeEnvironment(
+  env: Env,
+  customization: OpenCodeUserCustomization,
+  includeWorkshopMcp = true,
+): Record<string, string> {
   const baseUrl = env.TEAM_PI_CODEX_BASE_URL;
   if (!baseUrl) return {};
   return {
@@ -2590,7 +2921,7 @@ function opencodeEnvironment(env: Env, customization: OpenCodeUserCustomization)
           },
         },
       },
-      mcp: {
+      mcp: includeWorkshopMcp ? {
         workshop: {
           type: "remote",
           url: `https://${WORKSHOP_MCP_HOST}/mcp`,
@@ -2598,7 +2929,7 @@ function opencodeEnvironment(env: Env, customization: OpenCodeUserCustomization)
           enabled: true,
           timeout: 30_000,
         },
-      },
+      } : {},
       plugin: customization.plugins,
     }),
   };

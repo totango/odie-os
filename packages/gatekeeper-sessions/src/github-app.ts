@@ -32,6 +32,22 @@ export function mintGitHubCodingSessionToken(
   });
 }
 
+/** Mints a read-only token constrained to odie-os for autonomous feedback analysis. */
+export function mintGitHubProductFeedbackReadToken(env: GitHubAppEnv): Promise<GitHubInstallationToken> {
+  return mintGitHubInstallationToken(env, {
+    repositories: ["odie-os"],
+    permissions: { contents: "read", metadata: "read" },
+  });
+}
+
+/** Mints a write token constrained to odie-os for server-owned feedback pull requests. */
+export function mintGitHubProductFeedbackToken(env: GitHubAppEnv): Promise<GitHubInstallationToken> {
+  return mintGitHubInstallationToken(env, {
+    repositories: ["odie-os"],
+    permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+  });
+}
+
 /** Returns whether all credentials required to mint a GitHub App token are configured. */
 export function hasGitHubAppConfiguration(env: GitHubAppEnv): boolean {
   return Boolean(

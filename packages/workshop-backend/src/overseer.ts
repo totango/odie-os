@@ -43,6 +43,7 @@ import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } fro
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
+import type { ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
@@ -830,6 +831,23 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
       record satisfies never;
       throw new TypeError(`Invalid ActionRecord type: ${(record as ActionRecord).type}`);
   }
+}
+
+function summarizeFeedbackMessage(message: AiChatMessage): string {
+  const author = message.author.type === "user" ? "user" : "agent";
+  if (message.type === "message") return `${author}: ${redactFeedbackEvidenceText(message.message, 500)}`;
+  if (message.type === "changes") return `${author}: proposed workspace changes`;
+  if (message.type === "action") return `${author}: action ${message.actionLog?.resourceTitle ?? message.actionId}`;
+  if (message.type === "slashCommand") return `${author}: slash command`;
+  return `${author}: ${message.type}`;
+}
+
+function redactFeedbackEvidenceText(value: string, limit: number): string {
+  const redacted = value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/https?:\/\/[^\s#?]+\?\S+/g, "[redacted-url]")
+    .replace(/([A-Za-z0-9_]*token[A-Za-z0-9_]*|authorization|cookie|password|secret)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+  return redacted.length <= limit ? redacted : `${redacted.slice(0, limit - 1)}…`;
 }
 
 function makeOverseerStorage(storage: DurableObjectStorage) {
@@ -6849,6 +6867,30 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async getOutputsForOwnerBackfill(ownerId: string): Promise<WorkspaceOutputEntry[] | null> {
     if (this.impl.ownerId !== ownerId) return null;
     return this.impl.outputsSnapshot();
+  }
+
+  /** Collects bounded, sanitized workspace evidence for the workspace owner only. */
+  async collectProductFeedbackEvidence(ownerId: string, chatId?: number): Promise<NonNullable<ProductFeedbackEvidenceBundle["workspace"]> | undefined> {
+    if (this.impl.ownerId !== ownerId) return undefined;
+    const result: NonNullable<ProductFeedbackEvidenceBundle["workspace"]> = {
+      id: this.impl.ctx.id.toString(),
+      title: this.impl.storage.title.get(),
+      ...(chatId !== undefined ? { chatId } : {}),
+      omissions: [],
+    };
+    if (this.impl.storage.prohibitAllSharing.get() || this.impl.storage.domainSharingPolicy.get()) {
+      result.omissions!.push("workspace evidence omitted by sharing policy");
+      return result;
+    }
+    if (chatId !== undefined) {
+      const messages = [...this.impl.storage.chats.list({ prefix: `${keyString(chatId)}.` })].slice(-12);
+      result.transcript = messages.map(message => summarizeFeedbackMessage(message)).filter(Boolean);
+    }
+    result.activity = [...this.impl.storage.actions.list()].slice(-12).map(action => {
+      const log = actionRecordToLog(action);
+      return redactFeedbackEvidenceText(`${log.type}:${log.resourceTitle}:${log.state}`, 240);
+    });
+    return result;
   }
 
   #financeRole(

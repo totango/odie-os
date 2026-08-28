@@ -26,6 +26,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -848,6 +849,18 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Rejects one pending coding-session tool action. */
   rejectCodingSessionAction(activityId: string): Promise<void>;
+
+  /** Return whether the authenticated account may use first-party product feedback automation. */
+  productFeedbackAvailable(): Promise<boolean>;
+
+  /** Submit product feedback or a bug report with explicitly-consented evidence sections. */
+  submitProductFeedback(request: SubmitProductFeedbackRequest): Promise<ProductFeedbackSubmissionResult>;
+
+  /** List this user's recent product feedback automation statuses newest first. */
+  listProductFeedbackStatuses(): Promise<ProductFeedbackStatus[]>;
+
+  /** Read one product feedback automation status owned by this user. */
+  getProductFeedbackStatus(id: string): Promise<ProductFeedbackStatus | undefined>;
 
   /**
    * Get the user's preferred model, chosen during onboarding. Returns null if the user has not
