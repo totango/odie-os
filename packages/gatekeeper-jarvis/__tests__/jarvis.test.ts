@@ -8,6 +8,7 @@ import {
   JarvisGatekeeper,
   JarvisSession,
   jarvisSingletonResourceUrl,
+  productFeedbackSlackArguments,
 } from "../src/index.js";
 import { applyJarvisToolPolicy, JARVIS_ALLOWED_TOOLS } from "../src/config.js";
 import { JarvisPolicyApi } from "../src/policy.js";
@@ -57,6 +58,49 @@ describe("JarvisConnectionAccount", () => {
   });
 });
 
+describe("product feedback Slack notifications", () => {
+  it("uses only the fixed channel, template, and matching idempotency key", () => {
+    expect(productFeedbackSlackArguments({
+      jobId: "feedback_123",
+      prUrl: "https://github.com/totango/odie-os/pull/456",
+      idempotencyKey: "product-feedback:feedback_123:pr:456",
+    })).toEqual({
+      channel: "C09EW0T5VB5",
+      text: "Draft product-feedback PR created: https://github.com/totango/odie-os/pull/456",
+      idempotencyKey: "product-feedback:feedback_123:pr:456",
+    });
+  });
+
+  it("rejects another repository or a mismatched idempotency key", () => {
+    expect(() => productFeedbackSlackArguments({
+      jobId: "feedback_123",
+      prUrl: "https://github.com/totango/other/pull/456",
+      idempotencyKey: "product-feedback:feedback_123:pr:456",
+    })).toThrow(/PR URL/);
+    expect(() => productFeedbackSlackArguments({
+      jobId: "feedback_123",
+      prUrl: "https://github.com/totango/odie-os/pull/456",
+      idempotencyKey: "product-feedback:feedback_123:pr:999",
+    })).toThrow(/idempotency/);
+  });
+
+  it("rejects unsafe or non-canonical PR URLs", () => {
+    for (const prUrl of [
+      "https://user@github.com/totango/odie-os/pull/456",
+      "https://github.com/totango/odie-os/pull/456?token=secret",
+      "https://github.com/totango/odie-os/pull/456#capability",
+      "https://github.com/totango/odie-os/pull/0",
+      "http://github.com/totango/odie-os/pull/456",
+    ]) {
+      expect(() => productFeedbackSlackArguments({
+        jobId: "feedback_123",
+        prUrl,
+        idempotencyKey: "product-feedback:feedback_123:pr:456",
+      })).toThrow(/PR URL/);
+    }
+  });
+});
+
 describe("JarvisAccount", () => {
   it("describes the management UI with the dotted title and monochrome robot icon", async () => {
     const account = Object.create(JarvisAccount.prototype) as JarvisAccount;
@@ -84,13 +128,16 @@ describe("JarvisAccount", () => {
 });
 
 describe("JarvisSession", () => {
-  it("enforces the deployment-owned read-only policy despite unsafe annotations", () => {
+  it("enforces deployment-owned JARVIS read/action policy despite unsafe annotations", () => {
     for (const name of JARVIS_ALLOWED_TOOLS) {
       const classified = applyJarvisToolPolicy(classifyTool({
         name,
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
       }, "vetted"));
-      expect(classified).toMatchObject({ mode: "read", autoApprovable: false });
+      expect(classified).toMatchObject({
+        mode: name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool" ? "action" : "read",
+        autoApprovable: false,
+      });
     }
   });
 

@@ -13,7 +13,9 @@ import { generateSessionTypes, sessionTypeName } from "@gadgets/mcp-shared/schem
 import { McpSessionBase } from "@gadgets/mcp-shared/session";
 import { endpointTag, formatToolScope, type ToolScope } from "@gadgets/mcp-shared/scope";
 import type { ConnectionAccount, McpConnection } from "@gadgets/mcp-shared/connection";
+import { withClient } from "@gadgets/mcp-shared/connection";
 import type { ServerTrust } from "@gadgets/mcp-shared/tools";
+import type { ProductFeedbackNotificationRequest, ProductFeedbackNotifier } from "@gadgets/workshop-shared/product-feedback";
 import { hostOf } from "@gadgets/mcp-shared/util";
 import APP_HTML from "./generated/app.txt";
 import {
@@ -78,6 +80,38 @@ type StoredConnectionState = {
   generation: number;
   sessionId?: string;
 };
+
+type ProductFeedbackNotifierEnv = Env & {
+  PRODUCT_FEEDBACK_MCP_TOKEN?: string;
+  PRODUCT_FEEDBACK_MCP_URL?: string;
+};
+
+const PRODUCT_FEEDBACK_SLACK_CHANNEL = "C09EW0T5VB5";
+const PRODUCT_FEEDBACK_SLACK_TOOL = "jarvis_post_product_feedback_pr";
+const PRODUCT_FEEDBACK_ID = /^[A-Za-z0-9_-]{1,80}$/;
+
+/** Validates a private notification request and returns the fixed upstream Slack arguments. */
+export function productFeedbackSlackArguments(request: ProductFeedbackNotificationRequest): {
+  channel: string;
+  text: string;
+  idempotencyKey: string;
+} {
+  if (!PRODUCT_FEEDBACK_ID.test(request.jobId)) throw new Error("Invalid product feedback notification id.");
+  let prUrl: URL;
+  try { prUrl = new URL(request.prUrl); } catch { throw new Error("Invalid product feedback PR URL."); }
+  const prMatch = /^\/totango\/odie-os\/pull\/([1-9]\d*)$/.exec(prUrl.pathname);
+  if (prUrl.protocol !== "https:" || prUrl.host !== "github.com" || prUrl.username ||
+      prUrl.password || prUrl.search || prUrl.hash || !prMatch) {
+    throw new Error("Invalid product feedback PR URL.");
+  }
+  const expectedKey = `product-feedback:${request.jobId}:pr:${prMatch[1]}`;
+  if (request.idempotencyKey !== expectedKey) throw new Error("Invalid product feedback idempotency key.");
+  return {
+    channel: PRODUCT_FEEDBACK_SLACK_CHANNEL,
+    text: `Draft product-feedback PR created: ${prUrl.toString()}`,
+    idempotencyKey: expectedKey,
+  };
+}
 
 type ExportContext<Props> = ExecutionContext<Props> & {
   exports: {
@@ -289,6 +323,46 @@ export class JarvisAccount
 export class JarvisVerifier extends WorkerEntrypoint<Env> implements GatekeeperUserVerifier {
   /** No-op verifier; Workshop enforces the Totango SSO domain before admitting observers. */
   verify(): void {}
+}
+
+/** Private fixed-channel product-feedback Slack notifier. */
+@validateRpc()
+export class ProductFeedbackNotifierEntrypoint
+  extends WorkerEntrypoint<Env>
+  implements ProductFeedbackNotifier {
+  /** Sends one fixed-template notification; callers cannot choose channel or message text. */
+  async notifyProductFeedbackPr(request: ProductFeedbackNotificationRequest): Promise<void> {
+    const args = productFeedbackSlackArguments(request);
+    const env = this.env as ProductFeedbackNotifierEnv;
+    const rawEndpoint = env.PRODUCT_FEEDBACK_MCP_URL?.trim();
+    const token = env.PRODUCT_FEEDBACK_MCP_TOKEN?.trim();
+    if (!rawEndpoint || !token) throw new Error("Product feedback MCP is not configured.");
+    let endpoint: string;
+    try {
+      const url = new URL(rawEndpoint);
+      if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error();
+      endpoint = url.toString();
+    } catch {
+      throw new Error("Product feedback MCP endpoint is invalid.");
+    }
+    const account: ConnectionAccount = {
+      async getConnection(requestedEndpoint) {
+        if (requestedEndpoint !== endpoint) throw new Error("Product feedback MCP endpoint changed.");
+        return { authorization: token, sessionId: null, generation: 0 };
+      },
+      async assertConnectionCurrent() {},
+      async setMcpSessionId() { return true; },
+      async noteCredentialsExpired() {},
+    };
+    const result = await withClient(env, account, endpoint, async client => {
+      try {
+        return await client.callTool(PRODUCT_FEEDBACK_SLACK_TOOL, args);
+      } finally {
+        await client.closeSession().catch(() => undefined);
+      }
+    }, { retryOnExpiry: false });
+    if (result.isError) throw new Error("JARVIS Slack notification tool returned an error.");
+  }
 }
 
 class DomainSharingApprovalQueue extends RpcTarget implements ApprovalQueue {

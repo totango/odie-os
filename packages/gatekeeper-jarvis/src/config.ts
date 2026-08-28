@@ -31,16 +31,14 @@ export function isJarvisAllowedTool(toolName: string): toolName is JarvisAllowed
   return ALLOWED_TOOL_SET.has(toolName);
 }
 
-/**
- * Applies the deployment-owned policy that every allowlisted JARVIS tool is read-only.
- * Dispatcher tools are included because the internal endpoint constrains their reachable catalogs
- * to read-only operations; unknown tools still fail closed at the allowlist above.
- */
+/** Applies deployment-owned read/action policy to allowlisted JARVIS tools. */
 export function applyJarvisToolPolicy(entry: ClassifiedTool): ClassifiedTool | null {
   if (!isJarvisAllowedTool(entry.tool.name)) return null;
+  const manualAction = entry.tool.name === "jarvis_call_prod_tool" ||
+    entry.tool.name === "jarvis_call_wren_tool";
   return {
     ...entry,
-    mode: "read",
+    mode: manualAction ? "action" : "read",
     autoApprovable: false,
     classifiedBy: "default",
   };
