@@ -187,8 +187,18 @@ jobs:
 
       - name: Verify production origins
         run: |
-          status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://odie-os.odie-os.workers.dev/)"
-          test "$status" = "200"
+          web_headers="$(mktemp)"
+          trap 'rm -f "$web_headers"' EXIT
+          status="$(curl --silent --show-error --dump-header "$web_headers" --output /dev/null --write-out '%{http_code}' https://odie-os.odie-os.workers.dev/)"
+          if [ "$status" = "302" ]; then
+            location="$(awk 'tolower($1) == "location:" { sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit }' "$web_headers")"
+            case "$location" in
+              https://*.cloudflareaccess.com/cdn-cgi/access/login/*) ;;
+              *) echo "Unexpected Access redirect" >&2; exit 1 ;;
+            esac
+          else
+            test "$status" = "200"
+          fi
           native_root="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://odie-os-native-api.odie-os.workers.dev/)"
           test "$native_root" = "404"
           native_api="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://odie-os-native-api.odie-os.workers.dev/api)"
