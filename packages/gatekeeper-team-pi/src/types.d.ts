@@ -73,6 +73,26 @@ export type ZendeskTicketMemorySearchResult = {
   items: ZendeskTicketMemoryEntry[];
 };
 
+/** Request for an approval-backed Jira issue creation through Team PI Work Items. */
+export type TeamPiCreateJiraIssueRequest = {
+  /** Jira project key. Defaults to `AI` when omitted. */
+  projectKey?: string;
+  /** Jira issue type name. Defaults to `Story` when omitted. */
+  issueType?: string;
+  /** Required Jira issue summary. */
+  summary: string;
+  /** Required Jira issue description. */
+  description: string;
+  /** Optional Jira priority name. */
+  priority?: string;
+};
+
+/** Safe normalized result of an approved Team PI Jira issue creation. */
+export type TeamPiCreateJiraIssueResult = {
+  /** Normalized created Jira issue returned by Team PI Work Items. */
+  item: WorkItemSummary;
+};
+
 /** Minimal skill metadata exposed by Team PI. */
 export type TeamPiSkill = {
   id: string;
@@ -142,6 +162,9 @@ export interface TeamPiSession {
 
   /** Requests start of a Team PI connection by provider kind, such as `gmail` or `calendar`. */
   startConnection(provider: TeamPiProvider): Promise<TeamPiQueuedAction>;
+
+  /** Requests approval to create a Jira issue through Team PI Work Items. */
+  createJiraIssue(request: TeamPiCreateJiraIssueRequest): Promise<TeamPiQueuedAction<TeamPiCreateJiraIssueResult>>;
 
   /** Polls the result of a previously queued Team PI action. */
   getActionResult(actionId: number): Promise<TeamPiActionResult>;

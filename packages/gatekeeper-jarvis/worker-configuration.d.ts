@@ -5,6 +5,8 @@ interface __BaseEnv_Env {
 	JARVIS_MCP_TOKEN?: string;
 	JARVIS_TRUST_ANNOTATIONS?: string;
 	MCP_CLIENT_NAME?: string;
+	PRODUCT_FEEDBACK_MCP_TOKEN?: string;
+	PRODUCT_FEEDBACK_MCP_URL?: string;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

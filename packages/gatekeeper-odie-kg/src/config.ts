@@ -102,6 +102,37 @@ export const ODIE_KG_ALLOWED_TOOLS = [
   ...ODIE_KG_ACTION_TOOLS,
 ] as const;
 
+const STRUCTURED_ACCOUNT_FACT_GUIDANCE =
+  "Prefer this structured account/property/dashboard source for account facts before " +
+  "interactions, notes, documents, or meeting titles; report missing, ambiguous, or " +
+  "conflicting facts rather than guessing.";
+
+const WEAK_ACCOUNT_FACT_GUIDANCE =
+  "Non-canonical for account role, name, identity, or gender; use only as weak context " +
+  "and verify against structured account/property/dashboard facts.";
+
+const ODIE_KG_LOCAL_TOOL_GUIDANCE: Partial<Record<typeof ODIE_KG_ALLOWED_TOOLS[number], string>> = {
+  "odie-kg-accounts": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "odie-kg-account-root": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "get_customer_overview": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "get_customer_property": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "get_customer_prediction": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "get_segment": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "leviosa_public_list_property_definitions": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "leviosa_public_list_accounts": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "leviosa_public_get_account": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "leviosa_public_list_account_health_snapshots": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "show_lens": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "show_account": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "show_account_risk": STRUCTURED_ACCOUNT_FACT_GUIDANCE,
+  "odie-kg-search": WEAK_ACCOUNT_FACT_GUIDANCE,
+  "odie-kg-query": WEAK_ACCOUNT_FACT_GUIDANCE,
+  "odie-kg-document": WEAK_ACCOUNT_FACT_GUIDANCE,
+  "get_customer_interaction": WEAK_ACCOUNT_FACT_GUIDANCE,
+  "leviosa_public_list_notes": WEAK_ACCOUNT_FACT_GUIDANCE,
+  "leviosa_public_get_note": WEAK_ACCOUNT_FACT_GUIDANCE,
+};
+
 /** One validated deployment-owned ODIE MCP endpoint. */
 export type OdieKgConfig = { endpoint: string };
 
@@ -148,16 +179,36 @@ export function odieKgResource(config: OdieKgConfig): SupportedResource {
     urlPattern: config.endpoint,
     title: ODIE_KG_DISPLAY_NAME,
     description: "Tenant-scoped customer, account, CSM, product-usage, and internal knowledge.",
+    providedBySingleton: true,
   };
 }
 
 /** Applies the connector-owned fixed policy instead of trusting remote annotations. */
 export function applyOdieKgToolPolicy(entry: ClassifiedTool): ClassifiedTool | null {
   if ((ODIE_KG_READ_TOOLS as readonly string[]).includes(entry.tool.name)) {
-    return { ...entry, mode: "read", autoApprovable: false, classifiedBy: "default" };
+    return {
+      ...entry,
+      tool: withLocalOdieKgToolGuidance(entry.tool),
+      mode: "read",
+      autoApprovable: false,
+      classifiedBy: "default",
+    };
   }
   if ((ODIE_KG_ACTION_TOOLS as readonly string[]).includes(entry.tool.name)) {
-    return { ...entry, mode: "action", autoApprovable: true, classifiedBy: "default" };
+    return {
+      ...entry,
+      tool: withLocalOdieKgToolGuidance(entry.tool),
+      mode: "action",
+      autoApprovable: true,
+      classifiedBy: "default",
+    };
   }
   return null;
+}
+
+function withLocalOdieKgToolGuidance(tool: ClassifiedTool["tool"]): ClassifiedTool["tool"] {
+  const guidance = ODIE_KG_LOCAL_TOOL_GUIDANCE[tool.name as typeof ODIE_KG_ALLOWED_TOOLS[number]];
+  if (!guidance || tool.description?.includes(guidance)) return tool;
+  const description = [guidance, tool.description?.trim()].filter(Boolean).join(" ");
+  return { ...tool, description };
 }

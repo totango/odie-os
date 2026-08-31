@@ -7,15 +7,24 @@ import type {
   CodingSessionDevelopmentPlan,
   CodingSessionDevelopmentStatus,
   CodingSessionEditorCapability,
+  CodingSessionFileUploadRequest,
+  CodingSessionFileUploadResult,
   CodingSessionRepository,
   CodingSessionSummary,
   CodingSessionTerminalKind,
   CreateCodingSessionRequest,
   OpenCodeUserCustomization,
 } from "./api.js";
+import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult } from "./product-feedback.js";
 
 /** Maximum number of repositories accepted for one coding session. */
 export const MAX_CODING_SESSION_REPOSITORIES = 8;
+
+/** Maximum number of bytes accepted for one coding-session file upload (10 MiB). */
+export const MAX_CODING_SESSION_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+/** Maximum UTF-16 code units accepted from a user-supplied upload filename. */
+export const MAX_CODING_SESSION_UPLOAD_FILENAME_LENGTH = 255;
 
 const MAX_OPENCODE_PLUGINS = 20;
 const MAX_OPENCODE_SKILLS = 20;
@@ -117,6 +126,52 @@ export interface CodingSessionToolHost extends WorkerEntrypoint {
   ): Promise<CodingSessionToolResult>;
 }
 
+/** Server-collected, sanitized evidence bundle for first-party product feedback automation. */
+export interface ProductFeedbackEvidenceBundle {
+  /** Stable evidence identifier minted by Workshop. */
+  id: string;
+  /** Feedback category selected by the user. */
+  kind: "bug" | "feedback";
+  /** Bounded title authored by the submitter. */
+  title: string;
+  /** Bounded details authored by the submitter. */
+  description: string;
+  /** Verified submitting user email. */
+  submitterEmail: string;
+  /** Authenticated owner used only to authorize the isolated model relay and repository policy. */
+  owner: CodingSessionOwner;
+  /** Normalized route pathname only. */
+  pathname: string;
+  /** Server-authorized optional workspace context. */
+  workspace?: {
+    /** Workspace durable object ID. */
+    id: string;
+    /** Workspace title. */
+    title?: string;
+    /** Current chat ID, when supplied and authorized. */
+    chatId?: number;
+    /** Bounded visible transcript summary or omission notice. */
+    transcript?: string[];
+    /** Bounded sanitized action or observation summaries. */
+    activity?: string[];
+    /** Omission reasons for policy-tainted or unavailable evidence. */
+    omissions?: string[];
+  };
+  /** Bounded frontend diagnostics captured from the current browser tab. */
+  diagnostics?: Array<{ timestamp: Date; level: "log" | "info" | "warn" | "error"; message: string }>;
+  /** Bounded coding-session summaries and activity collected through owner-bound APIs. */
+  codingSessions?: {
+    /** Bounded public coding-session summaries. */
+    sessions: CodingSessionSummary[];
+    /** Bounded activity summaries. */
+    activity: string[];
+    /** Omission reasons for unavailable or policy-tainted evidence. */
+    omissions?: string[];
+  };
+  /** Expiration time for private raw evidence. */
+  expiresAt: Date;
+}
+
 /** Private control-plane RPC implemented by the Sessions service. */
 export interface CodingSessionsService extends WorkerEntrypoint {
   /** Reports whether a separate-origin browser VS Code runtime is configured. */
@@ -195,6 +250,24 @@ export interface CodingSessionsService extends WorkerEntrypoint {
     sessionId: string,
     applicationId: string,
   ): Promise<CodingSessionApplicationCapability>;
+
+  /** Writes one bounded file into an owned running session's private upload directory. */
+  uploadFile(
+    owner: CodingSessionOwner,
+    request: CodingSessionFileUploadRequest,
+  ): Promise<CodingSessionFileUploadResult>;
+
+  /** Durably enqueue a first-party feedback automation job using private sanitized evidence. */
+  submitProductFeedback(
+    owner: CodingSessionOwner,
+    evidence: ProductFeedbackEvidenceBundle,
+  ): Promise<ProductFeedbackSubmissionResult>;
+
+  /** List recent first-party feedback automation statuses owned by the supplied user. */
+  listProductFeedbackStatuses(owner: CodingSessionOwner): Promise<ProductFeedbackStatus[]>;
+
+  /** Read one first-party feedback automation status owned by the supplied user. */
+  getProductFeedbackStatus(owner: CodingSessionOwner, id: string): Promise<ProductFeedbackStatus | undefined>;
 }
 
 /** Returns whether a value is a canonical GitHub repository name accepted by Coding Sessions. */
@@ -220,6 +293,39 @@ export function validateCodingSessionRepositories(values: unknown): CodingSessio
     repositories.splice(index, 0, value);
   }
   return repositories;
+}
+
+/** Validates and normalizes one coding-session file-upload request. */
+export function validateCodingSessionFileUploadRequest(
+  value: CodingSessionFileUploadRequest,
+): CodingSessionFileUploadRequest & { filename: string } {
+  if (typeof value !== "object" || value === null) throw new Error("Invalid coding session file upload.");
+  const { sessionId, filename, content } = value as CodingSessionFileUploadRequest;
+  if (typeof sessionId !== "string" || sessionId.length < 1) throw new Error("Coding session is required.");
+  if (typeof filename !== "string" || filename.length < 1) throw new Error("Upload filename is required.");
+  if (filename.length > MAX_CODING_SESSION_UPLOAD_FILENAME_LENGTH) {
+    throw new Error(`Upload filename must be at most ${MAX_CODING_SESSION_UPLOAD_FILENAME_LENGTH} characters.`);
+  }
+  if (!(content instanceof Uint8Array)) throw new Error("Upload content must be bytes.");
+  if (content.byteLength === 0) throw new Error("Upload content must not be empty.");
+  if (content.byteLength > MAX_CODING_SESSION_UPLOAD_BYTES) {
+    throw new Error(`Upload content must be at most ${MAX_CODING_SESSION_UPLOAD_BYTES} bytes.`);
+  }
+  return { sessionId, filename: safeCodingSessionUploadFilename(filename), content };
+}
+
+/** Returns a display-useful safe basename for a coding-session upload filename. */
+export function safeCodingSessionUploadFilename(filename: string): string {
+  const basename = filename.split(/[\\/]+/).filter(Boolean).at(-1) ?? "";
+  const withoutControls = [...basename]
+    .filter(character => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127)
+    .join("");
+  const safe = withoutControls.replace(/[^A-Za-z0-9._ -]+/g, "_").replace(/[ .]+$/g, "").replace(/^\.+/g, "");
+  const candidate = safe || "upload.bin";
+  if (candidate.length <= MAX_CODING_SESSION_UPLOAD_FILENAME_LENGTH) return candidate;
+  const dot = candidate.lastIndexOf(".");
+  const extension = dot > 0 && candidate.length - dot <= 32 ? candidate.slice(dot) : "";
+  return `${candidate.slice(0, MAX_CODING_SESSION_UPLOAD_FILENAME_LENGTH - extension.length)}${extension}`;
 }
 
 /** Validates and normalizes account-scoped OpenCode customization before persistence or use. */

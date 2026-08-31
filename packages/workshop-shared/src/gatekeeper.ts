@@ -123,9 +123,13 @@ export type AgentCatalog = {
  * the ceiling and to bound whichever of its item classes can grow without limit (the Context Library
  * caps its skills), leaving this as the backstop against one that doesn't.
  */
+/** Maximum number of entries accepted in one agent discovery catalog. */
 export const AGENT_CATALOG_MAX_ENTRIES = 1000;
+/** Maximum length of an agent catalog entry's opaque identifier. */
 export const AGENT_CATALOG_MAX_ID_LENGTH = 256;
+/** Maximum length of an agent catalog entry's display title. */
 export const AGENT_CATALOG_MAX_TITLE_LENGTH = 100;
+/** Maximum length of an agent catalog entry's discovery description. */
 export const AGENT_CATALOG_MAX_DESCRIPTION_LENGTH = 400;
 
 /**
@@ -241,6 +245,16 @@ export type ResourceDescription = {
   hasSlashCommands?: true;
 
   /**
+   * If present, any observation read through this resource is protected by this organization/domain
+   * sharing policy, even if it was observed before the resource began annotating individual
+   * observations. The Workshop uses this description-level policy to protect existing workspaces as
+   * soon as the updated gatekeeper is deployed: before non-owners open the workspace or anyone adds
+   * collaborators/share links, the Workshop derives and caches the compatible policy from in-scope
+   * resource descriptions and then enforces it like `ObservationDescription.domainSharingPolicy`.
+   */
+  domainSharingPolicy?: ObservationDomainSharingPolicy;
+
+  /**
    * Some resources implement the ability for the client to subscribe to events. The application
    * implements a "hook", which is a WorkerEntrypoint that implements the TypeScript interface
    * named by `hookTsType` (which must be one of the exports from `getTypescriptTypes()`).
@@ -333,7 +347,8 @@ export type ResolveRequestedResourceResult =
  * modal, using the exact same precedence the modal uses:
  *   1. the resource whose urlPattern matches `resourceUrl` (ignoring the catch-all), else
  *   2. the whole-instance catch-all ("https://*") if the vendor offers one, else
- *   3. the sole resource, if the vendor offers exactly one.
+ *   3. the sole resource, if the vendor offers exactly one and it is not a fixed singleton whose
+ *      supplied URL failed to match.
  *
  * If none of those apply, the modal would open with nothing pre-selected (a bare "create new
  * connection" screen). Rather than let that happen, this returns { ok: false } with a
@@ -353,7 +368,10 @@ export function resolveRequestedResource(
   }
   const catchAll = supportedResources.find(r => r.urlPattern === 'https://*');
   if (catchAll) return { ok: true, resource: catchAll };
-  if (supportedResources.length === 1) return { ok: true, resource: supportedResources[0] };
+  if (supportedResources.length === 1 &&
+      (!resourceUrl || !supportedResources[0].providedBySingleton)) {
+    return { ok: true, resource: supportedResources[0] };
+  }
 
   const available = supportedResources.length > 0
     ? supportedResources.map(r => `  * ${r.title} — urlPattern: ${r.urlPattern}`).join('\n')
@@ -1180,6 +1198,23 @@ export interface ApprovalQueue extends ObservationAuthorizer {
         description: HookDescription): Promise<void>;
 }
 
+/**
+ * Restricts how a sensitive observation may be shared after it has been read.
+ *
+ * A `verified-sso-email-domain` policy means the observation may be visible to the owner and to
+ * direct collaborators whose Workshop identity is a verified SSO-backed email address in
+ * `emailDomain`. Bearer/public share links are not compatible with the policy because the redeemer
+ * is not known when the link is created, and password-created Workshop identities are not compatible
+ * because their email-shaped usernames have not been verified by an identity provider.
+ */
+export type ObservationDomainSharingPolicy = {
+  /** Policy discriminator. Additional policy kinds may be added in the future. */
+  type: "verified-sso-email-domain";
+
+  /** Lowercase email domain, without the leading `@`, required for non-owner collaborators. */
+  emailDomain: string;
+};
+
 export type ObservationDescription = {
   /** Brief one-line summary of the observation, like an email subject line, to display in a list. */
   title: string;
@@ -1219,6 +1254,18 @@ export type ObservationDescription = {
    *   requires a more complex policy framework to compute.
    */
   prohibitAllSharing?: boolean;
+
+  /**
+   * If present, this observation contains organization-scoped sensitive information that may only
+   * be shared with explicitly invited collaborators satisfying this domain policy. The Workshop
+   * enforces the policy before authorizing the observation, when adding future direct collaborators,
+   * when non-owners open the workspace, and when creating or copying share links.
+   *
+   * This is intentionally weaker than `prohibitAllSharing`: it does not put the workspace into
+   * owner-only lockdown or block future actions/web fetches, but it still blocks public/bearer-link
+   * sharing and password-created identities. If both fields are set, `prohibitAllSharing` wins.
+   */
+  domainSharingPolicy?: ObservationDomainSharingPolicy;
 
   /**
    * If present, then this observation includes data that must not be revealed to the given

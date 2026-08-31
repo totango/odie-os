@@ -244,11 +244,12 @@ describe("applyJarvisToolPolicy", () => {
     expect(applyJarvisToolPolicy(entry("create_skill"))).toBeNull();
   });
 
-  it("classifies every allowlisted tool as read-only regardless of server annotations", () => {
+  it("keeps list/describe tools read-only and dispatcher tools manual actions", () => {
     for (const name of JARVIS_ALLOWED_TOOLS) {
       for (const annotations of [undefined, { readOnlyHint: true }, { readOnlyHint: false }]) {
         const policy = applyJarvisToolPolicy(entry(name, annotations));
-        expect(policy?.mode).toBe("read");
+        expect(policy?.mode).toBe(
+          name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool" ? "action" : "read");
         expect(policy?.autoApprovable).toBe(false);
         expect(policy?.classifiedBy).toBe("default");
       }

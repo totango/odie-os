@@ -6,6 +6,7 @@ const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 64_000;
 const MAX_STRING_LENGTH = 16_000;
 const MAX_WORK_ITEM_DESCRIPTION_LENGTH = 60_000;
+const MAX_JIRA_CREATE_DESCRIPTION_LENGTH = 12_000;
 const MAX_ARRAY_LENGTH = 100;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
@@ -63,6 +64,7 @@ export type ListOptions = { query?: string; limit?: number; cursor?: string };
 export type CalendarOptions = { startIso: string; endIso: string; limit?: number; calendarId?: string };
 export type SearchOptions = { query: string; limit?: number; cursor?: string };
 export type TeamPiProvider = "gmail" | "calendar" | "chorus" | "zendesk" | "salesforce" | "docs";
+type CreateJiraIssueInput = { projectKey?: string; issueType?: string; summary: string; description: string; priority?: string };
 
 const PROVIDERS = new Set<TeamPiProvider>(["gmail", "calendar", "chorus", "zendesk", "salesforce", "docs"]);
 
@@ -75,7 +77,8 @@ type WorkItemsEndpoint =
   | "workItemsSourceStatus" | "workItemsSearch" | "workItemsDetail" | "workItemsComments"
   | "workItemsActivity" | "workItemsUpdateOptions" | "workItemsAddComment" | "workItemsUpdateFields"
   | "workItemsTransitions" | "workItemsApplyTransition" | "workItemsLink" | "workItemsAttachments"
-  | "workItemsAttachmentContent" | "workItemsMediaCapabilities" | "workItemsCreateAttachment";
+  | "workItemsAttachmentContent" | "workItemsMediaCapabilities" | "workItemsCreateAttachment"
+  | "workItemsCreateJiraIssue";
 
 const READ_ENDPOINTS = new Set<ReadEndpoint>([
   "listSkills", "getSkill", "checkSkill", "listConnections", "calendarEvents", "gmailSearch",
@@ -88,6 +91,7 @@ const WORK_ITEMS_ENDPOINTS = new Set<WorkItemsEndpoint>([
   "workItemsActivity", "workItemsUpdateOptions", "workItemsAddComment", "workItemsUpdateFields",
   "workItemsTransitions", "workItemsApplyTransition", "workItemsLink", "workItemsAttachments",
   "workItemsAttachmentContent", "workItemsMediaCapabilities", "workItemsCreateAttachment",
+  "workItemsCreateJiraIssue",
 ]);
 
 export function resolveConfig(env: Env): TeamPiConfig {
@@ -346,6 +350,12 @@ export class TeamPiApi {
     });
   }
 
+  workItemsCreateJiraIssue(input: CreateJiraIssueInput): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsCreateJiraIssue");
+    const body = normalizeCreateJiraIssueInput(input);
+    return this.request("POST", "/api/work-items/v1/items/jira", undefined, body, MAX_JIRA_CREATE_DESCRIPTION_LENGTH);
+  }
+
   workItemsAttachments(source: "jira" | "zendesk", id: string): Promise<unknown> {
     assertAllowedEndpoint("workItems", "workItemsAttachments");
     return this.request("GET", `${workItemsItemPath(source, id)}/attachments`);
@@ -512,6 +522,42 @@ function safeWorkItemSource(value: string): "jira" | "zendesk" {
 
 function workItemsItemPath(source: "jira" | "zendesk", id: string): string {
   return `/api/work-items/v1/items/${safeWorkItemSource(source)}/${encodeURIComponent(safeId(id, "item id"))}`;
+}
+
+function normalizeCreateJiraIssueInput(input: CreateJiraIssueInput): Required<Pick<CreateJiraIssueInput, "projectKey" | "issueType" | "summary" | "description">> & Pick<CreateJiraIssueInput, "priority"> {
+  const projectKey = (optionalCleanInputString(input?.projectKey, 40) ?? "AI").toUpperCase();
+  const issueType = optionalCleanInputString(input?.issueType, 80) ?? "Story";
+  const summary = requiredCleanInputString(input?.summary, "summary", 300);
+  const description = requiredCleanInputString(input?.description, "description", MAX_JIRA_CREATE_DESCRIPTION_LENGTH, true).replace(/\r\n?/g, "\n");
+  if (description.split("\n").length > 80) {
+    throw new Error("Team PI Jira description must contain at most 80 lines.");
+  }
+  const priority = optionalCleanInputString(input?.priority, 80);
+  return priority ? { projectKey, issueType, summary, description, priority } : { projectKey, issueType, summary, description };
+}
+
+function requiredCleanInputString(value: unknown, name: string, max: number, allowMultiline = false): string {
+  if (typeof value !== "string") throw new Error(`Team PI Jira ${name} is required.`);
+  const out = boundedString(value.trim(), max);
+  if (!out) throw new Error(`Team PI Jira ${name} is required.`);
+  if (hasDisallowedControlCharacter(out, allowMultiline)) throw new Error(`Invalid Team PI Jira ${name}.`);
+  return out;
+}
+
+function optionalCleanInputString(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const out = boundedString(value.trim(), max);
+  if (!out) return undefined;
+  if (hasDisallowedControlCharacter(out, false)) throw new Error("Invalid Team PI Jira field.");
+  return out;
+}
+
+function hasDisallowedControlCharacter(value: string, allowMultiline: boolean): boolean {
+  for (let i = 0; i < value.length; ++i) {
+    const code = value.charCodeAt(i);
+    if (code < 32 && !(allowMultiline && (code === 9 || code === 10 || code === 13))) return true;
+  }
+  return false;
 }
 
 export function safeProvider(value: string): TeamPiProvider {

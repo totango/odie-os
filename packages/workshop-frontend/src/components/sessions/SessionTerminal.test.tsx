@@ -5,7 +5,10 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const testState = vi.hoisted(() => ({
-  authenticatedApi: undefined as unknown as { mintCodingSessionAttachCapability: ReturnType<typeof vi.fn> },
+  authenticatedApi: undefined as unknown as {
+    mintCodingSessionAttachCapability: ReturnType<typeof vi.fn>
+    uploadCodingSessionFile: ReturnType<typeof vi.fn>
+  },
   terminalWriteCallbacks: [] as Array<() => void>,
   sockets: [] as MockWebSocket[],
   scrollToBottom: vi.fn<() => void>(),
@@ -127,7 +130,24 @@ function createApi() {
       ticket++
       return { url: `https://terminal.example.test/attach?ticket=${ticket}` }
     }),
+    uploadCodingSessionFile: vi.fn<({ filename }: { filename: string }) => Promise<{
+      filename: string
+      path: string
+      bytesWritten: number
+    }>>(async ({ filename }) => ({
+      filename,
+      path: `/workspace/.odie-uploads/id-${filename}`,
+      bytesWritten: 5,
+    })),
   }
+}
+
+function createFile(name: string, bytes = new Uint8Array([1, 2, 3, 4, 5])): File {
+  const file = new File([bytes], name)
+  Object.defineProperty(file, 'arrayBuffer', {
+    value: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+  })
+  return file
 }
 
 async function renderTerminal(
@@ -179,6 +199,94 @@ afterEach(() => {
 })
 
 describe('SessionTerminal', () => {
+
+  it('uploads a selected file and inserts its quoted sandbox path without submitting', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]!
+    await act(async () => socket.serverMessage(JSON.stringify({ type: 'ready' })))
+    const input = rendered.container.querySelector('input[type="file"]') as HTMLInputElement
+    const file = createFile('screen shot.png')
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+
+    await act(async () => {
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(testState.authenticatedApi.uploadCodingSessionFile).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      filename: 'screen shot.png',
+      content: new Uint8Array([1, 2, 3, 4, 5]),
+    })
+    const inserted = new TextDecoder().decode(socket.send.mock.calls.at(-1)![0] as Uint8Array)
+    expect(inserted).toBe("'/workspace/.odie-uploads/id-screen shot.png'")
+    expect(inserted).not.toMatch(/[\r\n]/)
+    expect(rendered.container.textContent).toContain('File uploaded and path inserted.')
+    await rendered.unmount()
+  })
+
+  it('uploads dropped files in order and shell-quotes each inserted path', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]!
+    await act(async () => socket.serverMessage(JSON.stringify({ type: 'ready' })))
+    const terminalArea = rendered.container.querySelector('[aria-label="OpenCode session terminal"]')!.parentElement!
+    const drop = new Event('drop', { bubbles: true, cancelable: true })
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: { files: [createFile('a.txt'), createFile("b's.png")], types: ['Files'], dropEffect: 'none' },
+    })
+
+    await act(async () => {
+      terminalArea.dispatchEvent(drop)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(drop.defaultPrevented).toBe(true)
+    expect(testState.authenticatedApi.uploadCodingSessionFile).toHaveBeenCalledTimes(2)
+    expect(new TextDecoder().decode(socket.send.mock.calls.at(-1)![0] as Uint8Array))
+      .toBe("'/workspace/.odie-uploads/id-a.txt' '/workspace/.odie-uploads/id-b'\\''s.png'")
+    await rendered.unmount()
+  })
+
+  it('uploads clipboard files while leaving text-only paste to xterm', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]!
+    await act(async () => socket.serverMessage(JSON.stringify({ type: 'ready' })))
+    const terminalArea = rendered.container.querySelector('[aria-label="OpenCode session terminal"]')!.parentElement!
+    const filePaste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(filePaste, 'clipboardData', { value: { files: [createFile('clipboard.png')] } })
+    const textPaste = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(textPaste, 'clipboardData', { value: { files: [] } })
+
+    await act(async () => {
+      terminalArea.dispatchEvent(filePaste)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    terminalArea.dispatchEvent(textPaste)
+
+    expect(filePaste.defaultPrevented).toBe(true)
+    expect(textPaste.defaultPrevented).toBe(false)
+    expect(testState.authenticatedApi.uploadCodingSessionFile).toHaveBeenCalledOnce()
+    await rendered.unmount()
+  })
+
+  it('rejects oversized files before calling the upload API', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]!
+    await act(async () => socket.serverMessage(JSON.stringify({ type: 'ready' })))
+    const input = rendered.container.querySelector('input[type="file"]') as HTMLInputElement
+    const oversized = createFile('huge.png')
+    Object.defineProperty(oversized, 'size', { value: 10 * 1024 * 1024 + 1 })
+    Object.defineProperty(input, 'files', { configurable: true, value: [oversized] })
+
+    await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })))
+
+    expect(testState.authenticatedApi.uploadCodingSessionFile).not.toHaveBeenCalled()
+    expect(rendered.container.textContent).toContain('huge.png is larger than 10 MiB.')
+    await rendered.unmount()
+  })
 
   it('shows a live status and follows the latest Prime Agent TUI output', async () => {
     const rendered = await renderTerminal({ runtime: 'prime-agent', terminalKind: 'opencode' })

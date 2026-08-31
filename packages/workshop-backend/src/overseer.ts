@@ -1,7 +1,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isFinanceOperationsWorkbenchBlueprintId, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, type ObservationDomainSharingPolicy } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -43,6 +43,7 @@ import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord } fro
 import { AutoApprovalDrainer } from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext, traced } from "./observability";
+import type { ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
 import type { GadgetExportFormat } from "@gadgets/workshop-shared/api";
@@ -273,6 +274,7 @@ type GatekeeperRecord = {
   resourceTitle?: string,   // denormalized to avoid gatekeeper query
   resourceUrl?: string;     // denormalized to avoid gatekeeper query
   hasSlashCommands?: true;  // denormalized from ResourceDescription
+  domainSharingPolicy?: ObservationDomainSharingPolicy; // denormalized from ResourceDescription
   class: GatekeeperClass,
   hook?: string,  // export name to which the gatekeeper's hook is connected
 
@@ -723,6 +725,49 @@ function stringifyError(err: unknown): string {
   }
 }
 
+function normalizeSharingDomain(domain: string): string {
+  return domain.trim().replace(/^@+/, "").toLowerCase();
+}
+
+function sameDomainSharingPolicy(
+    a: ObservationDomainSharingPolicy, b: ObservationDomainSharingPolicy): boolean {
+  return a.type === b.type && normalizeSharingDomain(a.emailDomain) === normalizeSharingDomain(b.emailDomain);
+}
+
+function formatDomainSharingPolicy(policy: ObservationDomainSharingPolicy): string {
+  return `@${normalizeSharingDomain(policy.emailDomain)} SSO`;
+}
+
+/** Return true when a profile id satisfies an observation domain-sharing policy. */
+export async function isProfileAllowedByDomainSharingPolicy(
+    profileId: string,
+    hasPasswordLogin: () => Promise<boolean>,
+    policy: ObservationDomainSharingPolicy): Promise<boolean> {
+  const domain = normalizeSharingDomain(policy.emailDomain);
+  const lowerProfileId = profileId.trim().toLowerCase();
+  if (!lowerProfileId.endsWith(`@${domain}`)) return false;
+  return !(await hasPasswordLogin());
+}
+
+async function assertProfileAllowedByDomainSharingPolicy(
+    profileId: string,
+    hasPasswordLogin: () => Promise<boolean>,
+    policy: ObservationDomainSharingPolicy,
+    context: string): Promise<void> {
+  if (await isProfileAllowedByDomainSharingPolicy(profileId, hasPasswordLogin, policy)) return;
+  throw new Error(
+      `${context} requires an explicitly invited, verified ${formatDomainSharingPolicy(policy)} collaborator.`);
+}
+
+/** Throw when a workspace policy is incompatible with bearer/public share links. */
+export function assertShareLinkAllowedByDomainSharingPolicy(
+    policy: ObservationDomainSharingPolicy | undefined): void {
+  if (policy) {
+    throw new Error(
+        "This workspace has observed organization-scoped data and does not support share links.");
+  }
+}
+
 // Compute a unique value to use as session affinity for a chat thread. Workers AI in particular
 // wants a session affinity value to enable prompt caching. (But we compute it regardless of
 // provider since other providers might want it too.)
@@ -786,6 +831,23 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
       record satisfies never;
       throw new TypeError(`Invalid ActionRecord type: ${(record as ActionRecord).type}`);
   }
+}
+
+function summarizeFeedbackMessage(message: AiChatMessage): string {
+  const author = message.author.type === "user" ? "user" : "agent";
+  if (message.type === "message") return `${author}: ${redactFeedbackEvidenceText(message.message, 500)}`;
+  if (message.type === "changes") return `${author}: proposed workspace changes`;
+  if (message.type === "action") return `${author}: action ${message.actionLog?.resourceTitle ?? message.actionId}`;
+  if (message.type === "slashCommand") return `${author}: slash command`;
+  return `${author}: ${message.type}`;
+}
+
+function redactFeedbackEvidenceText(value: string, limit: number): string {
+  const redacted = value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/https?:\/\/[^\s#?]+\?\S+/g, "[redacted-url]")
+    .replace(/([A-Za-z0-9_]*token[A-Za-z0-9_]*|authorization|cookie|password|secret)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+  return redacted.length <= limit ? redacted : `${redacted.slice(0, limit - 1)}…`;
 }
 
 function makeOverseerStorage(storage: DurableObjectStorage) {
@@ -852,6 +914,10 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       // True if any past observation was authorized that had the `prohibitAllSharing` flag set
       // in its `ObservationDescription`.
       prohibitAllSharing: false,
+
+      // The active organization/domain-scoped observation sharing policy, if any. Unlike
+      // `prohibitAllSharing`, this still allows direct collaborators who satisfy the policy.
+      domainSharingPolicy: <ObservationDomainSharingPolicy | undefined>undefined,
     },
 
     collections: {
@@ -2779,6 +2845,7 @@ class OverseerImpl implements AgentHooks {
       gatekeeperRecord.resourceTitle = description.title;
       gatekeeperRecord.resourceUrl = description.url;
       gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
+      gatekeeperRecord.domainSharingPolicy = description.domainSharingPolicy;
       this.storage.gatekeepers.put(gatekeeperRecord);
     } catch (error) {
       this.removeGatekeeper(id);
@@ -2892,6 +2959,20 @@ class OverseerImpl implements AgentHooks {
       this.storage.prohibitAllSharing.put(true);
     }
 
+    if (description.domainSharingPolicy) {
+      const existing = this.storage.domainSharingPolicy.get();
+      if (existing && !sameDomainSharingPolicy(existing, description.domainSharingPolicy)) {
+        throw new Error(
+            "This observation was blocked because it requires a different sharing policy than " +
+            "earlier sensitive observations in this workspace.");
+      }
+      // Latch synchronously before any validation awaits, so a concurrent sharing mutation sees the
+      // conservative policy immediately. If validation later fails, retaining the latch is safe: it
+      // can only make future sharing stricter.
+      this.storage.domainSharingPolicy.put(existing ?? description.domainSharingPolicy);
+      await this.#enforceDomainSharingPolicyForObservation(description.domainSharingPolicy);
+    }
+
     // Forward exclusion: the gatekeeper may name observers who must not see this observation. Since
     // v1 has no per-thread hiding, the only way to let such an observation proceed is if the named
     // observer has already lost access in the sharing graph. If any named observer is still
@@ -2920,6 +3001,33 @@ class OverseerImpl implements AgentHooks {
 
     this.storage.actions.put(record);
     this.#associateAction(caller, actionId);
+  }
+
+  async #enforceDomainSharingPolicyForObservation(
+      policy: ObservationDomainSharingPolicy): Promise<void> {
+    const existing = this.storage.domainSharingPolicy.get();
+    if (existing && !sameDomainSharingPolicy(existing, policy)) {
+      throw new Error(
+          "This observation was blocked because it requires a different sharing policy than " +
+          "earlier sensitive observations in this workspace.");
+    }
+
+    const sharing = await this.getSharingManager();
+    if (sharing.listShareLinkRecords().length > 0) {
+      throw new Error(
+          "This observation was blocked because it contains organization-scoped data that cannot " +
+          "be exposed through public share links. Revoke all share links and try again.");
+    }
+
+    for (const collaborator of sharing.listCollaborators()) {
+      await assertProfileAllowedByDomainSharingPolicy(
+          collaborator.profile.id,
+          () => this.users.get(this.users.idFromName(collaborator.profile.id)).hasPasswordLogin(),
+          policy,
+          "This observation");
+    }
+
+    this.storage.domainSharingPolicy.put(policy);
   }
 
   async getChatAttachmentData(chatId: number, id: string): Promise<Uint8Array> {
@@ -5911,11 +6019,18 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (resolved.resource.providedBySingleton) {
+      let providedAccounts = await this.#ownerUserDo().listProvidedAccounts();
+      let connectedSingleton = providedAccounts.some(account =>
+        account.vendorId.toLowerCase() === input.vendorId.toLowerCase() &&
+        account.description.singleton !== undefined);
       let existingBindingName = findAmbientBindingName(
           this.getChatAgentContext(chatId).bindings,
           input.vendorId,
           target => this.storage.gatekeepers.get(target));
-      if (existingBindingName) {
+      // An expired singleton stays in the chat's frozen binding set, but listProvidedAccounts omits
+      // accounts with invalid credentials. Let that case proceed to the reconnect UI instead of
+      // telling the agent to keep retrying a capability that cannot currently authenticate.
+      if (existingBindingName && connectedSingleton) {
         return { requested: false, message:
             `Cannot request another "${vendor.description.displayName}" connection: this account ` +
             `is already available as env.${existingBindingName}. Call ` +
@@ -5924,9 +6039,6 @@ class OverseerImpl implements AgentHooks {
             `a duplicate connection.` };
       }
 
-      let connectedSingleton = (await this.#ownerUserDo().listProvidedAccounts()).some(account =>
-        account.vendorId.toLowerCase() === input.vendorId.toLowerCase() &&
-        account.description.singleton !== undefined);
       if (connectedSingleton) {
         return { requested: false, message:
             `Cannot request another "${vendor.description.displayName}" connection: this account ` +
@@ -6255,6 +6367,40 @@ class OverseerImpl implements AgentHooks {
     return this.#inScopeGatekeepers(role)
       .filter(record => !isGatekeeperDisabled(config, record))
       .map(observerBindingNeed);
+  }
+
+  async #deriveDomainSharingPolicy(role: CollaboratorRole): Promise<ObservationDomainSharingPolicy | undefined> {
+    const stored = this.storage.domainSharingPolicy.get();
+    if (stored) return stored;
+
+    let config = await readAdminConfig(this.env);
+    let policy: ObservationDomainSharingPolicy | undefined;
+    for (let gk of this.#inScopeGatekeepers(role).filter(record => !isGatekeeperDisabled(config, record))) {
+      let candidate = gk.domainSharingPolicy;
+      if (!candidate) {
+        let description = await this.getGatekeeperFacet(gk.id).describe();
+        candidate = description.domainSharingPolicy;
+        gk.resourceTitle = description.title;
+        gk.resourceUrl = description.url;
+        gk.hasSlashCommands = description.hasSlashCommands;
+        gk.domainSharingPolicy = candidate;
+        this.storage.gatekeepers.put(gk);
+      }
+      if (!candidate) continue;
+      if (policy && !sameDomainSharingPolicy(policy, candidate)) {
+        throw new Error(
+            "This workspace uses resources with incompatible organization sharing policies.");
+      }
+      policy = candidate;
+    }
+
+    if (policy) this.storage.domainSharingPolicy.put(policy);
+    return policy;
+  }
+
+  async deriveDomainSharingPolicyForRole(
+      role: CollaboratorRole): Promise<ObservationDomainSharingPolicy | undefined> {
+    return this.#deriveDomainSharingPolicy(role);
   }
 
   // Best-effort `removeObserver(observerId)` across the given gatekeeper ids. Never throws; logs
@@ -6723,6 +6869,30 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.outputsSnapshot();
   }
 
+  /** Collects bounded, sanitized workspace evidence for the workspace owner only. */
+  async collectProductFeedbackEvidence(ownerId: string, chatId?: number): Promise<NonNullable<ProductFeedbackEvidenceBundle["workspace"]> | undefined> {
+    if (this.impl.ownerId !== ownerId) return undefined;
+    const result: NonNullable<ProductFeedbackEvidenceBundle["workspace"]> = {
+      id: this.impl.ctx.id.toString(),
+      title: this.impl.storage.title.get(),
+      ...(chatId !== undefined ? { chatId } : {}),
+      omissions: [],
+    };
+    if (this.impl.storage.prohibitAllSharing.get() || this.impl.storage.domainSharingPolicy.get()) {
+      result.omissions!.push("workspace evidence omitted by sharing policy");
+      return result;
+    }
+    if (chatId !== undefined) {
+      const messages = [...this.impl.storage.chats.list({ prefix: `${keyString(chatId)}.` })].slice(-12);
+      result.transcript = messages.map(message => summarizeFeedbackMessage(message)).filter(Boolean);
+    }
+    result.activity = [...this.impl.storage.actions.list()].slice(-12).map(action => {
+      const log = actionRecordToLog(action);
+      return redactFeedbackEvidenceText(`${log.type}:${log.resourceTitle}:${log.state}`, 240);
+    });
+    return result;
+  }
+
   #financeRole(
       claim: FinanceWorkspaceClaim,
       ownerRecord: GadgetMetadata | null,
@@ -6863,6 +7033,14 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       }
 
       let sharing = await this.impl.getSharingManager();
+      let domainSharingPolicy = shareKey
+          ? await this.impl.deriveDomainSharingPolicyForRole("build")
+          : this.impl.storage.domainSharingPolicy.get();
+      if (domainSharingPolicy) {
+        if (shareKey) {
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+        }
+      }
 
       // If a share key was provided, redeem it. The owner already has full access and should not
       // appear in the collaborators table.
@@ -6886,6 +7064,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
         }
         role = effectiveCollaboratorRole(ownerRecord?.originHubId, effectiveRole);
+      }
+
+      domainSharingPolicy ??= await this.impl.deriveDomainSharingPolicyForRole(role);
+
+      if (domainSharingPolicy) {
+        if (!sharing.hasDirectInvite(profileId)) {
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+        }
+        await assertProfileAllowedByDomainSharingPolicy(
+            profileId,
+            () => clientUser.hasPasswordLogin(),
+            domainSharingPolicy,
+            "This workspace");
       }
 
       // Ambient reconciliation may attach Gatekeepers after open() starts. Finish it before taking
@@ -8002,8 +8193,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    let {class: cls, vendorId, typeUrlPattern} =
+    let {class: cls, vendorId, typeUrlPattern, providedBySingleton, singletonAuthorityKey} =
         await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
+    if (providedBySingleton) {
+      // Reconnect may have advanced a revisioned singleton's authority while this workspace still
+      // has only the previous ambient record. Install the current revision first, then reuse it.
+      await this.impl.ensureAmbientCapsules();
+      let existing = [...this.impl.storage.gatekeepers.list()].find(record =>
+        record.creationSpec?.type === "ambient" &&
+        record.creationSpec.vendorId === vendorId &&
+        record.creationSpec.accountId === accountId &&
+        record.creationSpec.authorityKey === singletonAuthorityKey);
+      if (existing) return this.getGatekeeperById(existing.id);
+    }
     let creationSpec: GatekeeperCreationSpec = {
       type: "gatekeeper",
       vendorId,
@@ -9244,13 +9446,35 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       return null;
     }
 
+    const sharing = await this.impl.getSharingManager();
+    const domainSharingPolicy = this.impl.storage.domainSharingPolicy.get() ??
+        await this.impl.deriveDomainSharingPolicyForRole(role);
+    if (domainSharingPolicy) {
+      await assertProfileAllowedByDomainSharingPolicy(
+          profile.id,
+          () => userDo.hasPasswordLogin(),
+          domainSharingPolicy,
+          "This workspace");
+    }
+
+    // authorizeObservation() can latch a policy while the identity check above is awaiting. The
+    // policy is monotonic, so one final synchronous read closes the mutation window.
+    const activeDomainSharingPolicy = this.impl.storage.domainSharingPolicy.get();
+    if (activeDomainSharingPolicy && !domainSharingPolicy) {
+      await assertProfileAllowedByDomainSharingPolicy(
+          profile.id,
+          () => userDo.hasPasswordLogin(),
+          activeDomainSharingPolicy,
+          "This workspace");
+    }
+
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
-    return (await this.impl.getSharingManager()).addCollaborator({
+    return sharing.addCollaborator({
       caller: this.#sharingCaller(),
       profile,
       role,
@@ -9304,26 +9528,32 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async createShareLink(role: CollaboratorRole, note?: string)
       : Promise<{ key: string; linkId: string }> {
     assertShareLinksAllowed(await this.#isFinanceWorkspace());
+    const sharing = await this.impl.getSharingManager();
+    assertShareLinkAllowedByDomainSharingPolicy(
+        await this.impl.deriveDomainSharingPolicyForRole("build"));
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
-    return (await this.impl.getSharingManager())
-        .createShareLink({ caller: this.#sharingCaller(), role, note });
+    assertShareLinkAllowedByDomainSharingPolicy(this.impl.storage.domainSharingPolicy.get());
+    return sharing.createShareLink({ caller: this.#sharingCaller(), role, note });
   }
 
   async newShareLinkKey(linkId: string): Promise<{ key: string }> {
     assertShareLinksAllowed(await this.#isFinanceWorkspace());
+    const sharing = await this.impl.getSharingManager();
+    assertShareLinkAllowedByDomainSharingPolicy(
+        await this.impl.deriveDomainSharingPolicyForRole("build"));
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
-    return (await this.impl.getSharingManager())
-        .newShareLinkKey({ caller: this.#sharingCaller(), linkId });
+    assertShareLinkAllowedByDomainSharingPolicy(this.impl.storage.domainSharingPolicy.get());
+    return sharing.newShareLinkKey({ caller: this.#sharingCaller(), linkId });
   }
 
   async listShareLinks(): Promise<ShareLinkInfo[]> {

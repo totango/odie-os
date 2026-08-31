@@ -6,6 +6,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useTheme } from '../../ThemeContext'
 import { WorkshopButton } from '../WorkshopControls'
 import type { CodingSessionRuntime, CodingSessionTerminalKind } from '@gadgets/workshop-shared/api'
+import { MAX_CODING_SESSION_UPLOAD_BYTES } from '@gadgets/workshop-shared/coding-sessions'
 import { OrderedTerminalOperationQueue, TerminalWriteBatcher } from './orderedTerminalOperations'
 
 type PendingChunk = { byteLength: number; cursor: string }
@@ -13,6 +14,9 @@ type PendingChunk = { byteLength: number; cursor: string }
 const MAX_RECONNECT_ATTEMPTS = 5
 const MAX_CURSOR_LENGTH = 1024
 const RECONNECT_STABILITY_WINDOW_MS = 5_000
+const MAX_FILES_PER_UPLOAD = 5
+
+const hasFiles = (types: readonly string[]) => Array.from(types).includes('Files')
 
 const TERMINAL_THEMES = {
   light: { background: '#ffffff', foreground: '#18181b', cursor: '#ff4801', selectionBackground: '#dbeafe' },
@@ -39,6 +43,9 @@ export default function SessionTerminal({
   const hostRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal>(null)
   const reconnectRef = useRef<() => void>(() => {})
+  const insertTextRef = useRef<(text: string) => boolean>(() => false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const dragDepthRef = useRef(0)
   const runtimeRef = useRef(runtime)
   const followLatestRef = useRef<() => void>(() => {})
   runtimeRef.current = runtime
@@ -49,6 +56,9 @@ export default function SessionTerminal({
   const [state, setState] = useState<'connecting' | 'starting' | 'connected' | 'disconnected'>('connecting')
   const [interactive, setInteractive] = useState(false)
   const [error, setError] = useState<string>()
+  const [uploadMessage, setUploadMessage] = useState<string>()
+  const [uploading, setUploading] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
   const terminalLabel = terminalKind === 'shell' ? 'Shell' : runtime === 'pi' ? 'Pi' : runtime === 'prime-agent' ? 'Prime Agent' : 'OpenCode'
 
   useEffect(() => {
@@ -110,6 +120,12 @@ export default function SessionTerminal({
       if (socket?.readyState !== WebSocket.OPEN) return
       socket.send(inputEncoder.encode(data))
     })
+    insertTextRef.current = (text) => {
+      if (socket?.readyState !== WebSocket.OPEN) return false
+      socket.send(inputEncoder.encode(text))
+      terminal.focus()
+      return true
+    }
     followLatestRef.current = () => {
       terminal.scrollToBottom()
       if (terminalKind === 'opencode' && runtimeRef.current === 'prime-agent' &&
@@ -365,6 +381,7 @@ export default function SessionTerminal({
       socket?.close()
       terminal.dispose()
       terminalRef.current = null
+      insertTextRef.current = () => false
       followLatestRef.current = () => {}
     }
   }, [authenticatedApi, onSessionUnavailable, sessionId, terminalKind]) // Theme and prepared input updates are applied without reconnecting below.
@@ -373,6 +390,48 @@ export default function SessionTerminal({
   useEffect(() => {
     if (terminalRef.current) terminalRef.current.options.theme = TERMINAL_THEMES[resolvedThemeMode]
   }, [resolvedThemeMode])
+
+  const uploadFiles = async (files: File[]) => {
+    if (files.length === 0 || uploading) return
+    if (state !== 'connected') {
+      setUploadMessage('Connect to the terminal before uploading files.')
+      return
+    }
+    const selected = files.slice(0, MAX_FILES_PER_UPLOAD)
+    const omittedCount = files.length - selected.length
+    const oversized = selected.find((file) => file.size > MAX_CODING_SESSION_UPLOAD_BYTES)
+    if (oversized) {
+      setUploadMessage(`${oversized.name} is larger than 10 MiB.`)
+      return
+    }
+    const empty = selected.find((file) => file.size === 0)
+    if (empty) {
+      setUploadMessage(`${empty.name} is empty.`)
+      return
+    }
+
+    setUploading(true)
+    setUploadMessage(`Uploading ${selected.length === 1 ? selected[0]!.name : `${selected.length} files`}…`)
+    try {
+      const results = []
+      for (const file of selected) {
+        results.push(await authenticatedApi.uploadCodingSessionFile({
+          sessionId,
+          filename: file.name,
+          content: new Uint8Array(await file.arrayBuffer()),
+        }))
+      }
+      const inserted = insertTextRef.current(results.map(({ path }) => quoteTerminalPath(path)).join(' '))
+      const resultMessage = inserted
+        ? `${results.length === 1 ? 'File' : 'Files'} uploaded and path${results.length === 1 ? '' : 's'} inserted.`
+        : `${results.length === 1 ? 'File' : 'Files'} uploaded, but the terminal disconnected before insertion.`
+      setUploadMessage(omittedCount > 0 ? `${resultMessage} ${omittedCount} more not uploaded.` : resultMessage)
+    } catch (caught) {
+      setUploadMessage(caught instanceof Error ? caught.message : 'Could not upload files.')
+    } finally {
+      setUploading(false)
+    }
+  }
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden bg-kumo-base">
@@ -387,6 +446,25 @@ export default function SessionTerminal({
           {state === 'connected' && <span className="sr-only">PTY connectivity only; agent running or idle state is shown inside the terminal.</span>}
         </span>
         <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="sr-only"
+            aria-label="Upload files to coding session"
+            onChange={(event) => {
+              const files = Array.from(event.currentTarget.files ?? [])
+              event.currentTarget.value = ''
+              void uploadFiles(files)
+            }}
+          />
+          <WorkshopButton
+            title="Upload files to the coding session and insert their paths into the terminal"
+            disabled={state !== 'connected' || uploading}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {uploading ? 'Uploading…' : 'Upload file'}
+          </WorkshopButton>
           {state === 'connected' && (
             <WorkshopButton
               title={runtime === 'prime-agent' && terminalKind === 'opencode'
@@ -407,7 +485,48 @@ export default function SessionTerminal({
         </div>
       </div>
       {error && <div className="border-b border-kumo-danger/20 bg-kumo-danger/10 px-3 py-2 text-xs text-kumo-danger">{error}</div>}
-      <div className="relative min-h-0 flex-1">
+      {uploadMessage && <div role="status" aria-live="polite" className="border-b border-kumo-line px-3 py-2 text-xs text-kumo-subtle">{uploadMessage}</div>}
+      <div
+        className="relative min-h-0 flex-1"
+        onPasteCapture={(event) => {
+          const files = Array.from(event.clipboardData.files)
+          if (files.length === 0) return
+          event.preventDefault()
+          event.stopPropagation()
+          void uploadFiles(files)
+        }}
+        onDragEnter={(event) => {
+          if (!hasFiles(event.dataTransfer.types)) return
+          event.preventDefault()
+          dragDepthRef.current++
+          setDragActive(true)
+        }}
+        onDragOver={(event) => {
+          if (!hasFiles(event.dataTransfer.types)) return
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'copy'
+        }}
+        onDragLeave={(event) => {
+          if (!hasFiles(event.dataTransfer.types)) return
+          event.preventDefault()
+          dragDepthRef.current = Math.max(0, dragDepthRef.current - 1)
+          if (dragDepthRef.current === 0) setDragActive(false)
+        }}
+        onDrop={(event) => {
+          const files = Array.from(event.dataTransfer.files)
+          if (files.length === 0) return
+          event.preventDefault()
+          event.stopPropagation()
+          dragDepthRef.current = 0
+          setDragActive(false)
+          void uploadFiles(files)
+        }}
+      >
+        {dragActive && (
+          <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-kumo-accent bg-kumo-base/90 text-sm font-medium text-kumo-default">
+            Drop files to upload and insert their paths
+          </div>
+        )}
         {!interactive && state !== 'disconnected' && (
           <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-kumo-base/90 text-xs text-kumo-subtle">
             {state === 'connecting' ? 'Connecting to the sandbox…' : `Starting ${terminalLabel}…`}
@@ -417,6 +536,10 @@ export default function SessionTerminal({
       </div>
     </section>
   )
+}
+
+function quoteTerminalPath(path: string): string {
+  return `'${path.replaceAll("'", "'\\''")}'`
 }
 
 function terminalHasVisibleContent(terminal: Terminal): boolean {

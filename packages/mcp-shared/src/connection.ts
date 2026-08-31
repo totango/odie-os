@@ -11,6 +11,7 @@ import {
   McpAuthRequiredError,
   McpCallNotDispatchedError,
   McpClient,
+  McpSessionAffinityError,
   McpSessionExpiredError,
   type McpToolFilter,
   type ToolCatalog,
@@ -159,6 +160,13 @@ export async function withClient<T>(
     try {
       return await fn(client);
     } catch (err) {
+      if (err instanceof McpSessionAffinityError) {
+        // JARVIS's bridge keeps sessions on one replica and asks clients that hit another replica
+        // to retry. Re-run reads once with the same session id; writes opt out below because even a
+        // server-declared pre-dispatch failure is not a strong enough contract to replay an action.
+        if (options.retryOnExpiry !== false) return await fn(client);
+        throw err;
+      }
       if (!(err instanceof McpSessionExpiredError)) throw err;
       if (options.retryOnExpiry !== false) {
         client.sessionId = null;

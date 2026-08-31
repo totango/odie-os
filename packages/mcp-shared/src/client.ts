@@ -198,6 +198,17 @@ export class McpProtocolError extends Error {
   }
 }
 
+const MCP_SESSION_AFFINITY_ERROR_MESSAGE =
+  "HTTP bridge session is owned by a different instance; retry to reach the correct replica";
+
+/** The MCP bridge recognized the session but this request reached a non-owning replica. */
+export class McpSessionAffinityError extends McpProtocolError {
+  constructor(message: string, code?: number, outcome: CallOutcome = "unknown") {
+    super(message, code, outcome);
+    this.name = "McpSessionAffinityError";
+  }
+}
+
 /**
  * Whether a failed call might already have taken effect on the server.
  *
@@ -482,7 +493,6 @@ export class McpClient {
     }
 
     const sessionId = response.headers.get("Mcp-Session-Id");
-    if (sessionId) this.sessionId = sessionId;
 
     const contentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
     let parsed: JsonRpcResponse;
@@ -507,10 +517,18 @@ export class McpClient {
     }
 
     if (parsed.error) {
+      const message = `MCP server rejected "${method}": ` +
+        this.#quoteServerText(parsed.error.message);
+      // Vendor compatibility for a bridge that keeps sessions on one replica. A tools/call error
+      // remains outcome-unknown; only its trusted read call site can decide to retry it.
+      if (parsed.error.message === MCP_SESSION_AFFINITY_ERROR_MESSAGE) {
+        throw new McpSessionAffinityError(
+          message, parsed.error.code, method === "tools/call" ? "unknown" : "declined");
+      }
       throw new McpProtocolError(
-        `MCP server rejected "${method}": ${this.#quoteServerText(parsed.error.message)}`,
-        parsed.error.code, method === "tools/call" ? "unknown" : "declined");
+        message, parsed.error.code, method === "tools/call" ? "unknown" : "declined");
     }
+    if (sessionId) this.sessionId = sessionId;
     return { result: parsed.result as T, responseBytes };
   }
 

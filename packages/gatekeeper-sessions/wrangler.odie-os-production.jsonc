@@ -43,6 +43,12 @@
       "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:a3ed11cff1c11faf8efd0fe4d1cebd7595026f791b8a6bc69b986e7ff9c5b1c1",
       "instance_type": "standard-4",
       "max_instances": 2
+    },
+    {
+      "class_name": "ProductFeedbackSandbox",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:a3ed11cff1c11faf8efd0fe4d1cebd7595026f791b8a6bc69b986e7ff9c5b1c1",
+      "instance_type": "standard-1",
+      "max_instances": 4
     }
   ],
   "durable_objects": {
@@ -51,6 +57,7 @@
       { "name": "SESSION_SANDBOX_STANDARD_2", "class_name": "CodingSessionSandboxStandard2" },
       { "name": "SESSION_SANDBOX_STANDARD_3", "class_name": "CodingSessionSandboxStandard3" },
       { "name": "SESSION_SANDBOX_STANDARD_4", "class_name": "CodingSessionSandboxStandard4" },
+      { "name": "PRODUCT_FEEDBACK_SANDBOX", "class_name": "ProductFeedbackSandbox" },
       { "name": "SESSION_CAPACITY", "class_name": "CodingSessionCapacity" },
       { "name": "SESSION_POLICIES", "class_name": "CodingSessionPolicy" },
       { "name": "SESSION_APPLICATION_PREVIEWS", "class_name": "CodingSessionApplicationPreview" },
@@ -62,6 +69,11 @@
       "binding": "WORKSHOP_TOOLS",
       "service": "odie-os-backend",
       "entrypoint": "CodingSessionToolHostImpl"
+    },
+    {
+      "binding": "PRODUCT_FEEDBACK_NOTIFIER",
+      "service": "odie-os-gk-jarvis",
+      "entrypoint": "ProductFeedbackNotifierEntrypoint"
     }
   ],
   "migrations": [
@@ -85,6 +97,10 @@
     {
       "tag": "v4",
       "new_sqlite_classes": ["CodingSessionApplicationPreview"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["ProductFeedbackSandbox"]
     }
   ],
   "observability": {

@@ -30,6 +30,13 @@
   //
   //   JARVIS_TRUST_ANNOTATIONS
   //     Set exactly to "true" to trust JARVIS MCP tool annotations for auto-approval. Defaults to BYO.
+  //
+  //   PRODUCT_FEEDBACK_MCP_URL
+  //     Dedicated JARVIS MCP endpoint for fixed product-feedback PR notifications.
+  //
+  // Secrets:
+  //   PRODUCT_FEEDBACK_MCP_TOKEN
+  //     Dedicated bearer token accepted only by the product-feedback MCP endpoint.
   "vars": {
     "JARVIS_TRUST_ANNOTATIONS": "true"
   },

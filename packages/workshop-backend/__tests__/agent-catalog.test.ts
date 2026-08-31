@@ -102,6 +102,10 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("For customer, account, CSM, product-usage, or internal business questions");
     expect(message).toContain("prefer the ODIE MCP resource when available");
     expect(message).toContain("say when an answer had to fall back to the public web");
+    expect(message).toContain("structured ODIE account facts");
+    expect(message).toContain("outrank interactions, notes, documents, and meeting titles");
+    expect(message).toContain("Report ambiguity, missing facts, or conflicts");
+    expect(message).toContain("never infer account role, name, identity, or gender from weak evidence");
     expect(message).not.toContain("prefer the Wren semantic query tools behind JARVIS");
     expect(message).toContain("engineering questions");
     expect(message).toContain("prefer JARVIS repo_graph tools");
@@ -110,6 +114,9 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("only when the task needs capabilities the organization source does not provide");
     expect(message).toContain("do not request another connection to the same vendor");
     expect(message).toContain("a duplicate binding does not add methods");
+    expect(message).toContain("never create a Gadget, document, or other local artifact as a substitute");
+    expect(message).toContain("ask where the user wants it sent");
+    expect(message).toContain("provide a concise draft directly in chat");
 
     let wrenMessage = formatAlwaysAvailableResourcesPrompt([{
       title: "JARVIS",

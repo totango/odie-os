@@ -6,6 +6,7 @@ import {
   type AiChatAuthorInfo,
   type BlueprintUserSummary,
 } from "@gadgets/workshop-shared/api";
+import type { ObservationDomainSharingPolicy } from "@gadgets/workshop-shared/gatekeeper";
 import {
   assertBlueprintOriginAllowed,
   readFinanceHubStatus,
@@ -16,8 +17,10 @@ import {
 } from "../src/server.js";
 import {
   assertCollaboratorInviteAllowed,
+  assertShareLinkAllowedByDomainSharingPolicy,
   assertShareLinksAllowed,
   effectiveCollaboratorRole,
+  isProfileAllowedByDomainSharingPolicy,
   type OverseerDurableObject,
 } from "../src/overseer.js";
 import type { AdminSettings, FinanceWorkspaceClaim } from "../src/admin-settings.js";
@@ -32,6 +35,10 @@ declare module "cloudflare:workers" {
 }
 
 const PASSWORD_HASH = new Uint8Array([1, 2, 3]);
+const TOTANGO_POLICY: ObservationDomainSharingPolicy = {
+  type: "verified-sso-email-domain",
+  emailDomain: "totango.com",
+};
 
 function username(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}@example.com`;
@@ -43,6 +50,13 @@ async function createUser(prefix: string) {
   let user = env.TEST_USER.get(id);
   await user.createAccount(profileId, prefix, PASSWORD_HASH);
   return {id, profileId, user};
+}
+
+async function createSsoUser(email: string) {
+  let id = env.TEST_USER.idFromName(email);
+  let user = env.TEST_USER.get(id);
+  await user.authenticateFromCfAccess(email, true);
+  return {id, profileId: email, user};
 }
 
 async function clearFinanceClaim(): Promise<void> {
@@ -568,5 +582,38 @@ describe("Finance hub access policy", () => {
     expect(() => assertShareLinksAllowed(true)).toThrow(/invite-only/);
     expect(() => assertCollaboratorInviteAllowed(false, false, "build")).not.toThrow();
     expect(() => assertShareLinksAllowed(false)).not.toThrow();
+  });
+});
+
+describe("organization-scoped observation sharing policy", () => {
+  it("admits only verified SSO identities in the configured email domain", async () => {
+    let ssoTotango = await createSsoUser(`verified-${crypto.randomUUID()}@totango.com`);
+    let ssoExternal = await createSsoUser(`verified-${crypto.randomUUID()}@example.com`);
+    let passwordTotango = await createUser("password-totango");
+    let passwordProfileId = passwordTotango.profileId.replace("@example.com", "@totango.com");
+
+    expect(await isProfileAllowedByDomainSharingPolicy(
+        ssoTotango.profileId, () => ssoTotango.user.hasPasswordLogin(), TOTANGO_POLICY)).toBe(true);
+    expect(await isProfileAllowedByDomainSharingPolicy(
+        ssoExternal.profileId, () => ssoExternal.user.hasPasswordLogin(), TOTANGO_POLICY)).toBe(false);
+    expect(await isProfileAllowedByDomainSharingPolicy(
+        passwordProfileId, () => passwordTotango.user.hasPasswordLogin(), TOTANGO_POLICY)).toBe(false);
+  });
+
+  it("allows direct Totango SSO invites but denies outsiders, password users, and share links", async () => {
+    let ssoTotango = await createSsoUser(`invite-${crypto.randomUUID()}@totango.com`);
+    let ssoExternal = await createSsoUser(`invite-${crypto.randomUUID()}@example.com`);
+    let passwordTotango = await createUser("invite-password");
+
+    await expect(isProfileAllowedByDomainSharingPolicy(
+        ssoTotango.profileId, () => ssoTotango.user.hasPasswordLogin(), TOTANGO_POLICY)).resolves.toBe(true);
+    await expect(isProfileAllowedByDomainSharingPolicy(
+        ssoExternal.profileId, () => ssoExternal.user.hasPasswordLogin(), TOTANGO_POLICY)).resolves.toBe(false);
+    await expect(isProfileAllowedByDomainSharingPolicy(
+        passwordTotango.profileId.replace("@example.com", "@totango.com"),
+        () => passwordTotango.user.hasPasswordLogin(), TOTANGO_POLICY)).resolves.toBe(false);
+    expect(() => assertShareLinkAllowedByDomainSharingPolicy(TOTANGO_POLICY))
+        .toThrow(/does not support share links/);
+    expect(() => assertShareLinkAllowedByDomainSharingPolicy(undefined)).not.toThrow();
   });
 });

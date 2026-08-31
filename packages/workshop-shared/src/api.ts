@@ -26,6 +26,7 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
 export const SERVICE_SALT = new Uint8Array([
   0xd9, 0x4e, 0x54, 0x1d, 0x29, 0xc1, 0x03, 0x74, 0x73, 0x7e, 0xb3, 0xe3, 0x34, 0x6d, 0x8f, 0x21
@@ -657,6 +658,26 @@ export const EMPTY_OPENCODE_USER_CUSTOMIZATION: OpenCodeUserCustomization = {
   skills: [],
 };
 
+/** Request to upload one file into an owned running coding session. */
+export interface CodingSessionFileUploadRequest {
+  /** Opaque running session identifier returned by `createCodingSession()` or `listCodingSessions()`. */
+  sessionId: string;
+  /** User-supplied filename; servers sanitize this to a safe basename before writing. */
+  filename: string;
+  /** Exact binary bytes to write. Must be non-empty and no larger than the server upload limit. */
+  content: Uint8Array;
+}
+
+/** Result of uploading one file into a coding session. */
+export interface CodingSessionFileUploadResult {
+  /** Safe basename selected by the server after stripping directories and unsafe characters. */
+  filename: string;
+  /** Absolute sandbox path where the bytes were written under `/workspace/.odie-uploads`. */
+  path: string;
+  /** Number of bytes accepted and written to the sandbox. */
+  bytesWritten: number;
+}
+
 /** Short-lived, single-use terminal attachment capability. */
 export interface CodingSessionAttachCapability {
   /** Same-origin WebSocket URL accepted by the Sessions worker. */
@@ -859,6 +880,9 @@ export interface AuthenticatedApi extends RpcTarget {
     applicationId: string,
   ): Promise<CodingSessionApplicationCapability>;
 
+  /** Uploads one non-empty bounded file into an owned running coding session. */
+  uploadCodingSessionFile(request: CodingSessionFileUploadRequest): Promise<CodingSessionFileUploadResult>;
+
   /** Lists coding-session tool activity, optionally narrowed to one session. */
   listCodingSessionActivity(sessionId?: string): Promise<import("./coding-sessions.js").CodingSessionActivity[]>;
 
@@ -867,6 +891,18 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Rejects one pending coding-session tool action. */
   rejectCodingSessionAction(activityId: string): Promise<void>;
+
+  /** Return whether the authenticated account may use first-party product feedback automation. */
+  productFeedbackAvailable(): Promise<boolean>;
+
+  /** Submit product feedback or a bug report with explicitly-consented evidence sections. */
+  submitProductFeedback(request: SubmitProductFeedbackRequest): Promise<ProductFeedbackSubmissionResult>;
+
+  /** List this user's recent product feedback automation statuses newest first. */
+  listProductFeedbackStatuses(): Promise<ProductFeedbackStatus[]>;
+
+  /** Read one product feedback automation status owned by this user. */
+  getProductFeedbackStatus(id: string): Promise<ProductFeedbackStatus | undefined>;
 
   /**
    * Get the user's preferred model, chosen during onboarding. Returns null if the user has not

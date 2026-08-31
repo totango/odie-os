@@ -6,6 +6,7 @@ import {
   type Icon,
 } from '@phosphor-icons/react'
 import type { DeploymentHubId } from '@gadgets/workshop-shared/api'
+import { CREATE_JIRA_ISSUE_PROMPT } from '../../createJiraIssuePrompt'
 
 // A few example work tasks shown under the Home composer, so a new user immediately sees the kind
 // of thing they can ask for. Picking one drops a starter prompt into the composer (it does not
@@ -38,12 +39,11 @@ const OPS_SUGGESTIONS: TaskSuggestion[] = [
       'Investigate a bug in the codebase. Ask me for the symptom or error, then trace likely causes, identify the files involved, and propose a small safe fix plan before changing anything.',
   },
   {
-    id: 'jira-from-zendesk',
-    label: 'Create Jira from Zendesk',
-    description: 'Turn support context into an actionable engineering ticket',
+    id: 'create-jira-issue',
+    label: 'Create Jira issue',
+    description: 'Draft, review, and create an engineering ticket',
     icon: Ticket,
-    prompt:
-      'Create a Jira ticket from a Zendesk conversation. Summarize the customer problem, expected vs actual behavior, reproduction details, affected account or plan if available, and acceptance criteria.',
+    prompt: CREATE_JIRA_ISSUE_PROMPT,
   },
   {
     id: 'customer-impact',
@@ -102,11 +102,11 @@ const SUPPORT_SUGGESTIONS: TaskSuggestion[] = [
     prompt: 'Answer a customer support question using internal knowledge sources first. Distinguish confirmed facts from assumptions and provide a concise customer-ready response plus internal follow-up notes.',
   },
   {
-    id: 'jira-from-zendesk',
-    label: 'Create Jira from Zendesk',
-    description: 'Turn support context into an actionable engineering ticket',
+    id: 'create-jira-issue',
+    label: 'Create Jira issue',
+    description: 'Draft, review, and create an engineering ticket',
     icon: Ticket,
-    prompt: 'Create a Jira ticket from a Zendesk conversation. Summarize the customer problem, expected vs actual behavior, reproduction details, affected account or plan if available, and acceptance criteria.',
+    prompt: CREATE_JIRA_ISSUE_PROMPT,
   },
   {
     id: 'customer-impact',

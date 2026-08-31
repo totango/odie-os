@@ -4,6 +4,8 @@ import {
   callMayHaveTakenEffect,
   McpCallNotDispatchedError,
   McpClient,
+  McpProtocolError,
+  McpSessionAffinityError,
 } from "../src/client.js";
 import { withClient, type ConnectionAccount } from "../src/connection.js";
 
@@ -234,4 +236,137 @@ it("gives a retried listing a fresh discovery budget after session recovery", as
   expect(catalog.truncated).toBe(false);
   expect(initialPages).toBe(50);
   expect(retryPages).toBe(2);
+});
+
+it("retries a read once with the same session after a bridge replica miss", async () => {
+  const sessionIds: Array<string | null> = [];
+  let requests = 0;
+  vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+    requests++;
+    sessionIds.push(new Headers(init?.headers).get("Mcp-Session-Id"));
+    const request = JSON.parse(String(init?.body));
+    const headers = new Headers({ "Content-Type": "application/json" });
+    if (requests === 1) headers.set("Mcp-Session-Id", "wrong-replica-session");
+    return new Response(JSON.stringify(requests === 1 ? {
+      jsonrpc: "2.0",
+      id: request.id,
+      error: {
+        code: -32603,
+        message: "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+      },
+    } : {
+      jsonrpc: "2.0",
+      id: request.id,
+      result: { tools: [{ name: "query_knowledge" }] },
+    }), { headers });
+  });
+  const account: ConnectionAccount = {
+    async getConnection() {
+      return { authorization: null, sessionId: "bridge-session", generation: 1 };
+    },
+    async assertConnectionCurrent() {},
+    async setMcpSessionId() { return true; },
+    async noteCredentialsExpired() {},
+  };
+
+  const catalog = await withClient({}, account, "https://mcp.example.com", client =>
+    client.listTools(10));
+
+  expect(catalog.tools.map(tool => tool.name)).toEqual(["query_knowledge"]);
+  expect(requests).toBe(2);
+  expect(sessionIds).toEqual(["bridge-session", "bridge-session"]);
+});
+
+it("retries an observation tool call after a bridge replica miss", async () => {
+  let requests = 0;
+  vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+    requests++;
+    const request = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify(requests === 1 ? {
+      jsonrpc: "2.0",
+      id: request.id,
+      error: {
+        code: -32603,
+        message: "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+      },
+    } : {
+      jsonrpc: "2.0",
+      id: request.id,
+      result: { content: [{ type: "text", text: "found" }] },
+    }), { headers: { "Content-Type": "application/json" } });
+  });
+  const account: ConnectionAccount = {
+    async getConnection() {
+      return { authorization: null, sessionId: "bridge-session", generation: 1 };
+    },
+    async assertConnectionCurrent() {},
+    async setMcpSessionId() { return true; },
+    async noteCredentialsExpired() {},
+  };
+
+  const result = await withClient({}, account, "https://mcp.example.com", client =>
+    client.callTool("query_knowledge", {}));
+
+  expect(result.content).toEqual([{ type: "text", text: "found" }]);
+  expect(requests).toBe(2);
+});
+
+it("does not automatically replay an action after a bridge replica miss", async () => {
+  let requests = 0;
+  vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+    requests++;
+    const request = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      id: request.id,
+      error: {
+        code: -32603,
+        message: "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+      },
+    }), { headers: { "Content-Type": "application/json" } });
+  });
+  const account: ConnectionAccount = {
+    async getConnection() {
+      return { authorization: null, sessionId: "bridge-session", generation: 1 };
+    },
+    async assertConnectionCurrent() {},
+    async setMcpSessionId() { return true; },
+    async noteCredentialsExpired() {},
+  };
+
+  const error = await withClient({}, account, "https://mcp.example.com",
+    client => client.callTool("create_issue", {}), { retryOnExpiry: false }).catch(err => err);
+
+  expect(error).toBeInstanceOf(McpProtocolError);
+  expect(error).toBeInstanceOf(McpSessionAffinityError);
+  expect(callMayHaveTakenEffect(error)).toBe(true);
+  expect(requests).toBe(1);
+});
+
+it("bounds bridge replica retries to one", async () => {
+  let requests = 0;
+  vi.stubGlobal("fetch", async (_input: unknown, init?: RequestInit) => {
+    requests++;
+    const request = JSON.parse(String(init?.body));
+    return new Response(JSON.stringify({
+      jsonrpc: "2.0",
+      id: request.id,
+      error: {
+        code: -32603,
+        message: "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
+      },
+    }), { headers: { "Content-Type": "application/json" } });
+  });
+  const account: ConnectionAccount = {
+    async getConnection() {
+      return { authorization: null, sessionId: "bridge-session", generation: 1 };
+    },
+    async assertConnectionCurrent() {},
+    async setMcpSessionId() { return true; },
+    async noteCredentialsExpired() {},
+  };
+
+  await expect(withClient({}, account, "https://mcp.example.com", client =>
+    client.listTools(10))).rejects.toBeInstanceOf(McpSessionAffinityError);
+  expect(requests).toBe(2);
 });

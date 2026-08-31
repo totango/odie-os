@@ -462,6 +462,7 @@ describe("Team PI token refresh and API isolation", () => {
     await api.workItemsTransitions("J-1");
     await api.workItemsApplyTransition("J-1", "31");
     await api.workItemsLink("J-1", "12");
+    await api.workItemsCreateJiraIssue({ summary: "New issue", description: "Details", priority: "High", projectKey: "ENG", issueType: "Bug", ignored: "no" } as never);
     await api.workItemsAttachments("jira", "J-1");
 
     const calls = vi.mocked(fetch).mock.calls;
@@ -477,15 +478,46 @@ describe("Team PI token refresh and API isolation", () => {
       "https://team-pi.example/api/work-items/v1/items/jira/J-1/transitions",
       "https://team-pi.example/api/work-items/v1/items/jira/J-1/transitions",
       "https://team-pi.example/api/work-items/v1/links",
+      "https://team-pi.example/api/work-items/v1/items/jira",
       "https://team-pi.example/api/work-items/v1/items/jira/J-1/attachments",
     ]);
     expect(calls[6]?.[1]).toMatchObject({ method: "POST", redirect: "manual" });
     expect(calls[7]?.[1]).toMatchObject({ method: "PATCH" });
     expect(calls[10]?.[1]).toMatchObject({ method: "POST" });
+    expect(calls[11]?.[1]).toMatchObject({ method: "POST" });
     expect(calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer access", "X-Team-PI-ID-Token": "identity" });
     expect(JSON.parse(String(calls[6]?.[1]?.body))).toEqual({ body: "x".repeat(12_000), visibility: "internal" });
     expect(JSON.parse(String(calls[10]?.[1]?.body))).toEqual({ jiraId: "J-1", zendeskTicketId: "12" });
+    expect(JSON.parse(String(calls[11]?.[1]?.body))).toEqual({ projectKey: "ENG", issueType: "Bug", summary: "New issue", description: "Details", priority: "High" });
     expect(() => assertAllowedEndpoint("workItems", "rawProxy")).toThrow(/not allowed/);
+  });
+
+  it("posts Jira create requests to the exact Work Items path with defaults", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ item: { source: "jira", id: "AI-1", title: "Issue", fields: {} } }));
+    const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
+
+    await api.workItemsCreateJiraIssue({ summary: " Defaulted ", description: " Details\nSecond line " });
+
+    expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toBe("https://team-pi.example/api/work-items/v1/items/jira");
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body))).toEqual({
+      projectKey: "AI",
+      issueType: "Story",
+      summary: "Defaulted",
+      description: "Details\nSecond line",
+    });
+  });
+
+  it("normalizes Jira project casing and rejects descriptions that cannot be previewed exactly", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ item: { source: "jira", id: "ABC-1", title: "Issue", fields: {} } }));
+    const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
+
+    await api.workItemsCreateJiraIssue({ projectKey: "aBc", summary: "Issue", description: "Details" });
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body)).projectKey).toBe("ABC");
+    expect(() => api.workItemsCreateJiraIssue({ summary: "Issue", description: Array(81).fill("line").join("\n") }))
+      .toThrow(/at most 80 lines/);
+    expect(() => api.workItemsCreateJiraIssue({ summary: "Issue", description: Array(81).fill("line").join("\r") }))
+      .toThrow(/at most 80 lines/);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("fetches Work Items attachment bytes through the bounded binary allowlist", async () => {
@@ -625,7 +657,9 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
     const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
     await expect(session.listSkills()).resolves.toMatchObject({ items: [{ id: "skill-1" }] });
-    expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({ prohibitAllSharing: true }));
+    expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
+    }));
     await expect(session.installSkill("skill-1")).resolves.toMatchObject({ actionId: 1, status: "pending" });
     expect(approval.submitAction).toHaveBeenCalledWith(1, expect.objectContaining({ actionKind: { tag: "team-pi.installSkill", label: "Install Team PI skill" } }));
     expect(kv.get("pending:1")).toMatchObject({ kind: "installSkill", skillId: "skill-1" });
@@ -638,6 +672,33 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     await expect(session.startConnection("gmail")).rejects.toThrow("queue down");
     expect(kv.get("pending:1")).toBeUndefined();
     expect(kv.get("result:1")).toBeUndefined();
+  });
+
+  it("stages Jira creation with default payload and Markdown-escaped approval details", async () => {
+    const kv = new Kv();
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await expect(session.createJiraIssue({
+      summary: "Fix *login* [now] <hidden>",
+      description: "Line > one\nBacktick ` code & <details>",
+      priority: "High",
+    })).resolves.toMatchObject({ actionId: 1, status: "pending" });
+
+    expect(kv.get("pending:1")).toEqual({
+      kind: "createJiraIssue",
+      request: { projectKey: "AI", issueType: "Story", summary: "Fix *login* [now] <hidden>", description: "Line > one\nBacktick ` code & <details>", priority: "High" },
+    });
+    expect(approval.submitAction).toHaveBeenCalledWith(1, expect.objectContaining({
+      actionKind: { tag: "team-pi.createJiraIssue", label: "Create Jira issue" },
+      title: "Create Jira issue AI Story",
+      description: expect.stringContaining("Project key: AI"),
+    }));
+    const description = approval.submitAction.mock.calls[0]?.[1]?.description;
+    expect(description).toContain("Summary: Fix \\*login\\* \\[now\\] &lt;hidden\\>");
+    expect(description).toContain("Line \\> one");
+    expect(description).toContain("Backtick \\` code");
+    expect(description).toContain("&amp; &lt;details\\>");
   });
 
   it("claims pending actions synchronously and blocks reject/apply races", () => {
@@ -703,7 +764,11 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
 
     await expect(session.workItemsSearch({ source: "jira", query: "login" })).resolves.toMatchObject({ items: [{ source: "jira", id: "J-1" }] });
     expect(approval.authorizeObservation).toHaveBeenCalledTimes(1);
-    expect(approval.authorizeObservation).toHaveBeenCalledWith({ title: "Search Team PI Work Items", description: "Searched Jira and Zendesk Work Items through Team PI.", prohibitAllSharing: true });
+    expect(approval.authorizeObservation).toHaveBeenCalledWith({
+      title: "Search Team PI Work Items",
+      description: "Searched Jira and Zendesk Work Items through Team PI.",
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
+    });
   });
 
   it("isolates provider partial failures when searching both Work Items sources", async () => {
@@ -883,7 +948,9 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       transitions: [],
       attachments: [{ id: "att-1", name: "screen.png" }],
     });
-    expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({ prohibitAllSharing: true }));
+    expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
+    }));
     expect(vi.mocked(fetch).mock.calls.map(call => String(call[0]))).toEqual([
       "https://team-pi.example/api/work-items/v1/items/zendesk/12",
       "https://team-pi.example/api/work-items/v1/items/zendesk/12/comments",
@@ -1060,6 +1127,87 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     await expect(session.getActionResult(1)).resolves.toMatchObject({ status: "ready", result: { provider: "gmail", connectionId: "c1" } });
   });
 
+  it("applies approved Jira creation and stores a sanitized ready result", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ item: {
+      source: "jira",
+      id: "10001",
+      key: "AI-17",
+      url: "https://jira.example/browse/AI-17",
+      title: "Created",
+      projectKey: "AI",
+      description: { body: "Safe", format: "markdown" },
+      fields: { summary: "Created", customfield_10000: "secret", providerOptions: "secret" },
+      token: "secret",
+    } }));
+    const kv = new Kv();
+    kv.put("pending:3", { kind: "createJiraIssue", request: { projectKey: "AI", issueType: "Story", summary: "Created", description: "Safe" } });
+    const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
+    (gatekeeper as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (gatekeeper as unknown as { ctx: unknown }).ctx = {
+      storage: { kv },
+      props: { accountId: "account-1" },
+      exports: { TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access" }) }) } },
+    };
+
+    await gatekeeper.applyAction(3);
+
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0]?.[1]?.body))).toEqual({ projectKey: "AI", issueType: "Story", summary: "Created", description: "Safe" });
+    expect(kv.get("result:3")).toEqual({ status: "ready", result: { item: expect.objectContaining({ source: "jira", id: "10001", key: "AI-17", title: "Created", fields: { summary: "Created" } }) } });
+    expect(JSON.stringify(kv.get("result:3"))).not.toMatch(/customfield|providerOptions|token|secret/);
+  });
+
+  it("marks failed Jira creation apply attempts as unknown and non-retryable", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "upstream_write_status_unknown" }, 502));
+    const kv = new Kv();
+    kv.put("pending:4", { kind: "createJiraIssue", request: { projectKey: "AI", issueType: "Story", summary: "Created", description: "Safe" } });
+    const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
+    (gatekeeper as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (gatekeeper as unknown as { ctx: unknown }).ctx = {
+      storage: { kv },
+      props: { accountId: "account-1" },
+      exports: { TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access" }) }) } },
+    };
+
+    await gatekeeper.applyAction(4);
+
+    expect(kv.get("result:4")).toEqual({ status: "unknown", message: "Team PI API failed: ", canRetry: false });
+    expect(kv.get("applying:4")).toBeUndefined();
+  });
+
+  it("marks definite Jira creation denials as failed", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "project_not_allowed" }, 403));
+    const kv = new Kv();
+    kv.put("pending:5", { kind: "createJiraIssue", request: { projectKey: "NOPE", issueType: "Story", summary: "Created", description: "Safe" } });
+    const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
+    (gatekeeper as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (gatekeeper as unknown as { ctx: unknown }).ctx = {
+      storage: { kv },
+      props: { accountId: "account-1" },
+      exports: { TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access" }) }) } },
+    };
+
+    await gatekeeper.applyAction(5);
+
+    expect(kv.get("result:5")).toEqual({ status: "failed", message: expect.stringMatching(/denied access/i) });
+  });
+
+  it("fails closed for unknown persisted action kinds", async () => {
+    const kv = new Kv();
+    kv.put("pending:6", { kind: "futureAction", request: { projectKey: "AI", issueType: "Story", summary: "Must not create", description: "Safe" } });
+    const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
+    (gatekeeper as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (gatekeeper as unknown as { ctx: unknown }).ctx = {
+      storage: { kv },
+      props: { accountId: "account-1" },
+      exports: { TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access" }) }) } },
+    };
+
+    await gatekeeper.applyAction(6);
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(kv.get("result:6")).toEqual({ status: "unknown", message: "Unknown Team PI action kind.", canRetry: false });
+  });
+
   it("allowlists write-result fields and strips connection bootstrap secrets", () => {
     expect(sanitizeStartConnectionResult("gmail", {
       connectionId: "c1",
@@ -1135,7 +1283,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
         { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
         { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
         { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
-        { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through the read-only Team PI workItemsSearch(request) API." },
+        { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through Team PI Work Items, and request approved Jira issue creation with createJiraIssue(request)." },
         { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
       ],
       truncated: false,
@@ -1144,7 +1292,15 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
     expect(authorizeObservation).toHaveBeenCalledWith({
       title: "Read Team PI skill, provider, and Work Items catalog",
-      description: "Listed bounded Team PI skill manifests, provider capabilities, and the read-only Work Items/Jira search capability for agent discovery.",
+      description: "Listed bounded Team PI skill manifests, provider capabilities, Work Items/Jira search, and approval-backed Jira issue creation capability for agent discovery.",
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
+    });
+  });
+
+  it("declares the Totango SSO sharing policy in its resource description", async () => {
+    const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
+    await expect(gatekeeper.describe()).resolves.toMatchObject({
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
     });
   });
 
@@ -1175,6 +1331,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     expect(authorizeObservation).toHaveBeenCalledWith({
       title: "Team PI catalog unavailable",
       description: "Team PI API failed: ",
+      domainSharingPolicy: { type: "verified-sso-email-domain", emailDomain: "totango.com" },
     });
   });
 });

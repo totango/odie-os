@@ -1,7 +1,9 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
-import { validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService } from "@gadgets/workshop-shared/coding-sessions";
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { validateCodingSessionFileUploadRequest, validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService, type ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
+import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
+import { PRODUCT_FEEDBACK_MAX_DIAGNOSTIC_LENGTH, PRODUCT_FEEDBACK_MAX_DIAGNOSTICS, PRODUCT_FEEDBACK_MAX_TEXT_LENGTH, sanitizeProductFeedbackText, validateSubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, type GatekeeperReconnectWithCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { McpSessionBase } from "@gadgets/mcp-shared/session";
@@ -29,6 +31,7 @@ const logger = createWorkshopLogger("workshop.user");
 const OUTPUTS_BACKFILL_PAGE = 16;
 const CODING_SESSION_REPOSITORY_OWNER = "totango";
 const CODING_SESSION_REPOSITORY_OPTION_LIMIT = 50;
+const PRODUCT_FEEDBACK_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 
 /** Rejects missing, inactive, archived, or stale coding-session generations. */
 export async function assertCurrentCodingSessionGeneration(
@@ -365,6 +368,21 @@ async function checkGatekeeperVendorFilter(
     });
     return false;
   }
+}
+
+function normalizedPathname(value: string): string {
+  if (typeof value !== "string" || !value.startsWith("/") || value.includes("?") || value.includes("#")) {
+    throw new Error("Feedback route pathname is invalid.");
+  }
+  return boundedText(value, 512);
+}
+
+function boundedText(value: string, limit: number): string {
+  return typeof value === "string" && value.length > limit ? value.slice(0, limit) : `${value ?? ""}`;
+}
+
+function sanitizeFeedbackText(value: string, limit: number): string {
+  return boundedText(sanitizeProductFeedbackText(value), limit);
 }
 
 /** Durable Object that stores information about a user. */
@@ -1681,6 +1699,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return service.mintApplicationCapability(owner, sessionId, applicationId);
   }
 
+  /** Uploads one file into an owned running coding session after rechecking repository access. */
+  async uploadCodingSessionFile(
+    request: CodingSessionFileUploadRequest,
+  ): Promise<CodingSessionFileUploadResult> {
+    const upload = validateCodingSessionFileUploadRequest(request);
+    let initial = await this.#codingSessionsOwner();
+    let session = await initial.service.getSession(initial.owner, upload.sessionId);
+    if (!session) throw new Error("Coding session was not found.");
+    let {owner, service} = await this.#codingSessionsAccess(session.repositories);
+    return service.uploadFile(owner, upload);
+  }
+
   /** Lists coding-session observations and actions newest first. */
   listCodingSessionActivity(sessionId?: string): CodingSessionActivity[] {
     const records = sessionId
@@ -1693,6 +1723,89 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       ...record
     }) => record)
       .toSorted((left, right) => right.createdAt.valueOf() - left.createdAt.valueOf());
+  }
+
+  /** Submits first-party product feedback after enforcing verified @totango.com SSO eligibility. */
+  async submitProductFeedback(request: SubmitProductFeedbackRequest): Promise<ProductFeedbackSubmissionResult> {
+    await this.#assertProductFeedbackEligible();
+    const { owner, service } = await this.#codingSessionsOwner();
+    const evidence = await this.#buildProductFeedbackEvidence(owner, request);
+    return service.submitProductFeedback(owner, evidence);
+  }
+
+  /** Lists first-party product feedback automation statuses owned by this user. */
+  async listProductFeedbackStatuses(): Promise<ProductFeedbackStatus[]> {
+    await this.#assertProductFeedbackEligible();
+    const { owner, service } = await this.#codingSessionsOwner();
+    return service.listProductFeedbackStatuses(owner);
+  }
+
+  /** Reads one first-party product feedback automation status owned by this user. */
+  async getProductFeedbackStatus(id: string): Promise<ProductFeedbackStatus | undefined> {
+    await this.#assertProductFeedbackEligible();
+    const { owner, service } = await this.#codingSessionsOwner();
+    return service.getProductFeedbackStatus(owner, id);
+  }
+
+  /** Return whether the current account satisfies the internal SSO-only feedback policy. */
+  async productFeedbackAvailable(): Promise<boolean> {
+    const profile = await this.whoami();
+    return isTeamPiCodexEligibleUser(profile.id, this.storage.passwordHashHash.get() !== null);
+  }
+
+  async #assertProductFeedbackEligible(): Promise<void> {
+    if (!await this.productFeedbackAvailable()) {
+      throw new Error("Product feedback automation is available only to verified @totango.com SSO users.");
+    }
+  }
+
+  async #buildProductFeedbackEvidence(
+    owner: CodingSessionOwner,
+    rawRequest: SubmitProductFeedbackRequest,
+  ): Promise<ProductFeedbackEvidenceBundle> {
+    const request = validateSubmitProductFeedbackRequest(rawRequest);
+    const title = sanitizeFeedbackText(request.title, 180).trim();
+    const description = sanitizeFeedbackText(request.description, PRODUCT_FEEDBACK_MAX_TEXT_LENGTH).trim();
+    if (!title) throw new Error("Feedback title is required.");
+    if (!description) throw new Error("Feedback details are required.");
+    if (request.kind !== "bug" && request.kind !== "feedback") throw new Error("Feedback type is invalid.");
+    const pathname = normalizedPathname(request.context.pathname);
+    const evidence: ProductFeedbackEvidenceBundle = {
+      id: crypto.randomUUID(),
+      kind: request.kind,
+      title,
+      description,
+      submitterEmail: owner.email,
+      owner,
+      pathname,
+      expiresAt: new Date(Date.now() + PRODUCT_FEEDBACK_TTL_MS),
+    };
+    if (request.consent.frontendDiagnostics) {
+      evidence.diagnostics = (request.diagnostics ?? []).slice(-PRODUCT_FEEDBACK_MAX_DIAGNOSTICS).map(item => ({
+        timestamp: item.timestamp instanceof Date ? item.timestamp : new Date(item.timestamp),
+        level: ["log", "info", "warn", "error"].includes(item.level) ? item.level : "log",
+        message: sanitizeFeedbackText(item.message, PRODUCT_FEEDBACK_MAX_DIAGNOSTIC_LENGTH),
+      })).filter(item => item.message);
+    }
+    if (request.consent.workspaceContext && request.context.workspaceId) {
+      const record = this.storage.gadgets.get(request.context.workspaceId);
+      if (record) {
+        const ns = this.ctx.exports.OverseerDurableObject;
+        evidence.workspace = await ns.get(ns.idFromString(request.context.workspaceId))
+          .collectProductFeedbackEvidence(this.ctx.id.toString(), request.context.chatId);
+      }
+    }
+    if (request.consent.codingSessionContext) {
+      const sessions = await this.listCodingSessions();
+      const selected = request.context.codingSessionId
+        ? sessions.filter(session => session.id === request.context.codingSessionId)
+        : sessions.slice(0, 5);
+      const activity = this.listCodingSessionActivity(request.context.codingSessionId)
+        .slice(0, 20)
+        .map(record => sanitizeFeedbackText(`${record.type}:${record.vendorId}:${record.resourceTitle}:${record.state}`, 240));
+      evidence.codingSessions = { sessions: selected, activity };
+    }
+    return evidence;
   }
 
   /** Approves and applies one coding-session action exactly once. */
@@ -2433,7 +2546,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGatekeeperClassFor(accountId: number, url: string)
       : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
-                  typeUrlPattern: string}> {
+                  typeUrlPattern: string, providedBySingleton?: true,
+                  singletonAuthorityKey?: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
     if (!areCredentialsValid(account)) throw new Error("This connection needs to be reconnected before it can be used.");
@@ -2456,7 +2570,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
     }
 
-    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
+    let singletonAuthorityKey: string | undefined;
+    if (resource.providedBySingleton && account.description.singleton?.revisionedAuthority) {
+      singletonAuthorityKey = (await (account.account as unknown as SingletonAccountStub)
+        .getSingletonGatekeeperAuthority()).key;
+    }
+    return {
+      class: cls,
+      vendorId: account.vendorId,
+      typeUrlPattern: resource.urlPattern,
+      providedBySingleton: resource.providedBySingleton,
+      singletonAuthorityKey,
+    };
   }
 
   /**

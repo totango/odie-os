@@ -101,6 +101,8 @@ type ConnectionType = {
   resourceUrlPattern?: string
   // Whether this resource type is independently grantable.
   grantable?: boolean
+  // The fixed account capability is also supplied as an ambient singleton.
+  providedBySingleton?: true
 }
 
 type VendorOption = {
@@ -160,6 +162,7 @@ function connectionForResource(vendor: VendorOption, resource: SupportedResource
     accent: vendor.description.color,
     resourceUrlPattern: resource.urlPattern,
     grantable: Boolean(resource.grantable),
+    providedBySingleton: resource.providedBySingleton,
   }
 }
 
@@ -172,7 +175,8 @@ function requiredResourceUrlPatterns(connection: ConnectionType): string[] {
 
 function accountSupportsConnection(account: AccountOption, connection: ConnectionType): boolean {
   return account.vendorId === connection.vendorId &&
-    (!connection.resourceUrlPattern ||
+    (connection.providedBySingleton ||
+      !connection.resourceUrlPattern ||
       connection.resourceUrlPattern === 'https://*' ||
       account.supportedResources.some(resource => resource.urlPattern === connection.resourceUrlPattern))
 }
@@ -227,6 +231,7 @@ export default function GatekeeperModal({
   const configuratorFrameRef = useRef<ConfiguratorFrameState | null>(null)
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
   const nextConfiguratorFrameKeyRef = useRef(0)
+  const autoAttachedSingletonRef = useRef<string | null>(null)
 
   useEffect(() => {
     const el = document.createElement('div')
@@ -356,6 +361,7 @@ export default function GatekeeperModal({
       setConfiguratorLoading(false)
       setConfiguratorError(null)
       setConfiguratorSelectionReady(null)
+      autoAttachedSingletonRef.current = null
       return
     }
 
@@ -541,7 +547,8 @@ export default function GatekeeperModal({
 
   useEffect(() => {
     const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
-    if (!open || !resourceUrlPattern || !selectedAccount || hasMissingResourceGrants) {
+    if (!open || !resourceUrlPattern || !selectedAccount || hasMissingResourceGrants ||
+        selectedConnection?.providedBySingleton) {
       updateConfiguratorFrameState(null)
       setConfiguratorError(null)
       setConfiguratorLoading(false)
@@ -720,6 +727,7 @@ export default function GatekeeperModal({
   const handleCreateResourceConnection = async () => {
     if (creating) return
     if (!selectedConnection || selectedAccountId === null) return
+    if (hasMissingResourceGrants) return
     const resourceUrlPattern = selectedConnection.resourceUrlPattern
     if (!resourceUrlPattern) return
 
@@ -727,10 +735,13 @@ export default function GatekeeperModal({
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
     let transferred = false
     try {
-      if (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern) {
+      if (!selectedConnection.providedBySingleton &&
+          (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern)) {
         throw new Error('Configurator is not ready.')
       }
-      const resourceUrl = await configuratorCollectResourceUrlRef.current?.()
+      const resourceUrl = selectedConnection.providedBySingleton
+        ? resourceUrlPattern
+        : await configuratorCollectResourceUrlRef.current?.()
       if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
       const overseer = await getOverseer()
       gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
@@ -758,6 +769,9 @@ export default function GatekeeperModal({
     }
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
+      if (selectedConnection.providedBySingleton) {
+        return selectedAccountId !== null && selectedAccount !== null && !hasMissingResourceGrants
+      }
       return Boolean(
         selectedAccountId !== null &&
         resourceUrlPattern &&
@@ -781,6 +795,18 @@ export default function GatekeeperModal({
       handleCreateResourceConnection()
     }
   }
+
+  // Agent-requested singleton connections have no resource choices. Once OAuth has produced a
+  // valid account, attach it and resume the agent without making the user click Add connection.
+  useEffect(() => {
+    if (!open || !initialVendorId || !selectedConnection?.providedBySingleton ||
+        !selectedAccount || hasMissingResourceGrants || creating) return
+    const key = `${selectedConnection.id}:${selectedAccount.id}`
+    if (autoAttachedSingletonRef.current === key) return
+    autoAttachedSingletonRef.current = key
+    void handleCreateResourceConnection()
+  }, [open, initialVendorId, selectedConnection?.id, selectedConnection?.providedBySingleton,
+    selectedAccount?.id, hasMissingResourceGrants, creating])
 
   const createLabel = selectedConnection?.resourceUrlPattern
     ? 'Add connection'
@@ -849,7 +875,7 @@ export default function GatekeeperModal({
                   />
                 )}
 
-                {selectedConnection.resourceUrlPattern && !hasMissingResourceGrants && (
+                {selectedConnection.resourceUrlPattern && !selectedConnection.providedBySingleton && !hasMissingResourceGrants && (
                   <ResourceConfiguratorHost
                     frame={configuratorFrameState?.frame ?? null}
                     frameKey={configuratorFrameState?.key ?? null}

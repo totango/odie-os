@@ -14,6 +14,9 @@ import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
 import { getWorkshopRuntime, installNativeLoginCoordinator } from './runtime'
+import { installProductFeedbackDiagnostics } from './productFeedbackDiagnostics'
+
+installProductFeedbackDiagnostics()
 
 // ---------------------------------------------------------------------------
 // Dev auto-login: if VITE_DEV_AUTO_LOGIN=true, automatically create/login

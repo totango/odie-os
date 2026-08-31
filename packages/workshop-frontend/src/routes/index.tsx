@@ -123,6 +123,7 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
 
   const [models, setModels] = useState<AiChatAuthorInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const sendPendingRef = useRef(false);
   // Bumped each time a task suggestion is picked; the composer re-seeds its text off the nonce.
   const [seed, setSeed] = useState<{ text: string; nonce: number } | null>(null);
 
@@ -160,12 +161,12 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
 
   // Pre-create a provisional gadget as soon as the user starts interacting, so that navigation
   // after submit is instant. Same pattern as before — disposed on unmount if never consumed.
-  const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer> } | null>(null);
+  const provisionalOverseerRef = useRef<{ stub: RpcStub<Overseer>; hub: string } | null>(null);
 
   const ensureProvisionalGadget = useCallback(() => {
     if (!provisionalOverseerRef.current) {
       const overseer = authenticatedApi.newGadget(hub);
-      provisionalOverseerRef.current = { stub: overseer };
+      provisionalOverseerRef.current = { stub: overseer, hub };
     }
   }, [authenticatedApi, hub]);
 
@@ -184,13 +185,18 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
       attachments?: ChatAttachmentHandle[],
       formats?: MessageFormatRef[],
     ) => {
+      if (sendPendingRef.current) return;
+      sendPendingRef.current = true;
       try {
         ensureProvisionalGadget();
-        const overseer = provisionalOverseerRef.current!.stub;
+        const provisional = provisionalOverseerRef.current!;
+        const overseer = provisional.stub;
         const { id } = await overseer.getMetadata();
-        // Stamp the latest selected hub immediately before starting activity. This makes an already
-        // pre-created provisional workspace follow a last-second hub switch without authorizing by it.
-        await authenticatedApi.updateProvisionalWorkspaceOrigin(id, hub);
+        // If the workspace was pre-created for the currently selected hub, skip the extra round-trip.
+        // A last-second hub switch is still stamped immediately before starting activity.
+        if (provisional.hub !== hub) {
+          await authenticatedApi.updateProvisionalWorkspaceOrigin(id, hub);
+        }
         const chat = await overseer.newChat(message, modelId, capsules, attachments, formats);
         provisionalOverseerRef.current?.stub[Symbol.dispose]();
         provisionalOverseerRef.current = null;
@@ -208,6 +214,8 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
           toasts.add({ title: "Failed to create workspace", variant: "error" });
         }
         throw err;
+      } finally {
+        sendPendingRef.current = false;
       }
     },
     [authenticatedApi, ensureProvisionalGadget, hub, navigate, toasts],
@@ -270,6 +278,8 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
           minRows={3}
           seedText={seed?.text}
           seedNonce={seed?.nonce}
+          onInputIntent={ensureProvisionalGadget}
+          sendingStatusLabel="Starting workspace…"
           draftStorageKey={currentUser
             ? composerDraftStorageKey(currentUser.id, `home:${hub}`)
             : undefined}

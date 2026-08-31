@@ -1838,6 +1838,8 @@ export const ChatInput = ({
   blockedReason,
   chatKey,
   onStop,
+  onInputIntent,
+  sendingStatusLabel,
   showThinkingTraces = true,
   onToggleThinkingTraces,
 }: {
@@ -1891,6 +1893,10 @@ export const ChatInput = ({
   /** Identity of the chat the composer is bound to; a change clears chat-scoped hints. */
   chatKey?: number | null;
   onStop?: () => void;
+  /** Called when the user first focuses or edits the composer, before they submit. */
+  onInputIntent?: () => void;
+  /** Optional visible status shown while this composer is sending. */
+  sendingStatusLabel?: string;
   showThinkingTraces?: boolean;
   onToggleThinkingTraces?: () => void;
   /** Show the "Pre-approve actions" menu item (only when there are uncovered candidates). */
@@ -3294,6 +3300,11 @@ export const ChatInput = ({
               : "Connection hiccup — your message may not have been sent. Try again; if it keeps failing, reload the page."}
           </div>
         )}
+        {isSending && sendingStatusLabel && (
+          <div className="px-4 pt-2 text-xs text-kumo-subtle" role="status" aria-live="polite">
+            {sendingStatusLabel}
+          </div>
+        )}
         {/* Textarea */}
         <div className="relative px-4 pb-1 pt-3">
           {slashCommandPicker.popup}
@@ -3333,6 +3344,7 @@ export const ChatInput = ({
               aria-controls={slashCommandPicker.open ? slashCommandPicker.listboxId : undefined}
               aria-activedescendant={slashCommandPicker.activeDescendant}
               onChange={(e) => {
+                onInputIntent?.();
                 draftEditedRef.current = true;
                 draftRestoreGenerationRef.current++;
                 handleInputChange(e.target.value, e.target.selectionStart ?? 0);
@@ -3343,6 +3355,7 @@ export const ChatInput = ({
                 syncMirrorScroll(e.target);
               }}
               onSelect={handleCursorChange}
+              onFocus={onInputIntent}
               onClick={handleCursorChange}
               onKeyUp={handleCursorChange}
 
