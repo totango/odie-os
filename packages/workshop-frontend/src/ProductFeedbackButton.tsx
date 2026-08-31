@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ChatCenteredDots } from '@phosphor-icons/react'
+import { Bug, ChatCenteredDots, Lightbulb, ShieldCheck, X } from '@phosphor-icons/react'
 import type { ProductFeedbackStatus, SubmitProductFeedbackRequest } from '@gadgets/workshop-shared/product-feedback'
 import { productFeedbackDiagnosticsSnapshot } from './productFeedbackDiagnostics'
 import { useAuthenticatedApi } from './AuthContext'
@@ -144,47 +144,89 @@ function ProductFeedbackModal({
     }
   }
 
+  const inputClass = 'w-full rounded-xl border border-kumo-line bg-kumo-base px-3.5 py-3 text-sm text-kumo-default shadow-sm outline-none transition placeholder:text-kumo-inactive focus:border-kumo-brand focus:ring-2 focus:ring-kumo-brand/20'
+
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label="Product feedback">
-      <div className="max-h-full w-full max-w-2xl overflow-y-auto rounded-xl border border-kumo-line bg-kumo-base p-5 shadow-xl">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold text-kumo-default">Send product feedback</h2>
-          <button type="button" onClick={onClose} className="text-sm text-kumo-subtle hover:text-kumo-default">Close</button>
-        </div>
-        <div className="mt-4 space-y-3">
-          <select value={kind} onChange={(e) => setKind(e.target.value as 'bug' | 'feedback')} className="w-full rounded-md border border-kumo-line bg-kumo-base p-2">
-            <option value="bug">Report a bug</option>
-            <option value="feedback">Product feedback</option>
-          </select>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Short title" className="w-full rounded-md border border-kumo-line bg-kumo-base p-2" />
-          <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What happened? What should change?" className="h-28 w-full rounded-md border border-kumo-line bg-kumo-base p-2" />
-          <fieldset className="rounded-md border border-kumo-line p-3 text-sm">
-            <legend className="px-1 font-medium">Evidence preview and consent</legend>
-            <label className="block"><input type="checkbox" checked={workspaceContext} onChange={(e) => setWorkspaceContext(e.target.checked)} /> Include server-collected workspace/chat context if available</label>
-            <label className="block"><input type="checkbox" checked={codingSessionContext} onChange={(e) => setCodingSessionContext(e.target.checked)} /> Include coding-session summaries/activity if available</label>
-            <label className="block"><input type="checkbox" checked={frontendDiagnostics} onChange={(e) => setFrontendDiagnostics(e.target.checked)} /> Include current-tab console/errors ({productFeedbackDiagnosticsSnapshot().length})</label>
-          </fieldset>
-          <button type="button" onClick={() => setPreview((value) => !value)} className="text-sm text-kumo-brand">{preview ? 'Hide' : 'Preview'} submission</button>
-          {preview && <pre className="max-h-64 overflow-auto rounded bg-kumo-tint p-3 text-xs">{JSON.stringify(previewSummary, null, 2)}</pre>}
-          {error && <p className="text-sm text-kumo-danger">{error}</p>}
-          <button type="button" disabled={submitting || !title.trim() || !description.trim() || !preview} onClick={submit} className="rounded-md bg-kumo-brand px-4 py-2 text-sm font-medium text-kumo-inverse disabled:opacity-50">
-            {submitting ? 'Submitting…' : 'Submit with consent'}
-          </button>
-        </div>
-        {liveStatuses.length > 0 && (
-          <div className="mt-6 border-t border-kumo-line pt-4">
-            <h3 className="text-sm font-semibold">Recent feedback status</h3>
-            <ul className="mt-2 space-y-2 text-sm">
-              {liveStatuses.slice(0, 5).map((status) => (
-                <li key={status.id} className="rounded-md border border-kumo-line p-2">
-                  <div className="font-medium">{status.title} — {status.state}</div>
-                  {status.message && <div className="text-kumo-subtle">{status.message}</div>}
-                  {status.prUrl && <a className="text-kumo-brand" href={status.prUrl} target="_blank" rel="noreferrer">Open draft PR</a>}
-                </li>
-              ))}
-            </ul>
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-labelledby="product-feedback-title">
+      <div className="max-h-[min(760px,calc(100vh-2rem))] w-full max-w-xl overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base shadow-2xl">
+        <header className="flex items-start gap-3 border-b border-kumo-line px-5 py-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-kumo-fill text-kumo-brand">
+            <ChatCenteredDots size={20} weight="fill" />
           </div>
-        )}
+          <div className="min-w-0 flex-1">
+            <h2 id="product-feedback-title" className="text-base font-semibold tracking-[-0.15px] text-kumo-default">Share feedback</h2>
+            <p className="mt-0.5 text-xs leading-5 text-kumo-subtle">Tell us what happened or what would make Odie better.</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close feedback" className="flex h-8 w-8 items-center justify-center rounded-lg text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default">
+            <X size={17} />
+          </button>
+        </header>
+
+        <div className="max-h-[calc(100vh-12rem)] space-y-5 overflow-y-auto px-5 py-5">
+          <fieldset>
+            <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-kumo-subtle">Feedback type</legend>
+            <div className="grid grid-cols-2 gap-2 rounded-xl bg-kumo-elevated p-1" role="group">
+              <button type="button" onClick={() => setKind('bug')} aria-pressed={kind === 'bug'} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${kind === 'bug' ? 'bg-kumo-base text-kumo-default shadow-sm ring-1 ring-kumo-line' : 'text-kumo-subtle hover:text-kumo-default'}`}>
+                <Bug size={16} weight={kind === 'bug' ? 'fill' : 'regular'} className={kind === 'bug' ? 'text-kumo-brand' : ''} /> Report a bug
+              </button>
+              <button type="button" onClick={() => setKind('feedback')} aria-pressed={kind === 'feedback'} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition ${kind === 'feedback' ? 'bg-kumo-base text-kumo-default shadow-sm ring-1 ring-kumo-line' : 'text-kumo-subtle hover:text-kumo-default'}`}>
+                <Lightbulb size={16} weight={kind === 'feedback' ? 'fill' : 'regular'} className={kind === 'feedback' ? 'text-kumo-brand' : ''} /> Suggest an idea
+              </button>
+            </div>
+          </fieldset>
+
+          <div className="space-y-4">
+            <label htmlFor="feedback-title" className="block">
+              <span className="mb-1.5 block text-sm font-medium text-kumo-default">Title</span>
+              <input id="feedback-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Summarize the issue or idea" className={inputClass} />
+            </label>
+            <label htmlFor="feedback-description" className="block">
+              <span className="mb-1.5 block text-sm font-medium text-kumo-default">Details</span>
+              <textarea id="feedback-description" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What happened? What did you expect, or what should change?" className={`${inputClass} min-h-32 resize-y`} />
+            </label>
+          </div>
+
+          <fieldset className="rounded-xl border border-kumo-line bg-kumo-elevated/60 p-4">
+            <legend className="sr-only">Evidence and consent</legend>
+            <div className="mb-3 flex items-start gap-2.5">
+              <ShieldCheck size={18} weight="fill" className="mt-0.5 shrink-0 text-kumo-brand" />
+              <div><h3 className="text-sm font-semibold text-kumo-default">Include helpful context</h3><p className="mt-0.5 text-xs leading-4 text-kumo-subtle">Choose exactly what Odie may attach to this report.</p></div>
+            </div>
+            <div className="space-y-2.5 text-sm text-kumo-default">
+              <label className="flex cursor-pointer items-start gap-2.5"><input className="mt-0.5 h-4 w-4 accent-kumo-brand" type="checkbox" checked={workspaceContext} onChange={(e) => setWorkspaceContext(e.target.checked)} /><span>Workspace and chat context <small className="block text-xs text-kumo-subtle">Only when the current workspace is authorized.</small></span></label>
+              <label className="flex cursor-pointer items-start gap-2.5"><input className="mt-0.5 h-4 w-4 accent-kumo-brand" type="checkbox" checked={codingSessionContext} onChange={(e) => setCodingSessionContext(e.target.checked)} /><span>Coding-session summaries and activity</span></label>
+              <label className="flex cursor-pointer items-start gap-2.5"><input className="mt-0.5 h-4 w-4 accent-kumo-brand" type="checkbox" checked={frontendDiagnostics} onChange={(e) => setFrontendDiagnostics(e.target.checked)} /><span>Current-tab console and errors <small className="text-xs text-kumo-subtle">({productFeedbackDiagnosticsSnapshot().length} entries)</small></span></label>
+            </div>
+          </fieldset>
+
+          {preview && <div><div className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-kumo-subtle">Submission preview</div><pre className="max-h-52 overflow-auto rounded-xl border border-kumo-line bg-kumo-elevated p-3 text-xs leading-5 text-kumo-subtle">{JSON.stringify(previewSummary, null, 2)}</pre></div>}
+          {error && <p className="rounded-lg bg-kumo-danger/10 px-3 py-2 text-sm text-kumo-danger">{error}</p>}
+
+          {liveStatuses.length > 0 && (
+            <section className="border-t border-kumo-line pt-4">
+              <h3 className="text-sm font-semibold text-kumo-default">Recent feedback</h3>
+              <ul className="mt-2 space-y-2 text-sm">
+                {liveStatuses.slice(0, 5).map((status) => (
+                  <li key={status.id} className="rounded-xl border border-kumo-line bg-kumo-elevated p-3">
+                    <div className="font-medium text-kumo-default">{status.title} <span className="ml-1 text-xs font-normal text-kumo-subtle">{status.state}</span></div>
+                    {status.message && <div className="mt-1 text-xs text-kumo-subtle">{status.message}</div>}
+                    {status.prUrl && <a className="mt-1 inline-block text-xs font-medium text-kumo-brand hover:underline" href={status.prUrl} target="_blank" rel="noreferrer">Open draft PR</a>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </div>
+
+        <footer className="flex items-center justify-between gap-3 border-t border-kumo-line bg-kumo-elevated px-5 py-4">
+          <p className="hidden text-xs text-kumo-subtle sm:block">Preview is required before sending.</p>
+          <div className="ml-auto flex items-center gap-2">
+            <button type="button" onClick={() => setPreview((value) => !value)} className="rounded-lg border border-kumo-line bg-kumo-base px-3.5 py-2 text-sm font-medium text-kumo-default shadow-sm transition hover:bg-kumo-tint">{preview ? 'Hide preview' : 'Preview'}</button>
+            <button type="button" disabled={submitting || !title.trim() || !description.trim() || !preview} onClick={submit} className="rounded-lg bg-kumo-brand px-4 py-2 text-sm font-semibold text-kumo-inverse shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-40">
+              {submitting ? 'Sending…' : 'Send feedback'}
+            </button>
+          </div>
+        </footer>
       </div>
     </div>
   )

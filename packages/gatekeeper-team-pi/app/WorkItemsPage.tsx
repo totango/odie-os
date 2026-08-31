@@ -491,9 +491,16 @@ export default function WorkItemsPage({
       {statuses && (!statuses.jira.configured || !statuses.jira.connected || !statuses.zendesk.configured || !statuses.zendesk.connected) && (
         <Banner tone="neutral" title="Provider setup" message="Disconnected or unconfigured providers stay visible here so admins know what Team PI needs before searching." />
       )}
-      {page.errors?.map((providerError) => (
-        <Banner key={providerError.source} tone="warning" title={`${labelSource(providerError.source)} search failed`} message={providerError.message} />
-      ))}
+      {page.errors?.map((providerError) => {
+        const expiredCursor = /invalid .*cursor|cursor.*(?:expired|invalid)/i.test(providerError.message);
+        return <Banner
+          key={providerError.source}
+          tone="warning"
+          title={expiredCursor ? "Results need a refresh" : `${labelSource(providerError.source)} search failed`}
+          message={expiredCursor ? "The provider’s paging token expired. Your connection is still active." : providerError.message}
+          action={expiredCursor ? <button type="button" onClick={() => void refreshAll()}>Refresh results</button> : undefined}
+        />;
+      })}
       {error && <Banner tone="danger" title="Couldn’t load work items" message={error} action={<button onClick={() => void refreshAll()}>Retry</button>} />}
 
       <div className="content-grid">

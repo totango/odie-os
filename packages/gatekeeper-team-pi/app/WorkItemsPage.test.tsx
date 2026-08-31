@@ -143,6 +143,21 @@ describe("WorkItemsPage", () => {
     expect(host.textContent).toContain("Jira search failed");
   });
 
+  it("distinguishes an expired paging cursor from a broken Team PI connection", async () => {
+    const api = createApi({
+      page: {
+        items: [jiraItem],
+        cursors: {},
+        hasMore: {},
+        errors: [{ source: "jira", message: "Invalid Team PI cursor." }],
+      },
+    });
+    await render(api);
+    expect(host.textContent).toContain("Results need a refresh");
+    expect(host.textContent).toContain("Your connection is still active");
+    expect([...host.querySelectorAll("button")].some((button) => button.textContent === "Refresh results")).toBe(true);
+  });
+
   it("selects items and disposes the prior per-item stub", async () => {
     const first = createItemApi(readFor(jiraItem));
     const second = createItemApi(readFor(zendeskItem));
