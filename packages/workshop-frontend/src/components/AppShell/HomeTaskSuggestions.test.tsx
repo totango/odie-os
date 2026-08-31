@@ -62,7 +62,8 @@ describe('HomeTaskSuggestions', () => {
 
     expect(onPick).toHaveBeenCalledWith(CREATE_JIRA_ISSUE_PROMPT)
     expect(CREATE_JIRA_ISSUE_PROMPT).toContain('project')
-    expect(CREATE_JIRA_ISSUE_PROMPT).toContain('approval-backed Jira create action')
+    expect(CREATE_JIRA_ISSUE_PROMPT).toContain('TEAM_PI.createJiraIssue')
+    expect(CREATE_JIRA_ISSUE_PROMPT).toContain('Do not request or connect a generic Atlassian MCP')
     expect(CREATE_JIRA_ISSUE_PROMPT).toContain('retain the draft in chat')
   })
 
