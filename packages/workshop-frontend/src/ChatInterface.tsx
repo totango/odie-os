@@ -1220,8 +1220,11 @@ function getMarkdownComponents(
           aria-label={workItemTarget
             ? `Open ${workItemTarget.key ?? workItemTarget.id} in Work Items`
             : props["aria-label"]}
+          title={workItemTarget ? "Open in Odie Work Items. Command-click to open the provider page." : props.title}
         >
-          {children}
+          {workItemTarget && typeof children === "string" && /^open in (?:jira|zendesk)\.?$/i.test(children.trim())
+            ? "Open work item"
+            : children}
         </a>
       );
     },

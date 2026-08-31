@@ -5,6 +5,7 @@ export type WorkItemTarget = {
 };
 
 const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9_]*-\d+$/i;
+const TRUSTED_JIRA_REDIRECT_HOSTS = new Set(["team-pi-proxy.unison.totango.com"]);
 
 /**
  * Recognizes provider UI links emitted in chat so the Workshop can open the same item in Work Items.
@@ -19,7 +20,11 @@ export function workItemTargetFromUrl(href: string | undefined): WorkItemTarget 
 
     const browseIndex = segments.findIndex((segment) => segment.toLowerCase() === "browse");
     const jiraKey = browseIndex >= 0 ? segments[browseIndex + 1] : undefined;
-    if (hostname.endsWith(".atlassian.net") && jiraKey && JIRA_KEY_PATTERN.test(jiraKey)) {
+    // Team PI may return an Atlassian tenant URL or its own trusted redirect URL whose path
+    // preserves Jira's canonical /browse/KEY shape. Keep this allowlist narrow so unrelated links
+    // cannot be relabeled or intercepted as first-party Work Items.
+    const trustedJiraHost = hostname.endsWith(".atlassian.net") || TRUSTED_JIRA_REDIRECT_HOSTS.has(hostname);
+    if (trustedJiraHost && jiraKey && JIRA_KEY_PATTERN.test(jiraKey)) {
       const key = jiraKey.toUpperCase();
       return { source: "jira", id: key, key };
     }

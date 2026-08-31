@@ -172,6 +172,18 @@ export interface TeamPiSession {
   /** Searches Jira and Zendesk Work Items as a private read-only observation. */
   workItemsSearch(request: WorkItemSearchRequest): Promise<WorkItemSearchPage>;
 
+  /** Reads authoritative detail, comments, activity, editable fields, transitions, and attachments for one Jira or Zendesk item. */
+  readWorkItem(ref: WorkItemProviderRef): Promise<WorkItemRead>;
+
+  /** Adds a public Jira comment or a Zendesk comment with the requested visibility. */
+  addWorkItemComment(ref: WorkItemProviderRef, input: WorkItemCommentInput): Promise<TeamPiQueuedAction<WorkItemDetail>>;
+
+  /** Updates allowlisted fields on one Jira or Zendesk work item. */
+  updateWorkItemFields(ref: WorkItemProviderRef, patch: WorkItemFieldPatch): Promise<TeamPiQueuedAction<WorkItemDetail>>;
+
+  /** Applies one transition returned by readWorkItem() to a Jira issue. */
+  transitionJiraIssue(ref: WorkItemProviderRef, transitionId: string): Promise<TeamPiQueuedAction<WorkItemDetail>>;
+
   /**
    * Reads the authoritative live Zendesk ticket Work Items model, including detail, comments,
    * activity, update options, transitions, and attachment metadata. When the live ticket includes

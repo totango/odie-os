@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { ChatCenteredDots } from '@phosphor-icons/react'
 import type { ProductFeedbackStatus, SubmitProductFeedbackRequest } from '@gadgets/workshop-shared/product-feedback'
 import { productFeedbackDiagnosticsSnapshot } from './productFeedbackDiagnostics'
 import { useAuthenticatedApi } from './AuthContext'
@@ -13,7 +14,15 @@ function contextFromPath(pathname: string): SubmitProductFeedbackRequest['contex
   return context
 }
 
-export default function ProductFeedbackButton({ pathname }: { pathname: string }) {
+export default function ProductFeedbackButton({
+  pathname,
+  placement = 'floating',
+  collapsed = false,
+}: {
+  pathname: string
+  placement?: 'floating' | 'sidebar'
+  collapsed?: boolean
+}) {
   const { authenticatedApi } = useAuthenticatedApi()
   const [open, setOpen] = useState(false)
   const [statuses, setStatuses] = useState<ProductFeedbackStatus[]>([])
@@ -43,9 +52,20 @@ export default function ProductFeedbackButton({ pathname }: { pathname: string }
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="rounded-md border border-kumo-line px-3 py-2 text-sm text-kumo-default hover:bg-kumo-tint"
+        aria-label="Share feedback"
+        title={collapsed ? 'Share feedback' : undefined}
+        className={placement === 'sidebar'
+          ? collapsed
+            ? 'flex h-9 w-9 items-center justify-center rounded-lg border border-transparent bg-kumo-brand text-kumo-inverse shadow-sm transition-all hover:brightness-95 hover:shadow-md'
+            : 'flex w-full items-center gap-2.5 rounded-xl border border-transparent bg-kumo-brand px-3 py-2.5 text-left text-kumo-inverse shadow-sm transition-all hover:brightness-95 hover:shadow-md'
+          : 'rounded-md border border-kumo-line px-3 py-2 text-sm text-kumo-default shadow-sm hover:bg-kumo-tint'}
       >
-        Feedback
+        {placement === 'sidebar' && <ChatCenteredDots size={collapsed ? 17 : 18} weight="fill" className="shrink-0" />}
+        {!collapsed && (
+          placement === 'sidebar'
+            ? <span className="min-w-0"><span className="block text-sm font-semibold leading-4">Share feedback</span><span className="mt-0.5 block text-[11px] leading-4 text-kumo-inverse/75">Help improve Odie</span></span>
+            : 'Feedback'
+        )}
       </button>
       {open && <ProductFeedbackModal pathname={pathname} statuses={statuses} onClose={() => setOpen(false)} onSubmitted={(status) => setStatuses((prev) => [status, ...prev])} />}
     </>

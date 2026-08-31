@@ -128,9 +128,17 @@ const ACCOUNT_RESOURCE: SupportedResource = {
 type StoredDevice = { nonce: string; deviceCode: string; userCode: string; verificationUri: string; verificationUriComplete?: string; expiresAt: number; intervalMs: number };
 type StoredIdentity = { displayName?: string; uniqueName?: string };
 type Props = { accountId: string };
-type PendingAction = { kind: "installSkill"; skillId: string } | { kind: "startConnection"; provider: TeamPiProvider } | { kind: "createJiraIssue"; request: NormalizedCreateJiraIssueRequest };
+type PendingAction =
+  | { kind: "installSkill"; skillId: string }
+  | { kind: "startConnection"; provider: TeamPiProvider }
+  | { kind: "createJiraIssue"; request: NormalizedCreateJiraIssueRequest }
+  | { kind: "addWorkItemComment"; ref: WorkItemProviderRef; input: NormalizedWorkItemCommentInput }
+  | { kind: "updateWorkItemFields"; ref: WorkItemProviderRef; fields: Record<string, string | number | boolean | null | string[]> }
+  | { kind: "transitionJiraIssue"; ref: WorkItemProviderRef; transitionId: string };
 type ApplyingAction = PendingAction & { claimedAt: number };
+class WorkItemPostMutationReadError extends Error {}
 type NormalizedCreateJiraIssueRequest = Required<Pick<TeamPiCreateJiraIssueRequest, "projectKey" | "issueType" | "summary" | "description">> & Pick<TeamPiCreateJiraIssueRequest, "priority">;
+type NormalizedWorkItemCommentInput = Omit<WorkItemCommentInput, "visibility"> & { visibility: "internal" | "public" };
 type WorkItemProviderSearchResult =
   | { source: WorkItemProviderKind; page: WorkItemSearchPage }
   | { source: WorkItemProviderKind; error: WorkItemProviderError };
@@ -143,7 +151,7 @@ const PROVIDER_CATALOG_ENTRIES: AgentCatalogEntry[] = [
   { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
   { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
   { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
-  { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through Team PI Work Items, and request approved Jira issue creation with createJiraIssue(request)." },
+  { id: "provider:work-items", title: "Work Items / Jira", description: "Search and read Jira issues and Zendesk tickets through Team PI Work Items. Create Jira issues, add comments, update allowlisted fields, and apply Jira transitions with the approval-backed Work Items actions." },
   { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
 ];
 
@@ -194,7 +202,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
       logo: ICON,
       color: "#111827",
       tagline: "Use your per-user Team PI skills and connected work apps",
-      description: "Connect Team PI with Auth0 device authorization to expose approved per-user skills, Work Items/Jira search, approval-backed Jira issue creation, calendar, Gmail, Chorus, Zendesk, and Salesforce reads to agents. Management UI writes stay admin-only.",
+      description: "Connect Team PI with Auth0 device authorization to expose approved per-user skills, Work Items/Jira search and management, calendar, Gmail, Chorus, Zendesk, and Salesforce reads to agents. Jira creation, comments, field updates, and transitions require explicit approval.",
     };
   }
 
@@ -603,7 +611,7 @@ export class TeamPiVerifier extends WorkerEntrypoint<Env> implements GatekeeperU
 export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatekeeper<TeamPiSession> {
   #account(): DurableObjectStub<TeamPiAccount> { return this.ctx.exports.TeamPiAccount.get(this.ctx.exports.TeamPiAccount.idFromString(this.ctx.props.accountId)); }
   #api(): TeamPiApi { return new TeamPiApi(forceRefresh => this.#account().getApiCredentials(forceRefresh), resolveConfig(this.env).baseUrl); }
-  async describe(): Promise<ResourceDescription> { return { url: ACCOUNT_URL, title: "Team PI", snippet: "Totango SSO-shareable Team PI singleton with approved reads, Work Items search, approval-backed Jira issue creation, and staged non-agent writes.", suggestedBindingName: "TEAM_PI", tsType: "TeamPiSession", domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY }; }
+  async describe(): Promise<ResourceDescription> { return { url: ACCOUNT_URL, title: "Team PI", snippet: "Totango SSO-shareable Team PI singleton with approved reads plus approval-backed Work Items creation, comments, field updates, and Jira transitions.", suggestedBindingName: "TEAM_PI", tsType: "TeamPiSession", domainSharingPolicy: TOTANGO_DOMAIN_SHARING_POLICY }; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
   async getAutoApprovableActions(): Promise<ActionKind[]> { return []; }
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TeamPiSession> { return new TeamPiSessionImpl(this.#api(), approvalQueue.dup(), this.ctx.storage.kv); }
@@ -640,7 +648,7 @@ export class TeamPiGatekeeper extends DurableObject<Env, Props> implements Gatek
       this.ctx.storage.kv.put(resultKey(action), { status: "ready", result });
     } catch (error) {
       const message = boundString(error instanceof Error ? error.message : String(error), 512);
-      this.ctx.storage.kv.put(resultKey(action), pending.kind === "createJiraIssue" && isDefiniteCreateRejection(error)
+      this.ctx.storage.kv.put(resultKey(action), isDefiniteWorkItemRejection(pending, error)
         ? { status: "failed", message }
         : { status: "unknown", message, canRetry: false });
     }
@@ -681,6 +689,44 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
   }
   async getActionResult(actionId: number): Promise<TeamPiActionResult> { return getStoredActionResult(this.kv, actionId); }
   async workItemsSearch(request: WorkItemSearchRequest): Promise<WorkItemSearchPage> { return this.read("Search Team PI Work Items", "Searched Jira and Zendesk Work Items through Team PI.", () => searchWorkItems(this.api, request)); }
+  async readWorkItem(ref: WorkItemProviderRef): Promise<WorkItemRead> {
+    const normalized = normalizeWorkItemRef(ref);
+    return this.read(
+      `Read Team PI ${normalized.source === "jira" ? "Jira issue" : "Zendesk ticket"}`,
+      `Read authoritative ${workItemLabel(normalized)} through Team PI Work Items.`,
+      () => readWorkItem(this.api, normalized),
+    );
+  }
+  async addWorkItemComment(ref: WorkItemProviderRef, input: WorkItemCommentInput): Promise<TeamPiQueuedAction<WorkItemDetail>> {
+    const normalizedRef = normalizeWorkItemRef(ref);
+    const normalizedInput = normalizeWorkItemCommentInput(normalizedRef, input);
+    return this.queue(
+      { kind: "addWorkItemComment", ref: normalizedRef, input: normalizedInput },
+      `Comment on ${workItemLabel(normalizedRef)}`,
+      workItemCommentApprovalDescription(normalizedRef, normalizedInput),
+    );
+  }
+  async updateWorkItemFields(ref: WorkItemProviderRef, patch: WorkItemFieldPatch): Promise<TeamPiQueuedAction<WorkItemDetail>> {
+    const normalizedRef = normalizeWorkItemRef(ref);
+    const normalizedFields = normalizeFieldPatch(patch);
+    if (Object.keys(normalizedFields).length === 0) throw new Error("At least one supported work item field is required.");
+    return this.queue(
+      { kind: "updateWorkItemFields", ref: normalizedRef, fields: normalizedFields },
+      `Update ${workItemLabel(normalizedRef)}`,
+      workItemFieldApprovalDescription(normalizedRef, normalizedFields),
+    );
+  }
+  async transitionJiraIssue(ref: WorkItemProviderRef, transitionId: string): Promise<TeamPiQueuedAction<WorkItemDetail>> {
+    const normalizedRef = normalizeWorkItemRef(ref);
+    if (normalizedRef.source !== "jira") throw new Error("Only Jira work items support transitions.");
+    const normalizedTransitionId = typeof transitionId === "string" ? boundString(transitionId.trim(), 80) : "";
+    if (!normalizedTransitionId || /[\r\n]/.test(normalizedTransitionId)) throw new Error("Jira transition id is required.");
+    return this.queue(
+      { kind: "transitionJiraIssue", ref: normalizedRef, transitionId: normalizedTransitionId },
+      `Transition ${workItemLabel(normalizedRef)}`,
+      `Apply Jira transition \`${escapeMd(normalizedTransitionId)}\` to ${escapeMd(workItemLabel(normalizedRef))}.`,
+    );
+  }
   async readZendeskTicket(request: ZendeskTicketReadRequest): Promise<WorkItemRead> {
     const id = normalizeZendeskTicketId(request?.id);
     const result = await this.read(
@@ -737,13 +783,37 @@ async function applyPendingAction(api: TeamPiApi, pending: PendingAction): Promi
   if (pending.kind === "installSkill") return api.installSkill(pending.skillId);
   if (pending.kind === "startConnection") return api.startConnection(pending.provider);
   if (pending.kind === "createJiraIssue") return api.workItemsCreateJiraIssue(pending.request);
+  if (pending.kind === "addWorkItemComment") {
+    await api.workItemsAddComment(pending.ref.source, pending.ref.id, pending.input);
+    return detailAfterWorkItemMutation(api, pending.ref);
+  }
+  if (pending.kind === "updateWorkItemFields") {
+    await api.workItemsUpdateFields(pending.ref.source, pending.ref.id, pending.fields);
+    return detailAfterWorkItemMutation(api, pending.ref);
+  }
+  if (pending.kind === "transitionJiraIssue") {
+    await api.workItemsApplyTransition(pending.ref.id, pending.transitionId);
+    return detailAfterWorkItemMutation(api, pending.ref);
+  }
   throw new Error("Unknown Team PI action kind.");
+}
+
+async function detailAfterWorkItemMutation(api: TeamPiApi, ref: WorkItemProviderRef): Promise<unknown> {
+  try {
+    return await api.workItemsDetail(ref.source, ref.id);
+  } catch (error) {
+    const message = boundString(error instanceof Error ? error.message : String(error), 400);
+    throw new WorkItemPostMutationReadError(`Work item changed, but refreshing its detail failed: ${message}`);
+  }
 }
 
 function sanitizePendingActionResult(pending: PendingAction, raw: unknown, baseUrl: string): unknown {
   if (pending.kind === "installSkill") return sanitizeInstallSkillResult(raw);
   if (pending.kind === "startConnection") return sanitizeStartConnectionResult(pending.provider, raw, baseUrl);
   if (pending.kind === "createJiraIssue") return createJiraIssueResultFromEnvelope(raw);
+  if (pending.kind === "addWorkItemComment" || pending.kind === "updateWorkItemFields" || pending.kind === "transitionJiraIssue") {
+    return detailFromEnvelope(raw);
+  }
   throw new Error("Unknown Team PI action kind.");
 }
 
@@ -751,11 +821,19 @@ function actionKindFor(action: PendingAction): ActionKind {
   if (action.kind === "installSkill") return { tag: "team-pi.installSkill", label: "Install Team PI skill" };
   if (action.kind === "startConnection") return { tag: "team-pi.startConnection", label: "Start Team PI connection" };
   if (action.kind === "createJiraIssue") return { tag: "team-pi.createJiraIssue", label: "Create Jira issue" };
+  if (action.kind === "addWorkItemComment") return { tag: "team-pi.addWorkItemComment", label: "Add work item comment" };
+  if (action.kind === "updateWorkItemFields") return { tag: "team-pi.updateWorkItemFields", label: "Update work item fields" };
+  if (action.kind === "transitionJiraIssue") return { tag: "team-pi.transitionJiraIssue", label: "Transition Jira issue" };
   throw new Error("Unknown Team PI action kind.");
 }
 
-function isDefiniteCreateRejection(error: unknown): boolean {
-  return error instanceof TeamPiApiError && [400, 401, 403, 404, 422].includes(error.status ?? 0);
+function isDefiniteWorkItemRejection(pending: PendingAction, error: unknown): boolean {
+  if (error instanceof WorkItemPostMutationReadError) return false;
+  const workItemAction = pending.kind === "createJiraIssue"
+    || pending.kind === "addWorkItemComment"
+    || pending.kind === "updateWorkItemFields"
+    || pending.kind === "transitionJiraIssue";
+  return workItemAction && error instanceof TeamPiApiError && [400, 401, 403, 404, 409, 422].includes(error.status ?? 0);
 }
 
 function normalizeCreateJiraIssueRequest(request: TeamPiCreateJiraIssueRequest): NormalizedCreateJiraIssueRequest {
@@ -802,6 +880,39 @@ function createJiraIssueApprovalDescription(request: NormalizedCreateJiraIssueRe
   ];
   if (request.priority) lines.push(`- Priority: ${escapeMd(request.priority)}`);
   lines.push("- Description:", escapeMd(request.description));
+  return lines.join("\n");
+}
+
+function workItemLabel(ref: WorkItemProviderRef): string {
+  const provider = ref.source === "jira" ? "Jira issue" : "Zendesk ticket";
+  return `${provider} ${ref.key ?? ref.id}`;
+}
+
+function normalizeWorkItemCommentInput(ref: WorkItemProviderRef, input: WorkItemCommentInput): NormalizedWorkItemCommentInput {
+  const body = typeof input?.body === "string" ? boundString(input.body, WORK_ITEM_BODY_MAX).trim() : "";
+  if (!body) throw new Error("Comment body is required.");
+  const requestedVisibility = input.visibility === "public" ? "public" : input.visibility === "internal" ? "internal" : undefined;
+  if (ref.source === "jira" && requestedVisibility === "internal") throw new Error("Jira comments are public only.");
+  const visibility = ref.source === "jira" ? "public" : requestedVisibility ?? "internal";
+  const attachmentTokens = stringArray(input.attachmentTokens, 10, 1600);
+  return attachmentTokens.length > 0 ? { body, visibility, attachmentTokens } : { body, visibility };
+}
+
+function workItemCommentApprovalDescription(ref: WorkItemProviderRef, input: NormalizedWorkItemCommentInput): string {
+  return [
+    `Add a ${input.visibility === "internal" ? "private" : "public"} comment to ${escapeMd(workItemLabel(ref))}:`,
+    escapeMd(input.body),
+  ].join("\n\n");
+}
+
+function workItemFieldApprovalDescription(
+  ref: WorkItemProviderRef,
+  fields: Record<string, string | number | boolean | null | string[]>,
+): string {
+  const lines = [`Update ${escapeMd(workItemLabel(ref))} with these exact field values:`];
+  for (const [key, value] of Object.entries(fields)) {
+    lines.push(`- ${escapeMd(key)}: \`${escapeMd(JSON.stringify(value))}\``);
+  }
   return lines.join("\n");
 }
 

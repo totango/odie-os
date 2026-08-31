@@ -13,6 +13,8 @@ const testState = vi.hoisted(() => ({
   pathname: '/',
   authenticatedApi: {
     listCodingSessionActivity: vi.fn<() => Promise<never[]>>(async () => []),
+    productFeedbackAvailable: vi.fn<() => Promise<boolean>>(async () => true),
+    listProductFeedbackStatuses: vi.fn<() => Promise<never[]>>(async () => []),
   },
 }))
 
@@ -56,11 +58,11 @@ describe('Sidebar Code navigation', () => {
     vi.clearAllMocks()
   })
 
-  async function renderSidebar() {
+  async function renderSidebar(collapsed = false) {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
-    await act(async () => root!.render(<Sidebar collapsed={false} onToggleCollapsed={() => {}} />))
+    await act(async () => root!.render(<Sidebar collapsed={collapsed} onToggleCollapsed={() => {}} />))
     return container
   }
 
@@ -78,6 +80,20 @@ describe('Sidebar Code navigation', () => {
     expect(chatLink?.textContent).toContain('Chat')
     expect(codeLink?.textContent).toContain('Code')
     expect(codeLink?.getAttribute('href')).toBe('/sessions')
+  })
+
+  it('keeps feedback permanently visible in both sidebar states', async () => {
+    let rendered = await renderSidebar()
+    const expandedFeedback = rendered.querySelector('button[aria-label="Share feedback"]')
+    expect(expandedFeedback?.textContent).toContain('Help improve Odie')
+    expect(expandedFeedback?.className).toContain('w-full')
+    expect(expandedFeedback?.className).toContain('bg-kumo-brand')
+
+    await act(async () => root?.unmount())
+    container?.remove()
+    root = undefined
+    rendered = await renderSidebar(true)
+    expect(rendered.querySelector('button[aria-label="Share feedback"]')).toBeTruthy()
   })
 
   it.each(['/outputs', '/explore', '/blueprints', '/blueprint/example'])('keeps Library active at %s', async (pathname) => {
