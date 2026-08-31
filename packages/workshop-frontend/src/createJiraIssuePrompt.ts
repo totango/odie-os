@@ -5,5 +5,5 @@ export const CREATE_JIRA_ISSUE_PROMPT = [
   'Show me the final draft for approval before taking any write action.',
   'Then use only the approval-backed TEAM_PI.createJiraIssue action exposed by Team PI Work Items.',
   'Do not request or connect a generic Atlassian MCP server, and do not invent or call any other Jira API.',
-  'If TEAM_PI.createJiraIssue is unavailable, explain that the Team PI connection or create action is missing and retain the draft in chat so I can copy or reconnect Team PI.',
+  'If TEAM_PI.createJiraIssue is unavailable or reports an authentication, connection, or permission failure, retain the draft and call requestConnection only for the Team PI account resource team-pi://account so I can reconnect or update Team PI access.',
 ].join(' ');
