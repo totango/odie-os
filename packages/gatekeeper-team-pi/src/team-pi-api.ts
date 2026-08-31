@@ -10,6 +10,12 @@ const MAX_ARRAY_LENGTH = 100;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 8;
 const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_ATTACHMENT_TOKENS = 10;
+const MAX_UPLOAD_HANDLE_LENGTH = 1600;
+const ALLOWED_UPLOAD_CONTENT_TYPES = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+  "application/pdf", "text/plain", "video/mp4", "video/webm", "video/quicktime",
+]);
 
 export class TeamPiApiError extends Error {
   constructor(
@@ -69,7 +75,7 @@ type WorkItemsEndpoint =
   | "workItemsSourceStatus" | "workItemsSearch" | "workItemsDetail" | "workItemsComments"
   | "workItemsActivity" | "workItemsUpdateOptions" | "workItemsAddComment" | "workItemsUpdateFields"
   | "workItemsTransitions" | "workItemsApplyTransition" | "workItemsLink" | "workItemsAttachments"
-  | "workItemsAttachmentContent";
+  | "workItemsAttachmentContent" | "workItemsMediaCapabilities" | "workItemsCreateAttachment";
 
 const READ_ENDPOINTS = new Set<ReadEndpoint>([
   "listSkills", "getSkill", "checkSkill", "listConnections", "calendarEvents", "gmailSearch",
@@ -81,7 +87,7 @@ const WORK_ITEMS_ENDPOINTS = new Set<WorkItemsEndpoint>([
   "workItemsSourceStatus", "workItemsSearch", "workItemsDetail", "workItemsComments",
   "workItemsActivity", "workItemsUpdateOptions", "workItemsAddComment", "workItemsUpdateFields",
   "workItemsTransitions", "workItemsApplyTransition", "workItemsLink", "workItemsAttachments",
-  "workItemsAttachmentContent",
+  "workItemsAttachmentContent", "workItemsMediaCapabilities", "workItemsCreateAttachment",
 ]);
 
 export function resolveConfig(env: Env): TeamPiConfig {
@@ -283,12 +289,14 @@ export class TeamPiApi {
     return this.request("GET", `${workItemsItemPath(source, id)}/update-options`);
   }
 
-  workItemsAddComment(source: "jira" | "zendesk", id: string, input: { body: string; visibility?: "internal" | "public" }): Promise<unknown> {
+  workItemsAddComment(source: "jira" | "zendesk", id: string, input: { body: string; visibility: "internal" | "public"; attachmentTokens?: string[] }): Promise<unknown> {
     assertAllowedEndpoint("workItems", "workItemsAddComment");
-    const visibility = input.visibility === "public" ? "public" : input.visibility === "internal" ? "internal" : undefined;
+    if (source === "jira" && input.visibility !== "public") throw new Error("Jira comments are public only.");
+    const attachmentTokens = (input.attachmentTokens ?? []).slice(0, MAX_ATTACHMENT_TOKENS).map(safeUploadHandle);
     return this.request("POST", `${workItemsItemPath(source, id)}/comments`, undefined, {
       body: boundedString(input.body, 12_000),
-      ...(visibility ? { visibility } : {}),
+      visibility: input.visibility,
+      ...(attachmentTokens.length ? { attachmentTokens } : {}),
     });
   }
 
@@ -314,6 +322,27 @@ export class TeamPiApi {
     return this.request("POST", "/api/work-items/v1/links", undefined, {
       jiraId: safeId(jiraId, "jiraId"),
       zendeskTicketId: safeId(zendeskTicketId, "zendeskTicketId"),
+    });
+  }
+
+  workItemsMediaCapabilities(source: "jira" | "zendesk", id: string): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsMediaCapabilities");
+    return this.request("GET", `${workItemsItemPath(source, id)}/media-capabilities`);
+  }
+
+  workItemsCreateAttachment(source: "jira" | "zendesk", id: string, input: { name: string; contentType: string; data: Uint8Array; target: "comment" | "description" }): Promise<unknown> {
+    assertAllowedEndpoint("workItems", "workItemsCreateAttachment");
+    const name = safeUploadName(input.name);
+    const contentType = safeUploadContentType(input.contentType);
+    if (!(input.data instanceof Uint8Array) || input.data.byteLength === 0 || input.data.byteLength > MAX_ATTACHMENT_BYTES) {
+      throw new Error("Invalid Team PI attachment bytes.");
+    }
+    if (input.target !== "comment" && input.target !== "description") throw new Error("Invalid Team PI attachment target.");
+    return this.uploadRequest(`${workItemsItemPath(source, id)}/attachments`, {
+      name,
+      contentType,
+      data: input.data,
+      target: input.target,
     });
   }
 
@@ -394,6 +423,47 @@ export class TeamPiApi {
     throw new TeamPiApiError("Team PI request failed after refreshing credentials.");
   }
 
+  private async uploadRequest(path: string, input: { name: string; contentType: string; data: Uint8Array; target: "comment" | "description" }): Promise<unknown> {
+    const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+    const url = new URL(`${this.baseUrl}${path}`);
+    for (let attempt = 0; attempt < 2; ++attempt) {
+      const credentials = await abortable(this.getCredentials(attempt > 0), signal, "Team PI attachment upload timed out");
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${credentials.accessToken}`,
+        Accept: "application/json",
+        "Content-Type": input.contentType,
+        "X-Work-Item-File-Name": encodeURIComponent(input.name),
+        "X-Work-Item-Target": input.target,
+      };
+      if (credentials.idToken) headers["X-Team-PI-ID-Token"] = credentials.idToken;
+      let response: Response;
+      try {
+        response = await fetch(url, { method: "POST", redirect: "manual", headers, body: input.data.slice(), signal });
+      } catch (error) {
+        if (signal.aborted) throw new TeamPiApiError("Team PI attachment upload timed out");
+        throw error;
+      }
+      const json = await boundedJson(response, MAX_STRING_LENGTH);
+      if (response.status === 401 && attempt === 0) {
+        await abortable(this.getCredentials(true), signal, "Team PI attachment upload timed out");
+        throw new TeamPiApiError(
+          "Team PI refreshed the stored credentials. Retry the attachment upload.",
+          response.status,
+          typeof json.error === "string" ? json.error : undefined,
+        );
+      }
+      if (response.status >= 300 && response.status < 400) {
+        throw new TeamPiApiError("Team PI attachment upload redirect was blocked", response.status);
+      }
+      if (!response.ok) {
+        const code = typeof json.error === "string" ? json.error : undefined;
+        throw new TeamPiApiError(`Team PI attachment upload failed: ${response.statusText}`, response.status, code);
+      }
+      return boundJsonValueWithLimit(json, 0, MAX_STRING_LENGTH);
+    }
+    throw new TeamPiApiError("Team PI attachment upload failed after refreshing credentials.");
+  }
+
   private async binaryRequest(path: string): Promise<{ data: Uint8Array; name: string; contentType?: string }> {
     const signal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
     const url = new URL(`${this.baseUrl}${path}`);
@@ -452,6 +522,28 @@ export function safeProvider(value: string): TeamPiProvider {
 export function safeId(value: string, name: string): string {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_ID_LENGTH || hasControlCharacter(value)) {
     throw new Error(`Invalid Team PI ${name}.`);
+  }
+  return value;
+}
+
+function safeUploadName(value: string): string {
+  if (typeof value !== "string") throw new Error("Invalid Team PI attachment name.");
+  const name = value.trim();
+  if (!name || name.length > 180 || hasControlCharacter(name) || /[\\/]/.test(name) || name === "." || name === "..") {
+    throw new Error("Invalid Team PI attachment name.");
+  }
+  return name;
+}
+
+function safeUploadContentType(value: string): string {
+  const contentType = typeof value === "string" ? value.toLowerCase().split(";")[0].trim() : "";
+  if (!ALLOWED_UPLOAD_CONTENT_TYPES.has(contentType)) throw new Error("Invalid Team PI attachment content type.");
+  return contentType;
+}
+
+function safeUploadHandle(value: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_UPLOAD_HANDLE_LENGTH || hasControlCharacter(value)) {
+    throw new Error("Invalid Team PI attachment upload handle.");
   }
   return value;
 }

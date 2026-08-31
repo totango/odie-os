@@ -13,6 +13,7 @@ import {
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
+  type GatekeeperReconnectWithCallback,
   type GatekeeperUiFrame,
   type GatekeeperUser,
   type GatekeeperUserVerifier,
@@ -52,12 +53,16 @@ import type {
   WorkItemActivity,
   WorkItemAttachment,
   WorkItemAttachmentContent,
+  WorkItemAttachmentUploadInput,
+  WorkItemAttachmentUploadResult,
   WorkItemComment,
   WorkItemCommentInput,
+  WorkItemDescription,
   WorkItemDetail,
   WorkItemFieldPatch,
   WorkItemLinkResult,
   WorkItemManagementApi,
+  WorkItemMediaCapabilities,
   WorkItemProviderError,
   WorkItemProviderKind,
   WorkItemProviderRef,
@@ -412,7 +417,8 @@ export class TeamPiAccount extends DurableObject<Env> {
 }
 
 @validateRpc()
-export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements GatekeeperUser {
+export class TeamPiUser extends WorkerEntrypoint<Env, Props>
+    implements GatekeeperUser, GatekeeperReconnectWithCallback {
   #account(): DurableObjectStub<TeamPiAccount> { return this.ctx.exports.TeamPiAccount.get(this.ctx.exports.TeamPiAccount.idFromString(this.ctx.props.accountId)); }
   #api(): TeamPiApi { return new TeamPiApi(forceRefresh => this.#account().getApiCredentials(forceRefresh), resolveConfig(this.env).baseUrl); }
   async describe(): Promise<AccountDescription> {
@@ -464,6 +470,12 @@ export class TeamPiUser extends WorkerEntrypoint<Env, Props> implements Gatekeep
   async revoke(): Promise<void> { await this.#account().revoke(); }
   async reconnect(): Promise<{ url: string }> {
     const nonce = crypto.randomUUID();
+    await this.#account().prepareReconnect(nonce);
+    return { url: `/gatekeeper/team-pi/connect/${this.ctx.props.accountId}/${nonce}` };
+  }
+  async reconnectWithCallback(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
+    const nonce = crypto.randomUUID();
+    await this.#account().setCallback(callback, nonce);
     await this.#account().prepareReconnect(nonce);
     return { url: `/gatekeeper/team-pi/connect/${this.ctx.props.accountId}/${nonce}` };
   }
@@ -526,12 +538,25 @@ export class TeamPiWorkItemManagementApi extends RpcTarget implements WorkItemMa
     return { data: content.data, name: boundString(content.name, 240), contentType: optionalBoundString(content.contentType, 160) };
   }
 
+  async mediaCapabilities(): Promise<WorkItemMediaCapabilities> {
+    return mediaCapabilitiesFromEnvelope(await this.api.workItemsMediaCapabilities(this.ref.source, this.ref.id));
+  }
+
+  async createAttachment(input: WorkItemAttachmentUploadInput): Promise<WorkItemAttachmentUploadResult> {
+    return attachmentUploadResultFromEnvelope(await this.api.workItemsCreateAttachment(this.ref.source, this.ref.id, input));
+  }
+
   async addComment(input: WorkItemCommentInput): Promise<WorkItemDetail> {
     const body = typeof input?.body === "string" ? boundString(input.body, WORK_ITEM_BODY_MAX).trim() : "";
     if (!body) throw new Error("Comment body is required.");
-    const visibility = input.visibility === "public" ? "public" : input.visibility === "internal" ? "internal" : undefined;
-    if (this.ref.source === "jira" && visibility === "internal") throw new Error("Jira comments are public only.");
-    await this.api.workItemsAddComment(this.ref.source, this.ref.id, { body, ...(visibility ? { visibility } : {}) });
+    const requestedVisibility = input.visibility === "public" ? "public" : input.visibility === "internal" ? "internal" : undefined;
+    const visibility = this.ref.source === "zendesk" ? requestedVisibility ?? "internal" : "public";
+    if (this.ref.source === "jira" && requestedVisibility === "internal") throw new Error("Jira comments are public only.");
+    await this.api.workItemsAddComment(this.ref.source, this.ref.id, {
+      body,
+      visibility,
+      attachmentTokens: stringArray(input.attachmentTokens, 10, 1600),
+    });
     return this.#detail();
   }
 
@@ -1146,6 +1171,36 @@ function attachmentFromValue(value: unknown): WorkItemAttachment | null {
   };
 }
 
+function mediaCapabilitiesFromEnvelope(value: unknown): WorkItemMediaCapabilities {
+  const obj = asRecord(value);
+  const uploadMode = obj.uploadMode === "staged-comment" ? "staged-comment" : "immediate-issue";
+  const targets = stringArray(obj.targets, 2, 20).filter((target): target is "comment" | "description" => target === "comment" || target === "description");
+  return {
+    uploads: obj.uploads === true,
+    uploadMode,
+    targets,
+    inlineImages: obj.inlineImages === true,
+    inlineVideos: obj.inlineVideos === true,
+    maxBytes: typeof obj.maxBytes === "number" && Number.isFinite(obj.maxBytes) ? Math.min(Math.max(Math.floor(obj.maxBytes), 0), 8 * 1024 * 1024) : 0,
+    acceptedContentTypes: stringArray(obj.acceptedContentTypes, 20, 180).map((type) => type.toLowerCase()),
+  };
+}
+
+function attachmentUploadResultFromEnvelope(value: unknown): WorkItemAttachmentUploadResult {
+  const obj = asRecord(value);
+  const attachment = attachmentFromValue(obj.attachment);
+  if (!attachment) throw new Error("Team PI attachment upload did not return attachment metadata.");
+  const target = obj.target === "description" ? "description" : "comment";
+  return {
+    attachment,
+    uploadToken: optionalBoundString(obj.uploadToken, 1600),
+    uploadMode: obj.uploadMode === "staged-comment" ? "staged-comment" : "immediate-issue",
+    target,
+    supportsInline: obj.supportsInline === true,
+    expiresAt: optionalBoundString(obj.expiresAt, 80),
+  };
+}
+
 function updateOptionsFromEnvelope(ref: WorkItemProviderRef, value: unknown): WorkItemUpdateOptions {
   const obj = asRecord(value);
   return {
@@ -1191,26 +1246,41 @@ function workItemSummaryFromValue(value: unknown): WorkItemSummary | null {
   };
 }
 
-function descriptionFromValue(value: unknown): { body: string; format: "text" | "markdown"; truncated?: boolean } | undefined {
+function descriptionFromValue(value: unknown): WorkItemDescription | undefined {
   const obj = asRecord(value);
   const body = typeof value === "string" ? value : stringField(obj.body, "");
   if (!body) return undefined;
+  const providerFormat = providerBodyFormat(obj.providerFormat);
+  const unsupportedNodes = stringArray(obj.unsupportedNodes, 30, 80);
   return {
     body: boundString(body, WORK_ITEM_DESCRIPTION_MAX),
     format: obj.format === "markdown" ? "markdown" : "text",
+    ...(providerFormat ? { providerFormat } : {}),
+    ...(obj.lossy === true ? { lossy: true } : {}),
+    ...(unsupportedNodes.length ? { unsupportedNodes } : {}),
     truncated: obj.truncated === true || body.length > WORK_ITEM_DESCRIPTION_MAX ? true : undefined,
   };
 }
 
 function commentFromValue(source: WorkItemProviderKind, value: unknown): WorkItemComment {
   const obj = asRecord(value);
+  const providerFormat = providerBodyFormat(obj.providerFormat);
+  const unsupportedNodes = stringArray(obj.unsupportedNodes, 30, 80);
   return {
     id: boundString(stringField(obj.id, ""), 80),
     author: optionalBoundString(obj.author, 120),
     body: boundString(stringField(obj.body, ""), WORK_ITEM_FIELD_MAX),
+    format: obj.format === "markdown" ? "markdown" : "text",
+    ...(providerFormat ? { providerFormat } : {}),
+    ...(obj.lossy === true ? { lossy: true } : {}),
+    ...(unsupportedNodes.length ? { unsupportedNodes } : {}),
     public: source === "zendesk" ? obj.public !== false : true,
     createdAt: optionalBoundString(obj.createdAt, 80),
   };
+}
+
+function providerBodyFormat(value: unknown): WorkItemDescription["providerFormat"] | undefined {
+  return value === "jira-adf" || value === "zendesk-markdown" || value === "zendesk-text" || value === "plain" ? value : undefined;
 }
 
 function activityFromValue(value: unknown): WorkItemActivity {

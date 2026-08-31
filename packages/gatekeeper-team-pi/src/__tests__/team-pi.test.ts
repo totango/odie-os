@@ -182,6 +182,23 @@ describe("Team PI token refresh and API isolation", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  it("can restore a legacy account callback before reconnecting", async () => {
+    const kv = new Kv();
+    kv.put("refreshToken", "existing-refresh");
+    const callback = { credentialsRestored: vi.fn() };
+    const setAlarm = vi.fn(async () => {});
+    const account = new TeamPiAccount({} as never, configEnv());
+    (account as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (account as unknown as { env: Env; ctx: unknown }).ctx = { storage: { kv, setAlarm } };
+
+    await account.setCallback(callback as never, "nonce");
+    await expect(account.prepareReconnect("nonce")).resolves.toBeUndefined();
+
+    expect(kv.get("callback")).toBe(callback);
+    expect(kv.get("reconnecting")).toBe(true);
+    expect(setAlarm).toHaveBeenCalledOnce();
+  });
+
   it("coalesces in-instance refreshes to avoid rotating refresh-token races", async () => {
     let resolveRefresh!: (response: Response) => void;
     vi.mocked(fetch).mockImplementation(() => new Promise<Response>(resolve => { resolveRefresh = resolve; }));
@@ -440,7 +457,7 @@ describe("Team PI token refresh and API isolation", () => {
     await api.workItemsComments("jira", "J-1");
     await api.workItemsActivity("jira", "J-1");
     await api.workItemsUpdateOptions("jira", "J-1");
-    await api.workItemsAddComment("zendesk", "12", { body: "x".repeat(20_000) });
+    await api.workItemsAddComment("zendesk", "12", { body: "x".repeat(20_000), visibility: "internal" });
     await api.workItemsUpdateFields("jira", "J-1", { summary: "New" });
     await api.workItemsTransitions("J-1");
     await api.workItemsApplyTransition("J-1", "31");
@@ -466,7 +483,7 @@ describe("Team PI token refresh and API isolation", () => {
     expect(calls[7]?.[1]).toMatchObject({ method: "PATCH" });
     expect(calls[10]?.[1]).toMatchObject({ method: "POST" });
     expect(calls[0]?.[1]?.headers).toMatchObject({ Authorization: "Bearer access", "X-Team-PI-ID-Token": "identity" });
-    expect(JSON.parse(String(calls[6]?.[1]?.body))).toEqual({ body: "x".repeat(12_000) });
+    expect(JSON.parse(String(calls[6]?.[1]?.body))).toEqual({ body: "x".repeat(12_000), visibility: "internal" });
     expect(JSON.parse(String(calls[10]?.[1]?.body))).toEqual({ jiraId: "J-1", zendeskTicketId: "12" });
     expect(() => assertAllowedEndpoint("workItems", "rawProxy")).toThrow(/not allowed/);
   });
@@ -480,6 +497,24 @@ describe("Team PI token refresh and API isolation", () => {
     await expect(api.workItemsAttachmentContent("jira", "J-1", "a1")).resolves.toEqual({ data: new Uint8Array([1, 2, 3]), name: "screen.png", contentType: "image/png" });
     expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toBe("https://team-pi.example/api/work-items/v1/items/jira/J-1/attachments/a1/content");
     expect(vi.mocked(fetch).mock.calls[0]?.[1]).toMatchObject({ method: "GET", redirect: "manual", headers: expect.objectContaining({ Authorization: "Bearer access", "X-Team-PI-ID-Token": "identity" }) });
+  });
+
+  it("uploads bounded Work Item attachment bytes with exact safe headers", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ attachment: { id: "a2", name: "screen.png" }, uploadMode: "immediate-issue", target: "comment", supportsInline: false }, 201));
+    const api = new TeamPiApi(async () => ({ accessToken: "access", idToken: "identity" }), config.baseUrl);
+    await api.workItemsCreateAttachment("jira", "J-1", { name: "screen.png", contentType: "image/png", data: new Uint8Array([1, 2, 3]), target: "comment" });
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(String(url)).toBe("https://team-pi.example/api/work-items/v1/items/jira/J-1/attachments");
+    expect(init).toMatchObject({ method: "POST", redirect: "manual", headers: expect.objectContaining({
+      Authorization: "Bearer access",
+      "X-Team-PI-ID-Token": "identity",
+      "Content-Type": "image/png",
+      "X-Work-Item-File-Name": "screen.png",
+      "X-Work-Item-Target": "comment",
+    }) });
+    expect(new Uint8Array(await new Response(init?.body).arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    expect(() => api.workItemsCreateAttachment("jira", "J-1", { name: "bad.svg", contentType: "image/svg+xml", data: new Uint8Array([1]), target: "comment" })).toThrow(/content type/);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
   });
 
   it("preserves Work Item descriptions above the generic JSON string limit", async () => {
@@ -639,14 +674,14 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
       key: "J-1",
       url: "https://jira.example/browse/J-1",
       title: "x".repeat(400),
-      description: { body: "Full description", format: "markdown", truncated: true },
+      description: { body: "Full description", format: "markdown", providerFormat: "jira-adf", lossy: true, unsupportedNodes: ["table"], truncated: true },
       fields: { summary: "y".repeat(3_000), labels: ["secret"], customfield_12345: "raw custom", providerOptions: "raw options" },
       token: "do-not-copy",
     } })).toEqual({ item: expect.objectContaining({
       source: "jira",
       id: "J-1",
       title: "x".repeat(300),
-      description: { body: "Full description", format: "markdown", truncated: true },
+      description: { body: "Full description", format: "markdown", providerFormat: "jira-adf", lossy: true, unsupportedNodes: ["table"], truncated: true },
       fields: { summary: "y".repeat(2_000), labels: "secret" },
     }) });
   });
@@ -749,6 +784,16 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     await expect(account.listSavedWorkItemViews()).resolves.not.toEqual(expect.arrayContaining([expect.objectContaining({ id: "v-24" })]));
   });
 
+  it("normalizes per-item media capabilities and opaque staged upload results", async () => {
+    const api = {
+      workItemsMediaCapabilities: vi.fn(async () => ({ uploads: true, uploadMode: "staged-comment", targets: ["comment", "bad"], inlineImages: false, inlineVideos: false, maxBytes: 20_000_000, acceptedContentTypes: ["VIDEO/MP4"] })),
+      workItemsCreateAttachment: vi.fn(async () => ({ attachment: { id: "77", name: "recording.mp4", contentType: "video/mp4", size: 3 }, uploadToken: "opaque-handle", uploadMode: "staged-comment", target: "comment", supportsInline: false, expiresAt: "2099-01-01T00:00:00Z" })),
+    } as unknown as TeamPiApi;
+    const item = new TeamPiWorkItemManagementApi(api, { source: "zendesk", id: "12" });
+    await expect(item.mediaCapabilities()).resolves.toEqual({ uploads: true, uploadMode: "staged-comment", targets: ["comment"], inlineImages: false, inlineVideos: false, maxBytes: 8 * 1024 * 1024, acceptedContentTypes: ["video/mp4"] });
+    await expect(item.createAttachment({ name: "recording.mp4", contentType: "video/mp4", data: new Uint8Array([1, 2, 3]), target: "comment" })).resolves.toMatchObject({ attachment: { id: "77", name: "recording.mp4" }, uploadToken: "opaque-handle", uploadMode: "staged-comment" });
+  });
+
   it("uses Zendesk internal comments by default and public only when explicit", async () => {
     vi.mocked(fetch)
       .mockResolvedValueOnce(response({ item: { source: "zendesk", id: "12", title: "Ticket", fields: {} } }))
@@ -761,7 +806,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     await expect(item.addComment({ body: "customer reply", visibility: "public" })).resolves.toMatchObject({ item: { id: "12" } });
 
     const bodies = vi.mocked(fetch).mock.calls.filter(call => String(call[0]).endsWith("/comments")).map(call => JSON.parse(String(call[1]?.body)));
-    expect(bodies).toEqual([{ body: "internal note" }, { body: "customer reply", visibility: "public" }]);
+    expect(bodies).toEqual([{ body: "internal note", visibility: "internal" }, { body: "customer reply", visibility: "public" }]);
   });
 
   it("calls Work Items transition, field update, link, and refreshes detail after mutations", async () => {

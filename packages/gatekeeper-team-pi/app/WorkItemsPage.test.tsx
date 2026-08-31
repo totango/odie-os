@@ -6,6 +6,8 @@ import type { WorkItemsRouteStateHost } from "./bridge";
 import type {
   WorkItemDetail,
   WorkItemManagementApi,
+  WorkItemMediaCapabilities,
+  WorkItemAttachmentUploadResult,
   WorkItemRead,
   WorkItemSearchPage,
   WorkItemSourceStatuses,
@@ -226,12 +228,26 @@ describe("WorkItemsPage", () => {
     expect(safeLink.rel).toContain("noopener");
   });
 
+  it("offers rich, Markdown, and sanitized preview editing modes", async () => {
+    const api = createApi({ items: [jiraItem], itemApis: [createItemApi(readFor(jiraItem))] });
+    await render(api);
+    await clickText("Jira login is slow");
+    expect(host.querySelector('[contenteditable="true"][aria-label="Comment body"]')).toBeTruthy();
+    expect(host.querySelector('[role="toolbar"][aria-label="Formatting toolbar"]')).toBeTruthy();
+    await changeText(await openMarkdownEditor(".editor-block"), "Hello **world** <script>bad()</script>");
+    const preview = [...host.querySelectorAll<HTMLButtonElement>(".editor-block button")]
+      .find((button) => button.textContent?.includes("Preview"))!;
+    await act(async () => { preview.click(); });
+    expect(host.querySelector(".editor-block strong")?.textContent).toBe("world");
+    expect(host.querySelector(".editor-block script")).toBeNull();
+  });
+
   it("defaults Zendesk comments to internal and requires an explicit public choice", async () => {
     const itemApi = createItemApi(readFor(zendeskItem));
     const api = createApi({ items: [zendeskItem], itemApis: [itemApi] });
     await render(api);
     await clickText("Customer cannot export");
-    const textarea = host.querySelector("textarea")!;
+    const textarea = await openMarkdownEditor(".editor-block");
     await changeText(textarea, "Internal investigation note");
     await clickText("Post comment");
     expect(itemApi.addComment).toHaveBeenCalledWith({ body: "Internal investigation note", visibility: "internal" });
@@ -251,7 +267,7 @@ describe("WorkItemsPage", () => {
     const api = createApi({ items: [jiraItem], itemApis: [itemApi] });
     await render(api);
     await clickText("Jira login is slow");
-    const textarea = host.querySelector("textarea")!;
+    const textarea = await openMarkdownEditor(".editor-block");
     await changeText(textarea, "Public Jira comment");
     await clickText("Post comment");
     expect(itemApi.read).toHaveBeenCalledTimes(2);
@@ -266,7 +282,7 @@ describe("WorkItemsPage", () => {
     const api = createApi({ items: [jiraItem, zendeskItem], itemApis: [first, second] });
     await render(api);
     await clickText("Jira login is slow");
-    await changeText(host.querySelector("textarea")!, "slow mutation");
+    await changeText(await openMarkdownEditor(".editor-block"), "slow mutation");
     await clickText("Post comment");
     await clickText("Customer cannot export");
     await act(async () => {
@@ -376,18 +392,20 @@ describe("WorkItemsPage", () => {
     const api = createApi({ items: [jiraItem], itemApis: [createItemApi(readFor(jiraItem))] });
     await render(api);
     await clickText("Jira login is slow");
-    const textarea = host.querySelector("textarea")!;
-    textarea.focus();
+    const editor = host.querySelector<HTMLElement>('[contenteditable="true"][aria-label="Comment body"]')!;
+    editor.focus();
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     expect(host.textContent).toContain("Jira login is slow");
   });
 
-  it("defaults My work to the current user and tolerates email local-part vs display name", async () => {
+  it("defaults to all work and filters My work only when selected", async () => {
     const api = createApi({ items: [jiraItem, jacobItem], currentUser: { displayName: "Jacob Beck", uniqueName: "jacob.beck@example.com" } });
     await render(api);
-    await act(async () => { await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 240)); });
+    expect(host.textContent).toContain("Jacob owned issue");
+    expect(host.textContent).toContain("Jira login is slow");
+    await clickText("My work");
     expect(host.textContent).toContain("Jacob owned issue");
     expect(host.textContent).not.toContain("Jira login is slow");
     expect([...host.querySelectorAll<HTMLSelectElement>(".filter-select select")].at(3)?.value).toBe("jacob.beck@example.com");
@@ -456,9 +474,27 @@ describe("WorkItemsPage", () => {
     expect(host.querySelector(".description-section strong")?.textContent).toBe("world");
     expect(host.querySelector("script")).toBeNull();
     await clickText("Edit");
-    await changeText(host.querySelector<HTMLTextAreaElement>(".description-section textarea")!, "Updated description");
+    await changeText(await openMarkdownEditor(".description-section"), "Updated description");
     await clickText("Save description");
     expect(itemApi.updateFields).toHaveBeenCalledWith({ fields: { description: "Updated description" } });
+  });
+
+  it("renders provider-rich descriptions as semantic hierarchy and blocks lossy edits", async () => {
+    const rich = readFor({ ...jiraItem, description: { body: "## Context\n\n- First signal\n- Second signal\n\n**Owner:** Jacob", format: "markdown", providerFormat: "jira-adf" }, fields: {} });
+    rich.updateOptions.allowedFields = ["description"];
+    await render(createApi({ items: [jiraItem], itemApis: [createItemApi(rich)] }));
+    await clickText("Jira login is slow");
+    expect(host.querySelector(".provider-heading")?.textContent).toBe("Context");
+    expect([...host.querySelectorAll(".rich-text li")].map((item) => item.textContent)).toEqual(["First signal", "Second signal"]);
+    expect(host.textContent).toContain("Jira rich text");
+
+    const lossy = readFor({ ...jiraItem, description: { body: "Table cell", format: "markdown", providerFormat: "jira-adf", lossy: true, unsupportedNodes: ["table"] }, fields: {} });
+    lossy.updateOptions.allowedFields = ["description"];
+    act(() => root?.unmount()); root = undefined; host.textContent = ""; sessionStorage.clear(); history.replaceState(null, "", "/");
+    await render(createApi({ items: [jiraItem], itemApis: [createItemApi(lossy)] }));
+    await clickText("Jira login is slow");
+    expect(host.textContent).toContain("cannot be represented safely (table)");
+    expect([...host.querySelectorAll("button")].some((button) => button.textContent?.includes("Edit"))).toBe(false);
   });
 
   it("renders the complete returned description and blocks truncated edits", async () => {
@@ -490,7 +526,7 @@ describe("WorkItemsPage", () => {
       { id: "a2", name: "runbook.html", contentType: "text/html" },
     ];
     const itemApi = createItemApi(read);
-    itemApi.readAttachment.mockImplementation(async (id) => ({ data: new Uint8Array([1, 2, 3]), name: id === "a1" ? "screenshot.png" : "runbook.html", contentType: id === "a1" ? "image/png" : "text/html" }));
+    itemApi.readAttachment.mockImplementation(async (id) => ({ data: id === "a1" ? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) : new Uint8Array([1, 2, 3]), name: id === "a1" ? "screenshot.png" : "runbook.html", contentType: id === "a1" ? "image/png" : "text/html" }));
     const api = createApi({ items: [jiraItem], itemApis: [itemApi] });
     await render(api);
     await clickText("Jira login is slow");
@@ -524,8 +560,8 @@ describe("WorkItemsPage", () => {
     expect(host.textContent).not.toContain("secret option");
   });
 
-  it("uses provider-specific safe new-tab links for item and markdown URLs", async () => {
-    const read = readFor({ ...jiraItem, url: "https://jira.example/browse/ODIE-1", fields: { description: "[docs](/docs) [bad](javascript:alert(1))" } });
+  it("uses provider-specific safe new-tab links and rejects relative or unsafe markdown URLs", async () => {
+    const read = readFor({ ...jiraItem, url: "https://jira.example/browse/ODIE-1", fields: { description: "[docs](https://docs.example/guide) [relative](/docs) [bad](javascript:alert(1))" } });
     const api = createApi({ items: [jiraItem], itemApis: [createItemApi(read)] });
     await render(api);
     await clickText("Jira login is slow");
@@ -534,9 +570,10 @@ describe("WorkItemsPage", () => {
     expect(providerLink.rel).toContain("noopener");
     expect(providerLink.getAttribute("aria-label")).toContain("opens in a new tab");
     const markdownLink = [...host.querySelectorAll<HTMLAnchorElement>("a")].find((link) => link.textContent?.includes("docs"))!;
-    expect(markdownLink.href).toBe(`${location.origin}/docs`);
+    expect(markdownLink.href).toBe("https://docs.example/guide");
     expect(markdownLink.rel).toContain("noreferrer");
     expect(markdownLink.getAttribute("aria-label")).toContain("opens in a new tab");
+    expect([...host.querySelectorAll<HTMLAnchorElement>("a")].some((link) => link.textContent?.includes("relative"))).toBe(false);
     expect([...host.querySelectorAll<HTMLAnchorElement>("a")].some((link) => link.href.startsWith("javascript:"))).toBe(false);
   });
 
@@ -559,8 +596,53 @@ describe("WorkItemsPage", () => {
     expect(host.textContent).toContain("Customer cannot export");
     expect(host.querySelectorAll(".link-suggestions button")).toHaveLength(1);
     await clickText("Customer cannot export");
-    await clickText("Create link");
+    await clickText("Create provider link");
     expect(itemApi.linkTo).toHaveBeenCalledWith({ source: "zendesk", id: "222", key: undefined });
+  });
+
+  it("stages Zendesk file uploads and sends only opaque handles with the comment", async () => {
+    const read = readFor(zendeskItem);
+    const itemApi = createItemApi(read, {
+      capabilities: { uploads: true, uploadMode: "staged-comment", targets: ["comment"], inlineImages: false, inlineVideos: false, maxBytes: 8 * 1024 * 1024, acceptedContentTypes: ["image/png"] },
+      uploadResult: { attachment: { id: "upload-1", name: "screen.png", contentType: "image/png", size: 3 }, uploadToken: "opaque-bound-handle", uploadMode: "staged-comment", target: "comment", supportsInline: false },
+    });
+    await render(createApi({ items: [zendeskItem], itemApis: [itemApi] }));
+    await clickText("Customer cannot export");
+    const file = new File([new Uint8Array([1, 2, 3])], "screen.png", { type: "image/png" });
+    Object.defineProperty(file, "arrayBuffer", { value: async () => new Uint8Array([1, 2, 3]).buffer });
+    const input = host.querySelector<HTMLInputElement>('[aria-label="Upload work item attachments"]')!;
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); await Promise.resolve(); await Promise.resolve(); });
+    expect(itemApi.createAttachment).toHaveBeenCalledWith({ name: "screen.png", contentType: "image/png", data: new Uint8Array([1, 2, 3]), target: "comment" });
+    expect(host.textContent).toContain("Attaches on post");
+    await clickText("Post comment");
+    expect(itemApi.addComment).toHaveBeenCalledWith(expect.objectContaining({ attachmentTokens: ["opaque-bound-handle"], visibility: "internal" }));
+  });
+
+  it("blocks known oversized attachments before invoking the read capability", async () => {
+    const read = readFor({ ...jiraItem, fields: {} });
+    read.attachments = [{ id: "huge", name: "video.mov", contentType: "video/quicktime", size: 9 * 1024 * 1024 }];
+    const itemApi = createItemApi(read);
+    await render(createApi({ items: [jiraItem], itemApis: [itemApi] }));
+    await clickText("Jira login is slow");
+    const blocked = [...host.querySelectorAll<HTMLButtonElement>(".attachment-card button")]
+      .find((button) => button.textContent?.includes("Too large to preview"))!;
+    expect(blocked.disabled).toBe(true);
+    expect(itemApi.readAttachment).not.toHaveBeenCalled();
+  });
+
+  it("inserts existing provider attachments as honest Team PI references without reading bytes", async () => {
+    const read = readFor({ ...jiraItem, fields: {} });
+    read.attachments = [{ id: "a1", name: "screenshot.png", contentType: "image/png", size: 2048 }];
+    const itemApi = createItemApi(read);
+    const api = createApi({ items: [jiraItem], itemApis: [itemApi] });
+    await render(api);
+    await clickText("Jira login is slow");
+    await openMarkdownEditor(".editor-block");
+    await clickText("Insert screenshot.png");
+    expect(itemApi.readAttachment).not.toHaveBeenCalled();
+    await clickText("Post comment");
+    expect(itemApi.addComment).toHaveBeenCalledWith({ body: "[Attachment: screenshot.png](team-pi-attachment://a1)", visibility: "public" });
   });
 });
 
@@ -576,6 +658,14 @@ async function clickText(text: string) {
   const element = [...host.querySelectorAll<HTMLElement>("button, input, a")].find((node) => node.textContent?.includes(text) || node.getAttribute("aria-label")?.includes(text));
   if (!element) throw new Error(`Missing clickable text: ${text}`);
   await act(async () => { element.click(); await Promise.resolve(); await Promise.resolve(); });
+}
+
+async function openMarkdownEditor(sectionSelector: string): Promise<HTMLTextAreaElement> {
+  const section = host.querySelector(sectionSelector)!;
+  const button = [...section.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.includes("Markdown"))!;
+  await act(async () => { button.click(); });
+  return section.querySelector<HTMLTextAreaElement>("textarea")!;
 }
 
 async function changeText(element: HTMLTextAreaElement | HTMLInputElement, value: string) {
@@ -609,7 +699,7 @@ function createApi(options: { items?: WorkItemSummary[]; page?: WorkItemSearchPa
   };
 }
 
-function createItemApi(read: WorkItemRead) {
+function createItemApi(read: WorkItemRead, media?: { capabilities?: WorkItemMediaCapabilities; uploadResult?: WorkItemAttachmentUploadResult }) {
   const detail: WorkItemDetail = read.detail;
   const dispose = vi.fn<() => void>();
   const api = {
@@ -619,6 +709,8 @@ function createItemApi(read: WorkItemRead) {
     transition: vi.fn<WorkItemManagementApi["transition"]>(async () => detail),
     linkTo: vi.fn<WorkItemManagementApi["linkTo"]>(async () => ({ globalId: "team-pi:link", jiraId: "ODIE-1", zendeskTicketId: "222" })),
     readAttachment: vi.fn<WorkItemManagementApi["readAttachment"]>(async () => ({ data: new Uint8Array([1]), name: "attachment.bin", contentType: "application/octet-stream" })),
+    mediaCapabilities: vi.fn<WorkItemManagementApi["mediaCapabilities"]>(async () => media?.capabilities ?? { uploads: false, uploadMode: read.detail.item.source === "zendesk" ? "staged-comment" : "immediate-issue", targets: [], inlineImages: false, inlineVideos: false, maxBytes: 8 * 1024 * 1024, acceptedContentTypes: [] }),
+    createAttachment: vi.fn<WorkItemManagementApi["createAttachment"]>(async (input) => media?.uploadResult ?? { attachment: { id: "uploaded", name: input.name, contentType: input.contentType, size: input.data.byteLength }, uploadMode: read.detail.item.source === "zendesk" ? "staged-comment" : "immediate-issue", target: input.target, supportsInline: false }),
     dispose,
     [Symbol.dispose]() { dispose(); },
   } satisfies WorkItemManagementApi & { dispose: typeof dispose; [Symbol.dispose]: () => void };

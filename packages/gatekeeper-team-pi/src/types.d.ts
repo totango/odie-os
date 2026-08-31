@@ -231,8 +231,14 @@ export type WorkItemSummary = WorkItemProviderRef & {
 export type WorkItemDescription = {
   /** Complete or bounded body text in the declared format. */
   body: string;
-  /** Text format supplied by the proxy. */
+  /** Safe interchange format supplied by Team PI. */
   format: "text" | "markdown";
+  /** Provider-native source format from which the safe body was derived. */
+  providerFormat?: "jira-adf" | "zendesk-markdown" | "zendesk-text" | "plain";
+  /** True when unsupported provider structures could not be represented exactly. */
+  lossy?: boolean;
+  /** Bounded provider node names that could not be represented exactly. */
+  unsupportedNodes?: string[];
   /** True when the proxy explicitly truncated the returned description. */
   truncated?: boolean;
 };
@@ -263,6 +269,52 @@ export type WorkItemAttachmentContent = {
   contentType?: string;
 };
 
+/** Provider media capabilities for one selected work item. */
+export type WorkItemMediaCapabilities = {
+  /** Whether the Team PI proxy accepts bounded binary uploads for this item. */
+  uploads: boolean;
+  /** Provider upload lifecycle: Jira attaches immediately; Zendesk stages until comment creation. */
+  uploadMode: "immediate-issue" | "staged-comment";
+  /** Editor targets that may initiate an upload. */
+  targets: Array<"comment" | "description">;
+  /** Whether provider-native inline image nodes are supported. */
+  inlineImages: boolean;
+  /** Whether provider-native inline video nodes are supported. */
+  inlineVideos: boolean;
+  /** Maximum accepted upload size in bytes. */
+  maxBytes: number;
+  /** Exact accepted MIME content types. */
+  acceptedContentTypes: string[];
+};
+
+/** Input for a bounded work item attachment upload. */
+export type WorkItemAttachmentUploadInput = {
+  /** Safe provider-visible file name. */
+  name: string;
+  /** Allowlisted MIME content type. */
+  contentType: string;
+  /** Bounded attachment bytes. */
+  data: Uint8Array;
+  /** Editor target initiating the upload. */
+  target: "comment" | "description";
+};
+
+/** Result of uploading a work item attachment. */
+export type WorkItemAttachmentUploadResult = {
+  /** Normalized provider attachment metadata. */
+  attachment: WorkItemAttachment;
+  /** Opaque bounded Zendesk staging handle supplied back only when the comment is posted. */
+  uploadToken?: string;
+  /** Provider upload lifecycle used for this attachment. */
+  uploadMode: "immediate-issue" | "staged-comment";
+  /** Editor target that initiated the upload. */
+  target: "comment" | "description";
+  /** False until the provider proxy supports native rich-text media nodes. */
+  supportsInline: boolean;
+  /** Zendesk staging expiry timestamp, when supplied by the provider. */
+  expiresAt?: string;
+};
+
 /** Authoritative item detail returned by Team PI. */
 export type WorkItemDetail = {
   /** The normalized authoritative item. */
@@ -275,8 +327,16 @@ export type WorkItemComment = {
   id: string;
   /** Bounded author display string. */
   author?: string;
-  /** Plain text bounded body. */
+  /** Safe bounded Markdown or text body. */
   body: string;
+  /** Safe interchange format supplied by Team PI. */
+  format?: "text" | "markdown";
+  /** Provider-native source format from which the safe body was derived. */
+  providerFormat?: "jira-adf" | "zendesk-markdown" | "zendesk-text" | "plain";
+  /** True when unsupported provider structures could not be represented exactly. */
+  lossy?: boolean;
+  /** Bounded provider node names that could not be represented exactly. */
+  unsupportedNodes?: string[];
   /** Whether the comment is public in Zendesk; Jira comments are always public. */
   public: boolean;
   /** Provider creation timestamp as an ISO-like string. */
@@ -412,6 +472,8 @@ export type WorkItemCommentInput = {
   body: string;
   /** Visibility override. Zendesk defaults to internal; public must be explicit. Jira allows public only. */
   visibility?: "internal" | "public";
+  /** Opaque handles returned by createAttachment() for Zendesk staged comment uploads. */
+  attachmentTokens?: string[];
 };
 
 /** Bounded allowlisted field patch. */
@@ -454,6 +516,10 @@ export interface WorkItemManagementApi {
   read(): Promise<WorkItemRead>;
   /** Reads bounded binary content for one attachment id on this item. */
   readAttachment(id: string): Promise<WorkItemAttachmentContent>;
+  /** Reads provider-specific upload limits and lifecycle semantics for this item. */
+  mediaCapabilities(): Promise<WorkItemMediaCapabilities>;
+  /** Uploads one bounded attachment through Team PI without exposing provider credentials or URLs. */
+  createAttachment(input: WorkItemAttachmentUploadInput): Promise<WorkItemAttachmentUploadResult>;
   /** Adds a comment, defaulting Zendesk comments to internal unless public is explicit, then returns refreshed detail. */
   addComment(input: WorkItemCommentInput): Promise<WorkItemDetail>;
   /** Updates allowlisted fields and returns refreshed authoritative detail. */
