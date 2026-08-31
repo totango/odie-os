@@ -31,10 +31,10 @@ fn platform_manifests_do_not_request_camera_or_notifications() {
 
 #[test]
 fn verified_link_domain_is_declared() {
-    assert!(read("Entitlements.plist").contains("applinks:odie-os.odie-os.workers.dev"));
+    assert!(read("Entitlements.plist").contains("applinks:odie-os-native-api.odie-os.workers.dev"));
     let android = read("gen/android/app/src/main/AndroidManifest.xml");
     assert!(android.contains("android:scheme=\"https\""));
-    assert!(android.contains("android:host=\"odie-os.odie-os.workers.dev\""));
+    assert!(android.contains("android:host=\"odie-os-native-api.odie-os.workers.dev\""));
 }
 
 #[test]
@@ -55,7 +55,7 @@ fn csp_is_restrictive_and_disallows_remote_scripts() {
     assert!(csp.contains("default-src 'self'"));
     assert!(csp.contains("script-src 'self'"));
     assert!(csp.contains(
-        "connect-src 'self' https://odie-os.odie-os.workers.dev wss://odie-os.odie-os.workers.dev"
+        "connect-src 'self' ipc: http://ipc.localhost https://odie-os-native-api.odie-os.workers.dev wss://odie-os-native-api.odie-os.workers.dev"
     ));
     assert!(csp.contains("object-src 'none'"));
     assert!(!csp.contains("script-src 'self' https://"));
