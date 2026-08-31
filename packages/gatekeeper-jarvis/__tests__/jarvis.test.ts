@@ -102,7 +102,7 @@ describe("product feedback Slack notifications", () => {
 });
 
 describe("JarvisAccount", () => {
-  it("describes the management UI with the dotted title and monochrome robot icon", async () => {
+  it("keeps the ambient singleton while hiding the management UI", async () => {
     const account = Object.create(JarvisAccount.prototype) as JarvisAccount;
     Object.defineProperty(account, "env", {
       value: env({
@@ -120,10 +120,10 @@ describe("JarvisAccount", () => {
     });
 
     const description = await account.describe();
-    expect(description.providesUi?.title).toBe("J.A.R.V.I.S");
-    expect(description.providesUi?.icon?.url).toMatch(/^data:image\/svg\+xml,/);
-    expect(decodeURIComponent(description.providesUi?.icon?.url.split(",")[1] ?? ""))
-      .toContain("<svg");
+    expect(description.providesUi).toBeUndefined();
+    expect(description.singleton?.tsType).toContain("Jarvis");
+    expect(description.singleton?.revisionedAuthority).toBe(true);
+    expect(description.avatar?.url).toMatch(/^data:image\/svg\+xml,/);
   });
 });
 
