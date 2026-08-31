@@ -269,7 +269,7 @@ export class TeamPiApi {
     assertAllowedEndpoint("workItems", "workItemsSearch");
     const params = new URLSearchParams({ source: safeWorkItemSource(source), limit: String(limit(options.limit)) });
     if (options.query) params.set("q", boundedString(options.query, 300));
-    if (options.cursor) params.set("cursor", safeId(options.cursor, "cursor"));
+    if (options.cursor) params.set("cursor", safeCursor(options.cursor));
     return this.request("GET", "/api/work-items/v1/search", params);
   }
 
@@ -568,6 +568,13 @@ export function safeProvider(value: string): TeamPiProvider {
 export function safeId(value: string, name: string): string {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_ID_LENGTH || hasControlCharacter(value)) {
     throw new Error(`Invalid Team PI ${name}.`);
+  }
+  return value;
+}
+
+function safeCursor(value: string): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 500 || hasControlCharacter(value)) {
+    throw new Error("Invalid Team PI cursor.");
   }
   return value;
 }

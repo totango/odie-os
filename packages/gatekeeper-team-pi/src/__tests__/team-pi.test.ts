@@ -492,6 +492,17 @@ describe("Team PI token refresh and API isolation", () => {
     expect(() => assertAllowedEndpoint("workItems", "rawProxy")).toThrow(/not allowed/);
   });
 
+  it("accepts bounded opaque Jira cursors longer than ordinary resource IDs", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ items: [], hasMore: false }));
+    const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
+    const cursor = "opaque-token-".repeat(30);
+
+    await expect(api.workItemsSearch("jira", { cursor })).resolves.toMatchObject({ items: [] });
+
+    const url = new URL(String(vi.mocked(fetch).mock.calls[0]?.[0]));
+    expect(url.searchParams.get("cursor")).toBe(cursor);
+  });
+
   it("posts Jira create requests to the exact Work Items path with defaults", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(response({ item: { source: "jira", id: "AI-1", title: "Issue", fields: {} } }));
     const api = new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl);
