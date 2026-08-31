@@ -5,6 +5,7 @@ import { RpcStub } from 'capnweb'
 import { BlueprintGadgetSummary, GadgetClient, GadgetMetadata, Overseer, BlueprintBindingAnnotation, BlueprintScreenshotUpload } from '@gadgets/workshop-shared/api'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput, WorkshopInputArea } from './components/WorkshopControls'
 import { copyToClipboard } from './clipboard'
+import { getWorkshopRuntime } from './runtime'
 import {
   BindingCardData,
   BlueprintBindingCard,
@@ -527,7 +528,7 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
                         }
                       }}
                       onCopyLink={async () => {
-                        const url = `${window.location.origin}/blueprint/${bp.id}`
+                        const url = new URL(`/blueprint/${bp.id}`, getWorkshopRuntime().publicWebOrigin).toString()
                         return copyToClipboard(url)
                       }}
                       isConfirmingDelete={confirmingDeleteId === bp.id}

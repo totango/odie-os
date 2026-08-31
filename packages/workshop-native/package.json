@@ -1,0 +1,21 @@
+{
+  "name": "@gadgets/odie-os-native",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "frontend:build": "pnpm --dir ../.. exec vp run --filter @gadgets/workshop-frontend --cache build",
+    "tauri": "tauri",
+    "sync:gatekeeper-csp": "node scripts/sync-gatekeeper-csp.mjs",
+    "tauri:dev": "pnpm sync:gatekeeper-csp && tauri dev",
+    "tauri:build": "pnpm sync:gatekeeper-csp && tauri build",
+    "ios:dev": "pnpm sync:gatekeeper-csp && tauri ios dev",
+    "android:dev": "pnpm sync:gatekeeper-csp && tauri android dev",
+    "rust:fmt": "cargo fmt --check --manifest-path src-tauri/Cargo.toml",
+    "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
+    "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

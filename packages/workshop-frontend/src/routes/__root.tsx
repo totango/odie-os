@@ -17,6 +17,7 @@ import { SessionsProvider } from '../components/sessions/SessionsContext'
 import { RequiredConnectionsGate } from '../RequiredConnectionsGate'
 import { HubProvider } from '../HubContext'
 import { useEnabledHubs } from '../ServerConfigContext'
+import { AppLoadingSkeleton } from '../components/AppLoadingSkeleton'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -50,12 +51,7 @@ function RootComponent() {
 
   // Loading state
   if (isLoading && !standalone) {
-    return (
-      <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
-        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-kumo-subtle">{connectionLost ? 'Waiting for server…' : 'Loading...'}</p>
-      </div>
-    )
+    return <AppLoadingSkeleton label={connectionLost ? 'Waiting for server' : 'Restoring session'} />
   }
 
   // Auth error
@@ -75,12 +71,7 @@ function RootComponent() {
 
   // CF Access mode: show spinner while pipelined auth resolves
   if (!isAuthenticated && CF_ACCESS_MODE && !standalone) {
-    return (
-      <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
-        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-        <p className="text-sm text-kumo-subtle">Authenticating...</p>
-      </div>
-    )
+    return <AppLoadingSkeleton label="Authenticating" />
   }
 
   // Not authenticated and not a public route — show login
@@ -170,11 +161,7 @@ function AuthenticatedShell({
 
   // Still checking onboarding status
   if (onboardingNeeded === null) {
-    return (
-      <div className="flex min-h-full items-center justify-center flex-col gap-4 bg-kumo-base">
-        <div className="w-8 h-8 border-2 border-kumo-brand border-t-transparent rounded-full animate-spin" />
-      </div>
-    )
+    return <AppLoadingSkeleton label="Preparing Odie OS" />
   }
 
   // Show onboarding wizard

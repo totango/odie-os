@@ -2,6 +2,24 @@ import { useEffect, useRef, useState } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
+import { getWorkshopRuntime } from '../../runtime'
+
+function base64Url(bytes: Uint8Array): string {
+  let text = ''
+  for (const byte of bytes) text += String.fromCharCode(byte)
+  return btoa(text).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+}
+
+function randomVerifier(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return base64Url(bytes)
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))
+  return [...hash].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
 
 interface OAuthButtonsProps {
   rpcStub: RpcStub<PublicApi>
@@ -50,7 +68,23 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
     setError(null)
     setPending(vendorId)
     try {
+      const runtime = getWorkshopRuntime()
+      if (runtime.kind === 'tauri') {
+        console.info('[native-auth] creating browser flow')
+        const verifier = randomVerifier()
+        const started = await rpcStub.startGatekeeperLogin(vendorId, {
+          flow: { returnMode: 'native-verified-link', clientVerifierHash: await sha256Hex(verifier) },
+        })
+        console.info('[native-auth] browser flow created')
+        await runtime.writePendingNativeLoginFlow({ flowHandle: started.flowHandle!, verifier, expiresAt: started.expiresAt })
+        console.info('[native-auth] verifier stored')
+        await runtime.openOAuthTrampoline(started.url)
+        console.info('[native-auth] system browser opened')
+        if (mountedRef.current) setPending(null)
+        return
+      }
       const { url, attempt } = await rpcStub.startGatekeeperLogin(vendorId)
+      if (!attempt) throw new Error('Sign-in did not return a web login attempt.')
       // `attempt` is the capability to receive the session token; track it so we can dispose it
       // (cancelling the wait server-side) if the component unmounts mid-login.
       loginRpcRef.current = attempt as unknown as Disposable
@@ -83,7 +117,7 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
           .catch(e => finish(() => reject(e instanceof Error ? e : new Error('Could not sign in'))))
       })
       if (!mountedRef.current) return  // user navigated away mid-flow; drop the result
-      localStorage.setItem('authToken', token)
+      await runtime.writeSessionSecret(token)
       if (onSuccess) onSuccess()
       else window.location.reload()
     } catch (err) {
