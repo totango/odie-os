@@ -17,17 +17,19 @@ function makeEnv(extra: Record<string, unknown> = {}): Env {
   } as Env;
 }
 
-async function route(env: Env, path: string): Promise<string> {
-  const req = new Request(`https://example.com${path}`);
+async function route(env: Env, path: string, host = 'example.com'): Promise<string> {
+  const req = new Request(`https://${host}${path}`);
   const res = await router.fetch!(req, env, {} as ExecutionContext);
   return res.text();
 }
 
 describe('router fetch', () => {
-  it('routes /api and /blueprint-screenshot prefixes to the backend', async () => {
+  it('routes /api, native OAuth launch, and /blueprint-screenshot prefixes to the backend', async () => {
     const env = makeEnv({ ASSETS: stubFetcher('assets') });
     expect(await route(env, '/api')).toBe('backend');
     expect(await route(env, '/api/workshop')).toBe('backend');
+    expect(await route(env, '/native/oauth-start/ticket')).toBe('backend');
+    expect(await route(env, '/native/oauth-return/flow')).toBe('backend');
     expect(await route(env, '/blueprint-screenshot')).toBe('backend');
     expect(await route(env, '/blueprint-screenshot/abc')).toBe('backend');
   });
@@ -64,6 +66,32 @@ describe('router fetch', () => {
       GATEKEEPER_GOOGLE: stubFetcher('google'),
     });
     expect(await route(env, '/gatekeeper/googles')).toBe('assets');
+  });
+
+  it('serves verified-link association documents on the configured host', async () => {
+    const env = makeEnv({ ASSETS: stubFetcher('assets') });
+    expect(JSON.parse(await route(env, '/.well-known/apple-app-site-association', 'odie-os.odie-os.workers.dev'))).toEqual({ applinks: { apps: [], details: [] } });
+    expect(JSON.parse(await route(env, '/.well-known/assetlinks.json', 'odie-os.odie-os.workers.dev'))).toEqual([]);
+
+    const nativeEnv = makeEnv({ NATIVE_API_ONLY: 'true', APP_LINK_HOST: 'odie-os-native-api.odie-os.workers.dev' });
+    expect(JSON.parse(await route(nativeEnv, '/.well-known/apple-app-site-association', 'odie-os-native-api.odie-os.workers.dev'))).toEqual({ applinks: { apps: [], details: [] } });
+    expect(await route(nativeEnv, '/.well-known/apple-app-site-association', 'odie-os.odie-os.workers.dev')).toBe('Not Found');
+  });
+
+  it('keeps a native gateway restricted to API, OAuth, installed gatekeepers, and association routes', async () => {
+    const env = makeEnv({
+      NATIVE_API_ONLY: 'true',
+      APP_LINK_HOST: 'odie-os-native-api.odie-os.workers.dev',
+      GATEKEEPER_GOOGLE: stubFetcher('google'),
+    });
+    expect(await route(env, '/api')).toBe('backend');
+    expect(await route(env, '/native/oauth-start/ticket')).toBe('backend');
+    expect(await route(env, '/native/oauth-return/flow')).toBe('backend');
+    expect(await route(env, '/gatekeeper/google/oauth')).toBe('google');
+    expect(await route(env, '/')).toBe('Not Found');
+    expect(await route(env, '/admin')).toBe('Not Found');
+    expect(await route(env, '/assets/main.js')).toBe('Not Found');
+    expect(await route(env, '/blueprint-screenshot/abc')).toBe('Not Found');
   });
 
   it('serves everything else from ASSETS when the binding is present', async () => {
@@ -114,6 +142,7 @@ describe('wrangler.jsonc contract', () => {
     const first: string[] = config.assets.run_worker_first;
     expect(first).toContain('/api');
     expect(first).toContain('/api/*');
+    expect(first).toContain('/native/oauth-start/*');
     expect(first).toContain('/blueprint-screenshot');
     expect(first).toContain('/blueprint-screenshot/*');
     expect(first).toContain('/gatekeeper/*');

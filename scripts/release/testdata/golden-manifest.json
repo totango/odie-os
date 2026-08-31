@@ -1378,6 +1378,7 @@
         "run_worker_first": [
           "/api",
           "/api/*",
+          "/native/oauth-start/*",
           "/blueprint-screenshot",
           "/blueprint-screenshot/*",
           "/gatekeeper/*"
@@ -1510,6 +1511,12 @@
             "PendingLogin"
           ],
           "tag": "v2"
+        },
+        {
+          "new_sqlite_classes": [
+            "NativeBrowserFlow"
+          ],
+          "tag": "v3"
         }
       ],
       "modules": [

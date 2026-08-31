@@ -466,7 +466,52 @@ export type ResourceConfiguratorFrame = GatekeeperUiFrame;
 export type GatekeeperConnectOptions = {
   scopes?: "auth" | "full";
   resourceUrlPatterns?: string[];
+  /** Optional branded Workshop return URL used by native verified-link browser flows. */
+  returnUrl?: string;
 };
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>'"]/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "'": "&#39;",
+    '"': "&quot;",
+  }[char]!));
+}
+
+/** Renders a completion page for gatekeeper browser flows without embedding tokens or codes. */
+export function renderBrowserFlowCompletionHtml(options?: { returnUrl?: string; appName?: string }): string {
+  const appName = escapeHtml(options?.appName ?? "Odie OS");
+  if (!options?.returnUrl) {
+    return `<!DOCTYPE html>
+<html lang="en">
+  <body>
+    <script type="text/javascript">window.close();</script>
+    <p>Authorization complete. You may close this tab and return to ${appName}.</p>
+  </body>
+</html>`;
+  }
+
+  const returnUrl = escapeHtml(options.returnUrl);
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Return to ${appName}</title>
+    <meta http-equiv="refresh" content="0; url=${returnUrl}">
+  </head>
+  <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
+    <main style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
+      <h1>Authorization complete</h1>
+      <p>Return to ${appName} to finish.</p>
+      <p><a href="${returnUrl}" style="display: inline-block; padding: 0.5rem 1rem; background: #2563eb; color: white; border-radius: 4px; text-decoration: none;">Return to ${appName}</a></p>
+      <script type="text/javascript">location.replace(${JSON.stringify(options.returnUrl)});</script>
+    </main>
+  </body>
+</html>`;
+}
 
 export interface GatekeeperVendor extends WorkerEntrypoint {
   /** Get display info for the service, suitable for display to a user. */
@@ -745,6 +790,16 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 
   // TODO:
   // - Query whether account has scope to access a particular URL.
+}
+
+/**
+ * Optional reconnect extension for account implementations that must restore their original
+ * Workshop callback capability before beginning reauthorization. This is intended for durable
+ * accounts created by older deployments where that callback was not retained.
+ */
+export interface GatekeeperReconnectWithCallback extends GatekeeperUser {
+  /** Rebinds the Workshop callback and starts credential replacement. */
+  reconnectWithCallback(callback: Fetcher<GatekeeperConnectCallback>): Promise<{url: string}>;
 }
 
 /**

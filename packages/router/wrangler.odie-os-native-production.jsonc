@@ -1,9 +1,13 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "odie-os",
+  "name": "odie-os-native-api",
   "main": "src/index.ts",
   "compatibility_date": "2026-02-02",
   "preview_urls": false,
+  "vars": {
+    "NATIVE_API_ONLY": "true",
+    "APP_LINK_HOST": "odie-os-native-api.odie-os.workers.dev"
+  },
   "services": [
     { "binding": "WORKSHOP_BACKEND", "service": "odie-os-backend" },
     { "binding": "GATEKEEPER_CONTEXT", "service": "odie-os-gk-context" },
@@ -16,19 +20,6 @@
     { "binding": "GATEKEEPER_SESSIONS", "service": "odie-os-gk-sessions" },
     { "binding": "GATEKEEPER_TEAM_PI", "service": "odie-os-gk-team-pi" }
   ],
-  "assets": {
-    "directory": "../workshop-frontend/dist",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application",
-    "run_worker_first": [
-      "/api",
-      "/api/*",
-      "/native/oauth-start/*",
-      "/blueprint-screenshot",
-      "/blueprint-screenshot/*",
-      "/gatekeeper/*"
-    ]
-  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,

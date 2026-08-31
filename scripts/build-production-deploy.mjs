@@ -13,6 +13,7 @@ const FRONTEND_DIST = join(ROOT, "packages", "workshop-frontend", "dist");
 const WORKERS = [
   "gatekeeper-context",
   "gatekeeper-github",
+  "gatekeeper-google",
   "gatekeeper-jarvis",
   "gatekeeper-mcp",
   "gatekeeper-odie-kg",
@@ -48,7 +49,6 @@ function buildFrontend() {
     "exec", "vp", "run", "-F", "@gadgets/workshop-frontend", "build",
   ], {
     cwd: ROOT,
-    env: { ...process.env, VITE_CF_ACCESS_MODE: "true" },
     stdio: "inherit",
   });
 }
@@ -102,6 +102,25 @@ function main() {
     writeFileSync(join(workerDir, "wrangler.json"), JSON.stringify(config, null, 2) + "\n");
     console.log(`prepared ${relative(ROOT, workerDir)}`);
   }
+
+  // The native gateway deliberately reuses the router source without its frontend assets. Keeping it
+  // as a second prebuilt artifact gives installed apps a tiny public capability-safe surface while
+  // the browser origin remains protected by Cloudflare Access.
+  const nativeRouterPackageDir = join(ROOT, "packages", "router");
+  const nativeRouterConfigPath = join(nativeRouterPackageDir, "wrangler.odie-os-native-production.jsonc");
+  const nativeRouterDir = join(outputDir, "router-native");
+  mkdirSync(nativeRouterDir, { recursive: true });
+  runWrangler(nativeRouterPackageDir, nativeRouterConfigPath, nativeRouterDir);
+  const nativeRouterConfig = parse(readFileSync(nativeRouterConfigPath, "utf8"));
+  validateConfig(nativeRouterConfig, nativeRouterConfigPath);
+  const { mainModule: nativeRouterMain } = collectModules(nativeRouterDir);
+  delete nativeRouterConfig.$schema;
+  nativeRouterConfig.main = `./${nativeRouterMain}`;
+  writeFileSync(
+    join(nativeRouterDir, "wrangler.json"),
+    JSON.stringify(nativeRouterConfig, null, 2) + "\n",
+  );
+  console.log(`prepared ${relative(ROOT, nativeRouterDir)}`);
 }
 
 main();

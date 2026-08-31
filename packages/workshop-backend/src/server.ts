@@ -1,7 +1,7 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -9,12 +9,13 @@ import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
-import { PendingLogin, LoginConnectCallbackImpl } from "./auth/login-flow.js";
+import { PendingLogin, LoginConnectCallbackImpl, NativeLoginConnectCallbackImpl } from "./auth/login-flow.js";
+import { NativeBrowserFlow, createNativeBrowserFlowRecord } from "./auth/native-browser-flow.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
 
 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
-export { PendingLogin, LoginConnectCallbackImpl };
+export { PendingLogin, LoginConnectCallbackImpl, NativeLoginConnectCallbackImpl, NativeBrowserFlow };
 import type { CodingSessionOwner, CodingSessionToolHost, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
@@ -45,6 +46,25 @@ function base64UrlEncode(bytes: Uint8Array): string {
   let text = "";
   for (let byte of bytes) text += String.fromCharCode(byte);
   return btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function randomOpaqueHandle(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64UrlEncode(bytes);
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)));
+  return [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function publicBaseUrl(env: Env): URL {
+  return new URL(env.PUBLIC_BASE_URL || "http://localhost:8787");
+}
+
+function nativeBrowserFlows(ctx: ExecutionContext): DurableObjectNamespace<NativeBrowserFlow> {
+  return ctx.exports.NativeBrowserFlow as unknown as DurableObjectNamespace<NativeBrowserFlow>;
 }
 
 export async function gatekeeperAppInstanceId(account: Pick<ProvidedAccountInfo, "accountId">)
@@ -678,11 +698,17 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.getRequiredConnectionStatuses();
   }
 
-  connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
+  connectAccount(vendorId: string, resourceUrlPatterns?: string[], options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart> {
+    if (options?.flow?.returnMode === "native-verified-link") {
+      throw new Error("Native account browser flows require the NativeOAuthFlow durable object migration.");
+    }
     return this.#user.connectAccount(vendorId, resourceUrlPatterns);
   }
 
-  ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
+  ensureAccountResources(accountId: number, resourceUrlPatterns: string[], options?: { flow?: BrowserFlowOptions }): Promise<Partial<BrowserFlowStart>> {
+    if (options?.flow?.returnMode === "native-verified-link") {
+      throw new Error("Native account browser flows require the NativeOAuthFlow durable object migration.");
+    }
     return this.#user.ensureAccountResources(accountId, resourceUrlPatterns);
   }
 
@@ -704,8 +730,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.disconnectAccount(accountId);
   }
 
-  reconnectAccount(accountId: number): Promise<{url: string}> {
+  reconnectAccount(accountId: number, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart> {
+    if (options?.flow?.returnMode === "native-verified-link") {
+      throw new Error("Native account browser flows require the NativeOAuthFlow durable object migration.");
+    }
     return this.#user.reconnectAccount(accountId);
+  }
+
+  async getNativeAccountFlowStatus(flowHandle: string, clientVerifier: string): Promise<NativeLoginFlowStatus> {
+    return await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
+        .getAccountStatus(await sha256Hex(clientVerifier), this.#userId.toString());
   }
 
   startResourceConfigurator(
@@ -1041,7 +1075,9 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     return getServerConfig(this.env);
   }
 
-  async startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }> {
+  startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }>;
+  startGatekeeperLogin(vendorId: string, options: { flow: BrowserFlowOptions }): Promise<BrowserFlowStart>;
+  async startGatekeeperLogin(vendorId: string, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { attempt?: RpcStub<LoginAttempt> }> {
     if (!getAuthGatekeeperAllowlist(this.env).includes(vendorId)) {
       throw new Error(`Sign-in via "${vendorId}" is not enabled on this deployment.`);
     }
@@ -1050,23 +1086,50 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     const desc = await vendor.describe();
     if (!desc.providesAuth) throw new Error(`"${vendorId}" does not provide authentication.`);
 
+    const connectOptions = vendorId === CLOUDFLARE_VENDOR_ID
+      ? { scopes: "full" as const, resourceUrlPatterns: [] }
+      : { scopes: "auth" as const };
+
+    if (options?.flow?.returnMode === "native-verified-link") {
+      if (!options.flow.clientVerifierHash) throw new Error("Native login requires a client verifier hash.");
+      const flowHandle = randomOpaqueHandle();
+      const callback = this.ctx.exports.NativeLoginConnectCallbackImpl({ props: { flowHandle, vendorId } });
+      const returnUrl = new URL(`/native/oauth-return/${encodeURIComponent(flowHandle)}`, publicBaseUrl(this.env));
+      const { url: providerInitiationUrl } = await vendor.connectAccount(callback, {
+        ...connectOptions,
+        returnUrl: returnUrl.toString(),
+      });
+      const record = createNativeBrowserFlowRecord({
+        kind: "login",
+        flowHandle,
+        launchTicket: flowHandle,
+        clientVerifierHash: options.flow.clientVerifierHash,
+        providerInitiationUrl,
+      });
+      await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
+          .initialize(record);
+      return {
+        url: new URL(`/native/oauth-start/${encodeURIComponent(flowHandle)}`, publicBaseUrl(this.env)).toString(),
+        flowHandle,
+        expiresAt: new Date(record.expiresAt).toISOString(),
+      };
+    }
+
     // The PendingLogin DO is the rendezvous between this request and the (separate) OAuth-callback
     // invocation. The client never sees its id — we hand back an `attempt` stub instead.
     const pendingId = this.ctx.exports.PendingLogin.newUniqueId();
     const pending = this.ctx.exports.PendingLogin.get(pendingId);
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
         { props: { pendingId: pendingId.toString(), vendorId } });
-    // For most providers, sign-in needs only minimal scopes to verify the user's email (the grant is
-    // transient); capability scopes are requested later via an explicit connectAccount. Cloudflare is
-    // the exception: signing in with Cloudflare also links AI Gateway billing, so it requests and
-    // persists the billing-only scope set up front.
-    const options = vendorId === CLOUDFLARE_VENDOR_ID
-      ? { scopes: "full" as const, resourceUrlPatterns: [] }
-      : { scopes: "auth" as const };
-    const { url } = await vendor.connectAccount(callback, options);
+    const { url } = await vendor.connectAccount(callback, connectOptions);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
     return { url, attempt: new LoginAttemptImpl(pending) };
+  }
+
+  async consumeNativeLoginFlow(flowHandle: string, clientVerifier: string): Promise<NativeLoginConsumeResult> {
+    return await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
+        .consumeLoginResult(await sha256Hex(clientVerifier));
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {
@@ -1198,10 +1261,37 @@ export default {
       return serveBlueprintScreenshot(env, blueprintId);
     }
 
+    if (url.pathname.startsWith("/native/oauth-start/")) {
+      const launchTicket = decodeURIComponent(url.pathname.slice("/native/oauth-start/".length));
+      const providerUrl = await nativeBrowserFlows(ctx)
+          .get(nativeBrowserFlows(ctx).idFromName(launchTicket))
+          .launch(launchTicket);
+      return new Response(null, {
+        status: 302,
+        headers: { Location: providerUrl, "Referrer-Policy": "no-referrer" },
+      });
+    }
+
     // Sign-in via authentication gatekeepers happens entirely within each gatekeeper Worker (the
-    // OAuth redirect lands on `/gatekeeper/<name>/oauth`); the result is bridged back to the waiting
-    // browser via the `attempt` stub from PublicApi.startGatekeeperLogin(). So the backend no longer
-    // hosts /auth/* callbacks.
+    // OAuth redirect lands on `/gatekeeper/<name>/oauth`); native flows use /native/oauth-start/* as
+    // a branded one-time trampoline and return via /native/oauth-return/*. A signed Universal Link
+    // opens the app before this request reaches the Worker; unsigned desktop builds land here while
+    // the app securely consumes the result through its verifier-bound polling fallback.
+    if (url.pathname.startsWith("/native/oauth-return/")) {
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+      }
+      const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Return to Odie OS</title><style>body{box-sizing:border-box;min-height:100vh;margin:0;display:grid;place-items:center;background:#fafafa;color:#202020;font:16px system-ui,sans-serif;text-align:center}.card{max-width:28rem;padding:2rem}h1{margin:.75rem 0;font-size:1.75rem}p{color:#666;line-height:1.5}.mark{color:#f47f53;font-size:2.5rem}</style></head><body><main class="card"><div class="mark">●</div><h1>Sign-in complete</h1><p>Return to Odie OS. The app will continue automatically.</p></main></body></html>`;
+      return new Response(req.method === "HEAD" ? null : html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+        },
+      });
+    }
 
     if (url.pathname === "/api/client-errors") {
       return handleClientErrorRequest(req, env, ctx);
@@ -1234,7 +1324,11 @@ export default {
 
       let accessPayload: JWTPayload | undefined;
 
-      if (env.CF_ACCESS_AUD) {
+      // Preserve Cloudflare Access as defense-in-depth for the browser origin while allowing the
+      // separately deployed, route-restricted native gateway to use the API's existing in-band
+      // session authority. The backend has no public workers.dev route, so only account-owned service
+      // bindings can deliver a request whose URL names the configured native origin.
+      if (env.CF_ACCESS_AUD && url.origin !== publicBaseUrl(env).origin) {
         if (req.headers.get("Origin") !== url.origin) {
           return new Response("Cross-origin API access not allowed.", { status: 403 });
         }

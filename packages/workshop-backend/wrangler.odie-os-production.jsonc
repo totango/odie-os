@@ -17,13 +17,15 @@
   "preview_urls": false,
   "vars": {
     "ADMINS": ["jacob.beck@totango.com"],
+    "AUTH_GATEKEEPERS": "google",
     "CF_ACCESS_AUD": "8201bdec886d2938927bd320749e9aaebf3562bf12286db06d788eaea49b2e21",
     "CF_ACCESS_ISS": "https://weathered-moon-e011.cloudflareaccess.com",
     "CF_AI_GATEWAY": "odie-os-ai",
     "CF_AI_GATEWAY_ACCOUNT_ID": "286469790a4362a2e194b32045c5eca7",
     "CODING_SESSION_PI_RUNTIME_ENABLED": "true",
     "DEPLOY_URL": "https://os.cloudflare.app/deploy/?instance=0b25cd3c-6772-4200-be89-353ceea1c63e",
-    "PUBLIC_BASE_URL": "https://odie-os.odie-os.workers.dev",
+    "PUBLIC_BASE_URL": "https://odie-os-native-api.odie-os.workers.dev",
+    "DISABLE_PASSWORD_AUTH": "true",
     "REQUIRED_HEALTHY_CONNECTIONS": "team_pi,odie_kg",
     "TEAM_PI_CODEX_ONLY": "true"
   },
@@ -32,6 +34,7 @@
   "services": [
     { "binding": "GATEKEEPER_CONTEXT", "service": "odie-os-gk-context", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_GITHUB", "service": "odie-os-gk-github", "entrypoint": "GatekeeperVendor" },
+    { "binding": "GATEKEEPER_GOOGLE", "service": "odie-os-gk-google", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_GITHUB_ORG", "service": "odie-os-gk-sessions", "entrypoint": "GitHubOrganizationVendor" },
     { "binding": "GATEKEEPER_JARVIS", "service": "odie-os-gk-jarvis", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_MCP", "service": "odie-os-gk-mcp", "entrypoint": "GatekeeperVendor" },
@@ -43,7 +46,8 @@
   "migrations": [
     { "tag": "v0", "new_sqlite_classes": ["UserDurableObject", "OverseerDurableObject"] },
     { "tag": "v1", "new_sqlite_classes": ["AdminSettings"] },
-    { "tag": "v2", "new_sqlite_classes": ["PendingLogin"] }
+    { "tag": "v2", "new_sqlite_classes": ["PendingLogin"] },
+    { "tag": "v3", "new_sqlite_classes": ["NativeBrowserFlow"] }
   ],
   "kv_namespaces": [
     { "binding": "BLUEPRINTS", "id": "882e6c6dfdf9466f999b8084ed3cd637" },

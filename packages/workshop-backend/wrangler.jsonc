@@ -56,10 +56,15 @@
       // login back to the waiting browser.
       "tag": "v2",
       "new_sqlite_classes": [ "PendingLogin" ]
+    },
+    {
+      // Durable, resumable native browser flows for verified-link OAuth returns.
+      "tag": "v3",
+      "new_sqlite_classes": [ "NativeBrowserFlow" ]
     }
   ],
 
-  // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, ...) are
+  // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, NativeBrowserFlow, ...) are
   // reached via ctx.exports and need no explicit durable_objects binding.
   "kv_namespaces": [
     {

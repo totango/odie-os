@@ -44,6 +44,45 @@ export interface LoginAttempt extends RpcTarget {
   wait(): Promise<string>;
 }
 
+/** Browser-flow return modes supported by login/connect OAuth initiation APIs. */
+export type BrowserFlowReturnMode = "web-popup" | "native-verified-link";
+
+/** Options for starting a browser flow without changing the default web popup behavior. */
+export interface BrowserFlowOptions {
+  /** `web-popup` preserves existing popup semantics; `native-verified-link` uses durable app-link return. */
+  returnMode: BrowserFlowReturnMode;
+  /** Hash of a native-held verifier; present only for native-verified-link flows. */
+  clientVerifierHash?: string;
+}
+
+/** Start result for browser flows; native mode includes an opaque handle and expiry. */
+export interface BrowserFlowStart {
+  /** URL to open in the system browser; native mode receives a branded Workshop launch trampoline. */
+  url: string;
+  /** Opaque native flow handle. Present only for native verified-link flows and never contains authority. */
+  flowHandle?: string;
+  /** ISO timestamp after which the durable flow and any completed token expire. */
+  expiresAt?: string;
+}
+
+/** Description of the browser completion page a gatekeeper should render after callback completion. */
+export type BrowserFlowCompletionPage =
+  | { kind: "web-close" }
+  | { kind: "native-return"; returnUrl: string; fallbackUrl: string; appName: "Odie OS" };
+
+/** Durable native browser-flow status returned to authenticated clients. */
+export type NativeLoginFlowStatus =
+  | { status: "pending" | "expired" | "consumed" }
+  | { status: "failed"; message: string }
+  | { status: "completed" };
+
+/** Exact consume outcome for native login flows; terminal statuses clear pending verifier state. */
+export type NativeLoginConsumeResult =
+  | { status: "completed"; token: string }
+  | { status: "pending" }
+  | { status: "expired" | "consumed" | "verifier-mismatch" }
+  | { status: "failed"; message: string };
+
 /** Public API exposed to the internet. */
 export interface PublicApi extends RpcTarget {
   /** Confirms that the RPC connection can round-trip without performing application work. */
@@ -64,9 +103,12 @@ export interface PublicApi extends RpcTarget {
    * Dispose `attempt` to abandon the sign-in (e.g. the user closed the popup); this cancels the wait
    * server-side.
    */
-  startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }>;
+  startGatekeeperLogin(vendorId: string, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { attempt?: RpcStub<LoginAttempt> }>;
 
-  /** Authenticates the user using an auth token (typically stored in localStorage). */
+  /** Consumes a completed native login flow; terminal non-completed statuses clear native pending state. */
+  consumeNativeLoginFlow(flowHandle: string, clientVerifier: string): Promise<NativeLoginConsumeResult>;
+
+  /** Authenticates the user using an auth token read from the runtime-specific session store. */
   authenticate(token: string): Promise<AuthenticatedApi>;
 
   /**
@@ -80,7 +122,7 @@ export interface PublicApi extends RpcTarget {
   /**
    * Login with username and password.
    *
-   * Returns a token to store in local storage and pass to `authenticate()` in the future.
+   * Returns a token to store in the runtime-specific session store and pass to `authenticate()` in the future.
    *
    * Returns null if login failed (no such user or wrong password).
    *
@@ -976,7 +1018,7 @@ export interface AuthenticatedApi extends RpcTarget {
    * caller connects an account for a non-resource purpose (e.g. billing) without asking the user to
    * grant data access it will never use.
    */
-  connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}>;
+  connectAccount(vendorId: string, resourceUrlPatterns?: string[], options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart>;
 
   /**
    * Ensure the authorization for the listed grantable resource types (by `urlPattern`) is granted
@@ -984,7 +1026,7 @@ export interface AuthenticatedApi extends RpcTarget {
    * them, or no url if nothing was needed. The updated grant is observable via
    * subscribeConnectedAccounts().
    */
-  ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}>;
+  ensureAccountResources(accountId: number, resourceUrlPatterns: string[], options?: { flow?: BrowserFlowOptions }): Promise<Partial<BrowserFlowStart>>;
 
   /**
    * List the auto-provisioning ("ambient") gatekeepers the user can opt into right now: those set to
@@ -1116,7 +1158,10 @@ export interface AuthenticatedApi extends RpcTarget {
    * expire). Returns the URL to open in a new tab. When the OAuth flow completes, the account
    * is updated and subscribers are notified with credentialsValid: true.
    */
-  reconnectAccount(accountId: number): Promise<{url: string}>;
+  reconnectAccount(accountId: number, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart>;
+
+  /** Returns durable status for a native account connect/reconnect/grant flow. */
+  getNativeAccountFlowStatus(flowHandle: string, clientVerifier: string): Promise<NativeLoginFlowStatus>;
 
   // --- Gatekeeper management apps ---
 
@@ -1306,7 +1351,7 @@ export const MAX_SITE_NAME_LENGTH = 40;
  * What this deployment calls itself when the admin has not set a custom `siteName`. Also the
  * product's own name, so it appears in prose the server and UI address to the user.
  */
-export const DEFAULT_SITE_NAME = "Cloudflare OS";
+export const DEFAULT_SITE_NAME = "Odie OS";
 
 /**
  * The name to display for this deployment. Accepts an unset or not-yet-loaded `siteName` so both
