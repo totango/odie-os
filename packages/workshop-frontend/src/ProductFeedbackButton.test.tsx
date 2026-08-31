@@ -31,8 +31,10 @@ describe('ProductFeedbackButton', () => {
       </AuthProvider>,
     ))
     await act(async () => container.querySelector('button')!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    expect(container.textContent).toContain('Send product feedback')
-    expect(container.textContent).toContain('Broken flow — pr-created')
+    expect(container.textContent).toContain('Tell us what happened or what would make Odie better.')
+    expect(container.textContent).toContain('Report a bug')
+    expect(container.textContent).toContain('Suggest an idea')
+    expect(container.textContent).toContain('Broken flow pr-created')
     expect(container.querySelector('a')?.getAttribute('href')).toBe('https://github.com/totango/odie-os/pull/1')
     container.remove()
   })
