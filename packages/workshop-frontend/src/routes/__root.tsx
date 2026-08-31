@@ -18,7 +18,6 @@ import { RequiredConnectionsGate } from '../RequiredConnectionsGate'
 import { HubProvider } from '../HubContext'
 import { useEnabledHubs } from '../ServerConfigContext'
 import { AppLoadingSkeleton } from '../components/AppLoadingSkeleton'
-import ProductFeedbackButton from '../ProductFeedbackButton'
 
 export const Route = createRootRoute({
   component: RootComponent,
@@ -170,27 +169,18 @@ function AuthenticatedShell({
     return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
   }
 
-  // Normal app shell. The workspace editor is rendered fullscreen (no chrome); everything else
-  // gets the persistent left-rail AppShell. Connection loss is surfaced by a chip in whichever of
-  // those two top bars is showing, never by a banner that reflows the page (see ReconnectingChip).
+  // The left rail stays available on every authenticated page. Workspace editors start with the
+  // rail collapsed and omit the desktop top bar so their canvas remains effectively fullscreen.
   const fullscreen = isWorkspaceEditor
   return (
     <HubProvider enabledHubs={enabledHubs} financeStatus={financeStatus}>
       <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
         <AccountSelectionModal />
-        {fullscreen ? (
-          <main className="relative h-full min-h-0">
-            <div className="absolute right-3 top-3 z-30"><ProductFeedbackButton pathname={pathname} /></div>
+        <SessionsProvider loadRepositories={pathname === '/sessions'}>
+          <AppShell startCollapsed={fullscreen} fullscreenContent={fullscreen}>
             <Outlet />
-          </main>
-        ) : (
-          <SessionsProvider loadRepositories={pathname === '/sessions'}>
-            <AppShell>
-              <div className="fixed bottom-4 right-4 z-30"><ProductFeedbackButton pathname={pathname} /></div>
-              <Outlet />
-            </AppShell>
-          </SessionsProvider>
-        )}
+          </AppShell>
+        </SessionsProvider>
       </RequiredConnectionsGate>
     </HubProvider>
   )

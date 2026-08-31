@@ -21,16 +21,26 @@ function readCollapsed(): boolean {
 }
 
 /**
- * The authenticated, non-fullscreen application chrome: a persistent left rail + a thin top notice
- * strip + the routed content. Replaces the old <Header /> on these routes. Chat and Gadget editor
- * pages are still rendered fullscreen by __root.tsx without this shell.
+ * The authenticated application chrome: a persistent left rail + a thin top notice strip + routed
+ * content. Workspace editors keep the rail collapsed by default and omit the desktop top strip so
+ * their canvas remains effectively fullscreen without losing global navigation.
  *
  * Mobile: below `md` the rail collapses to an overlay drawer triggered by a hamburger button in a
  * minimal top bar. We don't try to gracefully shrink the rail at narrow widths; the overlay model
  * is simpler and matches how the rest of the app handles small screens.
  */
-export default function AppShell({ children }: { children: React.ReactNode }) {
-  const [collapsed, setCollapsed] = useState<boolean>(readCollapsed)
+export default function AppShell({
+  children,
+  startCollapsed = false,
+  fullscreenContent = false,
+}: {
+  children: React.ReactNode
+  startCollapsed?: boolean
+  fullscreenContent?: boolean
+}) {
+  const preferredCollapsed = useRef(readCollapsed())
+  const preFullscreenCollapsed = useRef<boolean | null>(startCollapsed ? preferredCollapsed.current : null)
+  const [collapsed, setCollapsed] = useState<boolean>(() => startCollapsed || preferredCollapsed.current)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const drawerRef = useRef<HTMLDivElement>(null)
@@ -40,10 +50,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const toggleCollapsed = useCallback(() => {
     setCollapsed((prev) => {
       const next = !prev
-      try { localStorage.setItem(STORAGE_KEY_COLLAPSED, next ? '1' : '0') } catch {}
+      if (!fullscreenContent) {
+        preferredCollapsed.current = next
+        try { localStorage.setItem(STORAGE_KEY_COLLAPSED, next ? '1' : '0') } catch {}
+      }
       return next
     })
-  }, [])
+  }, [fullscreenContent])
 
   // Close mobile drawer when escape is pressed.
   useEffect(() => {
@@ -89,6 +102,22 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     setMobileOpen(false)
   }, [pathname])
+
+  // Workspace editors keep the navigation rail available without sacrificing canvas space. Their
+  // temporary collapsed state must not overwrite the user's normal sidebar preference.
+  useEffect(() => {
+    if (startCollapsed) {
+      setCollapsed((current) => {
+        if (preFullscreenCollapsed.current === null) preFullscreenCollapsed.current = current
+        return true
+      })
+      return
+    }
+    if (preFullscreenCollapsed.current !== null) {
+      setCollapsed(preFullscreenCollapsed.current)
+      preFullscreenCollapsed.current = null
+    }
+  }, [startCollapsed])
 
   // Global ⌘K / Ctrl+K opens the command palette; the rail's search button opens it via a custom
   // event so it doesn't have to prop-drill into the palette.
@@ -145,7 +174,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           {/* Top bar. Same height as the sidebar's brand row (h-14) so they read as one continuous
               chrome strip across the top. Mostly empty — carries the mobile hamburger on the left,
               any admin TopBarNotice centered, and the reconnecting chip on the right. */}
-          <div className={`relative h-14 shrink-0 items-center justify-between border-b border-kumo-line bg-kumo-base px-3 ${isSessions ? 'flex md:hidden' : 'flex'}`}>
+          <div className={`relative h-14 shrink-0 items-center justify-between border-b border-kumo-line bg-kumo-base px-3 ${fullscreenContent ? 'flex md:hidden' : isSessions ? 'flex md:hidden' : 'flex'}`}>
             <button
               type="button"
               ref={menuButtonRef}
@@ -167,7 +196,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </div>
 
           {/* Routed content. Flat enterprise canvas — no texture. */}
-          <main className={`min-h-0 flex-1 ${isSessions ? 'overflow-hidden' : 'overflow-y-auto'}`}>{children}</main>
+          <main className={`min-h-0 flex-1 ${isSessions || fullscreenContent ? 'overflow-hidden' : 'overflow-y-auto'}`}>{children}</main>
         </div>
 
         <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

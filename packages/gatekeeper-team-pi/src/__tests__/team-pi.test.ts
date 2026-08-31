@@ -701,6 +701,31 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     expect(description).toContain("&amp; &lt;details\\>");
   });
 
+  it("stages approval-backed Work Items comments, field updates, and Jira transitions", async () => {
+    const kv = new Kv();
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+    const ref = { source: "jira" as const, id: "10001", key: "AI-17" };
+
+    await expect(session.addWorkItemComment(ref, { body: "  Ready for review.  " }))
+      .resolves.toMatchObject({ actionId: 1, status: "pending" });
+    await expect(session.updateWorkItemFields(ref, { fields: { priority: "High", labels: ["odie"] } }))
+      .resolves.toMatchObject({ actionId: 2, status: "pending" });
+    await expect(session.transitionJiraIssue(ref, "31"))
+      .resolves.toMatchObject({ actionId: 3, status: "pending" });
+
+    expect(kv.get("pending:1")).toEqual({ kind: "addWorkItemComment", ref, input: { body: "Ready for review.", visibility: "public" } });
+    expect(kv.get("pending:2")).toEqual({ kind: "updateWorkItemFields", ref, fields: { priority: "High", labels: ["odie"] } });
+    expect(kv.get("pending:3")).toEqual({ kind: "transitionJiraIssue", ref, transitionId: "31" });
+    expect(approval.submitAction.mock.calls.map((call) => call[1].actionKind.tag)).toEqual([
+      "team-pi.addWorkItemComment",
+      "team-pi.updateWorkItemFields",
+      "team-pi.transitionJiraIssue",
+    ]);
+    await expect(session.addWorkItemComment(ref, { body: "secret", visibility: "internal" })).rejects.toThrow("public only");
+    await expect(session.transitionJiraIssue({ source: "zendesk", id: "1" }, "31")).rejects.toThrow("Only Jira");
+  });
+
   it("claims pending actions synchronously and blocks reject/apply races", () => {
     const kv = new Kv();
     kv.put("pending:1", { kind: "startConnection", provider: "gmail" });
@@ -1156,10 +1181,16 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     expect(JSON.stringify(kv.get("result:3"))).not.toMatch(/customfield|providerOptions|token|secret/);
   });
 
-  it("marks failed Jira creation apply attempts as unknown and non-retryable", async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "upstream_write_status_unknown" }, 502));
+  it("reports unknown when a Work Items mutation succeeds but its detail refresh fails", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ ok: true }))
+      .mockResolvedValueOnce(response({ error: "detail unavailable" }, 404));
     const kv = new Kv();
-    kv.put("pending:4", { kind: "createJiraIssue", request: { projectKey: "AI", issueType: "Story", summary: "Created", description: "Safe" } });
+    kv.put("pending:4", {
+      kind: "addWorkItemComment",
+      ref: { source: "jira", id: "AI-17", key: "AI-17" },
+      input: { body: "Ready for review.", visibility: "public" },
+    });
     const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
     (gatekeeper as unknown as { env: Env; ctx: unknown }).env = configEnv();
     (gatekeeper as unknown as { ctx: unknown }).ctx = {
@@ -1170,8 +1201,29 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
 
     await gatekeeper.applyAction(4);
 
-    expect(kv.get("result:4")).toEqual({ status: "unknown", message: "Team PI API failed: ", canRetry: false });
-    expect(kv.get("applying:4")).toBeUndefined();
+    expect(kv.get("result:4")).toEqual({
+      status: "unknown",
+      message: expect.stringContaining("Work item changed, but refreshing its detail failed"),
+      canRetry: false,
+    });
+  });
+
+  it("marks failed Jira creation apply attempts as unknown and non-retryable", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(response({ error: "upstream_write_status_unknown" }, 502));
+    const kv = new Kv();
+    kv.put("pending:7", { kind: "createJiraIssue", request: { projectKey: "AI", issueType: "Story", summary: "Created", description: "Safe" } });
+    const gatekeeper = new TeamPiGatekeeper({} as never, configEnv());
+    (gatekeeper as unknown as { env: Env; ctx: unknown }).env = configEnv();
+    (gatekeeper as unknown as { ctx: unknown }).ctx = {
+      storage: { kv },
+      props: { accountId: "account-1" },
+      exports: { TeamPiAccount: { idFromString: (id: string) => id, get: () => ({ getApiCredentials: async () => ({ accessToken: "access" }) }) } },
+    };
+
+    await gatekeeper.applyAction(7);
+
+    expect(kv.get("result:7")).toEqual({ status: "unknown", message: "Team PI API failed: ", canRetry: false });
+    expect(kv.get("applying:7")).toBeUndefined();
   });
 
   it("marks definite Jira creation denials as failed", async () => {
@@ -1283,7 +1335,7 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
         { id: "provider:chorus", title: "Chorus", description: "Search calls and read customer account, engagement, and conversation details through Team PI." },
         { id: "provider:zendesk", title: "Zendesk", description: "Search and read support tickets available through Team PI." },
         { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
-        { id: "provider:work-items", title: "Work Items / Jira", description: "Search Jira issues and Zendesk tickets through Team PI Work Items, and request approved Jira issue creation with createJiraIssue(request)." },
+        { id: "provider:work-items", title: "Work Items / Jira", description: "Search and read Jira issues and Zendesk tickets through Team PI Work Items. Create Jira issues, add comments, update allowlisted fields, and apply Jira transitions with the approval-backed Work Items actions." },
         { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
       ],
       truncated: false,

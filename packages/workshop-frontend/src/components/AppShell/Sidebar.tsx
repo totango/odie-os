@@ -25,6 +25,7 @@ import { useGitHubConnection } from '../../hooks/useGitHubConnection'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useEffect, useState } from 'react'
 import SessionsSidebar from '../sessions/SessionsSidebar'
+import ProductFeedbackButton from '../../ProductFeedbackButton'
 
 /**
  * The persistent left rail. Three pinned regions sandwich a single scrolling region of lists, so
@@ -36,6 +37,7 @@ import SessionsSidebar from '../sessions/SessionsSidebar'
  *   • primary nav (Home, Workspaces, …)    pinned
  *   • workspace tools (⌘K search)          pinned
  *   • Favorites / Recent workspaces        SCROLLS
+ *   • feedback call-to-action              pinned
  *   • utility strip (plug, avatar)         pinned
  */
 export default function Sidebar({
@@ -251,6 +253,9 @@ export default function Sidebar({
       </SidebarWorkspacesProvider>
       )}
 
+      <div className={collapsed ? 'flex shrink-0 justify-center pb-2' : 'shrink-0 px-3 pb-2'}>
+        <ProductFeedbackButton pathname={pathname} placement="sidebar" collapsed={collapsed} />
+      </div>
       <SidebarUtilityStrip collapsed={collapsed} />
     </aside>
   )

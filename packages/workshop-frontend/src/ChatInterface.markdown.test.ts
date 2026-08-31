@@ -55,7 +55,7 @@ describe("MarkdownMessage line breaks", () => {
 
   it("opens Jira links in Work Items on an ordinary click", async () => {
     const onOpenWorkItem = vi.fn<(target: WorkItemTarget) => void>();
-    await render("[AI-3540](https://example.atlassian.net/browse/AI-3540)", onOpenWorkItem);
+    await render("[Open in Jira](https://example.atlassian.net/browse/AI-3540)", onOpenWorkItem);
 
     const link = container.querySelector("a")!;
     const click = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
@@ -64,6 +64,7 @@ describe("MarkdownMessage line breaks", () => {
     expect(click.defaultPrevented).toBe(true);
     expect(onOpenWorkItem).toHaveBeenCalledWith({ source: "jira", id: "AI-3540", key: "AI-3540" });
     expect(link.getAttribute("aria-label")).toBe("Open AI-3540 in Work Items");
+    expect(link.textContent).toBe("Open work item");
   });
 
   it("keeps modified clicks and unrelated links external", async () => {

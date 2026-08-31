@@ -9,8 +9,10 @@ import {
 } from "./workItemNavigation";
 
 describe("work item chat navigation", () => {
-  it("recognizes Jira browse links", () => {
+  it("recognizes Jira browse links, including provider redirect origins", () => {
     expect(workItemTargetFromUrl("https://example.atlassian.net/browse/ai-3540"))
+      .toEqual({ source: "jira", id: "AI-3540", key: "AI-3540" });
+    expect(workItemTargetFromUrl("https://team-pi-proxy.unison.totango.com/browse/AI-3540"))
       .toEqual({ source: "jira", id: "AI-3540", key: "AI-3540" });
   });
 
