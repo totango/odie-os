@@ -34,7 +34,7 @@ type JsonRpcRequest = {
 type RemoteScenario = {
   listStatus?: 401 | 403 | 429;
   omitTool?: string;
-  toolError?: { name: string; message: string };
+  toolError?: { name: string; messages: string[] };
 };
 
 let remoteScenario: RemoteScenario = {};
@@ -95,9 +95,12 @@ function odieOauthAndMcpHandler(seen: string[]): Handler {
       }
       if (body.method === "tools/call") {
         const toolError = remoteScenario.toolError;
-        if (toolError && body.params?.name === toolError.name) {
+        const message = toolError && body.params?.name === toolError.name
+          ? toolError.messages.shift()
+          : undefined;
+        if (message !== undefined) {
           return rpcResult(body.id, {
-            content: [{type: "text", text: toolError.message}],
+            content: [{type: "text", text: message}],
             isError: true,
           });
         }
@@ -290,7 +293,12 @@ describe("ODIE MCP integration", () => {
   });
 
   it("exposes generated odieKgQuery and preserves remote MCP tool-error results", async () => {
-    remoteScenario = { toolError: { name: "odie-kg-query", message: "KG query failed: bad domain" } };
+    remoteScenario = {
+      toolError: {
+        name: "odie-kg-query",
+        messages: ["KG query failed: bad domain", "KG query failed: bad domain"],
+      },
+    };
     await withSession(async publicApi => {
       using api = await signUp(publicApi, nextUsernames("odiequery")[0]);
       await connectOdieKgAccount(api);
@@ -307,6 +315,38 @@ describe("ODIE MCP integration", () => {
       });
       await expect(session.callTool("odie-kg-query", { question: "show churn risks" }))
         .resolves.toMatchObject({ status: "ok", text: "KG query failed: bad domain", isError: true });
+      expect(remoteScenario.toolError?.messages).toEqual([]);
+    });
+  });
+
+  it("retries transient ODIE backend tool errors once", async () => {
+    const transient = "Trino connection temporarily unavailable";
+    remoteScenario = {
+      toolError: { name: "odie-kg-query", messages: [transient] },
+    };
+    await withSession(async publicApi => {
+      using api = await signUp(publicApi, nextUsernames("odieretry")[0]);
+      await connectOdieKgAccount(api);
+      using overseer = await api.newGadget();
+      using gatekeeper = await overseer.getGatekeeperById(0);
+      using session = await gatekeeper.openSession() as unknown as McpSessionStub & {
+        odieKgQuery(args?: Record<string, unknown>): Promise<unknown>;
+      };
+
+      await expect(session.odieKgQuery({ question: "show activity" })).resolves.toMatchObject({
+        status: "ok",
+        text: "KG odie-kg-query returned data",
+        isError: false,
+      });
+
+      const persistentError = {
+        name: "odie-kg-query",
+        messages: [transient, transient],
+      };
+      remoteScenario.toolError = persistentError;
+      await expect(session.callTool("odie-kg-query", { question: "show activity" }))
+        .resolves.toMatchObject({ status: "ok", text: transient, isError: true });
+      expect(persistentError.messages).toEqual([]);
     });
   });
 

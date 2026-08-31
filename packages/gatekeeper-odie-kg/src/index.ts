@@ -33,7 +33,12 @@ import {
   type ConnectOutcome,
 } from "@gadgets/mcp-shared/account";
 import { generateNonce } from "@gadgets/mcp-shared/connect-nonce";
-import { type ConnectionAccount, type McpConnection } from "@gadgets/mcp-shared/connection";
+import type { McpClient } from "@gadgets/mcp-shared/client";
+import {
+  type ConnectionAccount,
+  type McpConnection,
+  type WithClientOptions,
+} from "@gadgets/mcp-shared/connection";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import {
   errorPageHtml,
@@ -86,6 +91,23 @@ const ODIE_KG_ICON: AvatarImage = {
 
 const ODIE_MCP_SCOPE_VERSION = 2;
 const ODIE_MCP_SCOPE_VERSION_KEY = "odieMcpScopeVersion";
+
+const TRANSIENT_ODIE_SERVICE = /\b(?:jarvis|trino|wren)\b/i;
+const TRANSIENT_ODIE_FAILURE =
+  /\b(?:connect(?:ion|ed|ing)?|temporar(?:y|ily)|transient|unavailable|timed?\s*out|reset|refused|closed|try again)\b/i;
+
+function isTransientOdieToolError(result: unknown): boolean {
+  if (typeof result !== "object" || result === null || !("isError" in result)
+      || result.isError !== true || !("content" in result) || !Array.isArray(result.content)) {
+    return false;
+  }
+  return result.content.some(block => {
+    if (typeof block !== "object" || block === null || !("type" in block) || block.type !== "text"
+        || !("text" in block) || typeof block.text !== "string") return false;
+    const text = block.text.slice(0, 512);
+    return TRANSIENT_ODIE_SERVICE.test(text) && TRANSIENT_ODIE_FAILURE.test(text);
+  });
+}
 
 type OdieKgGatekeeperProps = McpGatekeeperUserProps & {
   endpoint: string;
@@ -503,6 +525,16 @@ export class OdieKgGatekeeper
       exports.OdieKgAccount.idFromString(this.ctx.props.accountObjectId),
     );
     return new OdieKgConnectionAccount(this.env, account, this.ctx.props.endpoint);
+  }
+
+  /** Retries one narrowly identified transient ODIE backend failure, but never replays an action. */
+  override async call<T>(
+    fn: (client: McpClient) => Promise<T>,
+    options?: WithClientOptions,
+  ): Promise<T> {
+    const result = await super.call(fn, options);
+    if (options?.retryOnExpiry === false || !isTransientOdieToolError(result)) return result;
+    return super.call(fn, options);
   }
 
   /** Admit domain-policy collaborators; Workshop verifies @totango.com SSO before calling this. */
