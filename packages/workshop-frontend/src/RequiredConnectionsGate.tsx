@@ -8,6 +8,8 @@ import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { WorkshopButton } from './components/WorkshopControls'
 import { logRpcFailure } from './rpcErrors'
+import { getWorkshopRuntime } from './runtime'
+import { AppLoadingSkeleton } from './components/AppLoadingSkeleton'
 
 type RequiredConnectionsGateProps = {
   authenticatedApi: RpcStub<AuthenticatedApi>
@@ -103,14 +105,7 @@ export function RequiredConnectionsGate({ authenticatedApi, pathname, children }
   if (escapeRoute) return <>{children}</>
 
   if (statuses === null && !loadError) {
-    return (
-      <div className="min-h-screen bg-kumo-base flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3 text-kumo-subtle" role="status" aria-live="polite">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-kumo-brand border-t-transparent" />
-          <p className="text-sm">Checking required connections…</p>
-        </div>
-      </div>
-    )
+    return <AppLoadingSkeleton label="Checking required connections" />
   }
 
   if (statuses !== null && unhealthy.length === 0) {
@@ -210,7 +205,8 @@ function RequiredConnectionCard({
 
   const startConnection = async () => {
     if (unavailable) return
-    const popup = window.open('about:blank', '_blank')
+    const runtime = getWorkshopRuntime()
+    const popup = runtime.kind === 'web' ? window.open('about:blank', '_blank') : null
     if (popup) popup.opener = null
     setBusy(true)
     setActionError(undefined)
@@ -220,7 +216,8 @@ function RequiredConnectionCard({
         ? await authenticatedApi.reconnectAccount(connection.accountId)
         : await authenticatedApi.connectAccount(connection.vendorId)
       setManualUrl(url)
-      if (popup) popup.location.href = url
+      if (runtime.kind === 'tauri') await runtime.openExternal(url)
+      else if (popup) popup.location.href = url
       else setPopupBlocked(true)
     } catch (error) {
       popup?.close()

@@ -80,6 +80,52 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
 }
 
 type LoginCallbackProps = { pendingId: string; vendorId: string };
+type NativeLoginCallbackProps = { flowHandle: string; vendorId: string };
+
+async function completeGatekeeperLogin(
+    ctx: WorkerEntrypoint<Cloudflare.Env, any>["ctx"], env: Cloudflare.Env,
+    vendorId: string, account: Fetcher<GatekeeperUser>, expiresAt: Date | undefined,
+    deliver: (token: string) => Promise<void>, fail: (message: string) => Promise<void>) {
+  const loginLogger = logger.with({
+    operation: "gatekeeper.login",
+    vendorId,
+  });
+  try {
+    const email = await account.getAuthenticatedEmail();
+    if (!email) {
+      loginLogger.info("gatekeeper login finished", {
+        event: "gatekeeper.login.finished", outcome: "no_email",
+      });
+      await fail("This account has no verified email, so it can't be used to sign in.");
+      return;
+    }
+    const userStub = ctx.exports.UserDurableObject.get(ctx.exports.UserDurableObject.idFromName(email));
+    const signupsEnabled = (await readAdminConfig(env)).signupsEnabled;
+    const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
+    if (secret === null) {
+      loginLogger.info("gatekeeper login finished", {
+        event: "gatekeeper.login.finished", outcome: "signups_disabled",
+      });
+      await fail("New sign-ups are currently disabled on this deployment.");
+      return;
+    }
+    if (vendorId === CLOUDFLARE_VENDOR_ID) {
+      await userStub.linkConnectedAccountFromLogin(account, vendorId, expiresAt);
+    }
+    await deliver(`${email}:${secret}`);
+    loginLogger.info("gatekeeper login finished", {
+      event: "gatekeeper.login.finished", outcome: "ok",
+    });
+  } catch (err) {
+    loginLogger.error("gatekeeper login failed", {
+      event: "gatekeeper.login.failed", error: err,
+    });
+    loginLogger.info("gatekeeper login finished", {
+      event: "gatekeeper.login.finished", outcome: "error",
+    });
+    await fail("Sign-in failed. Please try again.");
+  }
+}
 
 export class LoginConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, LoginCallbackProps>
@@ -90,57 +136,10 @@ export class LoginConnectCallbackImpl
   }
 
   async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
-    const loginLogger = logger.with({
-      operation: "gatekeeper.login",
-      vendorId: this.ctx.props.vendorId,
-    });
     const pending = this.#pending();
-    // `account` is a call parameter, so Cap'n Web disposes it automatically when this method
-    // returns — no explicit disposal needed. We read the verified email to resolve/create the user.
-    // The email's local-part seeds the initial display name, like the Cloudflare Access flow.
-    try {
-      const email = await account.getAuthenticatedEmail();
-      if (!email) {
-        loginLogger.info("gatekeeper login finished", {
-          event: "gatekeeper.login.finished", outcome: "no_email",
-        });
-        await pending.fail("This account has no verified email, so it can't be used to sign in.");
-        return;
-      }
-      const userStub = this.ctx.exports.UserDurableObject.get(
-          this.ctx.exports.UserDurableObject.idFromName(email));
-      // Closed signups block first-time account creation here too (not just password signup); an
-      // existing user signing in is unaffected.
-      const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
-      if (secret === null) {
-        loginLogger.info("gatekeeper login finished", {
-          event: "gatekeeper.login.finished", outcome: "signups_disabled",
-        });
-        await pending.fail("New sign-ups are currently disabled on this deployment.");
-        return;
-      }
-      // For Cloudflare, signing in also links the account for AI Gateway billing: startGatekeeperLogin
-      // requested full (non-transient) scopes, so persist the grant as a connected account before
-      // handing back the session. Other providers use minimal, transient sign-in grants (no persist).
-      if (this.ctx.props.vendorId === CLOUDFLARE_VENDOR_ID) {
-        await userStub.linkConnectedAccountFromLogin(account, this.ctx.props.vendorId, expiresAt);
-      }
-      // Session tokens are "<doName>:<secret>"; PublicApi.authenticate() routes via idFromName of
-      // the first part. The user DO is keyed by email, so the prefix must be the email.
-      await pending.deliver(`${email}:${secret}`);
-      loginLogger.info("gatekeeper login finished", {
-        event: "gatekeeper.login.finished", outcome: "ok",
-      });
-    } catch (err) {
-      loginLogger.error("gatekeeper login failed", {
-        event: "gatekeeper.login.failed", error: err,
-      });
-      loginLogger.info("gatekeeper login finished", {
-        event: "gatekeeper.login.finished", outcome: "error",
-      });
-      await pending.fail("Sign-in failed. Please try again.");
-    }
+    await completeGatekeeperLogin(
+        this.ctx, this.env, this.ctx.props.vendorId, account, expiresAt,
+        token => pending.deliver(token), message => pending.fail(message));
   }
 
   /**
@@ -150,6 +149,26 @@ export class LoginConnectCallbackImpl
    * billing path degrades gracefully regardless — getUsableAccessToken() returns null on expiry and
    * the user falls back to the free tier / a reconnect prompt.
    */
+  async credentialsExpired(): Promise<void> {}
+  async credentialsRestored(_expiresAt?: Date): Promise<void> {}
+}
+
+export class NativeLoginConnectCallbackImpl
+    extends WorkerEntrypoint<Cloudflare.Env, NativeLoginCallbackProps>
+    implements GatekeeperConnectCallback {
+  #flow() {
+    const flows = this.ctx.exports.NativeBrowserFlow as unknown as DurableObjectNamespace;
+    const id = flows.idFromName(this.ctx.props.flowHandle);
+    return flows.get(id) as unknown as { completeLogin(token: string): Promise<void>; fail(message: string): Promise<void> };
+  }
+
+  async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
+    const flow = this.#flow();
+    await completeGatekeeperLogin(
+        this.ctx, this.env, this.ctx.props.vendorId, account, expiresAt,
+        token => flow.completeLogin(token), message => flow.fail(message));
+  }
+
   async credentialsExpired(): Promise<void> {}
   async credentialsRestored(_expiresAt?: Date): Promise<void> {}
 }

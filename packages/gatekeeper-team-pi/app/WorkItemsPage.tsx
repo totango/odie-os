@@ -36,6 +36,7 @@ import type {
   WorkItemAttachment,
   WorkItemFieldPatch,
   WorkItemManagementApi,
+  WorkItemMediaCapabilities,
   WorkItemProviderKind,
   WorkItemProviderRef,
   WorkItemRead,
@@ -44,10 +45,12 @@ import type {
   WorkItemSearchSource,
   WorkItemSourceStatuses,
   WorkItemSummary,
+  WorkItemAttachmentUploadResult,
   WorkItemsCurrentUser,
   WorkItemsManagementApi,
 } from "../src/types";
 import { useWorkItemsApi, useWorkItemsRouteState, type WorkItemsRouteStateHost } from "./bridge";
+import { WorkItemEditor, attachmentMarkdownReference } from "./WorkItemEditor";
 
 type DisposableItemApi = WorkItemManagementApi & { [Symbol.dispose]?: () => void };
 type Selected = { stub: DisposableItemApi; ref: WorkItemProviderRef };
@@ -58,10 +61,14 @@ type StatusLoadResult = { ok: true; statuses: WorkItemSourceStatuses } | { ok: f
 type ViewMode = "list" | "kanban";
 
 const EMPTY_FILTERS: Filters = { status: "", priority: "", type: "", person: "" };
-const STORE_KEY = "team-pi-work-items:v1";
+const STORE_KEY = "team-pi-work-items:v2";
 const BUILTIN_MY_WORK = "builtin:my-work";
 const BUILTIN_ALL = "builtin:all";
 const LIMIT = 40;
+const COMMENT_EDITOR_MAX = 12_000;
+const DESCRIPTION_EDITOR_MAX = 60_000;
+const MAX_ATTACHMENT_PREVIEW_BYTES = 8 * 1024 * 1024;
+const MAX_EDITOR_UPLOADS = 10;
 const DETAIL_WIDTH = { min: 360, default: 520, max: 760, margin: 32 };
 const MARKDOWN_COMPONENTS: Components = {
   a({ href, children, node: _node, ...props }) {
@@ -72,6 +79,13 @@ const MARKDOWN_COMPONENTS: Components = {
   img({ alt }) {
     return alt ? <span>{alt}</span> : null;
   },
+  h1({ children }) { return <ProviderHeading level={1}>{children}</ProviderHeading>; },
+  h2({ children }) { return <ProviderHeading level={2}>{children}</ProviderHeading>; },
+  h3({ children }) { return <ProviderHeading level={3}>{children}</ProviderHeading>; },
+  h4({ children }) { return <ProviderHeading level={4}>{children}</ProviderHeading>; },
+  h5({ children }) { return <ProviderHeading level={5}>{children}</ProviderHeading>; },
+  h6({ children }) { return <ProviderHeading level={6}>{children}</ProviderHeading>; },
+  table({ children }) { return <div className="provider-table-scroll"><table>{children}</table></div>; },
 };
 const SANITIZE_SCHEMA = {
   ...defaultSchema,
@@ -133,7 +147,6 @@ export default function WorkItemsPage({
   const statusEpoch = useRef(0);
   const pageRef = useRef(page);
   const selectedRef = useRef<Selected | null>(null);
-  const defaultedUserFilter = useRef(false);
 
   useEffect(() => {
     pageRef.current = page;
@@ -183,15 +196,6 @@ export default function WorkItemsPage({
     // Initial route selection is consumed once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);
-
-  useEffect(() => {
-    if (defaultedUserFilter.current || initial.explicitPersonOrView || !currentUser) return;
-    const person = preferredUserToken(currentUser);
-    if (!person) return;
-    defaultedUserFilter.current = true;
-    setFilters((current) => current.person ? current : { ...current, person });
-    setSelectedViewId(BUILTIN_MY_WORK);
-  }, [currentUser, initial.explicitPersonOrView]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 220);
@@ -598,6 +602,8 @@ function DetailPanel(props: {
 }) {
   const { selected, read, loading, error, tab, setTab, notice, backButtonRef, onClose, onRetry, mutationEpoch, onMutated, rootApi, codingSessionAvailable, onRequestCodingSession } = props;
   const [width, setWidth] = useState(DETAIL_WIDTH.default);
+  const [mediaCapabilities, setMediaCapabilities] = useState<WorkItemMediaCapabilities>();
+  const [mediaCapabilitiesError, setMediaCapabilitiesError] = useState<string>();
   const dragStart = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const detailRef = useRef<HTMLElement>(null);
   const clampWidth = useCallback((value: number) => clampDetailWidth(value), []);
@@ -639,6 +645,22 @@ function DetailPanel(props: {
       first.focus();
     }
   }, []);
+  useEffect(() => {
+    if (!selected) {
+      setMediaCapabilities(undefined);
+      setMediaCapabilitiesError(undefined);
+      return;
+    }
+    let cancelled = false;
+    setMediaCapabilities(undefined);
+    setMediaCapabilitiesError(undefined);
+    void selected.stub.mediaCapabilities().then((capabilities) => {
+      if (!cancelled) setMediaCapabilities(capabilities);
+    }).catch((caught) => {
+      if (!cancelled) setMediaCapabilitiesError(safeMessage(caught));
+    });
+    return () => { cancelled = true; };
+  }, [selected]);
   useEffect(() => {
     if (!selected) return;
     window.setTimeout(() => backButtonRef.current?.focus({ preventScroll: true }), 0);
@@ -690,38 +712,69 @@ function DetailPanel(props: {
       </header>
       <MetadataEditor read={read} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />
       {notice && <p className="success-note" role="status"><CheckCircle size={15} />{notice}</p>}
-      <DescriptionEditor read={read} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />
+      <DescriptionEditor read={read} api={selected.stub} mediaCapabilities={mediaCapabilities} mediaCapabilitiesError={mediaCapabilitiesError} onAttachmentChanged={onRetry} mutationEpoch={mutationEpoch} onMutated={onMutated} />
       <AttachmentsSection read={read} api={selected.stub} />
-      <CommentComposer item={item} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />
+      <CommentComposer item={item} attachments={read.attachments} api={selected.stub} mediaCapabilities={mediaCapabilities} mediaCapabilitiesError={mediaCapabilitiesError} onAttachmentChanged={onRetry} mutationEpoch={mutationEpoch} onMutated={onMutated} />
       {item.source === "jira" && <TransitionEditor item={item} transitions={read.transitions} api={selected.stub} mutationEpoch={mutationEpoch} onMutated={onMutated} />}
       <LinkEditor item={item} api={selected.stub} rootApi={rootApi} />
       <div className="tabs" role="tablist" aria-label="Detail timeline"><button role="tab" aria-selected={tab === "comments"} onClick={() => setTab("comments")}>Comments</button><button role="tab" aria-selected={tab === "activity"} onClick={() => setTab("activity")}>Activity</button></div>
-      {tab === "comments" ? <TimelineEmptyAware emptyText="No comments returned by the provider.">{read.comments.map((comment) => <article className="timeline-entry" key={comment.id}><div><strong>{comment.author || "Unknown"}</strong><time title={fullDate(comment.createdAt)}>{relativeDate(comment.createdAt)}</time><span className={`visibility ${comment.public ? "public" : "internal"}`}>{comment.public ? "Public" : "Internal"}</span></div><RichText value={comment.body} /></article>)}</TimelineEmptyAware> : <TimelineEmptyAware emptyText="No activity returned by the provider.">{read.activity.map((entry) => <article className="timeline-entry" key={entry.id}><div><strong>{entry.author || entry.type}</strong><time title={fullDate(entry.createdAt)}>{relativeDate(entry.createdAt)}</time></div><RichText value={entry.summary} /></article>)}</TimelineEmptyAware>}
+      {tab === "comments" ? <TimelineEmptyAware emptyText="No comments returned by the provider.">{read.comments.map((comment) => <article className="timeline-entry" key={comment.id}><div><strong>{comment.author || "Unknown"}</strong><time title={fullDate(comment.createdAt)}>{relativeDate(comment.createdAt)}</time><span className={`visibility ${comment.public ? "public" : "internal"}`}>{comment.public ? "Public" : "Internal"}</span></div><RichText value={comment.body} />{comment.lossy && <p className="format-warning">Some provider formatting was simplified for safe display.</p>}</article>)}</TimelineEmptyAware> : <TimelineEmptyAware emptyText="No activity returned by the provider.">{read.activity.map((entry) => <article className="timeline-entry" key={entry.id}><div><strong>{entry.author || entry.type}</strong><time title={fullDate(entry.createdAt)}>{relativeDate(entry.createdAt)}</time></div><RichText value={entry.summary} /></article>)}</TimelineEmptyAware>}
     </> : null}
   </aside>
   </div>;
+}
+
+function ProviderHeading({ level, children }: { level: number; children: ReactNode }) {
+  return <h4 className="provider-heading" data-provider-level={level}>{children}</h4>;
 }
 
 function RichText({ value }: { value: string }) {
   return <div className="rich-text"><ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]]} components={MARKDOWN_COMPONENTS}>{normalizeProviderText(value)}</ReactMarkdown></div>;
 }
 
-function CommentComposer({ item, api, mutationEpoch, onMutated }: { item: WorkItemSummary; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
+function CommentComposer({ item, attachments, api, mediaCapabilities, mediaCapabilitiesError, onAttachmentChanged, mutationEpoch, onMutated }: { item: WorkItemSummary; attachments: WorkItemAttachment[]; api: DisposableItemApi; mediaCapabilities?: WorkItemMediaCapabilities; mediaCapabilitiesError?: string; onAttachmentChanged: () => void; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
   const [body, setBody] = useState("");
   const [visibility, setVisibility] = useState<"internal" | "public">(item.source === "zendesk" ? "internal" : "public");
+  const [pendingUploads, setPendingUploads] = useState<WorkItemAttachmentUploadResult[]>([]);
   const [busy, setBusy] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [error, setError] = useState<string>();
-  useEffect(() => setVisibility(item.source === "zendesk" ? "internal" : "public"), [item.source, item.id]);
+  useEffect(() => {
+    setVisibility(item.source === "zendesk" ? "internal" : "public");
+    setBody("");
+    setPendingUploads([]);
+    setError(undefined);
+  }, [item.source, item.id]);
+  async function uploadFiles(files: File[]) {
+    if (!mediaCapabilities?.uploads || !mediaCapabilities.targets.includes("comment")) throw new Error("This provider does not support comment attachments.");
+    if (pendingUploads.length + files.length > MAX_EDITOR_UPLOADS) throw new Error(`A comment can include at most ${MAX_EDITOR_UPLOADS} staged attachments.`);
+    setUploadBusy(true); setError(undefined);
+    try {
+      for (const file of files) {
+        const result = await api.createAttachment({ name: file.name, contentType: file.type, data: new Uint8Array(await file.arrayBuffer()), target: "comment" });
+        setPendingUploads((current) => [...current.filter((upload) => upload.attachment.id !== result.attachment.id), result]);
+        setBody((current) => appendMarkdownReference(current, result.attachment));
+        if (result.uploadMode === "immediate-issue") onAttachmentChanged();
+      }
+    } catch (caught) {
+      setError(safeMessage(caught));
+      throw caught;
+    } finally { setUploadBusy(false); }
+  }
   async function submit() {
     setBusy(true); setError(undefined);
     try {
-      const detail = await api.addComment({ body, visibility });
+      const attachmentTokens = pendingUploads.map((upload) => upload.uploadToken).filter((token): token is string => Boolean(token));
+      const detail = await api.addComment({ body, visibility, ...(attachmentTokens.length ? { attachmentTokens } : {}) });
       setBody("");
+      setPendingUploads([]);
       onMutated(detail, { stub: api, ref: item, epoch: mutationEpoch });
     } catch (caught) { setError(safeMessage(caught)); }
     finally { setBusy(false); }
   }
-  return <section className="editor-block" aria-label="Add comment"><h3><ChatCircleText size={15} /> Comment</h3><label className="sr-only" htmlFor="work-item-comment">Comment body</label><textarea id="work-item-comment" aria-label="Comment body" value={body} onChange={(event) => setBody(event.currentTarget.value)} placeholder={item.source === "zendesk" ? "Add an internal note…" : "Add a public Jira comment…"} />{item.source === "zendesk" ? <fieldset className="radio-row"><legend className="sr-only">Zendesk comment visibility</legend><label><input type="radio" checked={visibility === "internal"} onChange={() => setVisibility("internal")} /> Internal note (default)</label><label><input type="radio" checked={visibility === "public"} onChange={() => setVisibility("public")} /> Public reply</label>{visibility === "public" && <span className="confirm-copy">This will be visible to the requester.</span>}</fieldset> : <p className="hint">Jira comments are public to users with issue access.</p>}{error && <p className="mutation-error" role="alert">{error}</p>}<button type="button" aria-label="Post work item comment" disabled={busy || !body.trim()} onClick={() => void submit()}>{busy ? "Posting…" : "Post comment"}</button></section>;
+  const editorAttachments = mergeAttachments(attachments, pendingUploads.map((upload) => upload.attachment));
+  const uploadEnabled = mediaCapabilities?.uploads === true && mediaCapabilities.targets.includes("comment");
+  return <section className="editor-block" aria-label="Add comment"><h3><ChatCircleText size={15} /> Comment</h3><WorkItemEditor ariaLabel="Comment body" value={body} onChange={setBody} maxLength={COMMENT_EDITOR_MAX} placeholder={item.source === "zendesk" ? "Add an internal note…" : "Add a public Jira comment…"} preview={(markdown) => <RichText value={markdown} />} dirty={body.trim().length > 0 || pendingUploads.length > 0} attachments={editorAttachments} upload={mediaCapabilities ? { enabled: uploadEnabled, acceptedContentTypes: mediaCapabilities.acceptedContentTypes, maxBytes: mediaCapabilities.maxBytes, busy: uploadBusy, mode: mediaCapabilities.uploadMode, onFiles: uploadFiles } : undefined} />{pendingUploads.length > 0 && <div className="upload-queue" aria-label="Comment attachments">{pendingUploads.map((upload) => <span key={upload.attachment.id}><File size={13} />{upload.attachment.name}<small>{upload.uploadMode === "staged-comment" ? "Attaches on post" : "Attached to issue"}</small></span>)}</div>}{item.source === "zendesk" ? <fieldset className="radio-row"><legend className="sr-only">Zendesk comment visibility</legend><label><input type="radio" checked={visibility === "internal"} onChange={() => setVisibility("internal")} /> Internal note (default)</label><label><input type="radio" checked={visibility === "public"} onChange={() => setVisibility("public")} /> Public reply</label>{visibility === "public" && <span className="confirm-copy">This reply and its attachments will be visible to the requester.</span>}</fieldset> : <p className="hint">Jira comments are public to users with issue access. New files attach to the issue immediately.</p>}{mediaCapabilitiesError && <p className="mutation-error" role="status">Attachment uploads unavailable: {mediaCapabilitiesError}</p>}{error && <p className="mutation-error" role="alert">{error}</p>}<button type="button" aria-label="Post work item comment" disabled={busy || uploadBusy || !body.trim() || body.length > COMMENT_EDITOR_MAX} onClick={() => void submit()}>{busy ? "Posting…" : "Post comment"}</button></section>;
 }
 
 function MetadataEditor({ read, api, mutationEpoch, onMutated }: { read: WorkItemRead; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
@@ -759,16 +812,33 @@ function InlineFieldChip({ chip, editable, item, api, mutationEpoch, onMutated }
   return <div className={`meta-chip ${editable ? "editable" : "readonly"}`}><span>{chip.label}</span>{editing ? <><input aria-label={`${chip.label} value`} value={value} onChange={(event) => setValue(event.currentTarget.value)} /><button type="button" disabled={busy} onClick={() => void submit()}>{busy ? "Saving…" : "Save"}</button><button type="button" onClick={() => setEditing(false)}>Cancel</button></> : <><strong>{chip.value}</strong>{editable && <button type="button" aria-label={`Edit ${chip.label}`} onClick={() => setEditing(true)}><PencilSimple size={13} /></button>}</>}{error && <em role="alert">{error}</em>}</div>;
 }
 
-function DescriptionEditor({ read, api, mutationEpoch, onMutated }: { read: WorkItemRead; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
+function DescriptionEditor({ read, api, mediaCapabilities, mediaCapabilitiesError, onAttachmentChanged, mutationEpoch, onMutated }: { read: WorkItemRead; api: DisposableItemApi; mediaCapabilities?: WorkItemMediaCapabilities; mediaCapabilitiesError?: string; onAttachmentChanged: () => void; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
   const item = read.detail.item;
   const allowed = read.updateOptions.allowedFields.some((field) => field.toLowerCase() === "description");
   const description = item.description?.body ?? String(item.fields.description ?? "");
   const truncated = item.description?.truncated === true;
+  const lossy = item.description?.lossy === true;
+  const formatLabel = item.description?.providerFormat === "jira-adf" ? "Jira rich text" : item.description?.providerFormat === "zendesk-markdown" ? "Zendesk Markdown" : item.description?.format === "markdown" ? "Markdown" : "Plain text";
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(description);
   const [busy, setBusy] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => { setEditing(false); setValue(description); setError(undefined); }, [description, item.id]);
+  async function uploadFiles(files: File[]) {
+    if (!mediaCapabilities?.uploads || !mediaCapabilities.targets.includes("description")) throw new Error("This provider does not support description attachments.");
+    setUploadBusy(true); setError(undefined);
+    try {
+      for (const file of files) {
+        const result = await api.createAttachment({ name: file.name, contentType: file.type, data: new Uint8Array(await file.arrayBuffer()), target: "description" });
+        setValue((current) => appendMarkdownReference(current, result.attachment));
+        onAttachmentChanged();
+      }
+    } catch (caught) {
+      setError(safeMessage(caught));
+      throw caught;
+    } finally { setUploadBusy(false); }
+  }
   async function submit() {
     if (truncated) { setError("Cannot save an explicitly truncated description. Refresh the source or edit it in the provider."); return; }
     setBusy(true); setError(undefined);
@@ -778,13 +848,13 @@ function DescriptionEditor({ read, api, mutationEpoch, onMutated }: { read: Work
     } catch (caught) { setError(safeMessage(caught)); }
     finally { setBusy(false); }
   }
-  return <section className="description-section" aria-label="Description"><div className="section-heading"><h3>Description</h3>{allowed && !editing && !truncated && <button type="button" onClick={() => setEditing(true)}><PencilSimple size={14} /> Edit</button>}</div>{truncated && <p className="mutation-error" role="status">Description was truncated by the provider, so editing is disabled to avoid overwriting hidden content.</p>}{editing ? <><textarea aria-label="Description body" value={value} onChange={(event) => setValue(event.currentTarget.value)} /><div className="inline-editor"><button type="button" disabled={busy || truncated} onClick={() => void submit()}>{busy ? "Saving…" : "Save description"}</button><button type="button" onClick={() => { setEditing(false); setValue(description); }}>Cancel</button></div></> : description ? <RichText value={description} /> : <p className="hint">No description returned by the provider.</p>}{error && <p className="mutation-error" role="alert">{error}</p>}</section>;
+  const uploadEnabled = mediaCapabilities?.uploads === true && mediaCapabilities.targets.includes("description");
+  return <section className="description-section" aria-label="Description"><div className="section-heading"><div><h3>Description</h3><span className="format-badge">{formatLabel}</span></div>{allowed && !editing && !truncated && !lossy && <button type="button" onClick={() => setEditing(true)}><PencilSimple size={14} /> Edit</button>}</div>{truncated && <p className="mutation-error" role="status">Description was truncated by the provider, so editing is disabled to avoid overwriting hidden content.</p>}{lossy && <p className="format-warning" role="status">This item contains provider formatting that cannot be represented safely{item.description?.unsupportedNodes?.length ? ` (${item.description.unsupportedNodes.join(", ")})` : ""}. Edit it in {labelSource(item.source)} to avoid losing content.</p>}{editing ? <><WorkItemEditor ariaLabel="Description body" value={value} onChange={setValue} maxLength={DESCRIPTION_EDITOR_MAX} placeholder="Describe the work, context, and acceptance criteria…" preview={(markdown) => <RichText value={markdown} />} autoFocus dirty={value !== description} attachments={read.attachments} upload={mediaCapabilities ? { enabled: uploadEnabled, acceptedContentTypes: mediaCapabilities.acceptedContentTypes, maxBytes: mediaCapabilities.maxBytes, busy: uploadBusy, mode: mediaCapabilities.uploadMode, onFiles: uploadFiles } : undefined} />{uploadEnabled && <p className="hint">Jira uploads attach to the issue immediately, even if you later discard description edits.</p>}<div className="inline-editor sticky-editor-actions"><span aria-live="polite">{value === description ? "Synced with provider read" : "Unsaved description edits"}</span><button type="button" disabled={busy || uploadBusy || truncated || value.length > DESCRIPTION_EDITOR_MAX || value === description} onClick={() => void submit()}>{busy ? "Saving…" : "Save description"}</button><button type="button" onClick={() => { setEditing(false); setValue(description); }}>Discard</button></div></> : description ? <RichText value={description} /> : <p className="hint">No description returned by the provider.</p>}{mediaCapabilitiesError && editing && <p className="mutation-error" role="status">Attachment uploads unavailable: {mediaCapabilitiesError}</p>}{error && <p className="mutation-error" role="alert">{error}</p>}</section>;
 }
 
 function AttachmentsSection({ read, api }: { read: WorkItemRead; api: DisposableItemApi }) {
   const attachments = read.attachments ?? [];
-  if (attachments.length === 0) return null;
-  return <section className="attachments-section" aria-label="Attachments"><h3><File size={15} /> Attachments</h3><div className="attachment-list">{attachments.map((attachment) => <AttachmentCard key={attachment.id} attachment={attachment} api={api} itemId={read.detail.item.id} />)}</div></section>;
+  return <section className="attachments-section" aria-label="Attachments"><div className="attachment-shelf-heading"><h3><File size={15} /> Attachments · {attachments.length}</h3><span>Safe preview</span></div>{attachments.length === 0 ? <p className="hint">No attachments yet. Use the paperclip in a supported editor to upload one.</p> : <><p className="hint">Attachment bytes remain lazy-loaded through this item's Team PI capability.</p><div className="attachment-list">{attachments.map((attachment) => <AttachmentCard key={attachment.id} attachment={attachment} api={api} itemId={read.detail.item.id} />)}</div></>}</section>;
 }
 
 function AttachmentCard({ attachment, api, itemId }: { attachment: WorkItemAttachment; api: DisposableItemApi; itemId: string }) {
@@ -792,6 +862,7 @@ function AttachmentCard({ attachment, api, itemId }: { attachment: WorkItemAttac
   const [objectUrl, setObjectUrl] = useState<string>();
   const [contentType, setContentType] = useState(attachment.contentType ?? "application/octet-stream");
   const [error, setError] = useState<string>();
+  const [copyStatus, setCopyStatus] = useState<string>();
   useEffect(() => {
     if (loadVersion === 0) return;
     let cancelled = false;
@@ -800,11 +871,11 @@ function AttachmentCard({ attachment, api, itemId }: { attachment: WorkItemAttac
     setError(undefined);
     void api.readAttachment(attachment.id).then((content) => {
       if (cancelled) return;
-      const type = safeInlineContentType(content.contentType ?? attachment.contentType);
       const bytes = content.data.slice();
+      const type = verifiedInlineContentType(content.contentType ?? attachment.contentType, bytes);
       const blob = new Blob([bytes.buffer], { type: type ?? "application/octet-stream" });
       localUrl = URL.createObjectURL(blob);
-      setContentType(type ?? content.contentType ?? attachment.contentType ?? "application/octet-stream");
+      setContentType(type ?? "application/octet-stream");
       setObjectUrl(localUrl);
     }).catch((caught) => { if (!cancelled) setError(safeMessage(caught)); });
     return () => {
@@ -813,8 +884,18 @@ function AttachmentCard({ attachment, api, itemId }: { attachment: WorkItemAttac
     };
   }, [api, attachment.id, attachment.contentType, itemId, loadVersion]);
   const safeInline = safeInlineContentType(contentType);
-  const loadLabel = safeInline ? `Load preview for ${attachment.name}` : `Prepare download for ${attachment.name}`;
-  return <article className="attachment-card"><div><File size={18} /><div><strong>{attachment.name}</strong><p>{attachment.contentType || "File"}{typeof attachment.size === "number" ? ` · ${formatBytes(attachment.size)}` : ""}</p></div></div>{error ? <><p className="mutation-error" role="alert">{error}</p><button type="button" onClick={() => setLoadVersion((version) => version + 1)}>Retry {attachment.name}</button></> : !objectUrl ? loadVersion > 0 ? <p className="hint">Loading attachment…</p> : <button type="button" onClick={() => setLoadVersion(1)}>{loadLabel}</button> : safeInline?.startsWith("image/") ? <img src={objectUrl} alt={attachment.name} /> : safeInline === "application/pdf" ? <iframe title={attachment.name} src={objectUrl} sandbox="" /> : <a className="attachment-download" href={objectUrl} download={attachment.name} target="_blank" rel="noopener noreferrer" aria-label={`Download ${attachment.name} (opens in a new tab)`}><DownloadSimple size={15} /> Download or open<span className="new-tab-cue" aria-hidden="true">↗</span></a>}</article>;
+  const tooLarge = typeof attachment.size === "number" && attachment.size > MAX_ATTACHMENT_PREVIEW_BYTES;
+  const loadLabel = tooLarge ? `Too large to preview (${formatBytes(attachment.size!)})` : safeInline ? `Load preview for ${attachment.name}` : `Prepare download for ${attachment.name}`;
+  const reference = attachmentMarkdownReference(attachment);
+  async function copyReference() {
+    try {
+      await navigator.clipboard.writeText(reference);
+      setCopyStatus("Copied Markdown reference.");
+    } catch {
+      setCopyStatus(reference);
+    }
+  }
+  return <article className="attachment-card"><div><File size={18} /><div><strong>{attachment.name}</strong><p>{attachment.contentType || "File"}{typeof attachment.size === "number" ? ` · ${formatBytes(attachment.size)}` : ""}</p></div></div><div className="attachment-actions"><button type="button" disabled={tooLarge} onClick={() => setLoadVersion((version) => version || 1)}>{loadLabel}</button><button type="button" onClick={() => void copyReference()}>Copy Markdown ref</button></div>{tooLarge && <p className="hint">Team PI limits attachment reads to 8 MB.</p>}{copyStatus && <p className="hint" role="status">{copyStatus}</p>}{error ? <><p className="mutation-error" role="alert">{error}</p><button type="button" onClick={() => setLoadVersion((version) => version + 1)}>Retry {attachment.name}</button></> : !objectUrl ? loadVersion > 0 ? <p className="hint">Loading attachment…</p> : null : safeInline?.startsWith("image/") ? <img src={objectUrl} alt={attachment.name} /> : safeInline === "application/pdf" ? <iframe title={attachment.name} src={objectUrl} sandbox="" /> : safeInline?.startsWith("video/") ? <video src={objectUrl} controls preload="metadata" aria-label={attachment.name} /> : <a className="attachment-download" href={objectUrl} download={attachment.name} target="_blank" rel="noopener noreferrer" aria-label={`Download ${attachment.name} (opens in a new tab)`}><DownloadSimple size={15} /> Download or open<span className="new-tab-cue" aria-hidden="true">↗</span></a>}</article>;
 }
 
 function TransitionEditor({ item, transitions, api, mutationEpoch, onMutated }: { item: WorkItemSummary; transitions: WorkItemRead["transitions"]; api: DisposableItemApi; mutationEpoch: number; onMutated: (detail: WorkItemDetail, ctx: MutationContext) => void }) {
@@ -863,7 +944,7 @@ function LinkEditor({ item, api, rootApi }: { item: WorkItemSummary; api: Dispos
     } catch (caught) { setError(safeMessage(caught)); }
     finally { setBusy(false); }
   }
-  return <section className="editor-block" aria-label="Link Jira and Zendesk"><h3><LinkSimple size={15} /> Link Jira ↔ Zendesk</h3><p className="hint">Search the opposite source or enter a provider ID/key manually.</p><div className="inline-editor"><label className="sr-only" htmlFor="work-item-link-source">Item source to link</label><select id="work-item-link-source" aria-label="Item source to link" value={source} onChange={(event) => setSource(event.currentTarget.value as WorkItemProviderKind)}><option value="jira">Jira issue</option><option value="zendesk">Zendesk ticket</option></select><label className="sr-only" htmlFor="work-item-link-id">Search or enter item ID/key to link</label><input id="work-item-link-id" aria-label="Search or enter item ID/key to link" value={id} onChange={(event) => setId(event.currentTarget.value)} placeholder="Search by title, ID, or key" /><button aria-label="Create Jira remote backlink" disabled={busy || !id.trim()} onClick={() => void submit()}>{busy ? "Linking…" : "Create link"}</button></div>{searching && <p className="hint" aria-live="polite">Searching…</p>}{suggestions.length > 0 && <div className="link-suggestions" aria-label="Link suggestions">{suggestions.map((suggestion) => <button key={rowKey(suggestion)} type="button" onClick={() => { setSource(suggestion.source); setId(suggestion.key ?? suggestion.id); }}><SourceBadge source={suggestion.source} /><span>{suggestion.key ?? suggestion.id}</span><strong>{suggestion.title}</strong></button>)}</div>}<p className="hint">Manual fallback: type an exact Jira key or Zendesk ticket ID, then Create link.</p>{result && <p className="success-note" role="status"><CheckCircle size={15} />{result}</p>}{error && <p className="mutation-error" role="alert">{error}</p>}</section>;
+  return <section className="editor-block" aria-label="Link Jira and Zendesk"><h3><LinkSimple size={15} /> Link Jira ↔ Zendesk</h3><p className="hint">Search the opposite source or enter a provider ID/key manually.</p><div className="inline-editor"><label className="sr-only" htmlFor="work-item-link-source">Item source to link</label><select id="work-item-link-source" aria-label="Item source to link" value={source} onChange={(event) => setSource(event.currentTarget.value as WorkItemProviderKind)}><option value="jira">Jira issue</option><option value="zendesk">Zendesk ticket</option></select><label className="sr-only" htmlFor="work-item-link-id">Search or enter item ID/key to link</label><input id="work-item-link-id" aria-label="Search or enter item ID/key to link" value={id} onChange={(event) => setId(event.currentTarget.value)} placeholder="Search by title, ID, or key" /><button aria-label="Create provider link" disabled={busy || !id.trim()} onClick={() => void submit()}>{busy ? "Linking…" : "Create provider link"}</button></div>{searching && <p className="hint" aria-live="polite">Searching…</p>}{suggestions.length > 0 && <div className="link-suggestions" aria-label="Link suggestions">{suggestions.map((suggestion) => <button key={rowKey(suggestion)} type="button" onClick={() => { setSource(suggestion.source); setId(suggestion.key ?? suggestion.id); }}><SourceBadge source={suggestion.source} /><span>{suggestion.key ?? suggestion.id}</span><strong>{suggestion.title}</strong></button>)}</div>}<p className="hint">Manual fallback: type an exact Jira key or Zendesk ticket ID, then Create provider link.</p>{result && <p className="success-note" role="status"><CheckCircle size={15} />{result}</p>}{error && <p className="mutation-error" role="alert">{error}</p>}</section>;
 }
 
 function TimelineEmptyAware({ children, emptyText }: { children: ReactNode[]; emptyText: string }) {
@@ -931,6 +1012,16 @@ function collectStatuses(items: WorkItemSummary[]): string[] {
   return [...set].toSorted((a, b) => a.localeCompare(b));
 }
 function sameRef(a: WorkItemProviderRef, b?: WorkItemProviderRef) { return !!b && a.source === b.source && a.id === b.id; }
+function appendMarkdownReference(value: string, attachment: WorkItemAttachment): string {
+  const reference = attachmentMarkdownReference(attachment);
+  const trimmed = value.trimEnd();
+  return `${trimmed}${trimmed ? "\n\n" : ""}${reference}`;
+}
+function mergeAttachments(current: WorkItemAttachment[], added: WorkItemAttachment[]): WorkItemAttachment[] {
+  const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
+  for (const attachment of added) byId.set(attachment.id, attachment);
+  return [...byId.values()];
+}
 function rowKey(item: WorkItemProviderRef) { return `${item.source}:${item.id}`; }
 function rowId(item: WorkItemProviderRef) { return `row-${item.source}-${cssEscape(item.id)}`; }
 function cssEscape(value: string) { return value.replace(/[^a-zA-Z0-9_-]/g, "-"); }
@@ -977,18 +1068,18 @@ async function deleteCurrentView(api: WorkItemsManagementApi, id: string, user: 
   try {
     await api.deleteSavedView(id);
     setters.setSavedViews((current) => current.filter((view) => view.id !== id));
-    applyBuiltinView(BUILTIN_MY_WORK, user, setters);
+    applyBuiltinView(BUILTIN_ALL, user, setters);
   } catch (caught) { setters.setError(safeMessage(caught)); }
   finally { setters.setViewsBusy(false); }
 }
 type StoredState = { query: string; source: WorkItemSearchSource; filters: Filters; selected: WorkItemProviderRef | null; view: ViewMode; hiddenStatuses: string[]; viewId: string };
-function readInitialState(routeState?: string): StoredState & { explicitPersonOrView: boolean } {
+function readInitialState(routeState?: string): StoredState {
   const host = routeState ? new URLSearchParams(routeState) : null;
   const stored = safeJson(safeSessionGet(STORE_KEY));
   const hash = host ?? safeHashParams();
   const source = hash.get("source") ?? stored?.source;
   const view = hash.get("view") ?? stored?.view;
-  const viewId = hash.get("viewId") ?? stored?.viewId ?? BUILTIN_MY_WORK;
+  const viewId = hash.get("viewId") ?? stored?.viewId ?? BUILTIN_ALL;
   const hiddenStatuses = hash.get("hiddenStatuses")?.split(",").filter(Boolean) ?? (Array.isArray(stored?.hiddenStatuses) ? stored.hiddenStatuses : []);
   return {
     query: hash.get("q") ?? stored?.query ?? "",
@@ -1003,7 +1094,6 @@ function readInitialState(routeState?: string): StoredState & { explicitPersonOr
     view: view === "kanban" ? "kanban" : "list",
     hiddenStatuses,
     viewId,
-    explicitPersonOrView: hash.has("person") || (hash.has("viewId") && viewId !== BUILTIN_MY_WORK) || !!stored?.filters?.person || (!!stored?.viewId && stored.viewId !== BUILTIN_MY_WORK),
   };
 }
 function safeSessionGet(key: string): string | null { try { return sessionStorage.getItem(key); } catch { return null; } }
@@ -1014,7 +1104,7 @@ function encodeStoredState(state: StoredState): string {
   if (state.query) params.set("q", state.query);
   if (state.source !== "both") params.set("source", state.source);
   if (state.view !== "list") params.set("view", state.view);
-  if (state.viewId !== BUILTIN_MY_WORK) params.set("viewId", state.viewId);
+  if (state.viewId !== BUILTIN_ALL) params.set("viewId", state.viewId);
   if (state.hiddenStatuses.length) params.set("hiddenStatuses", state.hiddenStatuses.join(","));
   for (const [key, value] of Object.entries(state.filters)) if (value) params.set(key, value);
   if (state.selected) params.set("selected", encodeRef(state.selected));
@@ -1044,8 +1134,12 @@ function normalizeProviderText(value: string): string {
 function safeLinkHref(href: string | undefined): string | undefined {
   if (!href) return undefined;
   try {
-    const url = new URL(href, window.location.href);
-    return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.toString() : undefined;
+    const trimmed = href.trim();
+    if (!/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return undefined;
+    const url = new URL(trimmed);
+    if (!["http:", "https:", "mailto:"].includes(url.protocol)) return undefined;
+    if (url.username || url.password) return undefined;
+    return url.toString();
   } catch { return undefined; }
 }
 function textFromChildren(children: ReactNode): string {
@@ -1056,7 +1150,21 @@ function textFromChildren(children: ReactNode): string {
 function safeInlineContentType(value: string | undefined): string | undefined {
   const type = value?.toLowerCase().split(";")[0]?.trim();
   if (!type) return undefined;
-  if (type === "image/png" || type === "image/jpeg" || type === "image/gif" || type === "image/webp" || type === "image/avif" || type === "application/pdf") return type;
+  if (type === "image/png" || type === "image/jpeg" || type === "image/gif" || type === "image/webp" || type === "image/avif" || type === "application/pdf" || type === "video/mp4" || type === "video/webm" || type === "video/quicktime") return type;
+  return undefined;
+}
+function verifiedInlineContentType(value: string | undefined, bytes: Uint8Array): string | undefined {
+  const type = safeInlineContentType(value);
+  if (!type) return undefined;
+  const ascii = (start: number, end: number) => String.fromCharCode(...bytes.slice(start, end));
+  if (type === "image/png") return bytes.length >= 8 && bytes[0] === 0x89 && ascii(1, 4) === "PNG" ? type : undefined;
+  if (type === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff ? type : undefined;
+  if (type === "image/gif") return bytes.length >= 6 && (ascii(0, 6) === "GIF87a" || ascii(0, 6) === "GIF89a") ? type : undefined;
+  if (type === "image/webp") return bytes.length >= 12 && ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP" ? type : undefined;
+  if (type === "image/avif") return bytes.length >= 12 && ascii(4, 8) === "ftyp" && /avi[fs]/.test(ascii(8, Math.min(bytes.length, 32))) ? type : undefined;
+  if (type === "application/pdf") return bytes.length >= 5 && ascii(0, 5) === "%PDF-" ? type : undefined;
+  if (type === "video/webm") return bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3 ? type : undefined;
+  if (type === "video/mp4" || type === "video/quicktime") return bytes.length >= 12 && ascii(4, 8) === "ftyp" ? type : undefined;
   return undefined;
 }
 function formatBytes(value: number): string {

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { RpcStub } from 'capnweb'
 import { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
+import { addNativeLoginTokenListener, getWorkshopRuntime } from './runtime'
 
 const CF_ACCESS_MODE = import.meta.env.VITE_CF_ACCESS_MODE === 'true'
 
@@ -55,18 +56,32 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     return () => { cancelled = true }
   }, [authState.authenticatedApi])
 
+  useEffect(() => addNativeLoginTokenListener((token) => authenticateWithToken(token)), [publicApi])
+
   useEffect(() => {
+    let cancelled = false
+    // A replacement PublicApi means the previous WebSocket died. Remove its authenticated child
+    // capability before painting another actionable screen; otherwise a fast click during native
+    // foreground recovery can invoke a stub that the effect cleanup has already disposed.
+    setAuthState(prev => {
+      prev.authenticatedApi?.[Symbol.dispose]()
+      return { ...prev, authenticatedApi: null, isLoading: true, error: null }
+    })
     if (CF_ACCESS_MODE) {
       authenticateWithCfAccess()
     } else {
-      const storedToken = localStorage.getItem('authToken')
-      if (storedToken) {
-        authenticateWithToken(storedToken)
-      } else {
-        setAuthState(prev => ({ ...prev, isLoading: false }))
-      }
+      getWorkshopRuntime().readSessionSecret()
+        .then((storedToken) => {
+          if (cancelled) return
+          if (storedToken) authenticateWithToken(storedToken)
+          else setAuthState(prev => ({ ...prev, isLoading: false }))
+        })
+        .catch((error) => {
+          if (!cancelled) setAuthState(prev => ({ ...prev, isLoading: false, error: error instanceof Error ? error.message : 'Could not read session' }))
+        })
     }
     return () => {
+      cancelled = true
       // The authenticateWithXxx functions also dispose the old stub via their setAuthState
       // updater, so this may double-dispose on reconnect. That's fine — dispose is idempotent.
       authenticatedApiRef.current?.[Symbol.dispose]()
@@ -119,6 +134,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   }
 
   const login = (token: string) => {
+    void getWorkshopRuntime().writeSessionSecret(token).catch(() => {})
     authenticateWithToken(token)
   }
 
@@ -143,7 +159,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
       }
     })
 
-    localStorage.removeItem('authToken')
+    void getWorkshopRuntime().clearSessionSecret().catch(() => {})
   }
 
   return {

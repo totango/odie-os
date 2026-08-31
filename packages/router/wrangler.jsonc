@@ -24,6 +24,7 @@
     "run_worker_first": [
       "/api",
       "/api/*",
+      "/native/oauth-start/*",
       "/blueprint-screenshot",
       "/blueprint-screenshot/*",
       "/gatekeeper/*"

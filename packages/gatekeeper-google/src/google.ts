@@ -1,6 +1,6 @@
 import { WorkerEntrypoint, DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
-import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind, stripTrailingSlashes } from '@gadgets/workshop-shared/gatekeeper';
+import { GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor as GatekeeperVendorIface, Gatekeeper, ResourceDescription, ApprovalQueue, ObservationDescription, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions, AccountDescription, SupportedResource, ResourceConfiguratorFrame, Cursor, ActionKind, stripTrailingSlashes, renderBrowserFlowCompletionHtml } from '@gadgets/workshop-shared/gatekeeper';
 import { exchangeAuthCode, getAccessToken, getGoogleAccountDescription, getGoogleVerifiedEmail, GmailApi, GmailMessageRaw, GmailOutboundMessage, GoogleAccessToken, normalizeEmailRecipients, revokeGoogleToken } from "./google-api";
 import {
   GmailSession, GmailThread, GmailMessage,
@@ -171,13 +171,31 @@ function getBasePath(env: Env) {
 
 // =======================================================================================
 
-const SELF_CLOSING_HTML = `<!DOCTYPE html>
-<html lang="en">
-  <body>
-    <script type="text/javascript">window.close();</script>
-    <p>Authorization complete. You may close this tab and return to Cloudflare OS.
-  </body>
-</html>`;
+function htmlResponse(html: string, init: ResponseInit = {}): Response {
+  return new Response(html, {
+    ...init,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Referrer-Policy": "no-referrer",
+      ...init.headers,
+    },
+  });
+}
+
+function textResponse(text: string, init: ResponseInit = {}): Response {
+  return new Response(text, {
+    ...init,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Referrer-Policy": "no-referrer",
+      ...init.headers,
+    },
+  });
+}
+
+function completionHtml(returnUrl?: string): string {
+  return renderBrowserFlowCompletionHtml({ returnUrl, appName: "Odie OS" });
+}
 
 const INVALID_LINK_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -189,7 +207,7 @@ const INVALID_LINK_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Authorization Link Expired</h1>
-      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to Cloudflare OS and try again.</p>
+      <p style="color: #555; line-height: 1.6; margin: 0 0 1.5rem 0;">This authorization link is invalid or has expired. Please return to Odie OS and try again.</p>
       <button onclick="window.close()" style="padding: 0.5rem 1.5rem; background: #d97706; color: white; border: none; border-radius: 4px; font-size: 1rem; cursor: pointer;">Close</button>
     </div>
   </body>
@@ -205,7 +223,7 @@ const NOT_CONFIGURED_HTML = `<!DOCTYPE html>
   <body style="font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5;">
     <div style="max-width: 520px; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); text-align: center;">
       <h1 style="color: #d97706; font-size: 1.5rem; margin: 0 0 1rem 0;">Google Gatekeeper Not Configured</h1>
-      <p style="color: #555; line-height: 1.6; margin: 0;">Please see the README.md for instructions on configuring an OAuth client ID and secret so that this Cloudflare OS instance can access Google APIs.</p>
+      <p style="color: #555; line-height: 1.6; margin: 0;">Please see the README.md for instructions on configuring an OAuth client ID and secret so that this Odie OS instance can access Google APIs.</p>
     </div>
   </body>
 </html>`;
@@ -359,11 +377,7 @@ export default {
 
     if (path.length === 2 && path[0].length === 64 && path[1].length === NONCE_BYTES * 2) {
       if (!env.CLIENT_ID || !env.CLIENT_SECRET) {
-        return new Response(NOT_CONFIGURED_HTML, {
-          headers: {
-            "Content-Type": "text/html; charset=utf-8"
-          }
-        });
+        return htmlResponse(NOT_CONFIGURED_HTML);
       }
 
       let doId = path[0];
@@ -371,9 +385,7 @@ export default {
       let stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
       let begun = await stub.beginOAuthFlow(initiationNonce);
       if (begun === null) {
-        return new Response(INVALID_LINK_HTML, {
-          headers: { "Content-Type": "text/html; charset=utf-8" }
-        });
+        return htmlResponse(INVALID_LINK_HTML);
       }
 
       let newUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
@@ -387,37 +399,34 @@ export default {
       newUrl.searchParams.set("include_granted_scopes", "true");
       newUrl.searchParams.set("state", `${doId}:${begun.oauthNonce}`);
 
-      return Response.redirect(newUrl.toString(), 302);
+      return new Response(null, {
+        status: 302,
+        headers: { Location: newUrl.toString(), "Referrer-Policy": "no-referrer" },
+      });
     } else if (relPath === "/oauth") {
       // Completion redirect.
 
       let error = url.searchParams.get("error");
       if (error) {
-        return new Response(`${error}: ${url.searchParams.get("error_description")}`);
+        return textResponse(`${error}: ${url.searchParams.get("error_description")}`);
       }
 
       let state = url.searchParams.get("state");
-      if (!state) return new Response("Error: no 'state' provided");
+      if (!state) return textResponse("Error: no 'state' provided");
       let colonIdx = state.indexOf(":");
-      if (colonIdx < 0) return new Response("Error: malformed state");
+      if (colonIdx < 0) return textResponse("Error: malformed state");
       let doId = state.slice(0, colonIdx);
       let oauthNonce = state.slice(colonIdx + 1);
 
       let code = url.searchParams.get("code");
-      if (!code) return new Response("Error: no 'code' provided");
+      if (!code) return textResponse("Error: no 'code' provided");
 
       let userObjectId = ctx.exports.UserAccount.idFromString(doId);
       let stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(userObjectId);
       if (!await stub.acceptAuthCode(code, oauthNonce)) {
-        return new Response(INVALID_LINK_HTML, {
-          headers: { "Content-Type": "text/html; charset=utf-8" }
-        });
+        return htmlResponse(INVALID_LINK_HTML);
       }
-      return new Response(SELF_CLOSING_HTML, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8"
-        }
-      });
+      return htmlResponse(completionHtml(await stub.getReturnUrl()));
     } else {
       return new Response("Not Found", {status: 404});
     }
@@ -459,7 +468,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
         ? AUTH_SCOPES
         : resourceUrlPatternsToOAuthScopes(options?.resourceUrlPatterns);
     await this.ctx.exports.UserAccount.get(userObjectId)
-        .setCallback(callback, initiationNonce, requestedScopes, authOnly);
+        .setCallback(callback, initiationNonce, requestedScopes, authOnly, options?.returnUrl);
 
     return {
       url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`
@@ -511,7 +520,7 @@ export class UserAccount extends DurableObject<Env> {
 
   async setCallback(
       callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string,
-      requestedScopes: string[], ephemeral?: boolean) {
+      requestedScopes: string[], ephemeral?: boolean, returnUrl?: string) {
     // If we have no API key in 1 hour, delete this object.
     if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
@@ -521,6 +530,8 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
     // Auth-only sign-in grants are transient: dropped shortly after the email is read.
     this.ctx.storage.kv.put<boolean>("ephemeral", ephemeral ?? false);
+    if (returnUrl) this.ctx.storage.kv.put<string>("returnUrl", returnUrl);
+    else this.ctx.storage.kv.delete("returnUrl");
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
@@ -585,6 +596,10 @@ export class UserAccount extends DurableObject<Env> {
     let scopes = this.ctx.storage.kv.get<string[]>("requestedScopes")
         ?? resourceUrlPatternsToOAuthScopes();
     return {oauthNonce, scopes};
+  }
+
+  async getReturnUrl(): Promise<string | undefined> {
+    return this.ctx.storage.kv.get<string>("returnUrl");
   }
 
   /** Returns false if the OAuth nonce is invalid or expired. */

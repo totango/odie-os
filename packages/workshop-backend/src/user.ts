@@ -5,7 +5,7 @@ import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult 
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import { PRODUCT_FEEDBACK_MAX_DIAGNOSTIC_LENGTH, PRODUCT_FEEDBACK_MAX_DIAGNOSTICS, PRODUCT_FEEDBACK_MAX_TEXT_LENGTH, sanitizeProductFeedbackText, validateSubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, type GatekeeperReconnectWithCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { McpSessionBase } from "@gadgets/mcp-shared/session";
 import type { McpCallResult, McpToolInfo } from "@gadgets/mcp-shared/types";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -2406,6 +2406,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(
         record.vendorId.toLowerCase())) {
       throw new Error("This connection is disabled on this deployment by an administrator.");
+    }
+    if (record.vendorId.replaceAll("_", "-") === "team-pi") {
+      const callback = this.ctx.exports.GatekeeperConnectCallbackImpl({
+        props: { userId: this.ctx.id.toString(), accountId, vendorId: record.vendorId },
+      });
+      return (record.account as Fetcher<GatekeeperReconnectWithCallback>)
+          .reconnectWithCallback(callback);
     }
     return record.account.reconnect();
   }

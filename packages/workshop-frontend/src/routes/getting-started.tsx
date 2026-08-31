@@ -17,6 +17,7 @@ import {
 import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { refreshGatekeeperApps } from '../useGatekeeperApps'
+import { getWorkshopRuntime } from '../runtime'
 import type {
   AiChatAuthorInfo,
   ConnectedAccountsSubscriber,
@@ -305,7 +306,9 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
         refreshGatekeeperApps(authenticatedApi)
       } else {
         const { url } = await authenticatedApi.connectAccount(vendorId)
-        window.open(url, '_blank', 'noopener,noreferrer')
+        const runtime = getWorkshopRuntime()
+        if (runtime.kind === 'tauri') await runtime.openExternal(url)
+        else window.open(url, '_blank', 'noopener,noreferrer')
       }
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : `Could not connect ${vendorId}.`)
@@ -315,7 +318,8 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
   }
 
   const connectWorkApps = async () => {
-    const popup = window.open('about:blank', '_blank')
+    const runtime = getWorkshopRuntime()
+    const popup = runtime.kind === 'web' ? window.open('about:blank', '_blank') : null
     setConnectingVendor(workAppVendorId ?? 'team-pi')
     setSetupError(undefined)
     try {
@@ -325,7 +329,8 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
           ? await authenticatedApi.connectAccount(workAppVendorId)
           : null
       if (result) {
-        if (popup) popup.location.href = result.url
+        if (runtime.kind === 'tauri') await runtime.openExternal(result.url)
+        else if (popup) popup.location.href = result.url
         else window.location.assign(result.url)
       }
     } catch (error) {

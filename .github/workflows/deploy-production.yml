@@ -51,7 +51,7 @@ jobs:
       - name: Build workspace
         run: pnpm build
 
-      - name: Build Access-mode deployment artifact
+      - name: Build production deployment artifact
         run: node scripts/build-production-deploy.mjs --out production-deploy
 
       - name: Upload deployment artifact
@@ -152,6 +152,7 @@ jobs:
             done
           }
           require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
+          require_secrets odie-os-gk-google CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN PRODUCT_FEEDBACK_MCP_TOKEN
           require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET EDITOR_CAPABILITY_HMAC_SECRET
           require_secrets odie-os-backend CF_AI_GATEWAY_API_TOKEN TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET TEAM_PI_CODEX_MODELS
@@ -173,6 +174,7 @@ jobs:
           message="GitHub Actions $DEPLOY_SHA"
           wrangler deploy --no-bundle --config gatekeeper-context/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-github/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-google/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-jarvis/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-mcp/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-odie-kg/wrangler.json --message "$message"
@@ -180,12 +182,17 @@ jobs:
           wrangler deploy --no-bundle --config gatekeeper-team-pi/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-sessions/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config workshop-backend/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config router-native/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config router/wrangler.json --message "$message"
 
-      - name: Verify Cloudflare Access boundary
+      - name: Verify production origins
         run: |
           status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://odie-os.odie-os.workers.dev/)"
-          test "$status" = "302"
+          test "$status" = "200"
+          native_root="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://odie-os-native-api.odie-os.workers.dev/)"
+          test "$native_root" = "404"
+          native_api="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' https://odie-os-native-api.odie-os.workers.dev/api)"
+          test "$native_api" = "400"
 
       - name: Store deployment receipts
         if: always()

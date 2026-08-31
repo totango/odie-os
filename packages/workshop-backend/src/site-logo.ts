@@ -10,6 +10,7 @@ export const SITE_LOGO_PATH = "/api/site-logo";
 export const SITE_LOGO_R2_KEY = ".site-logo";
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const PUBLIC_IMAGE_CORS = { "Access-Control-Allow-Origin": "*" } as const;
 /** Validates the bounded PNG header accepted for deployment logos. */
 export function validateSiteLogo(data: Uint8Array): void {
   if (data.byteLength > MAX_SITE_LOGO_BYTES) {
@@ -39,12 +40,18 @@ export function siteLogoImage(configured: boolean): AvatarImage | undefined {
 export async function serveSiteLogo(
     request: Request, bucket: Pick<R2Bucket, "get">): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") {
-    return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: { Allow: "GET, HEAD", ...PUBLIC_IMAGE_CORS },
+    });
   }
 
   let object = await bucket.get(SITE_LOGO_R2_KEY);
   if (!object) {
-    return new Response("Not Found", { status: 404, headers: { "Cache-Control": "no-store" } });
+    return new Response("Not Found", {
+      status: 404,
+      headers: { "Cache-Control": "no-store", ...PUBLIC_IMAGE_CORS },
+    });
   }
 
   return new Response(request.method === "HEAD" ? null : object.body, {
@@ -52,6 +59,7 @@ export async function serveSiteLogo(
       "Content-Type": "image/png",
       "Cache-Control": "no-cache",
       "X-Content-Type-Options": "nosniff",
+      ...PUBLIC_IMAGE_CORS,
     },
   });
 }

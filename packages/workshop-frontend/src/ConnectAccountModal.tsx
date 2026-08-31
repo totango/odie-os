@@ -4,6 +4,7 @@ import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, GatekeeperVendorFilter } from '@gadgets/workshop-shared/api'
 import { VendorDescription } from '@gadgets/workshop-shared/gatekeeper'
 import VendorCard from './VendorCard'
+import { getWorkshopRuntime } from './runtime'
 
 interface ConnectAccountModalProps {
   visible: boolean
@@ -64,8 +65,12 @@ export default function ConnectAccountModal({
   const handleConnect = async (vendorId: string) => {
     setConnecting(vendorId)
     try {
+      const runtime = getWorkshopRuntime()
+      if (runtime.kind === 'tauri') {
+        throw new Error('Native account connection is not available until verified-link OAuth return is implemented.')
+      }
       const result = await authenticatedApi.connectAccount(vendorId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      await runtime.openExternal(result.url)
       onInitiated()
     } catch (error) {
       console.error('Failed to initiate connection:', error)

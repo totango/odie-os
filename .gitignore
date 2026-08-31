@@ -3,6 +3,7 @@ node_modules/
 
 # Build outputs
 dist/
+packages/workshop-native/src-tauri/target/
 packages/gatekeeper-*/dist-app/
 # Generated gatekeeper UI bundles, rebuilt as a prerequisite of build/deploy
 packages/gatekeeper-*/src/generated/*-configurator-ui.txt

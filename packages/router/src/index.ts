@@ -14,16 +14,48 @@ type EmailEntrypoint = CloudflareWorkersModule.WorkerEntrypoint &
 
 export interface Env {
   WORKSHOP_BACKEND: Fetcher;
-  /** Present in production (wrangler.jsonc assets stanza); absent in dev. */
+  /** Present in production (wrangler.jsonc assets stanza); absent in dev and the native gateway. */
   ASSETS?: Fetcher;
+  /** Restricts this deployment to native API, OAuth, and association-document routes. */
+  NATIVE_API_ONLY?: string;
+  /** Host allowed to serve this deployment's verified-link association documents. */
+  APP_LINK_HOST?: string;
   /** Dormant until custom domains + Email Routing exist; the handler ships anyway. */
   GATEKEEPER_EMAIL?: Service<EmailEntrypoint>;
   [key: string]: unknown;
 }
 
+const ODIE_APP_LINK_HOST = "odie-os.odie-os.workers.dev";
+
+function associationResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+function appleAppSiteAssociation(): Response {
+  // The Apple Team ID is signing-account data and is intentionally not invented here. This keeps the
+  // association document valid and ready to fill during the signing gate without claiming a bogus app.
+  return associationResponse({ applinks: { apps: [], details: [] } });
+}
+
+function androidAssetLinks(): Response {
+  // Production SHA-256 fingerprints depend on the Play/App signing key and remain an external gate.
+  return associationResponse([]);
+}
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
+
+    const nativeApiOnly = env.NATIVE_API_ONLY === "true";
+    const appLinkHost = env.APP_LINK_HOST || ODIE_APP_LINK_HOST;
+    if (url.hostname === appLinkHost && url.pathname === "/.well-known/apple-app-site-association") {
+      return appleAppSiteAssociation();
+    }
+    if (url.hostname === appLinkHost && url.pathname === "/.well-known/assetlinks.json") {
+      return androidAssetLinks();
+    }
 
     for (const key of Object.keys(env)) {
       if (!key.startsWith("GATEKEEPER_")) continue;
@@ -35,10 +67,17 @@ export default {
     }
 
     if (url.pathname === "/api" || url.pathname.startsWith("/api/") ||
-        url.pathname === "/blueprint-screenshot" ||
-        url.pathname.startsWith("/blueprint-screenshot/")) {
+        (url.pathname.startsWith("/native/oauth-start/") ||
+          url.pathname.startsWith("/native/oauth-return/")) ||
+        (!nativeApiOnly && (url.pathname === "/blueprint-screenshot" ||
+          url.pathname.startsWith("/blueprint-screenshot/")))) {
       return env.WORKSHOP_BACKEND.fetch(req);
     }
+
+    // The native gateway deliberately has no SPA/admin/static fallback. Its public origin exposes
+    // only in-band-authorized RPC, one-time OAuth plumbing, installed gatekeepers, and association
+    // documents; the Access-protected browser origin remains a separate defense-in-depth boundary.
+    if (nativeApiOnly) return new Response("Not Found", { status: 404 });
 
     // Note: gatekeeper OAuth redirects land on the gatekeeper Workers themselves, at
     // `/gatekeeper/<name>/oauth` (handled by the loop above) — there are no backend /auth

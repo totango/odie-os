@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Odie OS",
+  "version": "1.0.0",
+  "identifier": "com.totango.odieos",
+  "build": {
+    "beforeDevCommand": "pnpm --filter @gadgets/workshop-frontend dev",
+    "beforeBuildCommand": "pnpm run frontend:build",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../../workshop-frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Odie OS",
+        "width": 1280,
+        "height": 900,
+        "minWidth": 360,
+        "minHeight": 640
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'sha256-xujUsdOfPkCZW/0lEGXNpb4f19MkA104+zIb+SZ/LQY=' 'sha256-pMLnezU9s1py1a8oIKuwlWPc/4noOpwqODtK648RwVo=' 'sha256-ZuyxzU9D5E+dZltOCPi0Xz71xPvu5ZK5QJb2hBw9JNE=' 'sha256-3dJaNZt6q6jppzdwqXSUBquNP4j3eTg55F2EnnkO/40=' 'sha256-3nxqSFVOHsR74t6CdI0JpMlp74NvjI7EizrUebR1AME=' 'sha256-MC9NwyCInH0td02UPGhMQxOpGFTuPT4SVYXf8ndvGR4='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://odie-os.odie-os.workers.dev https://odie-os-native-api.odie-os.workers.dev; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost https://odie-os-native-api.odie-os.workers.dev wss://odie-os-native-api.odie-os.workers.dev; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "Totango",
+    "category": "Productivity",
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
+    "android": {
+      "minSdkVersion": 26
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "mobile": [
+        {
+          "host": "odie-os-native-api.odie-os.workers.dev",
+          "path": ["/admin", "/blueprints", "/context", "/explore", "/gatekeepers", "/getting-started", "/outputs", "/profile", "/providers", "/sessions", "/signup", "/workspaces"],
+          "pathPrefix": ["/blueprint/", "/gadget/", "/gatekeepers/", "/workspace/", "/native/oauth-return/"]
+        }
+      ]
+    }
+  }
+}

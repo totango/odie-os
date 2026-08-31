@@ -51,6 +51,7 @@ describe("site logo asset", () => {
     expect(response.headers.get("content-type")).toBe("image/png");
     expect(response.headers.get("cache-control")).toBe("no-cache");
     expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(data);
   });
 
@@ -61,6 +62,7 @@ describe("site logo asset", () => {
       new Request(`https://workshop.example/api/site-logo?v=${REVISION}`), bucket);
     expect(missing.status).toBe(404);
     expect(missing.headers.get("cache-control")).toBe("no-store");
+    expect(missing.headers.get("access-control-allow-origin")).toBe("*");
 
     expect((await serveSiteLogo(new Request("https://workshop.example/api/site-logo", {
       method: "POST",

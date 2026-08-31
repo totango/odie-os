@@ -58,6 +58,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd())
   const backendHost = env.VITE_BACKEND_HOST?.trim() || 'localhost:8787'
   const frontendErrorReporting = env.VITE_FRONTEND_ERROR_REPORTING === 'true'
+  const tauriDevHost = env.TAURI_DEV_HOST?.trim()
   return {
     // Spread, not a literal `run: {...}`: `run` is Vite+'s field and vite's own `defineConfig` has
     // no such property, but the excess-property check doesn't reach spreads.
@@ -76,7 +77,9 @@ export default defineConfig(({ mode }) => {
     ],
     server: {
       port: 3000,
-      host: true,
+      strictPort: true,
+      host: tauriDevHost || true,
+      hmr: tauriDevHost ? { protocol: 'ws', host: tauriDevHost, port: 3000 } : undefined,
       proxy: {
         '/api/client-errors': `http://${backendHost}`,
         '/blueprint-screenshot': `http://${backendHost}`,

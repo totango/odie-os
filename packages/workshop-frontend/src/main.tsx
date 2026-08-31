@@ -13,6 +13,7 @@ import './styles.css'
 import FrontendErrorBoundary from './FrontendErrorBoundary'
 import { installWorkshopErrorReporting, reportIssue } from './errorReporting'
 import { applySiteFavicon, cacheBustSiteLogoUrl } from './siteLogoUtils'
+import { getWorkshopRuntime, installNativeLoginCoordinator } from './runtime'
 import { installProductFeedbackDiagnostics } from './productFeedbackDiagnostics'
 
 installProductFeedbackDiagnostics()
@@ -23,7 +24,8 @@ installProductFeedbackDiagnostics()
 // ---------------------------------------------------------------------------
 async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
   if (import.meta.env.VITE_DEV_AUTO_LOGIN !== 'true') return
-  if (localStorage.getItem('authToken')) return  // already logged in
+  const runtime = getWorkshopRuntime()
+  if (await runtime.readSessionSecret()) return  // already logged in
 
   const username = import.meta.env.VITE_DEV_USERNAME ?? 'dev'
   const password = import.meta.env.VITE_DEV_PASSWORD ?? 'devpassword'
@@ -43,7 +45,7 @@ async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
   }
 
   if (token) {
-    localStorage.setItem('authToken', token)
+    await runtime.writeSessionSecret(token)
   }
 }
 
@@ -60,12 +62,14 @@ async function devAutoLogin(stub: RpcStub<PublicApi>): Promise<void> {
 // Anyway, I pulled the connection management out into these globals instead.
 let lastConnectTime: number = 0;
 
-const INITIAL_BACKOFF_MS = 1000;
-const MAX_BACKOFF_MS = 10000;
-// Generous probe deadlines let a slow-but-alive backend settle instead of connect/dispose looping
-// (or, on wake, tearing down a healthy socket under load).
-const RECONNECT_PROBE_TIMEOUT_MS = 20000;
-const WAKE_PROBE_TIMEOUT_MS = 10000;
+const nativeRuntime = getWorkshopRuntime().kind === 'tauri';
+const INITIAL_BACKOFF_MS = nativeRuntime ? 500 : 1000;
+const MAX_BACKOFF_MS = nativeRuntime ? 5000 : 10000;
+// WebKit sometimes leaves a failed TLS WebSocket's pipelined ping unresolved rather than rejecting
+// it. A 20-second browser-safe probe made two transient native failures look like a minute-long
+// OAuth stall, so native retries use a bounded deadline while the web app retains its generous one.
+const RECONNECT_PROBE_TIMEOUT_MS = nativeRuntime ? 4000 : 20000;
+const WAKE_PROBE_TIMEOUT_MS = nativeRuntime ? 4000 : 10000;
 const WAKE_PROBE_MIN_IDLE_MS = 15000;
 
 // Callbacks to call whenever `currentStub` or connection state is updated.
@@ -85,19 +89,10 @@ const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> => {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 };
 
-function getBackendHost(): string {
-  // Only the Vite dev server is hosted separately from the backend. Built assets are served from
-  // the same origin in both production and run-local mode.
-  if (import.meta.env.DEV) {
-    return import.meta.env.VITE_BACKEND_HOST?.trim() || 'localhost:8787';
-  }
-  return window.location.host;
-}
-
 function startConnection(): RpcStub<PublicApi> {
   lastConnectTime = Date.now();
-  const apiHost = getBackendHost();
-  const wsUrl = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + apiHost + '/api';
+  const apiOrigin = getWorkshopRuntime().apiOrigin;
+  const wsUrl = `${apiOrigin.protocol === 'https:' ? 'wss:' : 'ws:'}//${apiOrigin.host}/api`;
   const stub = newWebSocketRpcSession<PublicApi>(wsUrl);
   stub.onRpcBroken(handleBroken);
   return stub;
@@ -184,6 +179,7 @@ window.addEventListener('online', () => void probeOnWake());
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
 let currentStub = startConnection();
+void installNativeLoginCoordinator(getWorkshopRuntime(), () => currentStub).catch(() => {})
 
 const router = createRouter()
 applyStoredThemeMode()
@@ -238,7 +234,11 @@ function AppWithConnection() {
         if (!cancelled) {
           setServerConfig(cfg.siteLogo ? {
             ...cfg,
-            siteLogo: { url: cacheBustSiteLogoUrl(cfg.siteLogo.url) },
+            siteLogo: {
+              url: cacheBustSiteLogoUrl(
+                new URL(cfg.siteLogo.url, getWorkshopRuntime().apiOrigin).toString(),
+              ),
+            },
           } : cfg);
         }
       })

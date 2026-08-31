@@ -1,0 +1,28 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "odie-os-native-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-02-02",
+  "preview_urls": false,
+  "vars": {
+    "NATIVE_API_ONLY": "true",
+    "APP_LINK_HOST": "odie-os-native-api.odie-os.workers.dev"
+  },
+  "services": [
+    { "binding": "WORKSHOP_BACKEND", "service": "odie-os-backend" },
+    { "binding": "GATEKEEPER_CONTEXT", "service": "odie-os-gk-context" },
+    { "binding": "GATEKEEPER_GITHUB", "service": "odie-os-gk-github" },
+    { "binding": "GATEKEEPER_GOOGLE", "service": "odie-os-gk-google" },
+    { "binding": "GATEKEEPER_JARVIS", "service": "odie-os-gk-jarvis" },
+    { "binding": "GATEKEEPER_MCP", "service": "odie-os-gk-mcp" },
+    { "binding": "GATEKEEPER_ODIE_KG", "service": "odie-os-gk-odie-kg" },
+    { "binding": "GATEKEEPER_SCHEDULER", "service": "odie-os-gk-scheduler" },
+    { "binding": "GATEKEEPER_SESSIONS", "service": "odie-os-gk-sessions" },
+    { "binding": "GATEKEEPER_TEAM_PI", "service": "odie-os-gk-team-pi" }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "invocation_logs": false }
+  }
+}

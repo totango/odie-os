@@ -1,7 +1,7 @@
 # Capacitor mobile application plan
 
-*Status: deferred. This document records the intended direction; do not begin implementation until
-mobile work is prioritized.*
+*Status: superseded by `plans/tauri-native.md`. Retained as historical prior art; do not execute this
+Capacitor plan.*
 
 ## 1. Goal
 

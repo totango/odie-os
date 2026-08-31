@@ -15,6 +15,12 @@
     "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/error-reporting": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
+    "@tiptap/extension-placeholder": "^3.30.5",
+    "@tiptap/extension-task-item": "^3.30.5",
+    "@tiptap/extension-task-list": "^3.30.5",
+    "@tiptap/markdown": "^3.30.5",
+    "@tiptap/react": "^3.30.5",
+    "@tiptap/starter-kit": "^3.30.5",
     "capnweb": "catalog:",
     "capnweb-validate": "catalog:"
   },

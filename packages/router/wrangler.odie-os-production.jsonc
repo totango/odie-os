@@ -8,6 +8,7 @@
     { "binding": "WORKSHOP_BACKEND", "service": "odie-os-backend" },
     { "binding": "GATEKEEPER_CONTEXT", "service": "odie-os-gk-context" },
     { "binding": "GATEKEEPER_GITHUB", "service": "odie-os-gk-github" },
+    { "binding": "GATEKEEPER_GOOGLE", "service": "odie-os-gk-google" },
     { "binding": "GATEKEEPER_JARVIS", "service": "odie-os-gk-jarvis" },
     { "binding": "GATEKEEPER_MCP", "service": "odie-os-gk-mcp" },
     { "binding": "GATEKEEPER_ODIE_KG", "service": "odie-os-gk-odie-kg" },
@@ -22,6 +23,7 @@
     "run_worker_first": [
       "/api",
       "/api/*",
+      "/native/oauth-start/*",
       "/blueprint-screenshot",
       "/blueprint-screenshot/*",
       "/gatekeeper/*"
