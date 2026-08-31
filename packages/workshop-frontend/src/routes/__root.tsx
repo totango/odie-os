@@ -177,7 +177,7 @@ function AuthenticatedShell({
       <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
         <AccountSelectionModal />
         <SessionsProvider loadRepositories={pathname === '/sessions'}>
-          <AppShell startCollapsed={fullscreen} fullscreenContent={fullscreen}>
+          <AppShell key={fullscreen ? 'workspace' : 'app'} startCollapsed={fullscreen} fullscreenContent={fullscreen}>
             <Outlet />
           </AppShell>
         </SessionsProvider>

@@ -38,9 +38,7 @@ export default function AppShell({
   startCollapsed?: boolean
   fullscreenContent?: boolean
 }) {
-  const preferredCollapsed = useRef(readCollapsed())
-  const preFullscreenCollapsed = useRef<boolean | null>(startCollapsed ? preferredCollapsed.current : null)
-  const [collapsed, setCollapsed] = useState<boolean>(() => startCollapsed || preferredCollapsed.current)
+  const [collapsed, setCollapsed] = useState<boolean>(() => startCollapsed || readCollapsed())
   const [mobileOpen, setMobileOpen] = useState(false)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const drawerRef = useRef<HTMLDivElement>(null)
@@ -51,7 +49,6 @@ export default function AppShell({
     setCollapsed((prev) => {
       const next = !prev
       if (!fullscreenContent) {
-        preferredCollapsed.current = next
         try { localStorage.setItem(STORAGE_KEY_COLLAPSED, next ? '1' : '0') } catch {}
       }
       return next
@@ -102,22 +99,6 @@ export default function AppShell({
   useEffect(() => {
     setMobileOpen(false)
   }, [pathname])
-
-  // Workspace editors keep the navigation rail available without sacrificing canvas space. Their
-  // temporary collapsed state must not overwrite the user's normal sidebar preference.
-  useEffect(() => {
-    if (startCollapsed) {
-      setCollapsed((current) => {
-        if (preFullscreenCollapsed.current === null) preFullscreenCollapsed.current = current
-        return true
-      })
-      return
-    }
-    if (preFullscreenCollapsed.current !== null) {
-      setCollapsed(preFullscreenCollapsed.current)
-      preFullscreenCollapsed.current = null
-    }
-  }, [startCollapsed])
 
   // Global ⌘K / Ctrl+K opens the command palette; the rail's search button opens it via a custom
   // event so it doesn't have to prop-drill into the palette.
