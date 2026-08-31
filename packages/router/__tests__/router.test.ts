@@ -3,6 +3,7 @@ import { parse } from 'jsonc-parser';
 import router, { type Env } from '../src/index';
 // Imported as text so the config-integrity tests run inside workerd without filesystem access.
 import wranglerConfigText from '../wrangler.jsonc?raw';
+import productionWranglerConfigText from '../wrangler.odie-os-production.jsonc?raw';
 
 function stubFetcher(label: string): Fetcher {
   return {
@@ -143,9 +144,15 @@ describe('wrangler.jsonc contract', () => {
     expect(first).toContain('/api');
     expect(first).toContain('/api/*');
     expect(first).toContain('/native/oauth-start/*');
+    expect(first).toContain('/native/oauth-return/*');
     expect(first).toContain('/blueprint-screenshot');
     expect(first).toContain('/blueprint-screenshot/*');
     expect(first).toContain('/gatekeeper/*');
+  });
+
+  it('keeps native OAuth callbacks on the worker in production', () => {
+    const production = parse(productionWranglerConfigText);
+    expect(production.assets.run_worker_first).toContain('/native/oauth-return/*');
   });
 
   it('serves the frontend as a single-page application', () => {

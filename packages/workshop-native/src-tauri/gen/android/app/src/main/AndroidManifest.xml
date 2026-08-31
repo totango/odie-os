@@ -5,23 +5,23 @@
         <action android:name="android.intent.action.VIEW" />
         <category android:name="android.intent.category.DEFAULT" />
         <category android:name="android.intent.category.BROWSABLE" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/admin" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/blueprints" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/context" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/explore" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/gatekeepers" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/getting-started" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/outputs" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/profile" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/providers" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/sessions" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/signup" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:path="/workspaces" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:pathPrefix="/blueprint/" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:pathPrefix="/gadget/" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:pathPrefix="/gatekeepers/" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:pathPrefix="/workspace/" />
-        <data android:scheme="https" android:host="odie-os.odie-os.workers.dev" android:pathPrefix="/native/oauth-return/" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/admin" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/blueprints" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/context" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/explore" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/gatekeepers" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/getting-started" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/outputs" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/profile" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/providers" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/sessions" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/signup" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/workspaces" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/blueprint/" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/gadget/" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/gatekeepers/" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/workspace/" />
+        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/native/oauth-return/" />
       </intent-filter>
     </activity>
   </application>

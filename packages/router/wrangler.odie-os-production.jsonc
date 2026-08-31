@@ -24,6 +24,7 @@
       "/api",
       "/api/*",
       "/native/oauth-start/*",
+      "/native/oauth-return/*",
       "/blueprint-screenshot",
       "/blueprint-screenshot/*",
       "/gatekeeper/*"
