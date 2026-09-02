@@ -697,6 +697,14 @@ export interface CodingSessionEditorCapability {
   expiresAt: Date;
 }
 
+/** Short-lived same-origin capability for the OpenCode HTTP workbench in one session generation. */
+export interface CodingSessionOpenCodeCapability {
+  /** Same-origin URL containing an unguessable generation-bound OpenCode server capability. */
+  url: string;
+  /** Time after which new OpenCode workbench HTTP requests require a freshly minted URL. */
+  expiresAt: Date;
+}
+
 /** Short-lived capability for opening one catalog application in a running session generation. */
 export interface CodingSessionApplicationCapability {
   /** Application-specific URL containing an unguessable generation-bound capability. */
@@ -821,6 +829,22 @@ export interface AuthenticatedApi extends RpcTarget {
   getQuickModel(): Promise<null | string>;
 
   /**
+   * Return whether this account prefers Simplified Technical English for agent replies.
+   *
+   * When enabled, agents should make user-facing prose simpler and more direct while leaving code,
+   * quotations, identifiers, and tool payloads unchanged. Existing accounts default to false.
+   */
+  getSimplifiedTechnicalEnglishEnabled(): Promise<boolean>;
+
+  /**
+   * Set whether this account prefers Simplified Technical English for future agent replies.
+   *
+   * Pass true to ask agents for simpler, more direct user-facing prose, or false to disable the
+   * account-scoped preference.
+   */
+  setSimplifiedTechnicalEnglishEnabled(enabled: boolean): Promise<void>;
+
+  /**
    * Get AI configuration info, including whether AI Gateway mode is active and which providers
    * are available. The frontend uses this to adjust the model management UI.
    */
@@ -873,6 +897,9 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Mints a generation-bound capability for browser VS Code in an owned running session. */
   mintCodingSessionEditorCapability(sessionId: string): Promise<CodingSessionEditorCapability>;
+
+  /** Mints a generation-bound same-origin OpenCode server capability in an owned running session. */
+  mintCodingSessionOpenCodeCapability(sessionId: string): Promise<CodingSessionOpenCodeCapability>;
 
   /** Mints a generation-bound capability for one catalog application in an owned running session. */
   mintCodingSessionApplicationCapability(

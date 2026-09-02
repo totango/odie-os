@@ -34,6 +34,25 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+run_bounded() {
+  local seconds="$1"
+  shift
+  "$@" &
+  local command_pid="$!"
+  (
+    sleep "$seconds"
+    kill -TERM "$command_pid" 2>/dev/null || exit 0
+    sleep 10
+    kill -KILL "$command_pid" 2>/dev/null || true
+  ) &
+  local watchdog_pid="$!"
+  local status=0
+  wait "$command_pid" || status="$?"
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  return "$status"
+}
+
 # First boot the image's normal Sandbox server under the same hard bounds as the CLI smoke. A local
 # TCP response and the structured startup log prove liveness, but do not replace a deployed SDK test.
 docker run --detach --rm \
@@ -54,7 +73,7 @@ runtime_ready=false
 for _ in $(seq 1 60); do
   # The single-quoted program is expanded by the container's Bash.
   # shellcheck disable=SC2016
-  if timeout --signal=TERM --kill-after=1s 2s docker exec "$runtime_name" /bin/bash -lc \
+  if run_bounded 2 docker exec "$runtime_name" /bin/bash -lc \
     'exec 3<>/dev/tcp/127.0.0.1/3000; printf "GET / HTTP/1.0\r\n\r\n" >&3; read -r response <&3; [[ "$response" == HTTP/* ]]' \
     >/dev/null 2>&1; then
     runtime_ready=true
@@ -79,7 +98,11 @@ for variable in "${version_variables[@]}"; do
   version_args+=(--env "$variable=${!variable}")
 done
 
-timeout --signal=TERM --kill-after=10s 5m docker run --rm \
+# The mounted smoke also runs local fake model/MCP endpoints plus real CLI tool loops. Keep the
+# whole container bounded, but give OpenCode enough time to start its server and complete tool calls.
+runtime_name="coding-session-cli-smoke-$$-$RANDOM"
+run_bounded 420 docker run --rm \
+  --name "$runtime_name" \
   --platform linux/amd64 \
   --network none \
   --read-only \

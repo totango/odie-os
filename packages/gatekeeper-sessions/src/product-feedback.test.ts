@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { validateSafeDiff, feedbackBranch, PRODUCT_FEEDBACK_SLACK_CHANNEL, summarizeEvidenceForPr } from "./product-feedback";
+import {
+  feedbackBranch,
+  PRODUCT_FEEDBACK_SLACK_CHANNEL,
+  summarizeEvidenceForPr,
+  summarizeProductFeedbackDiff,
+  validateSafeDiff,
+} from "./product-feedback";
 import type { ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
 
 describe("product feedback guardrails", () => {
@@ -24,6 +30,17 @@ describe("product feedback guardrails", () => {
     expect(validateSafeDiff("diff --git a/img.png b/img.png\nGIT binary patch\nliteral 12\nabc\n").ok).toBe(false);
   });
 
+  it("rejects patches above the contribution-policy line limit", () => {
+    const additions = Array.from({ length: 31 }, (_, index) => `+const value${index} = ${index};`).join("\n");
+    expect(validateSafeDiff(`diff --git a/src/a.ts b/src/a.ts\n${additions}\n`))
+      .toEqual({ ok: false, reason: "Diff changes too many lines." });
+  });
+
+  it("rejects a nonempty diff with no changed source lines", () => {
+    expect(validateSafeDiff("diff --git a/src/a.ts b/src/a.ts\nindex 123..456 100644\n"))
+      .toEqual({ ok: false, reason: "Diff does not change any lines." });
+  });
+
   it("rejects git metadata, symlinks, executable bits, and mode changes", () => {
     expect(validateSafeDiff("diff --git a/.git/hooks/pre-push b/.git/hooks/pre-push\n+x\n").ok).toBe(false);
     expect(validateSafeDiff("diff --git a/link b/link\nnew file mode 120000\n+x\n").ok).toBe(false);
@@ -42,8 +59,14 @@ describe("product feedback guardrails", () => {
     expect(validateSafeDiff("diff --git a/a.ts b/a.ts\n+// meaningful private diagnostic phrase\n", evidence).ok).toBe(false);
     expect(validateSafeDiff("diff --git a/a.ts b/a.ts\n+// jacob.beck@totango.com\n", evidence).ok).toBe(false);
     expect(validateSafeDiff("diff --git a/a.ts b/a.ts\n+// https://internal.example/private-path\n", evidence).ok).toBe(false);
-    const summary = summarizeEvidenceForPr(evidence);
+    const changeSummary = summarizeProductFeedbackDiff(
+      "diff --git a/src/a.ts b/src/a.ts\n-old\n+new\n",
+    );
+    expect(changeSummary).toBe("Updates 1 file: `src/a.ts` (2 changed lines).");
+    const summary = summarizeEvidenceForPr(evidence, changeSummary);
     expect(summary).toContain(evidence.id);
+    expect(summary).toContain(changeSummary);
+    expect(summary).toContain("- [x] <!-- contribution-policy:concrete-change -->");
     expect(summary).not.toContain(evidence.title);
     expect(summary).not.toContain(evidence.description);
     expect(summary).not.toContain(evidence.submitterEmail);

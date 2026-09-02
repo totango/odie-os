@@ -11,6 +11,7 @@ import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   matchesResourceUrlPattern,
   stripTrailingSlashes,
+  type AccountDescription,
   type AvatarImage,
   type Gatekeeper,
   type GatekeeperConnectCallback,
@@ -64,6 +65,7 @@ import {
 } from "@gadgets/mcp-shared/user";
 import {
   portalAuthRequiresReconnect,
+  portalCodingSessionResourceUrls,
   portalCatalogValidationMode,
   portalResource,
   portalServer,
@@ -359,6 +361,25 @@ export class GatekeeperUserImpl
 
   protected [mcpGatekeeperUserContext]() {
     return { account: this.#account(), avatar: PORTAL_AVATAR, baseUrl: getBaseUrl(this.env) };
+  }
+
+  async describe(): Promise<AccountDescription> {
+    const description = await super.describe();
+    const config = readPortalConfig(this.env);
+    if (!config) return description;
+
+    const server = await this.#account().getServer();
+    if (!sameEndpoint(server.endpoint, config.endpoint) ||
+        portalAuthRequiresReconnect(server.auth, config.auth)) {
+      return description;
+    }
+
+    const listing = await tryListPortalServers(this.env, this.#account(), server.endpoint);
+    if (!listing?.complete) return description;
+    return {
+      ...description,
+      codingSessionResourceUrls: portalCodingSessionResourceUrls(config, listing.servers),
+    };
   }
 
   /**

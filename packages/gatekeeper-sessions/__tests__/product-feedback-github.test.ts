@@ -28,7 +28,9 @@ describe("product feedback GitHub publishing", () => {
       .mockResolvedValueOnce(Response.json({ assignees: [{ login: "jacobbeck-totango" }] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(createDraftPullRequest({}, evidence, "feedback/feedback-12345678")).resolves.toEqual({
+    await expect(createDraftPullRequest(
+      {}, evidence, "feedback/feedback-12345678", "Updates 1 file: `src/a.ts` (2 changed lines).",
+    )).resolves.toEqual({
       url: "https://github.com/totango/odie-os/pull/42",
       number: 42,
     });
@@ -43,13 +45,17 @@ describe("product feedback GitHub publishing", () => {
       .mockResolvedValueOnce(Response.json({ assignees: [{ login: "jacobbeck-totango" }] }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await createDraftPullRequest({}, evidence, "feedback/feedback-12345678");
+    await createDraftPullRequest(
+      {}, evidence, "feedback/feedback-12345678", "Updates 1 file: `src/a.ts` (2 changed lines).",
+    );
 
     const createBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body));
     expect(createBody).toMatchObject({ draft: true, head: "feedback/feedback-12345678", base: "main" });
     expect(createBody.title).not.toContain(evidence.title);
     expect(createBody.body).not.toContain(evidence.description);
     expect(createBody.body).not.toContain(evidence.submitterEmail);
+    expect(createBody.body).toContain("Updates 1 file: `src/a.ts` (2 changed lines).");
+    expect(createBody.body).toContain("- [x] <!-- contribution-policy:guidelines -->");
     expect(fetchMock.mock.calls[2][0]).toContain("/issues/43/assignees");
   });
 });

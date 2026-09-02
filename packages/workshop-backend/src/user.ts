@@ -1,5 +1,5 @@
 import { RpcStub, RpcTarget } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateCodingSessionFileUploadRequest, validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService, type ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
@@ -32,6 +32,7 @@ const OUTPUTS_BACKFILL_PAGE = 16;
 const CODING_SESSION_REPOSITORY_OWNER = "totango";
 const CODING_SESSION_REPOSITORY_OPTION_LIMIT = 50;
 const PRODUCT_FEEDBACK_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const MAX_CODING_SESSION_DISCOVERED_BINDINGS_PER_ACCOUNT = 32;
 
 /** Rejects missing, inactive, archived, or stale coding-session generations. */
 export async function assertCurrentCodingSessionGeneration(
@@ -91,6 +92,39 @@ function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
   if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
   return true;
+}
+
+function fnv1a32(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+export function codingSessionBindingId(
+  vendorId: string,
+  accountId: number,
+  resourceUrl?: string,
+): string {
+  const prefix = `${vendorId}-${accountId}`;
+  if (!resourceUrl) return prefix;
+
+  let scope = "resource";
+  try {
+    const url = new URL(resourceUrl);
+    const serverId = new URLSearchParams(url.hash.slice(1)).get("server")?.trim();
+    if (serverId) scope = serverId.slice(0, 64).replaceAll(/[^A-Za-z0-9-]/g, "-");
+  } catch {
+    // Leave invalid resource URLs for getGatekeeperClassFor(), which owns authorization checks.
+  }
+  return `${prefix}-${scope}-${fnv1a32(resourceUrl)}`;
+}
+
+/** Canonical native GitHub repository resource URLs exposed to a coding session. */
+export function codingSessionGitHubResourceUrls(repositories: string[] | undefined): string[] {
+  return (repositories ?? []).map(repo => `https://github.com/${CODING_SESSION_REPOSITORY_OWNER}/${repo}`);
 }
 
 function requiredHealthyConnectionVendorIds(env: Cloudflare.Env): string[] {
@@ -289,6 +323,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
         id: "user@example.com",
       },
       quickModel: <string | null>null,
+      simplifiedTechnicalEnglishEnabled: false,
       preferredModel: <string | null>null,
       onboardingCompleted: false,
       openCodeCustomization: EMPTY_OPENCODE_USER_CUSTOMIZATION,
@@ -742,6 +777,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     } else {
       return null;
     }
+  }
+
+  async getSimplifiedTechnicalEnglishEnabled(): Promise<boolean> {
+    return this.storage.simplifiedTechnicalEnglishEnabled.get();
+  }
+
+  async setSimplifiedTechnicalEnglishEnabled(enabled: boolean): Promise<void> {
+    this.storage.simplifiedTechnicalEnglishEnabled.put(enabled);
   }
 
   async getPreferredModel(): Promise<string | null> {
@@ -1687,6 +1730,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return service.mintEditorCapability(owner, sessionId);
   }
 
+  /** Mints an OpenCode server capability after re-authorizing every session repository. */
+  async mintCodingSessionOpenCodeCapability(sessionId: string): Promise<CodingSessionOpenCodeCapability> {
+    let initial = await this.#codingSessionsOwner();
+    let session = await initial.service.getSession(initial.owner, sessionId);
+    if (!session) throw new Error("Coding session was not found.");
+    let {owner, service} = await this.#codingSessionsAccess(session.repositories);
+    return service.mintOpenCodeCapability(owner, sessionId);
+  }
+
   /** Mints an application capability after verifying ownership and current repository authority. */
   async mintCodingSessionApplicationCapability(
     sessionId: string,
@@ -1871,8 +1923,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listCodingSessionTools(sessionId: string, sandboxId: string): Promise<CodingSessionTool[]> {
-    await this.#assertCodingSessionAccess(sessionId, sandboxId);
-    const catalogs = await Promise.all((await this.#codingSessionBindings()).map(async binding => {
+    const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
+    const catalogs = await Promise.all((await this.#codingSessionBindings(repositories)).map(async binding => {
       let session: McpSessionBase | undefined;
       try {
         session = await binding.facet.startSession(
@@ -1898,8 +1950,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     args: Record<string, unknown> | undefined,
     sandboxId: string,
   ): Promise<CodingSessionToolResult> {
-    await this.#assertCodingSessionAccess(sessionId, sandboxId);
-    const { binding, toolName } = await this.#resolveCodingSessionTool(qualifiedName);
+    const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
+    const { binding, toolName } = await this.#resolveCodingSessionTool(qualifiedName, repositories);
     const session = await binding.facet.startSession(
       new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
     try {
@@ -1915,8 +1967,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     actionId: number,
     sandboxId: string,
   ): Promise<CodingSessionToolResult> {
-    await this.#assertCodingSessionAccess(sessionId, sandboxId);
-    const { binding } = await this.#resolveCodingSessionTool(qualifiedName);
+    const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
+    const { binding } = await this.#resolveCodingSessionTool(qualifiedName, repositories);
     const record = [...this.storage.codingSessionActions.bySession.get(sessionId)].find(candidate =>
       candidate.bindingId === binding.id &&
       candidate.bindingGeneration === binding.generation &&
@@ -1927,19 +1979,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const session = await binding.facet.startSession(
       new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
     try {
-      return this.#codingSessionToolResult(await session.getActionResult(actionId));
+      const codingSessionSession = session as McpSessionBase & {
+        getCodingSessionActionResult?: (actionId: number) => Promise<McpCallResult>;
+      };
+      const result = await (codingSessionSession.getCodingSessionActionResult?.(actionId) ??
+        session.getActionResult(actionId));
+      return this.#codingSessionToolResult(result);
     } finally {
       session[Symbol.dispose]();
     }
   }
 
-  async #assertCodingSessionAccess(sessionId: string, sandboxId: string): Promise<void> {
+  async #assertCodingSessionAccess(sessionId: string, sandboxId: string): Promise<string[]> {
     const { owner, service } = await this.#codingSessionsOwner();
     const session = await assertCurrentCodingSessionGeneration(service, owner, sessionId, sandboxId);
     await this.#codingSessionsAccess(session.repositories);
+    return session.repositories;
   }
 
-  async #codingSessionBindings(): Promise<CodingSessionMcpBinding[]> {
+  async #codingSessionBindings(repositories?: string[]): Promise<CodingSessionMcpBinding[]> {
     await this.#ensureAutoProvisionedAccounts();
     const config = await readAdminConfig(this.env);
     const bindings: CodingSessionMcpBinding[] = [];
@@ -1951,12 +2009,45 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         record.codingSessionGeneration = generation;
         this.storage.connectedAccounts.put(record);
       }
-      let cls: DurableObjectClass<Gatekeeper<any>> | null = null;
+      if (record.vendorId === "mcp_portal" &&
+          record.description.codingSessionResourceUrls === undefined) {
+        try {
+          record.description = await record.account.describe();
+          this.storage.connectedAccounts.put(record);
+        } catch (error) {
+          logger.warn("skipping coding session tools: failed to describe portal account", {
+            event: "coding.session.portal.describe.skipped",
+            accountId: record.id,
+            vendorId: record.vendorId,
+            error,
+          });
+          continue;
+        }
+      }
+      const nativeGitHubResourceUrls = record.vendorId === "github"
+        ? codingSessionGitHubResourceUrls(repositories)
+        : [];
+      const discoveredResourceUrls = [...new Set([
+        ...(record.description.codingSessionResourceUrls ?? []),
+        ...nativeGitHubResourceUrls,
+      ])]
+        .slice(0, MAX_CODING_SESSION_DISCOVERED_BINDINGS_PER_ACCOUNT);
+      const entries: { id: string; title: string; class: DurableObjectClass<Gatekeeper<any>> }[] = [];
       try {
         if (record.description.singleton) {
-          cls = await this.getSingletonGatekeeperClass(record.id);
+          const cls = await this.getSingletonGatekeeperClass(record.id);
+          if (!cls) continue;
+          entries.push({
+            id: codingSessionBindingId(record.vendorId, record.id),
+            title: record.description.displayName ?? record.vendorId,
+            class: cls,
+          });
         } else if (record.vendorId === "mcp" && record.description.uniqueName) {
-          cls = (await this.getGatekeeperClassFor(record.id, record.description.uniqueName)).class;
+          entries.push({
+            id: codingSessionBindingId(record.vendorId, record.id),
+            title: record.description.displayName ?? record.vendorId,
+            class: (await this.getGatekeeperClassFor(record.id, record.description.uniqueName)).class,
+          });
         }
       } catch (error) {
         logger.warn("skipping coding session tools: failed to load connected account", {
@@ -1967,30 +2058,47 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         });
         continue;
       }
-      if (!cls) continue;
-      const id = `${record.vendorId}-${record.id}`;
-      const facet = this.ctx.facets.get<Gatekeeper<McpSessionBase>>(
-        `coding-session-${id}-${generation}`, () => ({ class: cls! }));
-      bindings.push({
-        id, generation,
-        vendorId: record.vendorId,
-        resourceTitle: record.description.displayName ?? record.vendorId,
-        facet,
-      });
+      for (const resourceUrl of discoveredResourceUrls) {
+        try {
+          const loaded = await this.getGatekeeperClassFor(record.id, resourceUrl);
+          entries.push({
+            id: codingSessionBindingId(record.vendorId, record.id, resourceUrl),
+            title: resourceUrl,
+            class: loaded.class,
+          });
+        } catch (error) {
+          logger.warn("skipping discovered coding session tool binding", {
+            event: "coding.session.discovered.binding.load.skipped",
+            accountId: record.id,
+            vendorId: record.vendorId,
+            error,
+          });
+        }
+      }
+      for (const entry of entries) {
+        const facet = this.ctx.facets.get<Gatekeeper<McpSessionBase>>(
+          `coding-session-${entry.id}-${generation}`, () => ({ class: entry.class }));
+        bindings.push({
+          id: entry.id, generation,
+          vendorId: record.vendorId,
+          resourceTitle: entry.title,
+          facet,
+        });
+      }
     }
     return bindings;
   }
 
-  async #codingSessionBinding(id: string): Promise<CodingSessionMcpBinding> {
-    const binding = (await this.#codingSessionBindings()).find(candidate => candidate.id === id);
+  async #codingSessionBinding(id: string, repositories?: string[]): Promise<CodingSessionMcpBinding> {
+    const binding = (await this.#codingSessionBindings(repositories)).find(candidate => candidate.id === id);
     if (!binding) throw new Error("This connected tool is no longer available.");
     return binding;
   }
 
-  async #resolveCodingSessionTool(qualifiedName: string) {
+  async #resolveCodingSessionTool(qualifiedName: string, repositories?: string[]) {
     const separator = qualifiedName.indexOf("__");
     if (separator < 1) throw new Error("Invalid Workshop MCP tool name.");
-    const binding = await this.#codingSessionBinding(qualifiedName.slice(0, separator));
+    const binding = await this.#codingSessionBinding(qualifiedName.slice(0, separator), repositories);
     return { binding, toolName: qualifiedName.slice(separator + 2) };
   }
 

@@ -88,6 +88,9 @@ type ProductFeedbackNotifierEnv = Env & {
 const PRODUCT_FEEDBACK_SLACK_CHANNEL = "C09EW0T5VB5";
 const PRODUCT_FEEDBACK_SLACK_TOOL = "jarvis_post_product_feedback_pr";
 const PRODUCT_FEEDBACK_ID = /^[A-Za-z0-9_-]{1,80}$/;
+const LEGACY_PRODUCT_FEEDBACK_CHANGE_SUMMARY = "Applies a small automated source fix.";
+const PRODUCT_FEEDBACK_CHANGE_SUMMARY =
+  /^Updates (?:[1-9]|1[0-2]) files?: `[^`<>&\r\n]{1,120}`(?:, `[^`<>&\r\n]{1,120}`){0,2}(?:, and (?:[1-9]|1[0-2]) more)? \((?:[1-9]|[12]\d|30) changed lines?\)\.$/;
 
 /** Validates a private notification request and returns the fixed upstream Slack arguments. */
 export function productFeedbackSlackArguments(request: ProductFeedbackNotificationRequest): {
@@ -105,9 +108,14 @@ export function productFeedbackSlackArguments(request: ProductFeedbackNotificati
   }
   const expectedKey = `product-feedback:${request.jobId}:pr:${prMatch[1]}`;
   if (request.idempotencyKey !== expectedKey) throw new Error("Invalid product feedback idempotency key.");
+  const changeSummary = request.changeSummary.trim();
+  if (changeSummary !== LEGACY_PRODUCT_FEEDBACK_CHANGE_SUMMARY &&
+      !PRODUCT_FEEDBACK_CHANGE_SUMMARY.test(changeSummary)) {
+    throw new Error("Invalid product feedback change summary.");
+  }
   return {
     channel: PRODUCT_FEEDBACK_SLACK_CHANNEL,
-    text: `Draft product-feedback PR created: ${prUrl.toString()}`,
+    text: `Draft product-feedback PR created. ${changeSummary} ${prUrl.toString()}`,
     idempotencyKey: expectedKey,
   };
 }

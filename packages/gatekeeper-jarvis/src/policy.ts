@@ -66,6 +66,7 @@ export function upgradeDefaultJarvisToolPolicy(policy: JarvisToolPolicy): Jarvis
   const untouched = untouchedV1 || untouchedV2 || untouchedV3 || untouchedV4 || untouchedV5;
   if (untouched) return defaultJarvisToolPolicy();
   const selectedEveryPreviouslyVisibleChatTool =
+    policy.revision <= 5 &&
     !policy.chat.tools?.includes("jarvis_call_prod_tool") &&
     (sameTools(policy.chat.tools, HISTORICAL_V4_VISIBLE_CHAT_TOOLS) ||
       HISTORICAL_VISIBLE_CHAT_TOOLS.every(tool => policy.chat.tools?.includes(tool)));

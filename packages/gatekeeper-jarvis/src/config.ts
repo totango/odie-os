@@ -39,7 +39,7 @@ export function applyJarvisToolPolicy(entry: ClassifiedTool): ClassifiedTool | n
   return {
     ...entry,
     mode: manualAction ? "action" : "read",
-    autoApprovable: false,
+    autoApprovable: manualAction,
     classifiedBy: "default",
   };
 }

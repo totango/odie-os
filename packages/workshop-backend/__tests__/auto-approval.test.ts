@@ -1,8 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { AutoApprovalDrainer, AutoApprovalStorage, ApplyPendingActionFn } from "../src/auto-approval.js";
-import type { ActionRecord, AutoApproveTagRecord } from "../src/overseer.js";
+import {
+  jarvisDeploymentAutoApprover,
+  type ActionRecord,
+  type AutoApproveTagRecord,
+} from "../src/overseer.js";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
+import { endpointTag } from "@gadgets/mcp-shared/scope";
+import { actionKindFor } from "@gadgets/mcp-shared/tools";
 import { makeMockStorage } from "./mock-storage.js";
 
 function makeStorage(): AutoApprovalStorage {
@@ -18,6 +24,9 @@ function makeStorage(): AutoApprovalStorage {
 
 const GK = 1;
 const ENABLER: AiChatAuthorInfo = { type: "user", id: "enabler@example.com", name: "Enabler" };
+const DEPLOYMENT: AiChatAuthorInfo = {
+  type: "agent", id: "deployment:test-auto-approval", name: "Deployment policy",
+};
 
 function enableRule(storage: AutoApprovalStorage, actionTag = "edit", gatekeeperId = GK) {
   storage.autoApproveTags.put({
@@ -156,6 +165,34 @@ describe("AutoApprovalDrainer.drain", () => {
     expect(getAction(storage, 3).state).toBe("approved");
   });
 
+  it("applies an action authorized by deployment policy without a user rule", async () => {
+    let storage = makeStorage();
+    putAction(storage, 1);
+
+    let { applyFn, calls } = makeImmediateApply(storage);
+    let drainer = new AutoApprovalDrainer(storage, applyFn, () => DEPLOYMENT);
+    await drainer.drain(GK);
+
+    expect(calls).toEqual([1]);
+    expect(getAction(storage, 1)).toMatchObject({
+      state: "approved",
+      autoApproved: true,
+      resolvedBy: DEPLOYMENT,
+    });
+  });
+
+  it("does not let deployment policy override an action's manual-only verdict", async () => {
+    let storage = makeStorage();
+    putAction(storage, 1, { autoApprovable: false });
+
+    let { applyFn, calls } = makeImmediateApply(storage);
+    let drainer = new AutoApprovalDrainer(storage, applyFn, () => DEPLOYMENT);
+    await drainer.drain(GK);
+
+    expect(calls).toEqual([]);
+    expect(getAction(storage, 1).state).toBe("pending");
+  });
+
   // Two concurrent drains for the same gatekeeper must not double-apply. The input gate is open
   // across the apply await, so without the single-flight guard the second drain's pending re-check
   // would see the still-"pending" record and apply it again.
@@ -216,5 +253,66 @@ describe("AutoApprovalDrainer.drain", () => {
     expect(apply.calls).toEqual([1, 2]);
     expect(getAction(storage, 1).state).toBe("approved");
     expect(getAction(storage, 2).state).toBe("approved");
+  });
+});
+
+describe("jarvisDeploymentAutoApprover", () => {
+  const resourceUrl = "https://jarvis.example.com/mcp#tool=jarvis_call_wren_tool";
+  const actionTag = actionKindFor(
+      `jarvis:${endpointTag(resourceUrl)}`, "jarvis_call_wren_tool").tag;
+
+  function jarvisAction(tag = actionTag, label = "jarvis_call_wren_tool") {
+    return {
+      id: 1,
+      gatekeeperId: GK,
+      caller: {from: "agent" as const, chatId: 1},
+      createdAt: new Date(),
+      state: "pending" as const,
+      type: "action" as const,
+      action: 1,
+      description: {
+        title: "Run Wren tool",
+        description: "Run an approved JARVIS dispatcher.",
+        autoApprovable: true,
+        actionKind: {tag, label},
+      },
+    };
+  }
+
+  const ambientJarvis = {
+    resourceUrl,
+    creationSpec: {
+      type: "ambient" as const,
+      vendorId: "jarvis",
+      accountId: "account",
+      authorityKey: "authority",
+    },
+  };
+
+  it("approves an exact ambient JARVIS dispatcher tag", () => {
+    expect(jarvisDeploymentAutoApprover(jarvisAction(), ambientJarvis)?.id)
+      .toBe("deployment:jarvis-auto-approval");
+  });
+
+  it("rejects a dispatcher display label paired with a different policy tag", () => {
+    expect(jarvisDeploymentAutoApprover(
+        jarvisAction("untrusted:tool", "jarvis_call_wren_tool"), ambientJarvis))
+      .toBeUndefined();
+  });
+
+  it("rejects non-ambient and non-JARVIS bindings", () => {
+    expect(jarvisDeploymentAutoApprover(jarvisAction(), {
+      resourceUrl,
+      creationSpec: {
+        type: "gatekeeper",
+        vendorId: "jarvis",
+        resourceUrl,
+        typeUrlPattern: resourceUrl,
+      },
+    })).toBeUndefined();
+    expect(jarvisDeploymentAutoApprover(jarvisAction(), {
+      ...ambientJarvis,
+      creationSpec: {...ambientJarvis.creationSpec, vendorId: "mcp"},
+    })).toBeUndefined();
   });
 });

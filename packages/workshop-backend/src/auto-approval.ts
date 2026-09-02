@@ -24,6 +24,10 @@ export type ApplyPendingActionFn = (
     resolvedBy: AiChatAuthorInfo,
     autoApproved: boolean) => Promise<void>;
 
+/** Resolves deployment-owned approval authority for a narrowly trusted action, if any. */
+export type DeploymentAutoApproverFn = (
+    record: ActionRecord & {type: "action"}) => AiChatAuthorInfo | undefined;
+
 export class AutoApprovalDrainer {
   // Per-gatekeeper single-flight state. Key present => a drain is running for that gatekeeper; the
   // state carries both a "rerun" flag and the active promise. Concurrent callers join that promise
@@ -32,7 +36,18 @@ export class AutoApprovalDrainer {
 
   constructor(
       private storage: AutoApprovalStorage,
-      private applyPendingAction: ApplyPendingActionFn) {}
+      private applyPendingAction: ApplyPendingActionFn,
+      private deploymentAutoApprover?: DeploymentAutoApproverFn) {}
+
+  /** Returns the authority that permits this action to run without a prompt. */
+  approverFor(record: ActionRecord & {type: "action"}): AiChatAuthorInfo | undefined {
+    if (record.description.autoApprovable !== true) return undefined;
+    let tag = record.description.actionKind?.tag;
+    let rule = tag === undefined
+        ? undefined
+        : this.storage.autoApproveTags.get(`${record.gatekeeperId}:${tag}`);
+    return rule?.enabledBy ?? this.deploymentAutoApprover?.(record);
+  }
 
   drain(gatekeeperId: number): Promise<void> {
     let active = this.#draining.get(gatekeeperId);
@@ -62,8 +77,8 @@ export class AutoApprovalDrainer {
   // -- it is never skipped ahead of. This preserves in-order application and the invariant that
   // nothing is silently applied past a human gate.
   //
-  // Eligibility requires BOTH signals: the author's `autoApprovable` verdict on the action AND a
-  // user-enabled rule for the action's type on this gatekeeper.
+  // Eligibility requires the author's `autoApprovable` verdict plus either a user-enabled rule or
+  // narrowly-scoped deployment authority supplied by the Workshop.
   async #drainOnce(gatekeeperId: number): Promise<void> {
     // Materialize a snapshot first: list() is a lazy generator over storage, and we mutate the
     // actions collection (via applyPendingAction) as we go.
@@ -72,11 +87,8 @@ export class AutoApprovalDrainer {
             rec.gatekeeperId === gatekeeperId && rec.type === "action" && rec.state === "pending");
 
     for (let record of pending) {
-      let tag = record.description.actionKind?.tag;
-      let rule = tag !== undefined
-          ? this.storage.autoApproveTags.get(`${gatekeeperId}:${tag}`)
-          : undefined;
-      if (record.description.autoApprovable !== true || rule === undefined) {
+      let approver = this.approverFor(record);
+      if (!approver) {
         // A manual gate. Stop rather than skipping ahead to any later auto-eligible action.
         break;
       }
@@ -89,9 +101,7 @@ export class AutoApprovalDrainer {
       }
 
       try {
-        // Attribute the auto-approval to the user who enabled the rule -- it runs under their
-        // authority.
-        await this.applyPendingAction(fresh, rule.enabledBy, true);
+        await this.applyPendingAction(fresh, approver, true);
       } catch (err) {
         // Leave the action pending for manual handling and stop the drain (never skip ahead).
         logger.error("auto-approval failed", {

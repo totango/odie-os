@@ -63,10 +63,11 @@ describe("product feedback Slack notifications", () => {
     expect(productFeedbackSlackArguments({
       jobId: "feedback_123",
       prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Updates 1 file: `src/a.ts` (2 changed lines).",
       idempotencyKey: "product-feedback:feedback_123:pr:456",
     })).toEqual({
       channel: "C09EW0T5VB5",
-      text: "Draft product-feedback PR created: https://github.com/totango/odie-os/pull/456",
+      text: "Draft product-feedback PR created. Updates 1 file: `src/a.ts` (2 changed lines). https://github.com/totango/odie-os/pull/456",
       idempotencyKey: "product-feedback:feedback_123:pr:456",
     });
   });
@@ -75,11 +76,13 @@ describe("product feedback Slack notifications", () => {
     expect(() => productFeedbackSlackArguments({
       jobId: "feedback_123",
       prUrl: "https://github.com/totango/other/pull/456",
+      changeSummary: "Updates 1 file.",
       idempotencyKey: "product-feedback:feedback_123:pr:456",
     })).toThrow(/PR URL/);
     expect(() => productFeedbackSlackArguments({
       jobId: "feedback_123",
       prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Updates 1 file.",
       idempotencyKey: "product-feedback:feedback_123:pr:999",
     })).toThrow(/idempotency/);
   });
@@ -95,8 +98,25 @@ describe("product feedback Slack notifications", () => {
       expect(() => productFeedbackSlackArguments({
         jobId: "feedback_123",
         prUrl,
+        changeSummary: "Updates 1 file.",
         idempotencyKey: "product-feedback:feedback_123:pr:456",
       })).toThrow(/PR URL/);
+    }
+  });
+
+  it("rejects a non-canonical or Slack-active change summary", () => {
+    for (const changeSummary of [
+      "",
+      "First line\nsecond line",
+      "Updates 1 file.",
+      "Updates 1 file: `<@U123>` (2 changed lines).",
+    ]) {
+      expect(() => productFeedbackSlackArguments({
+        jobId: "feedback_123",
+        prUrl: "https://github.com/totango/odie-os/pull/456",
+        changeSummary,
+        idempotencyKey: "product-feedback:feedback_123:pr:456",
+      })).toThrow(/change summary/);
     }
   });
 });
@@ -136,7 +156,8 @@ describe("JarvisSession", () => {
       }, "vetted"));
       expect(classified).toMatchObject({
         mode: name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool" ? "action" : "read",
-        autoApprovable: false,
+        autoApprovable:
+          name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool",
       });
     }
   });

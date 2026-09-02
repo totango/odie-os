@@ -23,7 +23,7 @@ const { getSandbox } = await import("@cloudflare/sandbox");
 const OPENCODE_COMMAND = [
   "/bin/bash",
   "-lc",
-  "if [ -d /opt/odie-valhalla/opencode ]; then mkdir -p /workspace/.odie-opencode/command /workspace/.odie-opencode/skills && cp -R /opt/odie-valhalla/opencode/command/. /workspace/.odie-opencode/command/ && cp -R /opt/odie-valhalla/opencode/skills/. /workspace/.odie-opencode/skills/; fi && cd /workspace/jarvis && exec opencode",
+  "cd /workspace/jarvis && exec opencode",
 ];
 
 type StoredRecord = Omit<CodingSessionSummary, "runtime"> & {
@@ -32,6 +32,8 @@ type StoredRecord = Omit<CodingSessionSummary, "runtime"> & {
   sandboxId: string;
   terminalId?: string;
   shellTerminalId?: string;
+  opencodeServerProcessId?: string;
+  opencodeServerVersion?: number;
 };
 
 function createKv() {
@@ -135,6 +137,7 @@ function processHandle(id: string, state: "running" | "exited" = "exited", code 
   return {
     id,
     kill: vi.fn(async () => undefined),
+    waitForPort: vi.fn(async () => undefined),
     status: vi.fn(async () => state === "running" ? { state } : { state, exit: { code, timedOut: false } }),
     waitForExit: vi.fn(async () => ({ code, timedOut: false })),
   };
@@ -159,6 +162,7 @@ function createStartupSandbox() {
     exec: vi.fn(async (command: string[]) => {
       if (command[0] === "git" && command[1] === "-C") return processHandle("check", "exited", ready ? 0 : 1);
       if (command[0] === "rm") return processHandle("rm");
+      if (command[0] === "sh") return processHandle("defaults");
       const clone = processHandle("clone-1", "running");
       processes.set("clone-1", clone);
       ready = true;
@@ -461,6 +465,49 @@ describe("coding session asynchronous startup", () => {
     await policy.alarm();
     expect(registry.startupSucceeded).toHaveBeenCalledWith("session-1", 0, "sandbox-1", "term-primary");
     expect(kv.get("startup")).toBeUndefined();
+  });
+
+  it("materializes OpenCode defaults once and starts OpenCode with Workshop MCP when Team PI is unconfigured", async () => {
+    const { policy, kv } = createPolicy();
+    const sandbox = createStartupSandbox();
+    kv.put("startup", startupRecord({ phase: "materialize" }));
+
+    await policy.alarm();
+
+    expect(sandbox.exec).toHaveBeenCalledWith([
+      "sh", "-lc",
+      "if [ -d /opt/odie-valhalla/opencode ]; then " +
+        "cp -R /opt/odie-valhalla/opencode/command/. /workspace/.odie-opencode/command/ && " +
+        "cp -R /opt/odie-valhalla/opencode/skills/. /workspace/.odie-opencode/skills/; " +
+        "fi",
+    ], { timeout: 30_000 });
+
+    await policy.alarm();
+
+    const terminalOptions = sandbox.createTerminal.mock.calls[0]?.[0];
+    expect(terminalOptions.env).toMatchObject({
+      OPENCODE_DISABLE_AUTOUPDATE: "true",
+      OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+      OPENCODE_CONFIG_DIR: "/workspace/.odie-opencode",
+    });
+    const config = JSON.parse(terminalOptions.env.OPENCODE_CONFIG_CONTENT);
+    expect(config).toMatchObject({
+      share: "disabled",
+      mcp: {
+        workshop: {
+          type: "remote",
+          url: "https://workshop-mcp.internal/mcp",
+          oauth: false,
+          enabled: true,
+          timeout: 30_000,
+        },
+      },
+      plugin: [],
+    });
+    expect(config.provider).toBeUndefined();
+    expect(config.enabled_providers).toBeUndefined();
+    expect(config.model).toBeUndefined();
+    expect(config.small_model).toBeUndefined();
   });
 
   it("materializes and launches Prime Agent without exposing relay credentials", async () => {
@@ -1927,6 +1974,134 @@ describe("coding session asynchronous startup", () => {
 
     expect(registry.developmentUpdated({ ...update, sandboxId: "old", generation: 1 })).toBe(false);
     expect(registry.getDevelopmentStatus("session-1").generation).toBe(2);
+  });
+
+  it("starts and reuses one OpenCode server per running OpenCode generation with startup env parity", async () => {
+    const running = startingRecord({ status: "running", terminalId: "term-primary", generation: 3 });
+    const { registry, kv } = createRegistryWith(running);
+    const policy = { configure: vi.fn(), storeOpenCodeTicket: vi.fn() };
+    const customization: OpenCodeUserCustomization = {
+      plugins: ["@acme/opencode-plugin@1.2.3"],
+      skills: [{ name: "repair", description: "Fix things", instructions: "Always verify." }],
+    };
+    const tools = { prepareSessionStartup: vi.fn(async () => customization) };
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      BASE_URL: "https://workshop.example.test/gatekeeper/sessions",
+      EDITOR_CAPABILITY_HMAC_SECRET: "editor-test-secret",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+      WORKSHOP_TOOLS: tools,
+      TEAM_PI_CODEX_BASE_URL: "https://team-pi.example.test/",
+    };
+    const process = processHandle("opencode-server-1", "running");
+    const sandbox = {
+      getTerminal: vi.fn(async () => ({ getSnapshot: vi.fn(async () => ({ status: "running" })) })),
+      getProcess: vi.fn(async (id: string) => id === process.id ? process : null),
+      exec: vi.fn(async () => process),
+      destroy: vi.fn(async () => undefined),
+    };
+    sandboxState.sandboxes.set("sandbox-1", sandbox);
+    const owner = { userId: "user-1", email: "user@example.com" };
+
+    const [first, second] = await Promise.all([
+      registry.mintOpenCodeCapability(owner, "session-1"),
+      registry.mintOpenCodeCapability(owner, "session-1"),
+    ]);
+
+    expect(first.url).toMatch(/^https:\/\/workshop\.example\.test\/gatekeeper\/sessions\/opencode\//);
+    expect(second.url).toMatch(/^https:\/\/workshop\.example\.test\/gatekeeper\/sessions\/opencode\//);
+    expect(sandbox.exec).toHaveBeenCalledOnce();
+    expect(sandbox.exec).toHaveBeenCalledWith([
+      "opencode", "serve", "--hostname", "0.0.0.0", "--port", "40913", "--mdns", "false",
+    ], expect.objectContaining({
+      cwd: "/workspace/jarvis",
+      env: expect.objectContaining({
+        OPENCODE_DISABLE_AUTOUPDATE: "true",
+        OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
+        OPENCODE_CONFIG_DIR: "/workspace/.odie-opencode",
+      }),
+    }));
+    const env = sandbox.exec.mock.calls[0]![1]!.env as Record<string, string>;
+    expect(JSON.parse(env.OPENCODE_CONFIG_CONTENT!)).toMatchObject({
+      plugin: customization.plugins,
+      mcp: { workshop: { enabled: true } },
+    });
+    expect(process.waitForPort).toHaveBeenCalledWith(40_913, expect.objectContaining({ path: "/global/health" }));
+    expect(tools.prepareSessionStartup).toHaveBeenCalledTimes(2);
+    expect(policy.storeOpenCodeTicket).toHaveBeenCalledTimes(2);
+    expect(kv.get<StoredRecord>("session:session-1")?.opencodeServerProcessId).toBe("opencode-server-1");
+    expect(kv.get<StoredRecord>("session:session-1")?.opencodeServerVersion).toBe(1);
+
+    await registry.mintOpenCodeCapability(owner, "session-1");
+    expect(sandbox.exec).toHaveBeenCalledOnce();
+
+    const current = kv.get<StoredRecord>("session:session-1")!;
+    kv.put("session:session-1", { ...current, opencodeServerVersion: undefined });
+    await registry.mintOpenCodeCapability(owner, "session-1");
+    expect(process.kill).toHaveBeenCalledWith(15);
+    expect(sandbox.exec).toHaveBeenCalledTimes(2);
+
+    const migrated = kv.get<StoredRecord>("session:session-1")!;
+    kv.put("session:session-1", { ...migrated, opencodeServerVersion: undefined });
+    process.waitForExit.mockResolvedValue({ code: 0, timedOut: true });
+    await expect(registry.mintOpenCodeCapability(owner, "session-1"))
+      .rejects.toThrow("OpenCode server failed to stop. Restart the session to continue.");
+    expect(sandbox.destroy).toHaveBeenCalledOnce();
+    expect(sandbox.exec).toHaveBeenCalledTimes(2);
+    expect(kv.get<StoredRecord>("session:session-1")).toMatchObject({
+      status: "failed",
+      opencodeServerProcessId: undefined,
+      opencodeServerVersion: undefined,
+    });
+  });
+
+  it("stops a freshly-created OpenCode server when the session generation goes stale", async () => {
+    const running = startingRecord({ status: "running", terminalId: "term-primary", generation: 1 });
+    const { registry, kv } = createRegistryWith(running);
+    const policy = { configure: vi.fn(), storeOpenCodeTicket: vi.fn() };
+    (registry as typeof registry & { env: Record<string, unknown> }).env = {
+      BASE_URL: "https://workshop.example.test",
+      EDITOR_CAPABILITY_HMAC_SECRET: "editor-test-secret",
+      SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
+      SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
+      WORKSHOP_TOOLS: { prepareSessionStartup: vi.fn(async () => ({ plugins: [], skills: [] })) },
+    };
+    const process = processHandle("opencode-server-stale", "running");
+    process.waitForPort.mockImplementation(async () => {
+      kv.put("session:session-1", { ...running, generation: 2, sandboxId: "sandbox-2" });
+    });
+    sandboxState.sandboxes.set("sandbox-1", {
+      getTerminal: vi.fn(async () => ({ getSnapshot: vi.fn(async () => ({ status: "running" })) })),
+      getProcess: vi.fn(async () => process),
+      exec: vi.fn(async () => process),
+      destroy: vi.fn(async () => undefined),
+    });
+
+    await expect(registry.mintOpenCodeCapability(
+      { userId: "user-1", email: "user@example.com" }, "session-1",
+    )).rejects.toThrow("Coding session is not running.");
+    expect(process.kill.mock.calls).toEqual([[15]]);
+    expect(policy.storeOpenCodeTicket).not.toHaveBeenCalled();
+  });
+
+  it("deletes expired OpenCode capability tickets on the policy alarm", async () => {
+    const { policy, kv, deleteAlarm } = createPolicy();
+    const expiresAt = Date.now() + 1_000;
+    await policy.storeOpenCodeTicket({
+      sandboxId: "sandbox-1",
+      userId: "user-1",
+      sessionId: "session-1",
+      generation: 0,
+      instanceTier: "standard-1",
+      expiresAt,
+    });
+
+    const now = vi.spyOn(Date, "now").mockReturnValue(expiresAt + 1);
+    await policy.alarm();
+
+    expect(kv.get("opencodeTicket")).toBeUndefined();
+    expect(deleteAlarm).toHaveBeenCalled();
+    now.mockRestore();
   });
 
 });

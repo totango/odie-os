@@ -100,6 +100,8 @@ export type ProductFeedbackNotificationRequest = {
   jobId: string;
   /** Draft pull request URL created by the Sessions worker. */
   prUrl: string;
+  /** Public, diff-derived summary of the files and line count changed by the pull request. */
+  changeSummary: string;
   /** Stable idempotency key for the upstream notification write. */
   idempotencyKey: string;
 };

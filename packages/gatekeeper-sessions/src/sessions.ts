@@ -14,6 +14,7 @@ import {
   type CodingSessionFileUploadRequest,
   type CodingSessionFileUploadResult,
   type CodingSessionInstanceTier,
+  type CodingSessionOpenCodeCapability,
   type CodingSessionRepository,
   type CodingSessionRuntime,
   type CodingSessionSummary,
@@ -94,6 +95,7 @@ import {
   feedbackBranch,
   productFeedbackPrompt,
   PRODUCT_FEEDBACK_REPOSITORY,
+  summarizeProductFeedbackDiff,
   validateSafeDiff,
   type ProductFeedbackJob,
 } from "./product-feedback.js";
@@ -103,6 +105,10 @@ export { ContainerProxy, CodingSessionApplicationPreview };
 const ATTACH_TTL_MS = 60_000;
 const EDITOR_CAPABILITY_TTL_MS = 30 * 60 * 1_000;
 const EDITOR_PORT = 13_337;
+const OPENCODE_SERVER_CAPABILITY_TTL_MS = 10 * 60 * 1_000;
+const OPENCODE_SERVER_PORT = 40_913;
+const OPENCODE_SERVER_MAX_POST_BYTES = 1024 * 1024;
+const OPENCODE_SERVER_VERSION = 1;
 const MAX_SESSIONS_PER_USER = 5;
 const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
@@ -153,6 +159,8 @@ type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
   terminalId?: string;
   shellTerminalId?: string;
   editorProcessId?: string;
+  opencodeServerProcessId?: string;
+  opencodeServerVersion?: number;
   /** Public generation. Historical terminal-only sessions default to generation zero. */
   generation?: number;
   /** Fixed sandbox tier. Historical terminal-only sessions default to standard-1. */
@@ -180,6 +188,8 @@ type EditorTicket = {
   instanceTier?: CodingSessionInstanceTier;
   expiresAt: number;
 };
+
+type OpenCodeTicket = EditorTicket;
 
 type SessionPolicy = {
   sessionId: string;
@@ -250,6 +260,12 @@ type StartupProcess = {
   id: string;
   kill(signal?: number): Promise<void>;
   waitForExit(options?: { timeout?: number }): Promise<{ code: number; timedOut?: boolean }>;
+  waitForPort(port: number, options?: {
+    mode?: "http" | "tcp";
+    path?: string;
+    status?: { min: number; max: number };
+    timeout?: number;
+  }): Promise<unknown>;
   status(): Promise<
     | { state: "running" }
     | { state: "exited"; exit: { code: number; timedOut?: boolean } }
@@ -415,6 +431,19 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     return ticket;
   }
 
+  /** Stores a reusable but short-lived OpenCode HTTP workbench ticket. */
+  async storeOpenCodeTicket(ticket: OpenCodeTicket): Promise<void> {
+    this.ctx.storage.kv.put("opencodeTicket", ticket);
+    await this.#armPolicyAlarm(ticket.expiresAt);
+  }
+
+  /** Reads an OpenCode HTTP workbench ticket without consuming it. */
+  getOpenCodeTicket(now: number): OpenCodeTicket | null {
+    const ticket = this.ctx.storage.kv.get<OpenCodeTicket>("opencodeTicket");
+    if (!ticket || ticket.expiresAt < now) return null;
+    return ticket;
+  }
+
   /** Multiplexes startup, ticket expiry, and component supervision without clobbering wakeups. */
   async alarm(): Promise<void> {
     this.ctx.storage.kv.delete("policy-alarm-at");
@@ -473,6 +502,8 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     if (ticket && ticket.expiresAt <= now) this.ctx.storage.kv.delete("ticket");
     const editorTicket = this.ctx.storage.kv.get<EditorTicket>("editorTicket");
     if (editorTicket && editorTicket.expiresAt <= now) this.ctx.storage.kv.delete("editorTicket");
+    const openCodeTicket = this.ctx.storage.kv.get<OpenCodeTicket>("opencodeTicket");
+    if (openCodeTicket && openCodeTicket.expiresAt <= now) this.ctx.storage.kv.delete("opencodeTicket");
     await this.#scheduleNextPolicyAlarm();
   }
 
@@ -985,6 +1016,8 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     if (ticket) deadlines.push(ticket.expiresAt);
     const editorTicket = this.ctx.storage.kv.get<EditorTicket>("editorTicket");
     if (editorTicket) deadlines.push(editorTicket.expiresAt);
+    const openCodeTicket = this.ctx.storage.kv.get<OpenCodeTicket>("opencodeTicket");
+    if (openCodeTicket) deadlines.push(openCodeTicket.expiresAt);
     if (deadlines.length === 0) {
       await this.ctx.storage.deleteAlarm();
       this.ctx.storage.kv.delete("policy-alarm-at");
@@ -1004,6 +1037,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 export class CodingSessionRegistry extends DurableObject<Env> {
   readonly #shellTerminalCreations = new Map<string, Promise<string>>();
   readonly #editorProcessCreations = new Map<string, Promise<string>>();
+  readonly #opencodeServerProcessCreations = new Map<string, Promise<string>>();
 
   /** Retries durable restart work and capacity releases after pre-arming the next wakeup. */
   async alarm(): Promise<void> {
@@ -1372,6 +1406,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       terminalId: undefined,
       shellTerminalId: undefined,
       editorProcessId: undefined,
+      opencodeServerProcessId: undefined,
+      opencodeServerVersion: undefined,
       lastActiveAt: new Date(),
     };
     const restart: RestartRecord = {
@@ -1461,7 +1497,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       }
       this.#put({
         ...record, status: "stopped", terminalId: undefined, shellTerminalId: undefined,
-        editorProcessId: undefined, capacityLease: undefined, lastActiveAt: new Date(),
+        editorProcessId: undefined, opencodeServerProcessId: undefined, opencodeServerVersion: undefined,
+        capacityLease: undefined, lastActiveAt: new Date(),
       });
       return;
     }
@@ -1504,6 +1541,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       terminalId: undefined,
       shellTerminalId: undefined,
       editorProcessId: undefined,
+      opencodeServerProcessId: undefined,
+      opencodeServerVersion: undefined,
       archivedAt: new Date(),
       lastActiveAt: new Date(),
     });
@@ -1714,6 +1753,137 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return { url: `${baseUrl}/c/${token}/`, expiresAt };
   }
 
+  /** Starts OpenCode's HTTP server if needed and mints a same-origin generation-bound capability. */
+  async mintOpenCodeCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+  ): Promise<CodingSessionOpenCodeCapability> {
+    required(this.env.BASE_URL, "BASE_URL");
+    required(this.env.EDITOR_CAPABILITY_HMAC_SECRET, "EDITOR_CAPABILITY_HMAC_SECRET");
+    const record = this.#get(sessionId);
+    if (!record || record.status !== "running" || !record.terminalId || storedSessionRuntime(record) !== "opencode") {
+      throw new Error("Coding session is not running.");
+    }
+    const sandbox = sandboxFor(this.env, storedSessionTier(record), record.sandboxId);
+    if (!(await this.#runningPrimaryTerminal(record))) {
+      throw new Error("Coding session environment expired. Restart the session to continue.");
+    }
+    const customization = await this.env.WORKSHOP_TOOLS.prepareSessionStartup(owner, record.id, record.repositories);
+    await policyForSandbox(this.env, storedSessionTier(record), record.sandboxId).configure({
+      sessionId: record.id,
+      sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
+      owner,
+      repositories: record.repositories,
+    });
+
+    const generationKey = sessionGenerationKey(record);
+    let creation = this.#opencodeServerProcessCreations.get(generationKey);
+    if (!creation) {
+      creation = this.#runningOrCreatedOpenCodeServer(record, customization);
+      this.#opencodeServerProcessCreations.set(generationKey, creation);
+    }
+    let processId: string;
+    try {
+      processId = await creation;
+    } finally {
+      if (this.#opencodeServerProcessCreations.get(generationKey) === creation) {
+        this.#opencodeServerProcessCreations.delete(generationKey);
+      }
+    }
+
+    const current = this.#get(sessionId);
+    if (!current || current.status !== "running" || current.sandboxId !== record.sandboxId ||
+        storedSessionGeneration(current) !== storedSessionGeneration(record) || current.terminalId !== record.terminalId) {
+      const stale = await sandbox.getProcess(processId).catch(() => null);
+      if (stale) await stopProcess(stale);
+      throw new Error("Coding session is not running.");
+    }
+    const expiresAt = new Date(Date.now() + OPENCODE_SERVER_CAPABILITY_TTL_MS);
+    const token = await openCodeCapabilityToken(this.env, {
+      userId: owner.userId,
+      sessionId: record.id,
+      sandboxId: record.sandboxId,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
+      expiresAt: expiresAt.valueOf(),
+    });
+    await (await openCodeTicketFor(this.env, token)).storeOpenCodeTicket({
+      sandboxId: record.sandboxId,
+      userId: owner.userId,
+      sessionId: record.id,
+      generation: storedSessionGeneration(record),
+      instanceTier: storedSessionTier(record),
+      expiresAt: expiresAt.valueOf(),
+    });
+    const latest = this.#get(sessionId);
+    if (!latest || latest.status !== "running" || latest.sandboxId !== record.sandboxId ||
+        storedSessionGeneration(latest) !== storedSessionGeneration(record) || latest.terminalId !== record.terminalId) {
+      throw new Error("Coding session is not running.");
+    }
+    const baseUrl = this.env.BASE_URL!.replace(/\/$/, "");
+    this.#put({ ...latest, opencodeServerProcessId: processId, lastActiveAt: new Date() });
+    return { url: `${baseUrl}/opencode/${token}/`, expiresAt };
+  }
+
+  async #runningOrCreatedOpenCodeServer(
+    record: SessionRecord,
+    customization: OpenCodeUserCustomization,
+  ): Promise<string> {
+    const sandbox = sandboxFor(this.env, storedSessionTier(record), record.sandboxId);
+    const persistedProcessId = record.opencodeServerProcessId;
+    const existing = persistedProcessId ? await sandbox.getProcess(persistedProcessId) : null;
+    const existingStatus = existing ? await existing.status() : null;
+    if (persistedProcessId && existing && existingStatus?.state === "running" &&
+        record.opencodeServerVersion === OPENCODE_SERVER_VERSION) return persistedProcessId;
+    if (existing && existingStatus?.state === "running" && !(await stopProcess(existing))) {
+      await sandbox.destroy().catch(() => undefined);
+      this.markTerminalUnavailable(
+        record.id,
+        record.sandboxId,
+        record.terminalId,
+        "OpenCode server failed to stop. Restart the session to continue.",
+        storedSessionGeneration(record),
+      );
+      throw new Error("OpenCode server failed to stop. Restart the session to continue.");
+    }
+    const process = await sandbox.exec([
+      "opencode", "serve",
+      "--hostname", "0.0.0.0",
+      "--port", String(OPENCODE_SERVER_PORT),
+      "--mdns", "false",
+    ], {
+      cwd: `/workspace/${record.repositories[0]}`,
+      env: opencodeEnvironment(this.env, customization),
+    });
+    try {
+      await process.waitForPort(OPENCODE_SERVER_PORT, {
+        mode: "http", path: "/global/health", status: { min: 200, max: 399 }, timeout: 30_000,
+      });
+    } catch (error) {
+      if (!(await stopProcess(process))) {
+        await sandbox.destroy().catch(() => undefined);
+        this.markTerminalUnavailable(
+          record.id,
+          record.sandboxId,
+          record.terminalId,
+          "OpenCode server failed to stop. Restart the session to continue.",
+          storedSessionGeneration(record),
+        );
+      }
+      throw error;
+    }
+    const current = this.#get(record.id);
+    if (!current || current.status !== "running" || current.sandboxId !== record.sandboxId ||
+        storedSessionGeneration(current) !== storedSessionGeneration(record)) {
+      await stopProcess(process);
+      throw new Error("Coding session is not running.");
+    }
+    this.#put({ ...current, opencodeServerProcessId: process.id, opencodeServerVersion: OPENCODE_SERVER_VERSION });
+    return process.id;
+  }
+
   /** Writes one validated file into this running session's private upload directory. */
   async uploadFile(
     owner: CodingSessionOwner,
@@ -1767,6 +1937,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       terminalId: undefined,
       shellTerminalId: undefined,
       editorProcessId: undefined,
+      opencodeServerProcessId: undefined,
+      opencodeServerVersion: undefined,
       error: reason,
       lastActiveAt: new Date(),
     });
@@ -1986,6 +2158,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         terminalId: undefined,
         shellTerminalId: undefined,
         editorProcessId: undefined,
+        opencodeServerProcessId: undefined,
+        opencodeServerVersion: undefined,
         capacityLease: undefined,
         lastActiveAt: new Date(),
       };
@@ -2225,6 +2399,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         await bestEffortDestroy(sandbox);
         return;
       }
+      const changeSummary = summarizeProductFeedbackDiff(diff);
       this.ctx.storage.kv.put(diffKey, diff);
       await bestEffortDestroy(sandbox);
       const publisherSandboxId = current.publisherSandboxId ?? `feedback-publish-${job.id}`;
@@ -2260,7 +2435,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         await bestEffortDestroy(publisher);
         return;
       }
-      current = { ...current, publisherSandboxId, stage: "push", updatedAt: new Date() };
+      current = { ...current, changeSummary, publisherSandboxId, stage: "push", updatedAt: new Date() };
       this.ctx.storage.kv.put(`feedback:${job.id}`, current);
     }
     if (current.stage === "push") {
@@ -2275,7 +2450,12 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     }
     const pr = current.prUrl && current.prNumber
       ? { url: current.prUrl, number: current.prNumber }
-      : await createDraftPullRequest(this.env, evidence, branch);
+      : await createDraftPullRequest(
+        this.env,
+        evidence,
+        branch,
+        current.changeSummary ?? "Applies a small automated source fix.",
+      );
     current = { ...current, state: "pr-created", prUrl: pr.url, prNumber: pr.number, stage: "slack", updatedAt: new Date() };
     this.ctx.storage.kv.put(`feedback:${job.id}`, current);
     try {
@@ -2295,10 +2475,16 @@ export class CodingSessionRegistry extends DurableObject<Env> {
         event: "product.feedback.slack.failed", sessionId: job.id, error,
       });
       await bestEffortDestroy(sandbox);
+      await bestEffortDestroyFeedbackSandbox(this.env,
+        current.publisherSandboxId ?? `feedback-publish-${job.id}`);
       return;
     }
-    this.ctx.storage.kv.put(`feedback:${job.id}`, { ...current, stage: "done", updatedAt: new Date() });
+    this.ctx.storage.kv.put(`feedback:${job.id}`, {
+      ...current, stage: "done", message: undefined, slackAttempts: undefined, updatedAt: new Date(),
+    });
     await bestEffortDestroy(sandbox);
+    await bestEffortDestroyFeedbackSandbox(this.env,
+      current.publisherSandboxId ?? `feedback-publish-${job.id}`);
   }
 
   async #releaseCapacity(lease: CapacityReservationKey): Promise<void> {
@@ -2347,7 +2533,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       const failed = {
         ...current, status: current.capacityLease ? "stopping" as const : "failed" as const,
         terminalId: undefined, shellTerminalId: undefined,
-        editorProcessId: undefined, error, lastActiveAt: new Date(),
+        editorProcessId: undefined, opencodeServerProcessId: undefined, opencodeServerVersion: undefined,
+        error, lastActiveAt: new Date(),
       };
       this.#put(failed);
       this.#setDevelopmentLifecycle(failed, "failed", "Development component startup failed.");
@@ -2362,6 +2549,8 @@ export class CodingSessionRegistry extends DurableObject<Env> {
       terminalId: undefined,
       shellTerminalId: undefined,
       editorProcessId: undefined,
+      opencodeServerProcessId: undefined,
+      opencodeServerVersion: undefined,
       capacityLease: undefined,
       error,
       lastActiveAt: new Date(),
@@ -2478,6 +2667,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
     return registryFor(this.ctx, owner.userId).mintEditorCapability(owner, sessionId);
   }
 
+  /** Mints a same-origin OpenCode server capability for the supplied authenticated owner. */
+  mintOpenCodeCapability(
+    owner: CodingSessionOwner,
+    sessionId: string,
+  ): Promise<CodingSessionOpenCodeCapability> {
+    return registryFor(this.ctx, owner.userId).mintOpenCodeCapability(owner, sessionId);
+  }
+
   /** Rejects application preview minting until the preview gateway is available. */
   mintApplicationCapability(
     owner: CodingSessionOwner,
@@ -2521,6 +2718,8 @@ async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Pr
   const applicationPreview = await handleApplicationPreviewIngress(request, env);
   if (applicationPreview) return applicationPreview;
   const url = new URL(request.url);
+  const openCodeMatch = /^\/gatekeeper\/sessions\/opencode\/([^/]+)(\/.*)$/.exec(url.pathname);
+  if (openCodeMatch) return handleOpenCodeHttp(request, env, ctx, openCodeMatch[1]!, openCodeMatch[2]!);
   const editorMatch = /^\/c\/([A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43})(\/.*)$/.exec(url.pathname);
   if (editorMatch) return handleEditorHttp(request, env, ctx, editorMatch[1]!, editorMatch[2]!);
   const match = /^\/gatekeeper\/sessions\/attach\/([^/]+)$/.exec(url.pathname);
@@ -2563,20 +2762,6 @@ async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Pr
       });
       return new Response("Terminal is no longer available", { status: 410 });
     }
-    const snapshot = await terminal.getSnapshot();
-    if (snapshot.status !== "running") {
-      if (ticket.terminalKind === "opencode") {
-        await registryFor(ctx, ticket.userId).markTerminalUnavailable(ticket.sessionId, ticket.sandboxId, ticket.terminalId, "Coding session terminal exited. Restart the session to continue.", ticket.generation ?? 0);
-      }
-      logger.warn("coding session terminal attach failed", {
-        event: "coding.session.terminal.attach.failed",
-        sessionId: ticket.sessionId,
-        terminalKind: ticket.terminalKind,
-        status: 410,
-        reason: `terminal_${snapshot.status}`,
-      });
-      return new Response("Terminal is no longer available", { status: 410 });
-    }
     logger.debug("coding session terminal attaching", {
       event: "coding.session.terminal.attach",
       sessionId: ticket.sessionId,
@@ -2591,6 +2776,78 @@ async function handleHttp(request: Request, env: Env, ctx: ExecutionContext): Pr
       error,
     });
     return new Response("Terminal connection failed", { status: 502 });
+  }
+}
+
+async function handleOpenCodeHttp(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  token: string,
+  path: string,
+): Promise<Response> {
+  const requestUrl = new URL(request.url);
+  const expectedOrigin = env.SESSION_ALLOWED_ORIGIN ?? (env.BASE_URL ? new URL(env.BASE_URL).origin : requestUrl.origin);
+  if (requestUrl.origin !== expectedOrigin) return new Response("OpenCode capability is not accepted on this origin", { status: 403 });
+  const requestOrigin = request.headers.get("Origin");
+  if (requestOrigin && requestOrigin !== expectedOrigin) return new Response("Origin is not allowed", { status: 403 });
+  const tokenTicket = await validOpenCodeCapabilityToken(env, token);
+  if (!tokenTicket) return new Response("OpenCode capability is invalid or expired", { status: 403 });
+  const route = allowedOpenCodeRoute(request.method, path, requestUrl.searchParams);
+  if (!route.ok) return new Response(route.message, { status: route.status });
+  let body: Uint8Array | null = null;
+  if (request.method === "POST") {
+    const contentLength = request.headers.get("Content-Length");
+    if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > OPENCODE_SERVER_MAX_POST_BYTES)) {
+      return new Response("Request body is too large", { status: 413 });
+    }
+    body = await readBoundedBody(request.body, OPENCODE_SERVER_MAX_POST_BYTES);
+    if (!body) return new Response("Request body is too large", { status: 413 });
+  }
+  const ticket = await (await openCodeTicketFor(env, token)).getOpenCodeTicket(Date.now());
+  if (!ticket || ticket.userId !== tokenTicket.userId || ticket.sessionId !== tokenTicket.sessionId ||
+      ticket.sandboxId !== tokenTicket.sandboxId || (ticket.generation ?? 0) !== tokenTicket.generation ||
+      storedTicketTier(ticket) !== tokenTicket.instanceTier) {
+    return new Response("OpenCode capability is invalid or expired", { status: 403 });
+  }
+  if (!(await registryFor(ctx, ticket.userId).isCurrentSessionGeneration(
+    ticket.sessionId, ticket.sandboxId, ticket.generation ?? 0))) {
+    return new Response("OpenCode session is no longer available", { status: 410 });
+  }
+
+  const target = new URL(`http://127.0.0.1:${OPENCODE_SERVER_PORT}${path}`);
+  if (route.preserveQuery) target.search = requestUrl.search;
+  const headers = openCodeProxyHeaders(request.headers);
+  if (body) headers.set("Content-Length", String(body.byteLength));
+  const proxyRequest = new Request(target, {
+    method: request.method,
+    headers,
+    body,
+    redirect: "manual",
+  });
+  try {
+    const response = await sandboxFor(env, storedTicketTier(ticket), ticket.sandboxId)
+      .containerFetch(proxyRequest, OPENCODE_SERVER_PORT);
+    if (response.headers.has("Location") || response.status >= 300 && response.status < 400) {
+      return new Response("OpenCode redirect rejected", { status: 502, headers: secureProxyResponseHeaders() });
+    }
+    const responseHeaders = secureProxyResponseHeaders();
+    responseHeaders.set("Content-Type", path === "/event" ? "text/event-stream" : "application/json; charset=utf-8");
+    responseHeaders.set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; sandbox");
+    responseHeaders.set("Cross-Origin-Resource-Policy", "same-origin");
+    responseHeaders.set("X-Frame-Options", "DENY");
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+  } catch (error) {
+    logger.error("OpenCode server proxy failed", {
+      event: "coding.session.opencode.proxy.failed",
+      sessionId: ticket.sessionId,
+      error,
+    });
+    return new Response("OpenCode server is unavailable", { status: 502 });
   }
 }
 
@@ -2699,6 +2956,11 @@ async function editorTicketFor(env: Env, token: string): Promise<DurableObjectSt
   return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`editor-ticket:${digest}`));
 }
 
+async function openCodeTicketFor(env: Env, token: string): Promise<DurableObjectStub<CodingSessionPolicy>> {
+  const digest = await sha256Hex(new TextEncoder().encode(token));
+  return env.SESSION_POLICIES.get(env.SESSION_POLICIES.idFromName(`opencode-ticket:${digest}`));
+}
+
 function isHeavyTier(tier: CodingSessionInstanceTier): tier is HeavySessionTier {
   return (HEAVY_SESSION_TIERS as readonly CodingSessionInstanceTier[]).includes(tier);
 }
@@ -2730,7 +2992,7 @@ function storedPolicyTier(policy: SessionPolicy): CodingSessionInstanceTier {
   return policy.instanceTier ?? "standard-1";
 }
 
-function storedTicketTier(ticket: AttachTicket | EditorTicket): CodingSessionInstanceTier {
+function storedTicketTier(ticket: AttachTicket | EditorTicket | OpenCodeTicket): CodingSessionInstanceTier {
   return ticket.instanceTier ?? "standard-1";
 }
 
@@ -2748,6 +3010,8 @@ function publicSummary(record: SessionRecord): CodingSessionSummary {
     terminalId: _terminalId,
     shellTerminalId: _shellTerminalId,
     editorProcessId: _editorProcessId,
+    opencodeServerProcessId: _opencodeServerProcessId,
+    opencodeServerVersion: _opencodeServerVersion,
     primeAgent: _primeAgent,
     generation: _generation,
     instanceTier: _instanceTier,
@@ -2766,6 +3030,7 @@ function publicFeedbackStatus(job: ProductFeedbackJob): ProductFeedbackStatus {
     sandboxId: _sandboxId,
     stage: _stage,
     slackAttempts: _slackAttempts,
+    changeSummary: _changeSummary,
     ...status
   } = job;
   return status;
@@ -2800,6 +3065,7 @@ async function notifyFeedbackSlack(env: Env, job: ProductFeedbackJob): Promise<v
   await env.PRODUCT_FEEDBACK_NOTIFIER.notifyProductFeedbackPr({
     jobId: job.id,
     prUrl: job.prUrl,
+    changeSummary: job.changeSummary ?? "Applies a small automated source fix.",
     idempotencyKey: `product-feedback:${job.id}:pr:${job.prNumber ?? "unknown"}`,
   });
 }
@@ -2892,35 +3158,36 @@ function opencodeEnvironment(
   includeWorkshopMcp = true,
 ): Record<string, string> {
   const baseUrl = env.TEAM_PI_CODEX_BASE_URL;
-  if (!baseUrl) return {};
+  const provider = baseUrl ? {
+    enabled_providers: ["openai"],
+    provider: {
+      openai: {
+        name: "Team PI Codex",
+        options: {
+          baseURL: new URL("codex", ensureTrailingSlash(baseUrl)).toString(),
+          apiKey: "synthetic",
+        },
+        models: {
+          "gpt-5.6-sol": {
+            name: "GPT 5.6 Sol",
+            reasoning: true,
+            temperature: false,
+            tool_call: true,
+            limit: { context: 1_050_000, output: 128_000 },
+          },
+        },
+      },
+    },
+  } : {};
   return {
     OPENCODE_DISABLE_AUTOUPDATE: "true",
     OPENCODE_DISABLE_DEFAULT_PLUGINS: "true",
     OPENCODE_CONFIG_DIR,
     OPENCODE_CONFIG_CONTENT: JSON.stringify({
       $schema: "https://opencode.ai/config.json",
-      model: "openai/gpt-5.6-sol",
-      small_model: "openai/gpt-5.6-sol",
       share: "disabled",
-      enabled_providers: ["openai"],
-      provider: {
-        openai: {
-          name: "Team PI Codex",
-          options: {
-            baseURL: new URL("codex", ensureTrailingSlash(baseUrl)).toString(),
-            apiKey: "synthetic",
-          },
-          models: {
-            "gpt-5.6-sol": {
-              name: "GPT 5.6 Sol",
-              reasoning: true,
-              temperature: false,
-              tool_call: true,
-              limit: { context: 1_050_000, output: 128_000 },
-            },
-          },
-        },
-      },
+      ...(baseUrl ? { model: "openai/gpt-5.6-sol", small_model: "openai/gpt-5.6-sol" } : {}),
+      ...provider,
       mcp: includeWorkshopMcp ? {
         workshop: {
           type: "remote",
@@ -2971,11 +3238,20 @@ async function materializeRuntime(
 async function materializeOpenCodeCustomization(
   sandbox: {
     mkdir(path: string, options?: { recursive?: boolean }): Promise<unknown>;
+    exec(command: string[], options?: { timeout?: number; cwd?: string; env?: Record<string, string> }): Promise<StartupProcess>;
     writeFile(path: string, content: string): Promise<unknown>;
   },
   customization: OpenCodeUserCustomization,
 ): Promise<void> {
+  await sandbox.mkdir(`${OPENCODE_CONFIG_DIR}/command`, { recursive: true });
   await sandbox.mkdir(`${OPENCODE_CONFIG_DIR}/skills`, { recursive: true });
+  await waitForOk(await sandbox.exec([
+    "sh", "-lc",
+    `if [ -d /opt/odie-valhalla/opencode ]; then ` +
+      `cp -R /opt/odie-valhalla/opencode/command/. ${OPENCODE_CONFIG_DIR}/command/ && ` +
+      `cp -R /opt/odie-valhalla/opencode/skills/. ${OPENCODE_CONFIG_DIR}/skills/; ` +
+      `fi`,
+  ], { timeout: 30_000 }), 35_000);
   for (const skill of customization.skills) {
     const skillDir = `${OPENCODE_CONFIG_DIR}/skills/${skill.name}`;
     await sandbox.mkdir(skillDir, { recursive: true });
@@ -3042,8 +3318,140 @@ function requiredEditorBaseUrl(value: string | undefined): string {
   return configured.origin;
 }
 
+type OpenCodeTokenTicket = {
+  userId: string;
+  sessionId: string;
+  sandboxId: string;
+  generation: number;
+  instanceTier: CodingSessionInstanceTier;
+  expiresAt: number;
+};
+
+function allowedOpenCodeRoute(
+  method: string,
+  path: string,
+  searchParams: URLSearchParams,
+): { ok: true; preserveQuery: boolean } | { ok: false; status: number; message: string } {
+  if (path.includes("..") || /%2f|%5c/i.test(path)) return { ok: false, status: 404, message: "OpenCode route is not allowed" };
+  const getExact = new Set([
+    "/global/health", "/project/current", "/session", "/session/status", "/file/status", "/mcp", "/agent", "/command", "/event",
+  ]);
+  const getParameterized = /^\/session\/[A-Za-z0-9._:-]{1,128}(?:\/(?:message|diff|todo))?$/.test(path);
+  const postAllowed = path === "/session" || /^\/session\/[A-Za-z0-9._:-]{1,128}\/(?:prompt_async|abort)$/.test(path);
+  if (method === "GET") {
+    if (!getExact.has(path) && !getParameterized) return { ok: false, status: 404, message: "OpenCode route is not allowed" };
+    const preserveQuery = path === "/event";
+    if (!preserveQuery && [...searchParams].length) {
+      return { ok: false, status: 400, message: "OpenCode route does not accept query parameters" };
+    }
+    return { ok: true, preserveQuery };
+  }
+  if (method === "POST" && postAllowed) {
+    if ([...searchParams].length) return { ok: false, status: 400, message: "OpenCode route does not accept query parameters" };
+    return { ok: true, preserveQuery: false };
+  }
+  return { ok: false, status: method === "GET" || method === "POST" ? 404 : 405, message: "OpenCode route is not allowed" };
+}
+
+function openCodeProxyHeaders(source: Headers): Headers {
+  const headers = new Headers();
+  for (const name of ["Accept", "Content-Type", "Last-Event-ID"]) {
+    const value = source.get(name);
+    if (value) headers.set(name, value);
+  }
+  headers.set("Host", `127.0.0.1:${OPENCODE_SERVER_PORT}`);
+  return headers;
+}
+
+async function readBoundedBody(
+  body: ReadableStream<Uint8Array> | null,
+  limit: number,
+): Promise<Uint8Array | null> {
+  if (!body) return new Uint8Array();
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > limit) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function secureProxyResponseHeaders(): Headers {
+  return new Headers({
+    "Cache-Control": "private, no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  });
+}
+
 function ensureTrailingSlash(value: string): string {
   return value.endsWith("/") ? value : `${value}/`;
+}
+
+async function openCodeCapabilityToken(env: Env, ticket: OpenCodeTokenTicket): Promise<string> {
+  const payload = bytesToBase64Url(new TextEncoder().encode(JSON.stringify({ ...ticket, nonce: randomToken() })));
+  const signature = await hmacBase64Url(
+    required(env.EDITOR_CAPABILITY_HMAC_SECRET, "EDITOR_CAPABILITY_HMAC_SECRET"),
+    `odie-opencode-server-v1:${payload}`,
+  );
+  return `${payload}.${signature}`;
+}
+
+async function validOpenCodeCapabilityToken(env: Env, token: string): Promise<OpenCodeTokenTicket | null> {
+  const [payload, signature, extra] = token.split(".");
+  if (extra !== undefined || !payload || !signature) return null;
+  let expected: string;
+  try {
+    expected = await hmacBase64Url(
+      required(env.EDITOR_CAPABILITY_HMAC_SECRET, "EDITOR_CAPABILITY_HMAC_SECRET"),
+      `odie-opencode-server-v1:${payload}`,
+    );
+  } catch {
+    return null;
+  }
+  if (!constantTimeEqual(signature, expected)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(base64UrlToBytes(payload)));
+  } catch {
+    return null;
+  }
+  if (!isOpenCodeTokenTicket(parsed) || parsed.expiresAt < Date.now()) return null;
+  return parsed;
+}
+
+function isOpenCodeTokenTicket(value: unknown): value is OpenCodeTokenTicket {
+  if (!value || typeof value !== "object") return false;
+  const ticket = value as Partial<Record<keyof OpenCodeTokenTicket, unknown>>;
+  return typeof ticket.userId === "string" && typeof ticket.sessionId === "string" &&
+    typeof ticket.sandboxId === "string" && typeof ticket.generation === "number" &&
+    typeof ticket.expiresAt === "number" &&
+    (ticket.instanceTier === "standard-1" || DEVELOPMENT_CATALOG.enabledTiers.includes(ticket.instanceTier as CodingSessionInstanceTier));
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < right.length; index++) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  return difference === 0;
 }
 
 async function editorCapabilityToken(env: Env): Promise<string> {
@@ -3067,12 +3475,7 @@ async function validEditorCapabilityToken(env: Env, token: string): Promise<bool
   } catch {
     return false;
   }
-  if (signature.length !== expected.length) return false;
-  let difference = 0;
-  for (let index = 0; index < expected.length; index++) {
-    difference |= signature.charCodeAt(index) ^ expected.charCodeAt(index);
-  }
-  return difference === 0;
+  return constantTimeEqual(signature, expected);
 }
 
 function randomToken(): string {
@@ -3132,6 +3535,14 @@ function bytesToBase64Url(value: Uint8Array): string {
   let binary = "";
   for (const byte of value) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  const padded = `${value.replaceAll("-", "+").replaceAll("_", "/")}${"=".repeat((4 - value.length % 4) % 4)}`;
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
 function bytesToStream(value: Uint8Array): ReadableStream<Uint8Array> {

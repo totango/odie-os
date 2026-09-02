@@ -7,7 +7,26 @@ image:
    Linux capabilities, then requires the container server startup event and a local TCP response.
 2. It runs the host-controlled `smoke-image.sh` read-only with no network, bounded CPU, memory, PIDs,
    and time. This verifies the complete pinned tool contract, both offline pnpm versions, login-shell
-   resolution, the Prime kernel, and the offline browser editor.
+   resolution, the Prime kernel, the offline browser editor, and the local real-binary smoke matrix.
+
+The real-binary matrix creates disposable files under the smoke temp directory and starts a loopback-only
+fake model/MCP endpoint inside the network-none container. It does not talk to the public internet. The
+current deterministic coverage is:
+
+- **OpenCode**: runs the shipped `opencode run` binary against a local OpenAI-compatible fake provider,
+  observes the real tool catalog the CLI sends to the model, drives a read tool call, an edit/write tool
+  call, and a shell/command tool call, verifies the fixture file changed from `alpha` to `beta`, verifies
+  the command marker, and requires the OpenCode MCP client to call `tools/list` on the fake Workshop MCP
+  endpoint.
+- **Pi**: runs the shipped `pi` binary help path, verifies the Odie Pi runtime extension can be loaded by
+  the same Jiti loader baked into the image, verifies the `pi-mcp-adapter` import path, and runs a direct
+  MCP lifecycle probe against the fake Workshop endpoint. The probe does not exercise Pi's MCP client.
+  The smoke intentionally does not claim a prompt-driven Pi tool loop until the installed CLI exposes a
+  stable non-interactive entrypoint that can be driven without TUI timing assumptions.
+- **Prime Agent**: runs the shipped `prime-agent` binary version check and the shipped Prime kernel's
+  IPython entrypoint. The kernel-environment smoke imports `rlm.mcp`, reads and edits a fixture file,
+  runs a local shell assertion/marker command, and makes a direct HTTP `tools/list` request to the fake
+  Workshop MCP endpoint. This does not exercise Prime Agent's own tool bridge or a prompt-driven loop.
 
 The local boot check does not exercise the Worker/DO path in `@cloudflare/sandbox`. That SDK obtains
 process, interpreter, and terminal handles through a deployed Cloudflare Container binding; it has no

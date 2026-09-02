@@ -9,6 +9,7 @@ import type {
   CodingSessionEditorCapability,
   CodingSessionFileUploadRequest,
   CodingSessionFileUploadResult,
+  CodingSessionOpenCodeCapability,
   CodingSessionRepository,
   CodingSessionSummary,
   CodingSessionTerminalKind,
@@ -243,6 +244,9 @@ export interface CodingSessionsService extends WorkerEntrypoint {
 
   /** Mints a generation-bound browser VS Code capability after verifying ownership. */
   mintEditorCapability(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionEditorCapability>;
+
+  /** Mints a generation-bound same-origin OpenCode server capability after verifying ownership. */
+  mintOpenCodeCapability(owner: CodingSessionOwner, sessionId: string): Promise<CodingSessionOpenCodeCapability>;
 
   /** Mints a generation-bound capability for one reviewed application after verifying ownership. */
   mintApplicationCapability(

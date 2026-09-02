@@ -202,6 +202,14 @@ export type AccountDescription = {
      */
     adminOnly?: boolean;
   };
+
+  /**
+   * Concrete resource URLs the Workshop may expose to coding sessions as separate MCP tool
+   * bindings for this account. Each URL is still passed through GatekeeperUser.getGatekeeperClassFor()
+   * before use, so this discovery metadata only nominates already-authorized resources and never
+   * grants authority by itself.
+   */
+  codingSessionResourceUrls?: string[];
 }
 
 /** Describes metadata about a specific instance of a resource. Returned by Gatekeeper.describe(). */
