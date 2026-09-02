@@ -15,7 +15,7 @@ fn capabilities_are_default_deny_for_main_window_only() {
     assert!(!capabilities.to_ascii_lowercase().contains("stronghold"));
     assert!(!capabilities.to_ascii_lowercase().contains("keyring"));
     assert!(!capabilities.contains("camera"));
-    assert!(!capabilities.contains("notification"));
+    assert!(capabilities.contains("notification:default"));
 }
 
 #[test]
@@ -32,9 +32,23 @@ fn platform_manifests_do_not_request_camera_or_notifications() {
 #[test]
 fn verified_link_domain_is_declared() {
     assert!(read("Entitlements.plist").contains("applinks:odie-os-native-api.odie-os.workers.dev"));
+    assert!(
+        read("gen/apple/odie-os-native_iOS/odie-os-native_iOS.entitlements")
+            .contains("applinks:odie-os-native-api.odie-os.workers.dev")
+    );
     let android = read("gen/android/app/src/main/AndroidManifest.xml");
     assert!(android.contains("android:scheme=\"https\""));
     assert!(android.contains("android:host=\"odie-os-native-api.odie-os.workers.dev\""));
+}
+
+#[test]
+fn app_store_export_uses_the_distribution_profile() {
+    let options = read("ExportOptions.app-store.plist");
+    assert!(options.contains("<string>app-store-connect</string>"));
+    assert!(options.contains("<string>manual</string>"));
+    assert!(options.contains("<string>66J7DJB93K</string>"));
+    assert!(options.contains("<key>com.totango.odieos</key>"));
+    assert!(options.contains("<string>Odie OS App Store</string>"));
 }
 
 #[test]

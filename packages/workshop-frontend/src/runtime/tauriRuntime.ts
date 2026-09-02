@@ -1,10 +1,15 @@
-import { envUrl, ODIE_NATIVE_API_ORIGIN, ODIE_PRODUCTION_ORIGIN, originUrl, type DeepLinkEvent, type PendingNativeLoginFlow, type SaveFileOptions, type Unsubscribe, type WorkshopRuntime } from './WorkshopRuntime'
+import { envUrl, ODIE_NATIVE_API_ORIGIN, ODIE_PRODUCTION_ORIGIN, originUrl, shouldSendSystemNotification, type DeepLinkEvent, type PendingNativeLoginFlow, type SaveFileOptions, type SystemNotificationOptions, type Unsubscribe, type WorkshopRuntime } from './WorkshopRuntime'
 
 const SESSION_SECRET_KEY = 'workshop.sessionToken'
 const PENDING_NATIVE_LOGIN_FLOW_KEY = 'workshop.pendingNativeLoginFlow'
 
 type TauriCore = { invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> }
 type TauriDeepLink = { getCurrent(): Promise<string[] | null>; onOpenUrl(callback: (urls: string[]) => void): Promise<Unsubscribe> }
+type TauriNotification = {
+  isPermissionGranted(): Promise<boolean>
+  requestPermission(): Promise<'granted' | 'denied' | 'default'>
+  sendNotification(options: SystemNotificationOptions): void
+}
 
 declare global {
   interface Window { __TAURI_INTERNALS__?: unknown }
@@ -20,6 +25,10 @@ async function importTauriCore(): Promise<TauriCore> {
 
 async function importTauriDeepLink(): Promise<TauriDeepLink> {
   return await import(/* @vite-ignore */ '@tauri-apps/plugin-deep-link') as TauriDeepLink
+}
+
+async function importTauriNotification(): Promise<TauriNotification> {
+  return await import(/* @vite-ignore */ '@tauri-apps/plugin-notification') as TauriNotification
 }
 
 function productionOrigin(): URL {
@@ -45,6 +54,19 @@ export function createTauriRuntime(): WorkshopRuntime {
   const apiOrigin = productionOrigin()
   const publicWebOrigin = envUrl('VITE_ODIE_PUBLIC_WEB_ORIGIN') ?? new URL(ODIE_PRODUCTION_ORIGIN)
   const appLinkOrigin = envUrl('VITE_ODIE_APP_LINK_ORIGIN') ?? new URL(ODIE_NATIVE_API_ORIGIN)
+  let deniedThisRuntime = false
+  async function ensureNotificationPermission() {
+    try {
+      const notification = await importTauriNotification()
+      if (await notification.isPermissionGranted()) return true
+      if (deniedThisRuntime) return false
+      const permission = await notification.requestPermission()
+      if (permission === 'denied') deniedThisRuntime = true
+      return permission === 'granted'
+    } catch {
+      return false
+    }
+  }
   return {
     kind: 'tauri',
     apiOrigin: originUrl(apiOrigin),
@@ -95,6 +117,17 @@ export function createTauriRuntime(): WorkshopRuntime {
     async saveText(filename: string, content: string) {
       const core = await importTauriCore()
       await core.invoke('save_text_file', { filename, content })
+    },
+    async requestNotificationPermission() {
+      return await ensureNotificationPermission()
+    },
+    async sendNotification(options: SystemNotificationOptions) {
+      try {
+        if (!shouldSendSystemNotification()) return
+        const notification = await importTauriNotification()
+        if (!(await ensureNotificationPermission())) return
+        notification.sendNotification(options)
+      } catch {}
     },
     async lock() {
       const core = await importTauriCore()

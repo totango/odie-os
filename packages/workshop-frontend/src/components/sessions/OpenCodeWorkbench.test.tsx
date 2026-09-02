@@ -8,6 +8,15 @@ import { OpenCodeWorkbenchInner } from './OpenCodeWorkbench'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
+const runtime = vi.hoisted(() => ({
+  requestNotificationPermission: vi.fn<() => Promise<boolean>>(async () => true),
+  sendNotification: vi.fn<(options: { title: string; body: string }) => Promise<void>>(async () => {}),
+}))
+
+vi.mock('../../runtime', () => ({
+  getWorkshopRuntime: () => runtime,
+}))
+
 type FetchCall = { url: string; init?: RequestInit; body?: unknown }
 
 const fetchCalls: FetchCall[] = []
@@ -58,6 +67,8 @@ describe('OpenCodeWorkbench', () => {
     mint = vi.fn<(sessionId: string) => Promise<{ url: string; expiresAt: Date }>>(async () => ({ url: `${window.location.origin}/gatekeeper/sessions/opencode/token/`, expiresAt: new Date(Date.now() + 60_000) }))
     onInitialInputSent = vi.fn<() => void>()
     onSessionUnavailable = vi.fn<() => void>()
+    runtime.requestNotificationPermission.mockClear()
+    runtime.sendNotification.mockClear()
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const handler = handlers[0] ?? (() => json({ error: 'missing handler' }, 500))
       return Promise.resolve(handler(new URL(String(input), window.location.href), init))
@@ -90,6 +101,14 @@ describe('OpenCodeWorkbench', () => {
     })
     await act(async () => {})
     return container
+  }
+
+  async function typePrompt(textarea: HTMLTextAreaElement, value: string) {
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      setter?.call(textarea, value)
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    })
   }
 
   it('mints a same-origin capability, selects the most recently updated session, and loads context', async () => {
@@ -170,11 +189,7 @@ describe('OpenCodeWorkbench', () => {
     await act(async () => {})
 
     const textarea = container.querySelector('textarea')!
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-      setter?.call(textarea, 'Implement tests')
-      textarea.dispatchEvent(new Event('input', { bubbles: true }))
-    })
+    await typePrompt(textarea, 'Implement tests')
     const send = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Send'))!
     await act(async () => send.click())
     const abort = container.querySelector<HTMLButtonElement>('[aria-label="Abort OpenCode session"]')!
@@ -182,6 +197,242 @@ describe('OpenCodeWorkbench', () => {
 
     expect(fetchCalls).toContainEqual(expect.objectContaining({ url: '/gatekeeper/sessions/opencode/token/session/newer/prompt_async', body: { parts: [{ type: 'text', text: 'Implement tests' }] } }))
     expect(fetchCalls).toContainEqual(expect.objectContaining({ url: '/gatekeeper/sessions/opencode/token/session/newer/abort' }))
+  })
+
+  it('notifies once when a mounted composer turn completes quickly after submit', async () => {
+    handlers = []
+    let submitted = false
+    queue((url, init) => {
+      fetchCalls.push({ url: url.pathname, init, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      if (url.pathname.endsWith('/session')) return json([{ id: 'newer', title: 'Newer', updatedAt: '2026-09-01T00:00:00Z' }])
+      if (url.pathname.endsWith('/session/status')) return json({ newer: { type: 'idle' } })
+      if (url.pathname.endsWith('/prompt_async')) { submitted = true; return noContent() }
+      if (url.pathname.endsWith('/message')) return json(submitted
+        ? [{ info: { id: 'm1', role: 'assistant' }, parts: [{ type: 'text', text: 'Secret model output that must not be notified' }] }]
+        : [])
+      return json([])
+    })
+    await act(async () => {
+      root.render(<OpenCodeWorkbenchInner authenticatedApi={{ mintCodingSessionOpenCodeCapability: mint }} sessionId="odie-session" sessionTitle="Repair Jarvis" />)
+    })
+    await act(async () => {})
+
+    const textarea = container.querySelector('textarea')!
+    await typePrompt(textarea, 'Prompt body that must not be notified')
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    await act(async () => {})
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+
+    expect(runtime.requestNotificationPermission).toHaveBeenCalledOnce()
+    expect(runtime.sendNotification).toHaveBeenCalledOnce()
+    expect(runtime.sendNotification).toHaveBeenCalledWith({ title: 'Agent turn complete', body: 'Repair Jarvis' })
+    expect(runtime.sendNotification.mock.calls[0][0].body).not.toContain('Secret model output')
+    expect(runtime.sendNotification.mock.calls[0][0].body).not.toContain('Prompt body')
+  })
+
+  it('does not notify from initial hydration or unrelated child transcript switches', async () => {
+    await render()
+    expect(runtime.sendNotification).not.toHaveBeenCalled()
+
+    const transcriptPicker = container.querySelector<HTMLSelectElement>('[aria-label="OpenCode transcript"]')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set
+      setter?.call(transcriptPicker, 'older')
+      transcriptPicker.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => {})
+
+    expect(runtime.sendNotification).not.toHaveBeenCalled()
+  })
+
+  it('notifies once when a submitted running turn later becomes idle', async () => {
+    handlers = []
+    let submitted = false
+    let running = false
+    queue((url, init) => {
+      fetchCalls.push({ url: url.pathname, init, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      if (url.pathname.endsWith('/session')) return json([{ id: 'newer', title: 'Newer', updatedAt: '2026-09-01T00:00:00Z' }])
+      if (url.pathname.endsWith('/session/status')) return json({ newer: { type: running ? 'busy' : 'idle' } })
+      if (url.pathname.endsWith('/prompt_async')) { submitted = true; running = true; return noContent() }
+      if (url.pathname.endsWith('/message')) return json(submitted ? [{ info: { id: 'm1', role: 'user' }, parts: [{ type: 'text', text: 'Prompt' }] }] : [])
+      return json([])
+    })
+    await act(async () => {
+      root.render(<OpenCodeWorkbenchInner authenticatedApi={{ mintCodingSessionOpenCodeCapability: mint }} sessionId="odie-session" sessionTitle="Repair Jarvis" />)
+    })
+    await act(async () => {})
+    const textarea = container.querySelector('textarea')!
+    await typePrompt(textarea, 'Run tests')
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    await act(async () => {})
+    expect(runtime.sendNotification).not.toHaveBeenCalled()
+
+    running = false
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(4_000) })
+
+    expect(runtime.sendNotification).toHaveBeenCalledOnce()
+  })
+
+  it('submits with Enter but not Shift+Enter or while composing', async () => {
+    await render()
+    const textarea = container.querySelector('textarea')!
+
+    await typePrompt(textarea, 'Shift newline')
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true })))
+    expect(fetchCalls.filter((call) => call.url.endsWith('/prompt_async'))).toHaveLength(0)
+
+    await act(async () => textarea.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })))
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    await act(async () => textarea.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })))
+    expect(fetchCalls.filter((call) => call.url.endsWith('/prompt_async'))).toHaveLength(0)
+
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+
+    expect(fetchCalls).toContainEqual(expect.objectContaining({ url: '/gatekeeper/sessions/opencode/token/session/newer/prompt_async', body: { parts: [{ type: 'text', text: 'Shift newline' }] } }))
+  })
+
+  it('guards against duplicate prompt submissions before the sending render commits', async () => {
+    let resolvePrompt: ((response: Response) => void) | undefined
+    handlers = []
+    queue((url, init) => {
+      fetchCalls.push({ url: url.pathname, init, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      if (url.pathname.endsWith('/session')) return json([{ id: 'newer', title: 'Newer', updatedAt: '2026-09-01T00:00:00Z' }])
+      if (url.pathname.endsWith('/session/status')) return json({ newer: { type: 'idle' } })
+      if (url.pathname.endsWith('/prompt_async')) return new Promise<Response>((resolve) => { resolvePrompt = resolve })
+      return json([])
+    })
+    await act(async () => {
+      root.render(<OpenCodeWorkbenchInner authenticatedApi={{ mintCodingSessionOpenCodeCapability: mint }} sessionId="odie-session" sessionTitle="Repair" />)
+    })
+    await act(async () => {})
+    const textarea = container.querySelector('textarea')!
+    await typePrompt(textarea, 'Send once')
+
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    })
+
+    expect(fetchCalls.filter((call) => call.url.endsWith('/prompt_async'))).toHaveLength(1)
+    await act(async () => { resolvePrompt?.(noContent()) })
+  })
+
+  it('discovers slash commands, supports keyboard selection, and submits command payloads', async () => {
+    handlers = []
+    queue((url, init) => {
+      fetchCalls.push({ url: url.pathname, init, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      if (url.pathname.endsWith('/session')) return json([{ id: 'newer', title: 'Newer', updatedAt: '2026-09-01T00:00:00Z' }])
+      if (url.pathname.endsWith('/session/status')) return json({ newer: { type: 'idle' } })
+      if (url.pathname.endsWith('/prompt_async') || url.pathname.endsWith('/session/newer/command')) return noContent()
+      if (url.pathname.endsWith('/command')) return json({ commands: [{ name: 'review', description: 'Review code' }, { name: 'test', description: 'Run tests' }] })
+      return json([])
+    })
+    await act(async () => {
+      root.render(<OpenCodeWorkbenchInner authenticatedApi={{ mintCodingSessionOpenCodeCapability: mint }} sessionId="odie-session" sessionTitle="Repair" />)
+    })
+    await act(async () => {})
+
+    const textarea = container.querySelector('textarea')!
+    await typePrompt(textarea, '/t fix flaky tests')
+    await act(async () => {})
+
+    expect(fetchCalls.some((call) => call.url.endsWith('/command'))).toBe(true)
+    expect(container.textContent).toContain('Run tests')
+
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+    expect(textarea.value).toBe('/test fix flaky tests')
+    await act(async () => {})
+
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+
+    expect(fetchCalls).toContainEqual(expect.objectContaining({
+      url: '/gatekeeper/sessions/opencode/token/session/newer/command',
+      body: { command: 'test', arguments: 'fix flaky tests', parts: [{ type: 'text', text: '/test fix flaky tests' }] },
+    }))
+  })
+
+  it('adds image attachments and sends them as OpenCode file parts', async () => {
+    class ImmediateFileReader {
+      result: string | ArrayBuffer | null = null
+      #listeners = new Map<string, Array<() => void>>()
+      addEventListener(type: string, listener: () => void) {
+        this.#listeners.set(type, [...(this.#listeners.get(type) ?? []), listener])
+      }
+      readAsDataURL(file: File) {
+        this.result = `data:${file.type};base64,iVBORw0KGgo=`
+        for (const listener of this.#listeners.get('load') ?? []) listener()
+      }
+    }
+    vi.stubGlobal('FileReader', ImmediateFileReader)
+    await render()
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!
+    const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])], 'bug.png', { type: 'image/png' })
+
+    await act(async () => {
+      Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => {})
+
+    expect(container.textContent).toContain('bug.png')
+    const textarea = container.querySelector('textarea')!
+    await typePrompt(textarea, 'Use this screenshot')
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })))
+
+    const call = fetchCalls.find((item) => item.url.endsWith('/prompt_async'))
+    expect(call?.body).toMatchObject({
+      parts: [
+        { type: 'text', text: 'Use this screenshot' },
+        { type: 'file', mime: 'image/png', filename: 'bug.png' },
+      ],
+    })
+    const body = call?.body as { parts: Array<{ url?: string }> } | undefined
+    expect((body?.parts[1].url ?? '').startsWith('data:image/png')).toBe(true)
+    expect(container.textContent).not.toContain('bug.png')
+  })
+
+  it('rejects image data that does not match its declared file type', async () => {
+    class InvalidFileReader {
+      result: string | ArrayBuffer | null = null
+      #listeners = new Map<string, Array<() => void>>()
+      addEventListener(type: string, listener: () => void) {
+        this.#listeners.set(type, [...(this.#listeners.get(type) ?? []), listener])
+      }
+      readAsDataURL(file: File) {
+        this.result = `data:${file.type};base64,dGV4dA==`
+        for (const listener of this.#listeners.get('load') ?? []) listener()
+      }
+    }
+    vi.stubGlobal('FileReader', InvalidFileReader)
+    await render()
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!
+
+    await act(async () => {
+      Object.defineProperty(input, 'files', { configurable: true, value: [new File(['text'], 'fake.png', { type: 'image/png' })] })
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('does not contain valid PNG image data')
+    expect(container.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(true)
+  })
+
+  it('shows an aria-live working indicator while running or sending', async () => {
+    handlers = []
+    queue((url, init) => {
+      fetchCalls.push({ url: url.pathname, init, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      if (url.pathname.endsWith('/session')) return json([{ id: 'newer', title: 'Newer', updatedAt: '2026-09-01T00:00:00Z' }])
+      if (url.pathname.endsWith('/session/status')) return json({ newer: { type: 'busy' } })
+      return json([])
+    })
+
+    await act(async () => {
+      root.render(<OpenCodeWorkbenchInner authenticatedApi={{ mintCodingSessionOpenCodeCapability: mint }} sessionId="odie-session" sessionTitle="Repair" />)
+    })
+    await act(async () => {})
+
+    const indicator = container.querySelector('[aria-live="polite"]')
+    expect(indicator?.textContent).toContain('Agent is working…')
   })
 
   it('remints and retries once on an expired capability response', async () => {

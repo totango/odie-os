@@ -20,6 +20,11 @@ export interface PendingNativeLoginFlow {
   expiresAt?: string
 }
 
+export interface SystemNotificationOptions {
+  title: string
+  body: string
+}
+
 export interface WorkshopRuntime {
   readonly kind: 'web' | 'tauri'
   readonly apiOrigin: URL
@@ -36,8 +41,14 @@ export interface WorkshopRuntime {
   clearPendingNativeLoginFlow(): Promise<void>
   saveBlob(blob: Blob, options: SaveFileOptions): Promise<void>
   saveText(filename: string, content: string): Promise<void>
+  requestNotificationPermission(): Promise<boolean>
+  sendNotification(options: SystemNotificationOptions): Promise<void>
   lock(): Promise<void>
   unlock(): Promise<boolean>
+}
+
+export function shouldSendSystemNotification(): boolean {
+  return typeof document === 'undefined' || document.hidden || (typeof document.hasFocus === 'function' && !document.hasFocus())
 }
 
 export function envUrl(name: 'VITE_ODIE_API_ORIGIN' | 'VITE_ODIE_PUBLIC_WEB_ORIGIN' | 'VITE_ODIE_APP_LINK_ORIGIN'): URL | null {

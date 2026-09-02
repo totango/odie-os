@@ -41,7 +41,7 @@
     },
     "iOS": {
       "developmentTeam": "66J7DJB93K",
-      "bundleVersion": "4",
+      "bundleVersion": "5",
       "minimumSystemVersion": "15.0"
     },
     "android": {

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react'
 import ReactMarkdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { ArrowClockwise, CircleNotch, PaperPlaneRight, Stop, Wrench } from '@phosphor-icons/react'
+import { ArrowClockwise, CircleNotch, PaperPlaneRight, Paperclip, Stop, Wrench, X } from '@phosphor-icons/react'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
-import { WorkshopButton } from '../WorkshopControls'
+import { getWorkshopRuntime } from '../../runtime'
+import { WorkshopButton, WorkshopIconButton } from '../WorkshopControls'
 
 const POLL_INTERVAL_MS = 4_000
 const EXPIRY_REFRESH_WINDOW_MS = 10_000
@@ -14,6 +15,11 @@ const MAX_MESSAGE_COUNT = 80
 const MAX_TEXT_LENGTH = 16_000
 const MAX_PAYLOAD_LENGTH = 4_000
 const MAX_TOOL_COUNT = 12
+const MAX_IMAGE_ATTACHMENT_COUNT = 4
+const MAX_IMAGE_ATTACHMENT_BYTES = 4 * 1024 * 1024
+const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES = 8 * 1024 * 1024
+const SAFE_IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp'])
+const NOTIFICATION_BODY_MAX_LENGTH = 120
 
 type Capability = { url: string; expiresAt: Date }
 
@@ -41,6 +47,32 @@ type OpenCodeTool = {
   metadata?: string
 }
 
+type OpenCodeCommand = {
+  name: string
+  description?: string
+}
+
+type OpenCodeFilePart = {
+  type: 'file'
+  mime: string
+  filename: string
+  url: string
+}
+
+type OpenCodeTextPart = {
+  type: 'text'
+  text: string
+}
+
+type OpenCodePromptPart = OpenCodeTextPart | OpenCodeFilePart
+
+type ImageAttachment = OpenCodeFilePart & {
+  id: string
+  size: number
+  status: 'loading' | 'ready' | 'error'
+  error?: string
+}
+
 type WorkbenchSnapshot = {
   sessions: OpenCodeSession[]
   selected?: OpenCodeSession
@@ -52,6 +84,14 @@ type WorkbenchSnapshot = {
   mcpText?: string
 }
 
+type PendingTurnNotification = {
+  id: number
+  openCodeSessionId: string
+  assistantMessageBaseline: number
+  observedRunning: boolean
+  notified: boolean
+}
+
 type Props = {
   sessionId: string
   sessionTitle: string
@@ -59,6 +99,24 @@ type Props = {
   onInitialInputSent?: () => void
   onSessionUnavailable?: () => void
   surface?: 'agent' | 'changes'
+}
+
+function hasExpectedImageSignature(mime: string, bytes: Uint8Array): boolean {
+  if (mime === 'image/jpeg') return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  if (mime === 'image/png') return bytes.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((byte, index) => bytes[index] === byte)
+  return mime === 'image/webp' && bytes.length >= 12 &&
+    String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP'
+}
+
+function hasExpectedImageDataUrl(mime: string, url: string): boolean {
+  const prefix = `data:${mime};base64,`
+  if (!url.startsWith(prefix)) return false
+  try {
+    const decoded = atob(url.slice(prefix.length, prefix.length + 16))
+    return hasExpectedImageSignature(mime, Uint8Array.from(decoded, (character) => character.charCodeAt(0)))
+  } catch {
+    return false
+  }
 }
 
 const MARKDOWN_COMPONENTS: Components = {
@@ -98,6 +156,9 @@ export function OpenCodeWorkbenchInner({
   const refreshSequenceRef = useRef(0)
   const selectedOpenCodeSessionIdRef = useRef<string | undefined>(undefined)
   const initialSendKeyRef = useRef<string | undefined>(undefined)
+  const pendingTurnNotificationRef = useRef<PendingTurnNotification | undefined>(undefined)
+  const turnNotificationIdRef = useRef(0)
+  const sendingRef = useRef(false)
   const transcriptRef = useRef<HTMLDivElement>(null)
   const [snapshot, setSnapshot] = useState<WorkbenchSnapshot>({ sessions: [], messages: [], running: false, statusText: 'Connecting…' })
   const [loading, setLoading] = useState(true)
@@ -106,6 +167,15 @@ export function OpenCodeWorkbenchInner({
   const [prompt, setPrompt] = useState('')
   const [sending, setSending] = useState(false)
   const [aborting, setAborting] = useState(false)
+  const [commands, setCommands] = useState<OpenCodeCommand[]>([])
+  const [commandsLoaded, setCommandsLoaded] = useState(false)
+  const [commandMenuOpen, setCommandMenuOpen] = useState(false)
+  const [commandMenuSuppressedToken, setCommandMenuSuppressedToken] = useState<string>()
+  const [highlightedCommandIndex, setHighlightedCommandIndex] = useState(0)
+  const [attachments, setAttachments] = useState<ImageAttachment[]>([])
+  const [attachmentError, setAttachmentError] = useState<string>()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const composingRef = useRef(false)
 
   useEffect(() => {
     mountedRef.current = true
@@ -125,9 +195,19 @@ export function OpenCodeWorkbenchInner({
     capabilityPromiseRef.current = undefined
     selectedOpenCodeSessionIdRef.current = undefined
     initialSendKeyRef.current = undefined
+    pendingTurnNotificationRef.current = undefined
+    sendingRef.current = false
     setSnapshot({ sessions: [], messages: [], running: false, statusText: 'Connecting…' })
     setLoading(true)
     setError(undefined)
+    setPrompt('')
+    setCommands([])
+    setCommandsLoaded(false)
+    setCommandMenuOpen(false)
+    setCommandMenuSuppressedToken(undefined)
+    setHighlightedCommandIndex(0)
+    setAttachments([])
+    setAttachmentError(undefined)
   }, [sessionId])
 
   const mintCapability = useCallback(async (expectedEpoch = requestEpochRef.current) => {
@@ -258,6 +338,20 @@ export function OpenCodeWorkbenchInner({
     }
   }, [fetchJson, sessionTitle])
 
+  const loadCommands = useCallback(async () => {
+    if (commandsLoaded) return
+    try {
+      const commandJson = await fetchJson('/command')
+      if (!mountedRef.current) return
+      setCommands(parseCommands(commandJson))
+    } catch {
+      if (!mountedRef.current) return
+      setCommands([])
+    } finally {
+      if (mountedRef.current) setCommandsLoaded(true)
+    }
+  }, [commandsLoaded, fetchJson])
+
   useEffect(() => {
     let timer: number | undefined
     let cancelled = false
@@ -283,31 +377,217 @@ export function OpenCodeWorkbenchInner({
     if (distanceFromBottom < 160) node.scrollTop = node.scrollHeight
   }, [snapshot.messages])
 
-  const sendPrompt = useCallback(async (text: string, options: { fromInitialInput?: boolean } = {}) => {
+  const commandQuery = prompt.startsWith('/') ? prompt.slice(1).split(/\s/, 1)[0].toLowerCase() : ''
+  const filteredCommands = useMemo(() => {
+    if (!prompt.startsWith('/')) return []
+    const list = commandQuery
+      ? commands.filter((command) => command.name.toLowerCase().includes(commandQuery))
+      : commands
+    return list.slice(0, 8)
+  }, [commandQuery, commands, prompt])
+
+  useEffect(() => {
+    if (!prompt.startsWith('/')) {
+      setCommandMenuOpen(false)
+      setCommandMenuSuppressedToken(undefined)
+      return
+    }
+    const token = prompt.slice(1).split(/\s/, 1)[0]
+    if (commandMenuSuppressedToken && token === commandMenuSuppressedToken) {
+      setCommandMenuOpen(false)
+      return
+    }
+    if (commandMenuSuppressedToken && token !== commandMenuSuppressedToken) setCommandMenuSuppressedToken(undefined)
+    setCommandMenuOpen(true)
+    setHighlightedCommandIndex(0)
+    void loadCommands()
+  }, [commandMenuSuppressedToken, loadCommands, prompt])
+
+  useEffect(() => {
+    setHighlightedCommandIndex((current) => Math.min(current, Math.max(0, filteredCommands.length - 1)))
+  }, [filteredCommands.length])
+
+  const readyAttachments = attachments.filter((attachment) => attachment.status === 'ready')
+  const attachmentsLoading = attachments.some((attachment) => attachment.status === 'loading')
+  const canSend = Boolean(snapshot.selected) && !loading && !refreshing && !sending && !snapshot.running && !attachmentsLoading && !error && (Boolean(prompt.trim()) || readyAttachments.length > 0)
+
+  const addImageFiles = useCallback((fileList: FileList | File[]) => {
+    const files = Array.from(fileList).filter((file) => file.type.startsWith('image/'))
+    if (!files.length) return
+    setAttachmentError(undefined)
+    const available = MAX_IMAGE_ATTACHMENT_COUNT - attachments.length
+    if (available <= 0) {
+      setAttachmentError(`Attach up to ${MAX_IMAGE_ATTACHMENT_COUNT} images.`)
+      return
+    }
+    const accepted = files.slice(0, available)
+    if (files.length > accepted.length) setAttachmentError(`Only ${MAX_IMAGE_ATTACHMENT_COUNT} images can be attached.`)
+    let totalBytes = attachments.reduce((sum, attachment) => sum + attachment.size, 0)
+    for (const file of accepted) {
+      if (!SAFE_IMAGE_MIME_TYPES.has(file.type)) {
+        setAttachmentError(`${file.name} must be a PNG, JPEG, or WebP image.`)
+        continue
+      }
+      if (file.size > MAX_IMAGE_ATTACHMENT_BYTES) {
+        setAttachmentError(`${file.name} is too large. Images must be ${formatBytes(MAX_IMAGE_ATTACHMENT_BYTES)} or smaller.`)
+        continue
+      }
+      if (totalBytes + file.size > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES) {
+        setAttachmentError(`Attachments must total ${formatBytes(MAX_TOTAL_IMAGE_ATTACHMENT_BYTES)} or less.`)
+        continue
+      }
+      totalBytes += file.size
+      const id = `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`
+      const loadingAttachment: ImageAttachment = {
+        id,
+        type: 'file',
+        mime: file.type || 'application/octet-stream',
+        filename: file.name || 'image',
+        url: '',
+        size: file.size,
+        status: 'loading',
+      }
+      setAttachments((current) => [...current, loadingAttachment])
+      const reader = new FileReader()
+      reader.addEventListener('load', () => {
+        const url = typeof reader.result === 'string' ? reader.result : ''
+        const valid = hasExpectedImageDataUrl(file.type, url)
+        if (!valid) setAttachmentError(`${file.name} does not contain valid ${file.type.replace('image/', '').toUpperCase()} image data.`)
+        setAttachments((current) => current.map((attachment) => attachment.id === id ? {
+          ...attachment,
+          url: valid ? url : '',
+          status: valid ? 'ready' : 'error',
+          error: valid ? undefined : 'Image data does not match its file type.',
+        } : attachment))
+      })
+      reader.addEventListener('error', () => {
+        setAttachments((current) => current.map((attachment) => attachment.id === id ? { ...attachment, status: 'error', error: 'Could not read image.' } : attachment))
+      })
+      reader.readAsDataURL(file)
+    }
+  }, [attachments])
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id))
+  }, [])
+
+  const chooseCommand = useCallback((command: OpenCodeCommand) => {
+    const rest = prompt.replace(/^\/\S*/, '').replace(/^\s+/, '')
+    setPrompt(`/${command.name}${rest ? ` ${rest}` : ' '}`)
+    setCommandMenuOpen(false)
+    setCommandMenuSuppressedToken(command.name)
+  }, [prompt])
+
+  const sendPrompt = useCallback(async (text: string, options: { fromInitialInput?: boolean; attachments?: OpenCodeFilePart[] } = {}) => {
     const epoch = requestEpochRef.current
     const selectedId = selectedOpenCodeSessionIdRef.current
     const trimmed = text.trim()
-    if (!selectedId || !trimmed || sending || snapshot.running) return
+    const fileParts = options.attachments ?? []
+    if (!selectedId || (!trimmed && fileParts.length === 0) || sendingRef.current || snapshot.running) return
+    sendingRef.current = true
+    const parts: OpenCodePromptPart[] = [...(trimmed ? [{ type: 'text' as const, text: trimmed }] : []), ...fileParts]
+    const command = parseCommandPrompt(trimmed)
     setSending(true)
     setError(undefined)
     try {
-      await fetchJson(`/session/${selectedId}/prompt_async`, {
+      await fetchJson(command ? `/session/${selectedId}/command` : `/session/${selectedId}/prompt_async`, {
         method: 'POST',
-        body: JSON.stringify({ parts: [{ type: 'text', text: trimmed }] }),
+        body: JSON.stringify(command ? { command: command.command, arguments: command.arguments, parts } : { parts }),
       })
       if (epoch !== requestEpochRef.current || selectedOpenCodeSessionIdRef.current !== selectedId) return
+      if (!options.fromInitialInput) {
+        pendingTurnNotificationRef.current = {
+          id: ++turnNotificationIdRef.current,
+          openCodeSessionId: selectedId,
+          assistantMessageBaseline: countAssistantMessages(snapshot.messages),
+          observedRunning: false,
+          notified: false,
+        }
+      }
       if (!options.fromInitialInput) setPrompt('')
+      if (!options.fromInitialInput) setAttachments([])
+      if (!options.fromInitialInput) setAttachmentError(undefined)
+      setCommandMenuOpen(false)
       if (options.fromInitialInput) onInitialInputSent?.()
       await refreshWorkbench({ quiet: true })
     } catch (caught) {
       if (epoch === requestEpochRef.current && !isAbortError(caught)) {
+        if (!options.fromInitialInput) pendingTurnNotificationRef.current = undefined
         if (options.fromInitialInput) initialSendKeyRef.current = undefined
         setError(caught instanceof Error ? caught.message : 'Could not send prompt.')
       }
     } finally {
+      if (epoch === requestEpochRef.current) sendingRef.current = false
       if (mountedRef.current && epoch === requestEpochRef.current) setSending(false)
     }
-  }, [fetchJson, onInitialInputSent, refreshWorkbench, sending, snapshot.running])
+  }, [fetchJson, onInitialInputSent, refreshWorkbench, snapshot.messages, snapshot.running])
+
+  const submitComposer = useCallback(() => {
+    if (!canSend) return
+    void getWorkshopRuntime().requestNotificationPermission()
+    void sendPrompt(prompt, { attachments: readyAttachments.map(({ type, mime, filename, url }) => ({ type, mime, filename, url })) })
+  }, [canSend, prompt, readyAttachments, sendPrompt])
+
+  useEffect(() => {
+    const pending = pendingTurnNotificationRef.current
+    if (!pending || pending.notified) return
+    if (error || aborting) {
+      pendingTurnNotificationRef.current = undefined
+      return
+    }
+    if (snapshot.selected?.id !== pending.openCodeSessionId) {
+      pendingTurnNotificationRef.current = undefined
+      return
+    }
+    if (snapshot.running) {
+      pending.observedRunning = true
+      return
+    }
+    const assistantCount = countAssistantMessages(snapshot.messages)
+    if (!pending.observedRunning && assistantCount <= pending.assistantMessageBaseline) return
+    pending.notified = true
+    void getWorkshopRuntime().sendNotification({
+      title: 'Agent turn complete',
+      body: boundedTurnNotificationBody(sessionTitle || snapshot.selected?.title || 'Coding session'),
+    })
+  }, [aborting, error, sessionTitle, snapshot.messages, snapshot.running, snapshot.selected])
+
+  const onComposerKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (composingRef.current || event.nativeEvent.isComposing) return
+    if (commandMenuOpen && filteredCommands.length > 0) {
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        setHighlightedCommandIndex((current) => (current + 1) % filteredCommands.length)
+        return
+      }
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        setHighlightedCommandIndex((current) => (current - 1 + filteredCommands.length) % filteredCommands.length)
+        return
+      }
+      if (event.key === 'Tab' || event.key === 'Enter') {
+        event.preventDefault()
+        chooseCommand(filteredCommands[highlightedCommandIndex] ?? filteredCommands[0])
+        return
+      }
+    }
+    if (commandMenuOpen && event.key === 'Escape') {
+      event.preventDefault()
+      setCommandMenuOpen(false)
+      return
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      submitComposer()
+    }
+  }, [chooseCommand, commandMenuOpen, filteredCommands, highlightedCommandIndex, submitComposer])
+
+  const onComposerPaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'))
+    if (!files.length) return
+    event.preventDefault()
+    void addImageFiles(files)
+  }, [addImageFiles])
 
   useEffect(() => {
     const input = initialInput
@@ -326,6 +606,7 @@ export function OpenCodeWorkbenchInner({
     setError(undefined)
     try {
       await fetchJson(`/session/${selectedId}/abort`, { method: 'POST', body: '{}' })
+      pendingTurnNotificationRef.current = undefined
       await refreshWorkbench({ quiet: true })
     } catch (caught) {
       if (epoch === requestEpochRef.current && !isAbortError(caught)) setError(caught instanceof Error ? caught.message : 'Could not abort OpenCode session.')
@@ -352,6 +633,7 @@ export function OpenCodeWorkbenchInner({
                     onChange={(event) => {
                       const selected = sessionOptions.find((session) => session.id === event.currentTarget.value)
                       if (!selected) return
+                      pendingTurnNotificationRef.current = undefined
                       selectedOpenCodeSessionIdRef.current = selected.id
                       setSnapshot((current) => ({
                         ...current,
@@ -389,10 +671,25 @@ export function OpenCodeWorkbenchInner({
                   {!loading && !error && snapshot.messages.length === 0 ? <EmptyState title="Ready for instructions" body="Send a prompt to start this structured OpenCode session." /> : null}
                   <div className="min-w-0 space-y-3">
                     {snapshot.messages.map((message) => <MessageCard key={message.id} message={message} />)}
+                    {(snapshot.running || sending) && <WorkingIndicator />}
                   </div>
                 </div>
-                <form className="shrink-0 border-t border-kumo-line p-3" onSubmit={(event: FormEvent) => { event.preventDefault(); void sendPrompt(prompt) }}>
+                <form className="shrink-0 border-t border-kumo-line p-3" onSubmit={(event: FormEvent) => { event.preventDefault(); submitComposer() }}>
                   <label className="sr-only" htmlFor="opencode-prompt">Prompt OpenCode</label>
+                  {attachments.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-2" aria-label="Image attachments">
+                      {attachments.map((attachment) => (
+                        <div key={attachment.id} className="flex max-w-full items-center gap-2 rounded-lg border border-kumo-line bg-kumo-tint px-2 py-1 text-[11px] text-kumo-default">
+                          {attachment.url ? <img src={attachment.url} alt="" className="h-8 w-8 rounded object-cover" /> : <span className="flex h-8 w-8 items-center justify-center rounded bg-kumo-base"><CircleNotch size={13} className="animate-spin" /></span>}
+                          <span className="max-w-40 truncate">{attachment.filename}</span>
+                          <span className={attachment.status === 'error' ? 'text-kumo-danger' : 'text-kumo-subtle'}>{attachment.status === 'loading' ? 'Reading…' : attachment.status === 'error' ? attachment.error : formatBytes(attachment.size)}</span>
+                          <WorkshopIconButton aria-label={`Remove ${attachment.filename}`} className="!h-6 !w-6" onClick={() => removeAttachment(attachment.id)}><X size={12} /></WorkshopIconButton>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {attachmentError && <div role="alert" className="mb-2 text-xs text-kumo-danger">{attachmentError}</div>}
+                  <div className="relative">
                   <textarea
                     id="opencode-prompt"
                     className="max-h-40 min-h-20 w-full resize-y rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default outline-none focus:border-kumo-brand"
@@ -400,10 +697,39 @@ export function OpenCodeWorkbenchInner({
                     disabled={Boolean(error) || loading || refreshing || sending || snapshot.running || !snapshot.selected}
                     placeholder="Ask OpenCode to inspect, edit, test, or explain…"
                     onChange={(event) => setPrompt(event.currentTarget.value)}
+                    onKeyDown={onComposerKeyDown}
+                    onCompositionStart={() => { composingRef.current = true }}
+                    onCompositionEnd={() => { composingRef.current = false }}
+                    onPaste={onComposerPaste}
+                    aria-controls={commandMenuOpen && filteredCommands.length > 0 ? 'opencode-command-suggestions' : undefined}
+                    aria-expanded={commandMenuOpen && filteredCommands.length > 0}
                   />
+                  {commandMenuOpen && prompt.startsWith('/') && (
+                    <div id="opencode-command-suggestions" role="listbox" aria-label="OpenCode slash commands" className="absolute bottom-full mb-2 max-h-64 w-full overflow-auto rounded-xl border border-kumo-line bg-kumo-base p-1 shadow-lg">
+                      {!commandsLoaded ? <div className="px-3 py-2 text-xs text-kumo-subtle">Loading commands…</div> : filteredCommands.length === 0 ? <div className="px-3 py-2 text-xs text-kumo-subtle">No matching commands.</div> : filteredCommands.map((command, index) => (
+                        <button
+                          key={command.name}
+                          type="button"
+                          role="option"
+                          aria-selected={index === highlightedCommandIndex}
+                          className={`block w-full rounded-lg px-3 py-2 text-left text-xs ${index === highlightedCommandIndex ? 'bg-kumo-fill text-kumo-strong' : 'text-kumo-default hover:bg-kumo-tint'}`}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => chooseCommand(command)}
+                        >
+                          <span className="font-medium">/{command.name}</span>
+                          {command.description && <span className="mt-0.5 block text-kumo-subtle">{command.description}</span>}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  </div>
                   <div className="mt-2 flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <span className="min-w-0 text-[11px] text-kumo-subtle">Prompts stay in the session sandbox. Use tool approvals for external actions.</span>
-                    <WorkshopButton tone="primary" type="submit" disabled={Boolean(error) || loading || refreshing || sending || snapshot.running || !prompt.trim() || !snapshot.selected}><PaperPlaneRight size={13} /> Send</WorkshopButton>
+                    <div className="flex items-center gap-2">
+                      <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple className="hidden" onChange={(event) => { void addImageFiles(event.currentTarget.files ?? []); event.currentTarget.value = '' }} />
+                      <WorkshopButton type="button" disabled={Boolean(error) || loading || refreshing || sending || snapshot.running || attachments.length >= MAX_IMAGE_ATTACHMENT_COUNT} onClick={() => fileInputRef.current?.click()}><Paperclip size={13} /> Attach image</WorkshopButton>
+                      <WorkshopButton tone="primary" type="submit" disabled={!canSend}><PaperPlaneRight size={13} /> Send</WorkshopButton>
+                    </div>
                   </div>
                 </form>
               </>
@@ -418,6 +744,14 @@ export function OpenCodeWorkbenchInner({
         </aside>
       </div>
     </section>
+  )
+}
+
+function WorkingIndicator() {
+  return (
+    <div className="flex items-center gap-2 rounded-xl border border-kumo-line bg-kumo-tint/50 px-3 py-2 text-xs text-kumo-subtle" aria-live="polite" aria-label="Agent is working">
+      <CircleNotch size={13} className="animate-spin" /> Agent is working…
+    </div>
   )
 }
 
@@ -514,6 +848,45 @@ function timeoutError(message: string) {
 function parseSessions(input: unknown): OpenCodeSession[] {
   const list = Array.isArray(input) ? input : Array.isArray(readRecord(input)?.data) ? readRecord(input)!.data as unknown[] : Array.isArray(readRecord(input)?.sessions) ? readRecord(input)!.sessions as unknown[] : []
   return list.map(parseSession).filter((item): item is OpenCodeSession => Boolean(item)).toSorted((a, b) => b.updatedAt - a.updatedAt)
+}
+
+function parseCommands(input: unknown): OpenCodeCommand[] {
+  const record = readRecord(input)
+  const list = Array.isArray(input) ? input
+    : Array.isArray(record?.data) ? record.data as unknown[]
+      : Array.isArray(record?.commands) ? record.commands as unknown[]
+        : []
+  return list.map((item) => {
+    if (typeof item === 'string') return { name: item.replace(/^\//, '') }
+    const command = readRecord(item)
+    const rawName = readString(command?.name) ?? readString(command?.command) ?? readString(command?.id)
+    const name = rawName?.replace(/^\//, '')
+    if (!name) return undefined
+    return { name, description: readString(command?.description) ?? readString(command?.summary) }
+  }).filter((command): command is OpenCodeCommand => Boolean(command && /^[A-Za-z0-9:_-]{1,80}$/.test(command.name)))
+}
+
+function parseCommandPrompt(text: string): { command: string; arguments: string } | undefined {
+  const match = /^\/([A-Za-z0-9:_-]{1,80})(?:\s+(.*))?$/.exec(text)
+  if (!match) return undefined
+  return { command: match[1], arguments: match[2] ?? '' }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const kib = bytes / 1024
+  if (kib < 1024) return `${Math.round(kib)} KB`
+  return `${(kib / 1024).toFixed(1)} MB`
+}
+
+function countAssistantMessages(messages: OpenCodeMessage[]): number {
+  return messages.filter((message) => message.role === 'assistant').length
+}
+
+export function boundedTurnNotificationBody(title: string): string {
+  const normalized = title.replace(/\s+/g, ' ').trim() || 'Coding session'
+  if (normalized.length <= NOTIFICATION_BODY_MAX_LENGTH) return normalized
+  return `${normalized.slice(0, NOTIFICATION_BODY_MAX_LENGTH - 1).trimEnd()}…`
 }
 
 function parseSession(input: unknown): OpenCodeSession | undefined {

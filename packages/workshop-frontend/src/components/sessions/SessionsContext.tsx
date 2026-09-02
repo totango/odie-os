@@ -3,6 +3,8 @@ import type { CodingSessionRepository, CodingSessionRepositoryOption, CodingSess
 import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sessions'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useGitHubConnection } from '../../hooks/useGitHubConnection'
+import { getWorkshopRuntime } from '../../runtime'
+import DeleteConfirmationDialog from '../DeleteConfirmationDialog'
 
 export const CODING_SESSION_PRESETS: Array<{
   id: string
@@ -90,6 +92,19 @@ export async function openGitHubAccountPopup(
 }
 
 const SessionsContext = createContext<SessionsContextValue | null>(null)
+const NOTIFICATION_BODY_MAX_LENGTH = 120
+
+export function boundedNotificationBody(value: string, maxLength = NOTIFICATION_BODY_MAX_LENGTH): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`
+}
+
+export function pendingActivityNotificationBody(activity: CodingSessionActivity, sessions: CodingSessionSummary[]): string {
+  const sessionTitle = sessions.find((session) => session.id === activity.sessionId)?.title
+  const actionTitle = activity.description?.title || activity.resourceTitle || 'Action approval requested'
+  return boundedNotificationBody([sessionTitle, actionTitle].filter(Boolean).join(' · '))
+}
 
 export function SessionsProvider({ children, loadRepositories = false }: { children: ReactNode; loadRepositories?: boolean }) {
   const { authenticatedApi } = useAuthenticatedApi()
@@ -108,6 +123,9 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
   const [repositorySearch, setRepositorySearch] = useState('')
   const [repositoryOptions, setRepositoryOptions] = useState<CodingSessionRepositoryOption[]>([])
   const [repositoryLoading, setRepositoryLoading] = useState(false)
+  const [archiveRequest, setArchiveRequest] = useState<{ id: string; title: string }>()
+  const [archiveSubmitting, setArchiveSubmitting] = useState(false)
+  const [archiveError, setArchiveError] = useState<string>()
   const creatingRef = useRef(false)
   const sessionRefreshSequence = useRef(0)
   const sessionRefreshInFlight = useRef(false)
@@ -115,6 +133,9 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
   const activityRefreshSequence = useRef(0)
   const activityRefreshInFlight = useRef(false)
   const activityRefreshPending = useRef(false)
+  const activityStateById = useRef<Map<string, CodingSessionActivity['state']> | undefined>(undefined)
+  const notifiedPendingActivityIds = useRef<Set<string>>(new Set())
+  const archiveSubmittingRef = useRef(false)
 
   const refresh = useCallback((options?: { background?: boolean }) => {
     void options
@@ -151,7 +172,14 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
     const requestId = ++activityRefreshSequence.current
     activityRefreshInFlight.current = true
     authenticatedApi.listCodingSessionActivity().then((items) => {
-      if (requestId === activityRefreshSequence.current) setActivity(items)
+      if (requestId !== activityRefreshSequence.current) return
+      if (!activityStateById.current) {
+        activityStateById.current = new Map(items.map((item) => [item.id, item.state] as const))
+        for (const item of items) {
+          if (item.state === 'pending') notifiedPendingActivityIds.current.add(item.id)
+        }
+      }
+      setActivity(items)
     }).catch(() => {}).finally(() => {
       activityRefreshInFlight.current = false
       if (activityRefreshPending.current) {
@@ -166,6 +194,29 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
     refresh()
     refreshActivity()
   }, [github.state, refresh, refreshActivity])
+
+  useEffect(() => {
+    if (github.state !== 'connected' || !loadRepositories) return
+    const runtime = getWorkshopRuntime()
+    if (runtime.kind === 'tauri') void runtime.requestNotificationPermission()
+  }, [github.state, loadRepositories])
+
+  useEffect(() => {
+    const nextStates = new Map(activity.map((item) => [item.id, item.state] as const))
+    if (!activityStateById.current) {
+      return
+    }
+    const previousStates = activityStateById.current
+    activityStateById.current = nextStates
+    for (const item of activity) {
+      if (item.state !== 'pending' || previousStates.get(item.id) === 'pending' || notifiedPendingActivityIds.current.has(item.id)) continue
+      notifiedPendingActivityIds.current.add(item.id)
+      void getWorkshopRuntime().sendNotification({
+        title: 'Agent needs your approval',
+        body: pendingActivityNotificationBody(item, sessions),
+      })
+    }
+  }, [activity, sessions])
 
   useEffect(() => {
     if (github.state !== 'connected') return
@@ -287,10 +338,32 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
   }, [authenticatedApi])
 
   const archiveSession = useCallback(async (id: string) => {
-    await authenticatedApi.archiveCodingSession(id)
-    if (activeId === id) setActiveId(undefined)
-    refresh()
-  }, [activeId, authenticatedApi, refresh])
+    const session = sessions.find((item) => item.id === id)
+    if (!session || session.archivedAt || archiveSubmitting) return
+    setArchiveError(undefined)
+    setArchiveRequest({ id, title: session.title })
+  }, [archiveSubmitting, sessions])
+
+  const confirmArchiveSession = useCallback(async () => {
+    const request = archiveRequest
+    if (!request || archiveSubmittingRef.current) return
+    archiveSubmittingRef.current = true
+    setArchiveSubmitting(true)
+    setArchiveError(undefined)
+    try {
+      await authenticatedApi.archiveCodingSession(request.id)
+      sessionRefreshSequence.current += 1
+      setSessions((current) => current.map((item) => item.id === request.id ? { ...item, archivedAt: new Date() } : item))
+      setArchiveRequest(undefined)
+      if (activeId === request.id) setActiveId(undefined)
+      refresh()
+    } catch (caught) {
+      setArchiveError(caught instanceof Error ? caught.message : 'Could not archive coding session.')
+    } finally {
+      archiveSubmittingRef.current = false
+      setArchiveSubmitting(false)
+    }
+  }, [activeId, archiveRequest, authenticatedApi, refresh])
 
   const resolveActivity = useCallback(async (id: string, decision: 'approve' | 'reject') => {
     setError(undefined)
@@ -354,7 +427,32 @@ export function SessionsProvider({ children, loadRepositories = false }: { child
     runtime, sessions, stopSession, title,
   ])
 
-  return <SessionsContext.Provider value={value}>{children}</SessionsContext.Provider>
+  return (
+    <SessionsContext.Provider value={value}>
+      {children}
+      <DeleteConfirmationDialog
+        open={Boolean(archiveRequest)}
+        title="Archive session?"
+        description={(
+          <div className="space-y-2">
+            <p><span className="font-medium text-kumo-default">{archiveRequest?.title ?? 'This session'}</span> will be moved out of your open Code sessions.</p>
+            <p>Archiving stops the environment and discards any uncommitted sandbox changes.</p>
+            {archiveError && <p role="alert" className="text-kumo-danger">{archiveError}</p>}
+          </div>
+        )}
+        isDeleting={archiveSubmitting}
+        confirmLabel="Archive"
+        confirmingLabel="Archiving…"
+        onOpenChange={(open) => {
+          if (!open && !archiveSubmitting) {
+            setArchiveRequest(undefined)
+            setArchiveError(undefined)
+          }
+        }}
+        onConfirm={() => { void confirmArchiveSession() }}
+      />
+    </SessionsContext.Provider>
+  )
 }
 
 export function useSessionsContext(): SessionsContextValue {
