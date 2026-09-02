@@ -148,6 +148,10 @@ jobs:
             worker="$1"
             client_id="$2"
             client_secret="$3"
+            if [ -z "$client_id" ] && [ -z "$client_secret" ]; then
+              echo "No GitHub OAuth secrets configured for $worker; leaving existing Worker secrets unchanged."
+              return 0
+            fi
             test -n "$client_id"
             test -n "$client_secret"
             printf '%s' "$client_id" | wrangler secret put CLIENT_ID --name "$worker"
@@ -173,9 +177,7 @@ jobs:
             done
           }
           require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
-          require_secrets odie-os-gk-google CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN PRODUCT_FEEDBACK_MCP_TOKEN
-          require_secrets odie-os-gk-notion CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET EDITOR_CAPABILITY_HMAC_SECRET
           require_secrets odie-os-backend CF_AI_GATEWAY_API_TOKEN TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET TEAM_PI_CODEX_MODELS
 
