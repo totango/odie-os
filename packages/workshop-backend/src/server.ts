@@ -156,7 +156,7 @@ export async function readFinanceHubStatus(
   try {
     let workspace = overseers.get(overseers.idFromString(claim.workspaceId));
     let authorized = await retryOnDoReset(
-        () => workspace.hasFinanceHubAccess(claim, userId, profileId));
+        () => workspace.hasFinanceHubAccess(claim, userId, profileId, isAdmin));
     return resolveFinanceHubStatus(claim.workspaceId, authorized, isAdmin);
   } catch (error) {
     logger.warn("failed to validate Finance workspace access", {
@@ -643,7 +643,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
     let result;
     try {
-      result = await overseer.open(userId, profileId, notifyClosed, shareKey, configureObservers);
+      result = await overseer.open(
+          userId, profileId, notifyClosed, shareKey, configureObservers, this.#isAdmin());
     } catch (err) {
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries
