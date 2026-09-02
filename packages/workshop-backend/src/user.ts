@@ -1001,6 +1001,46 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.gadgets.get(id) || null;
   }
 
+  /** Return a coarse classification of the claimed Finance workspace's owner registration. */
+  getFinanceGadgetRegistrationStatus(id: string):
+      "missing" | "missing-origin" | "healthy" | "shared" | "non-finance" | "duplicate" {
+    let exact = this.storage.gadgets.get(id);
+    if (exact?.owner) return "shared";
+    for (let gadget of this.storage.gadgets.list()) {
+      if (!gadget.owner && gadget.originHubId === "finance" && gadget.id !== id) return "duplicate";
+    }
+    if (!exact) return "missing";
+    if (exact.originHubId === undefined) return "missing-origin";
+    return exact.originHubId === "finance" ? "healthy" : "non-finance";
+  }
+
+  /**
+   * Atomically repair one claimed Finance owner registration. Only a missing record or an existing
+   * owner record with no origin can change; every conflicting state is returned unchanged.
+   */
+  async repairFinanceGadgetRegistration(id: string): Promise<
+      "inserted" | "updated" | "missing" | "missing-origin" | "healthy" |
+      "shared" | "non-finance" | "duplicate"> {
+    if (!this.storage.created.get()) return "missing";
+    let status = this.getFinanceGadgetRegistrationStatus(id);
+    if (status === "missing") {
+      this.storage.gadgets.put({
+        id,
+        title: "Finance Operations Workbench",
+        created: new Date(),
+        originHubId: "finance",
+      });
+      return "inserted";
+    }
+    if (status === "missing-origin") {
+      let record = this.storage.gadgets.get(id)!;
+      record.originHubId = "finance";
+      this.storage.gadgets.put(record);
+      return "updated";
+    }
+    return status;
+  }
+
   async newGadget(id: string, title: string, originHubId?: DeploymentHubId): Promise<void> {
     let created = new Date();
     this.storage.gadgets.put({id, title, created, ...(originHubId ? {originHubId} : {})});

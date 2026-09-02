@@ -1492,6 +1492,68 @@ export type FinanceHubStatus =
       canCreate: true;
     };
 
+/** A repairable defect in the claimed Finance workspace's owner registration. */
+export type FinanceHubRepairKind =
+  /** The claimed owner has no registration for the initialized workspace. */
+  | "missing-owner-registration"
+  /** The claimed owner's existing owner registration has no hub origin. */
+  | "missing-finance-origin";
+
+/** A safe, coarse reason why an administrator cannot repair the Finance workspace automatically. */
+export type FinanceHubRepairBlockReason =
+  /** The stored claim does not round-trip to one account and workspace identity. */
+  | "invalid-claim"
+  /** The account named by the stored claim no longer exists. */
+  | "missing-owner-account"
+  /** The claimed workspace has not been initialized. */
+  | "uninitialized-workspace"
+  /** The claimed workspace did not progress past its first-open empty code snapshot. */
+  | "incomplete-workspace"
+  /** The initialized workspace belongs to a different account. */
+  | "owner-mismatch"
+  /** The claimed workspace is registered as shared rather than owned. */
+  | "shared-registration"
+  /** The claimed owner registration explicitly belongs to another hub. */
+  | "non-finance-origin"
+  /** The claimed owner already has a different owned Finance registration. */
+  | "duplicate-finance-registration"
+  /** Validation could not be completed without exposing internal failure details. */
+  | "unavailable";
+
+/**
+ * Sanitized deployment-wide Finance health returned only through the administrator capability.
+ * It never includes claim identities, workspace content, or internal errors.
+ */
+export type FinanceHubDiagnostic =
+  | {
+      /** No deployment Finance workspace has been claimed. */
+      status: "unclaimed";
+    }
+  | {
+      /** The claim, blueprint-initialized workspace owner, and owner registration agree. */
+      status: "healthy";
+    }
+  | {
+      /** The only safe registration mutation that can restore the claim. */
+      status: "repairable";
+      /** Which narrowly-scoped owner-registration repair is available. */
+      repair: FinanceHubRepairKind;
+    }
+  | {
+      /** Automatic repair was refused. */
+      status: "blocked";
+      /** Coarse refusal reason safe to show to a deployment administrator. */
+      reason: FinanceHubRepairBlockReason;
+    };
+
+/** Result of an idempotent administrator Finance repair attempt. */
+export type FinanceHubRepairResult = {
+  /** Whether this call inserted or updated the owner registration. */
+  repaired: boolean;
+  /** Sanitized Finance health after the attempted repair. */
+  diagnostic: FinanceHubDiagnostic;
+};
+
 /** All admin-managed deployment settings, returned by AdminApi.getSettings() for the admin UI. */
 export type AdminSettingsView = {
   /** Whether new account signups are allowed. */
@@ -1569,6 +1631,15 @@ export type AdminFormat = {
 export interface AdminApi {
   /** Read all admin-managed settings for the admin UI in one call. */
   getSettings(): Promise<AdminSettingsView>;
+
+  /** Validate the deployment Finance claim without exposing claim identities or workspace content. */
+  diagnoseFinanceHub(): Promise<FinanceHubDiagnostic>;
+
+  /**
+   * Idempotently repair only a missing owner registration or missing Finance origin after the
+   * stored claim, workspace owner, and completed protected-blueprint initialization validate.
+   */
+  repairFinanceHub(): Promise<FinanceHubRepairResult>;
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
