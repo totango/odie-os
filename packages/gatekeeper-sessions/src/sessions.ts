@@ -107,8 +107,10 @@ const EDITOR_CAPABILITY_TTL_MS = 30 * 60 * 1_000;
 const EDITOR_PORT = 13_337;
 const OPENCODE_SERVER_CAPABILITY_TTL_MS = 10 * 60 * 1_000;
 const OPENCODE_SERVER_PORT = 40_913;
-const OPENCODE_SERVER_MAX_POST_BYTES = 1024 * 1024;
+const OPENCODE_SERVER_MAX_POST_BYTES = 12 * 1024 * 1024;
 const OPENCODE_SERVER_VERSION = 1;
+const TEAM_PI_CODEX_MAX_COMPRESSED_BYTES = 4 * 1024 * 1024;
+const TEAM_PI_CODEX_MAX_DECODED_BYTES = 8 * 1024 * 1024;
 const MAX_SESSIONS_PER_USER = 5;
 const MAX_TITLE_LENGTH = 120;
 const GITHUB_ORIGIN = "https://github.com";
@@ -583,15 +585,31 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       return new Response("Codex request is not allowed.", { status: 403 });
     }
 
-    let body = new Uint8Array(await request.arrayBuffer());
-    if (body.byteLength > 4 * 1024 * 1024) {
+    const encoding = request.headers.get("Content-Encoding")?.trim().toLowerCase();
+    if (encoding && encoding !== "identity" && encoding !== "zstd") {
+      return new Response("Codex request encoding is not supported.", { status: 415 });
+    }
+    const encodedLimit = encoding === "zstd"
+      ? TEAM_PI_CODEX_MAX_COMPRESSED_BYTES
+      : TEAM_PI_CODEX_MAX_DECODED_BYTES;
+    const contentLength = request.headers.get("Content-Length");
+    if (contentLength && (!/^\d+$/.test(contentLength) || Number(contentLength) > encodedLimit)) {
       return new Response("Codex request is too large.", { status: 413 });
     }
-    const encoding = request.headers.get("Content-Encoding")?.trim().toLowerCase();
+    let body = await readBoundedBody(request.body, encodedLimit);
+    if (!body) return new Response("Codex request is too large.", { status: 413 });
     if (encoding === "zstd") {
-      body = Uint8Array.from(zstdDecompressSync(body, { maxOutputLength: 8 * 1024 * 1024 }));
-    } else if (encoding && encoding !== "identity") {
-      return new Response("Codex request encoding is not supported.", { status: 415 });
+      try {
+        body = Uint8Array.from(zstdDecompressSync(body, { maxOutputLength: TEAM_PI_CODEX_MAX_DECODED_BYTES }));
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+        if (code === "ERR_BUFFER_TOO_LARGE") {
+          return new Response("Codex request is too large.", { status: 413 });
+        }
+        return new Response("Codex request compression is invalid.", { status: 400 });
+      }
     }
     const timestamp = Date.now().toString();
     const clientRequestId = crypto.randomUUID();
@@ -2582,8 +2600,19 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSes
   }
 
   /** Lists sessions for the supplied authenticated owner. */
-  listSessions(owner: CodingSessionOwner): Promise<CodingSessionSummary[]> {
-    return registryFor(this.ctx, owner.userId).listSessions();
+  async listSessions(owner: CodingSessionOwner): Promise<CodingSessionSummary[]> {
+    const read = () => registryFor(this.ctx, owner.userId).listSessions();
+    try {
+      return await read();
+    } catch (error) {
+      if (!isDurableObjectReset(error)) throw error;
+      await scheduler.wait(Math.random() * 250);
+      const sessions = await read();
+      logger.info("coding session list recovered after registry reset", {
+        event: "coding.session.registry.reset.recovered",
+      });
+      return sessions;
+    }
   }
 
   /** Returns the display-safe server-owned development catalog. */
@@ -2934,6 +2963,13 @@ function registryFor(ctx: ExecutionContext, userId: string): DurableObjectStub<C
     exports: { CodingSessionRegistry: DurableObjectNamespace<CodingSessionRegistry> };
   }).exports.CodingSessionRegistry;
   return namespace.get(namespace.idFromName(userId));
+}
+
+function isDurableObjectReset(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const flags = error as { durableObjectReset?: unknown; retryable?: unknown; overloaded?: unknown };
+  if (flags.durableObjectReset === true) return true;
+  return flags.retryable === true && flags.overloaded !== true;
 }
 
 function policyFor(env: Env, containerId: string): DurableObjectStub<CodingSessionPolicy> {
@@ -3337,7 +3373,7 @@ function allowedOpenCodeRoute(
     "/global/health", "/project/current", "/session", "/session/status", "/file/status", "/mcp", "/agent", "/command", "/event",
   ]);
   const getParameterized = /^\/session\/[A-Za-z0-9._:-]{1,128}(?:\/(?:message|diff|todo))?$/.test(path);
-  const postAllowed = path === "/session" || /^\/session\/[A-Za-z0-9._:-]{1,128}\/(?:prompt_async|abort)$/.test(path);
+  const postAllowed = path === "/session" || /^\/session\/[A-Za-z0-9._:-]{1,128}\/(?:prompt_async|command|abort)$/.test(path);
   if (method === "GET") {
     if (!getExact.has(path) && !getParameterized) return { ok: false, status: 404, message: "OpenCode route is not allowed" };
     const preserveQuery = path === "/event";

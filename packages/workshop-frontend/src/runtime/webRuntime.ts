@@ -1,4 +1,4 @@
-import { envUrl, originUrl, type DeepLinkEvent, type PendingNativeLoginFlow, type SaveFileOptions, type Unsubscribe, type WorkshopRuntime } from './WorkshopRuntime'
+import { envUrl, originUrl, shouldSendSystemNotification, type DeepLinkEvent, type PendingNativeLoginFlow, type SaveFileOptions, type SystemNotificationOptions, type Unsubscribe, type WorkshopRuntime } from './WorkshopRuntime'
 
 type SaveFileHandle = { createWritable(): Promise<WritableStream<Uint8Array>> }
 type SaveFilePicker = (options: { suggestedName?: string; types?: Array<{ description?: string; accept: Record<string, string[]> }> }) => Promise<SaveFileHandle>
@@ -28,6 +28,7 @@ function triggerBlobDownload(blob: Blob, filename: string): void {
 
 export function createWebRuntime(): WorkshopRuntime {
   const publicWebOrigin = envUrl('VITE_ODIE_PUBLIC_WEB_ORIGIN') ?? originUrl(new URL(window.location.href))
+  let deniedThisRuntime = false
   return {
     kind: 'web',
     apiOrigin: envUrl('VITE_ODIE_API_ORIGIN') ?? browserApiOrigin(),
@@ -98,6 +99,25 @@ export function createWebRuntime(): WorkshopRuntime {
     },
     async saveText(filename: string, content: string) {
       triggerBlobDownload(new Blob([content], { type: 'text/plain;charset=utf-8' }), filename)
+    },
+    async requestNotificationPermission() {
+      try {
+        if (!('Notification' in window)) return false
+        if (Notification.permission === 'granted') return true
+        if (Notification.permission === 'denied' || deniedThisRuntime) return false
+        const permission = await Notification.requestPermission()
+        if (permission === 'denied') deniedThisRuntime = true
+        return permission === 'granted'
+      } catch {
+        return false
+      }
+    },
+    async sendNotification(options: SystemNotificationOptions) {
+      try {
+        if (!shouldSendSystemNotification() || !('Notification' in window) || Notification.permission !== 'granted') return
+        const notification = new Notification(options.title, { body: options.body })
+        void notification
+      } catch {}
     },
     async lock() {},
     async unlock() { return true },

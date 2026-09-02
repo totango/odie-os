@@ -269,6 +269,39 @@ describe("coding session terminal expiry", () => {
     expect(stub.getSession).toHaveBeenCalledWith("session-1");
   });
 
+  it("retries a session-list read with a fresh registry stub after a reset", async () => {
+    const reset = Object.assign(new Error("registry reset"), {
+      durableObjectReset: true,
+      overloaded: true,
+    });
+    const first = { listSessions: vi.fn(async () => { throw reset; }) };
+    const second = { listSessions: vi.fn(async () => [runningRecord()]) };
+    const namespace = {
+      idFromName: vi.fn((name: string) => `id:${name}`),
+      get: vi.fn()
+        .mockReturnValueOnce(first)
+        .mockReturnValueOnce(second),
+    };
+    const service = new GatekeeperVendor() as InstanceType<typeof GatekeeperVendor> & {
+      ctx: { exports: { CodingSessionRegistry: typeof namespace } };
+    };
+    service.ctx = { exports: { CodingSessionRegistry: namespace } };
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    vi.stubGlobal("scheduler", { wait: vi.fn(async () => {}) });
+
+    try {
+      await expect(service.listSessions({ userId: "user-1", email: "user@example.com" }))
+        .resolves.toHaveLength(1);
+    } finally {
+      random.mockRestore();
+      vi.unstubAllGlobals();
+    }
+
+    expect(namespace.get).toHaveBeenCalledTimes(2);
+    expect(first.listSessions).toHaveBeenCalledOnce();
+    expect(second.listSessions).toHaveBeenCalledOnce();
+  });
+
   it("does not reuse an old-generation shell creation promise for a replacement sandbox", async () => {
     let finishOldShell!: (value: { id: string }) => void;
     const oldCreate = vi.fn(() => new Promise<{ id: string }>(resolve => { finishOldShell = resolve; }));

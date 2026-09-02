@@ -9,6 +9,11 @@ import type { CodingSessionSummary } from '@gadgets/workshop-shared/api'
 const testState = vi.hoisted(() => ({
   github: { state: 'connected', accountId: 42, label: 'octo@example.com' } as { state: 'connected'; accountId: number; label: string } | { state: 'missing' },
   authenticatedApi: undefined as unknown,
+  runtime: {
+    kind: 'tauri',
+    requestNotificationPermission: vi.fn<() => Promise<boolean>>(async () => true),
+    sendNotification: vi.fn<(options: { title: string; body: string }) => Promise<void>>(async () => {}),
+  },
 }))
 
 vi.mock('../../AuthContext', () => ({
@@ -17,6 +22,10 @@ vi.mock('../../AuthContext', () => ({
 
 vi.mock('../../hooks/useGitHubConnection', () => ({
   useGitHubConnection: () => testState.github,
+}))
+
+vi.mock('../../runtime', () => ({
+  getWorkshopRuntime: () => testState.runtime,
 }))
 
 import { openGitHubAccountPopup, SessionsProvider, useSessionsContext } from './SessionsContext'
@@ -99,6 +108,7 @@ async function renderProvider({ loadRepositories = false }: { loadRepositories?:
       if (!latestContext) throw new Error('context not rendered')
       return latestContext
     },
+    container,
     async unmount() {
       await act(async () => root?.unmount())
       container.remove()
@@ -117,6 +127,8 @@ function fakePopup() {
 describe('openGitHubAccountPopup', () => {
   afterEach(() => {
     vi.restoreAllMocks()
+    testState.runtime.requestNotificationPermission.mockClear()
+    testState.runtime.sendNotification.mockClear()
     vi.clearAllTimers()
     vi.useRealTimers()
     testState.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
@@ -201,6 +213,8 @@ describe('SessionsProvider responsiveness', () => {
     vi.clearAllTimers()
     vi.useRealTimers()
     vi.restoreAllMocks()
+    testState.runtime.requestNotificationPermission.mockClear()
+    testState.runtime.sendNotification.mockClear()
     testState.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
     testState.authenticatedApi = createApi()
   })
@@ -377,6 +391,50 @@ describe('SessionsProvider responsiveness', () => {
     await rendered.unmount()
   })
 
+  it('notifies once when an observed activity becomes pending without bursting initial pending actions', async () => {
+    const api = createApi()
+    api.listCodingSessionActivity.mockResolvedValueOnce([activity({ id: 'initial-pending' })])
+    testState.authenticatedApi = api
+    const rendered = await renderProvider()
+
+    await act(async () => {})
+    expect(testState.runtime.sendNotification).not.toHaveBeenCalled()
+
+    await act(async () => {
+      api.listCodingSessionActivity.mockResolvedValueOnce([
+        activity({ id: 'initial-pending' }),
+        activity({ id: 'activity-2', description: { title: 'Deploy a very long command '.repeat(20), description: 'not included' } }),
+      ])
+      rendered.context.refreshActivity()
+    })
+    await act(async () => {})
+    await act(async () => {
+      api.listCodingSessionActivity.mockResolvedValueOnce([
+        activity({ id: 'initial-pending' }),
+        activity({ id: 'activity-2', description: { title: 'Deploy a very long command '.repeat(20), description: 'not included' } }),
+      ])
+      rendered.context.refreshActivity()
+    })
+    await act(async () => {})
+
+    expect(testState.runtime.sendNotification).toHaveBeenCalledOnce()
+    expect(testState.runtime.sendNotification).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Agent needs your approval',
+      body: expect.stringMatching(/^Deploy a very long command/),
+    }))
+    expect(testState.runtime.sendNotification.mock.calls[0][0].body.length).toBeLessThanOrEqual(120)
+
+    await rendered.unmount()
+  })
+
+  it('requests notification permission when entering Sessions', async () => {
+    testState.authenticatedApi = createApi()
+    const rendered = await renderProvider({ loadRepositories: true })
+
+    expect(testState.runtime.requestNotificationPermission).toHaveBeenCalledOnce()
+    await rendered.unmount()
+  })
+
   it('loads repository options only when enabled by the sessions route', async () => {
     vi.useFakeTimers()
     const api = createApi()
@@ -393,5 +451,74 @@ describe('SessionsProvider responsiveness', () => {
     expect(api.listCodingSessionRepositoryOptions).toHaveBeenCalledOnce()
 
     await insideSessions.unmount()
+  })
+
+  it('opens an archive confirmation and cancels without calling the archive RPC', async () => {
+    const api = createApi()
+    api.listCodingSessions.mockResolvedValueOnce([session()])
+    testState.authenticatedApi = api
+    const rendered = await renderProvider()
+
+    await act(async () => rendered.context.archiveSession('session-1'))
+
+    expect(api.archiveCodingSession).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain('Archive session?')
+    expect(document.body.textContent).toContain('Fix Jarvis')
+    expect(document.body.textContent).toContain('uncommitted sandbox changes')
+
+    const cancel = Array.from(document.body.querySelectorAll('button')).find((button) => button.textContent === 'Cancel')
+    await act(async () => cancel?.click())
+
+    expect(api.archiveCodingSession).not.toHaveBeenCalled()
+    expect(document.body.textContent).not.toContain('Archive session?')
+    await rendered.unmount()
+  })
+
+  it('archives once from the confirmation and clears the active session after success', async () => {
+    const api = createApi()
+    const pending = deferred<void>()
+    api.listCodingSessions.mockResolvedValueOnce([session()])
+    api.archiveCodingSession.mockReturnValue(pending.promise)
+    testState.authenticatedApi = api
+    const rendered = await renderProvider()
+
+    await act(async () => rendered.context.setActiveId('session-1'))
+    await act(async () => rendered.context.archiveSession('session-1'))
+    const archive = Array.from(document.body.querySelectorAll('button')).find((button) => button.textContent === 'Archive')
+    await act(async () => {
+      archive?.click()
+      archive?.click()
+      await Promise.resolve()
+    })
+
+    expect(api.archiveCodingSession).toHaveBeenCalledOnce()
+    expect(api.archiveCodingSession).toHaveBeenCalledWith('session-1')
+    expect(document.body.textContent).toContain('Archiving…')
+
+    await act(async () => pending.resolve())
+    await act(async () => {})
+
+    expect(rendered.context.activeId).toBeUndefined()
+    expect(document.body.textContent).not.toContain('Archive session?')
+    await rendered.unmount()
+  })
+
+  it('keeps the archive dialog open and exposes an error when archiving fails', async () => {
+    const api = createApi()
+    api.listCodingSessions.mockResolvedValueOnce([session()])
+    api.archiveCodingSession.mockRejectedValueOnce(new Error('Archive failed'))
+    testState.authenticatedApi = api
+    const rendered = await renderProvider()
+
+    await act(async () => rendered.context.archiveSession('session-1'))
+    const archive = Array.from(document.body.querySelectorAll('button')).find((button) => button.textContent === 'Archive')
+    await act(async () => archive?.click())
+    await act(async () => {})
+
+    expect(api.archiveCodingSession).toHaveBeenCalledOnce()
+    expect(document.body.textContent).toContain('Archive session?')
+    expect(document.body.textContent).toContain('Archive failed')
+    expect(rendered.context.activeId).toBeUndefined()
+    await rendered.unmount()
   })
 })

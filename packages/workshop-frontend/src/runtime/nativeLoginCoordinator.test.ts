@@ -24,6 +24,8 @@ function runtime(pending: { flowHandle: string; verifier: string } | null): Work
     clearPendingNativeLoginFlow: mockFn<() => Promise<void>>(),
     saveBlob: mockFn<WorkshopRuntime['saveBlob']>(),
     saveText: mockFn<WorkshopRuntime['saveText']>(),
+    requestNotificationPermission: vi.fn<() => Promise<boolean>>(async () => true),
+    sendNotification: vi.fn<WorkshopRuntime['sendNotification']>(async () => {}),
     lock: vi.fn<() => Promise<void>>(async () => {}),
     unlock: vi.fn<() => Promise<boolean>>(async () => true),
   }

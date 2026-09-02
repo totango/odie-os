@@ -483,17 +483,36 @@ describe("coding session same-origin OpenCode HTTP gateway", () => {
     expect(response.headers.get("X-Frame-Options")).toBe("DENY");
   });
 
+  it("forwards the bounded slash-command route", async () => {
+    const token = await openCodeToken(secret);
+    const containerFetch = vi.fn(async (request: Request) => {
+      expect(request.url).toBe("http://127.0.0.1:40913/session/abc/command");
+      expect(await request.json()).toEqual({ command: "test", arguments: "unit" });
+      return new Response(null, { status: 204 });
+    });
+    sandboxState.sandboxes.set("sandbox-1", { containerFetch });
+
+    const response = await sessions.default.fetch(new Request(
+      `${origin}/gatekeeper/sessions/opencode/${token}/session/abc/command`,
+      { method: "POST", body: JSON.stringify({ command: "test", arguments: "unit" }), headers: { "Content-Type": "application/json" } },
+    ), envWithTicket(), currentCtx());
+
+    expect(response.status).toBe(204);
+    expect(containerFetch).toHaveBeenCalledOnce();
+  });
+
   it("bounds POST bodies and rejects redirects", async () => {
     const token = await openCodeToken(secret);
+    const oversizedLength = 12 * 1024 * 1024 + 1;
     const large = await sessions.default.fetch(new Request(
       `${origin}/gatekeeper/sessions/opencode/${token}/session/abc/prompt_async`,
-      { method: "POST", body: "x".repeat(1024 * 1024 + 1), headers: { "Content-Length": String(1024 * 1024 + 1) } },
+      { method: "POST", body: "x".repeat(oversizedLength), headers: { "Content-Length": String(oversizedLength) } },
     ), envWithTicket(), currentCtx());
     expect(large.status).toBe(413);
 
     const understated = await sessions.default.fetch(new Request(
       `${origin}/gatekeeper/sessions/opencode/${token}/session/abc/prompt_async`,
-      { method: "POST", body: "x".repeat(1024 * 1024 + 1), headers: { "Content-Length": "2" } },
+      { method: "POST", body: "x".repeat(oversizedLength), headers: { "Content-Length": "2" } },
     ), envWithTicket(), currentCtx());
     expect(understated.status).toBe(413);
 

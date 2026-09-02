@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingSessionSummary, OpenCodeUserCustomization } from "@gadgets/workshop-shared/api";
+import { zstdCompressSync } from "node:zlib";
 
 const sandboxState = vi.hoisted(() => ({ sandboxes: new Map<string, any>() }));
 
@@ -176,6 +177,7 @@ function createStartupSandbox() {
 
 describe("coding session asynchronous startup", () => {
   beforeEach(() => {
+    vi.restoreAllMocks();
     sandboxState.sandboxes.clear();
     vi.clearAllMocks();
   });
@@ -546,6 +548,50 @@ describe("coding session asynchronous startup", () => {
       bufferSize: 256 * 1024,
     }));
     expect(JSON.stringify(sandbox.createTerminal.mock.calls)).not.toContain("worker-only-secret");
+  });
+
+  it("enforces separate encoded and decoded Team PI Codex request limits", async () => {
+    const { policy } = createPolicy();
+    policy.env.TEAM_PI_CODEX_BASE_URL = "https://team-pi.example.test/api/odie";
+    policy.env.TEAM_PI_CODEX_HMAC_SECRET = "worker-only-secret";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 204 }));
+
+    const identityBody = new Uint8Array(4 * 1024 * 1024 + 1);
+    const identity = await policy.forwardTeamPiCodexRequest(new Request(
+      "https://team-pi.example.test/api/odie/codex/responses",
+      { method: "POST", body: identityBody },
+    ));
+    expect(identity.status).toBe(204);
+    const forwardedBody = fetchMock.mock.calls[0]![1]!.body as Uint8Array;
+    expect(forwardedBody.byteLength).toBe(identityBody.byteLength);
+
+    const compressedOverflow = zstdCompressSync(new Uint8Array(8 * 1024 * 1024 + 1));
+    const overflow = await policy.forwardTeamPiCodexRequest(new Request(
+      "https://team-pi.example.test/api/odie/codex/responses",
+      { method: "POST", body: compressedOverflow, headers: { "Content-Encoding": "zstd" } },
+    ));
+    expect(overflow.status).toBe(413);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("rejects malformed or oversized compressed Team PI Codex requests", async () => {
+    const { policy } = createPolicy();
+    policy.env.TEAM_PI_CODEX_BASE_URL = "https://team-pi.example.test/api/odie";
+    policy.env.TEAM_PI_CODEX_HMAC_SECRET = "worker-only-secret";
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    const malformed = await policy.forwardTeamPiCodexRequest(new Request(
+      "https://team-pi.example.test/api/odie/codex/responses",
+      { method: "POST", body: "not-zstd", headers: { "Content-Encoding": "zstd" } },
+    ));
+    expect(malformed.status).toBe(400);
+
+    const oversized = await policy.forwardTeamPiCodexRequest(new Request(
+      "https://team-pi.example.test/api/odie/codex/responses",
+      { method: "POST", body: new Uint8Array(4 * 1024 * 1024 + 1), headers: { "Content-Encoding": "zstd" } },
+    ));
+    expect(oversized.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("records bounded startup failure after repeated alarm failures", async () => {

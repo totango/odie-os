@@ -51,7 +51,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         CFBundleShortVersionString: 1.0.0
-        CFBundleVersion: "4"
+        CFBundleVersion: "5"
     entitlements:
       path: odie-os-native_iOS/odie-os-native_iOS.entitlements
     scheme:
