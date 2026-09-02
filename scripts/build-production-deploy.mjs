@@ -16,6 +16,7 @@ const WORKERS = [
   "gatekeeper-google",
   "gatekeeper-jarvis",
   "gatekeeper-mcp",
+  "gatekeeper-notion",
   "gatekeeper-odie-kg",
   "gatekeeper-scheduler",
   "gatekeeper-team-pi",

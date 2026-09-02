@@ -11,6 +11,7 @@
     { "binding": "GATEKEEPER_GOOGLE", "service": "odie-os-gk-google" },
     { "binding": "GATEKEEPER_JARVIS", "service": "odie-os-gk-jarvis" },
     { "binding": "GATEKEEPER_MCP", "service": "odie-os-gk-mcp" },
+    { "binding": "GATEKEEPER_NOTION", "service": "odie-os-gk-notion" },
     { "binding": "GATEKEEPER_ODIE_KG", "service": "odie-os-gk-odie-kg" },
     { "binding": "GATEKEEPER_SCHEDULER", "service": "odie-os-gk-scheduler" },
     { "binding": "GATEKEEPER_SESSIONS", "service": "odie-os-gk-sessions" },

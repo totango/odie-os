@@ -76,7 +76,7 @@ included). Across all resource types, the gatekeeper can request:
 - `gmail.modify` for Gmail thread reads, organization, replies, forwards, and sending. This single scope already includes label access and sending.
 - `documents` for Google Docs reads and edits.
 - `drive.metadata.readonly` so the resource pickers can search Google Docs and Sheets by title.
-- `spreadsheets.readonly` to read metadata and cell values from selected Google spreadsheets.
+- `spreadsheets` to read metadata and cell values from selected Google spreadsheets, and to support spreadsheet updates.
 - `calendar.calendarlist.readonly` so the resource picker can list calendars.
 - `calendar.events` to manage selected calendar and check calendar availability.
 - `bigquery` for BigQuery dry-runs and queries. This is intentionally broader than `bigquery.readonly` because dry-runs use `jobs.insert`; the gatekeeper enforces read-only SQL and resource scope checks before running queries.

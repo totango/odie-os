@@ -1,5 +1,5 @@
 import type {
-  SpreadsheetCellValue, SpreadsheetInfo, SpreadsheetRange, SpreadsheetValueMode,
+  SpreadsheetCellValue, SpreadsheetInfo, SpreadsheetInputMode, SpreadsheetRange, SpreadsheetValueMode,
 } from "./sheets-types";
 import { AccessTokenProvider, fetchWithAuthRetry } from "./auth-retry";
 
@@ -11,6 +11,9 @@ const MAX_RANGE_LENGTH = 500;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_WRITE_ROWS = 5_000;
+const MAX_WRITE_CELLS = 50_000;
+const MAX_SHEET_TITLE_LENGTH = 100;
 
 type GoogleErrorResponse = {
   error?: { message?: string };
@@ -94,6 +97,34 @@ function validateRanges(ranges: string[]): ValidatedRange[] {
   return validated;
 }
 
+function validateWriteValues(values: SpreadsheetCellValue[][], maxRows: number): SpreadsheetCellValue[][] {
+  if (!Array.isArray(values) || values.length === 0 || values.length > maxRows) {
+    throw new Error(`A write requires between 1 and ${maxRows.toLocaleString()} row(s).`);
+  }
+  let cellCount = 0;
+  return values.map((row, rowIndex) => {
+    if (!Array.isArray(row) || row.length === 0) {
+      throw new Error(`Write row ${rowIndex + 1} must contain at least one cell.`);
+    }
+    cellCount += row.length;
+    if (cellCount > MAX_WRITE_CELLS) {
+      throw new Error(`A write may include at most ${MAX_WRITE_CELLS.toLocaleString()} cells.`);
+    }
+    return row.map(value => {
+      normalizeCell(value);
+      return value;
+    });
+  });
+}
+
+function validateUpdateValues(range: ValidatedRange, values: SpreadsheetCellValue[][]): SpreadsheetCellValue[][] {
+  let normalized = validateWriteValues(values, range.rows);
+  if (normalized.some(row => row.length > range.columns)) {
+    throw new Error(`Updated values must fit inside A1 range "${range.range}".`);
+  }
+  return normalized;
+}
+
 function valueRenderOption(mode: SpreadsheetValueMode | undefined): string {
   switch (mode ?? "formatted") {
     case "formatted": return "FORMATTED_VALUE";
@@ -101,6 +132,23 @@ function valueRenderOption(mode: SpreadsheetValueMode | undefined): string {
     case "formula": return "FORMULA";
     default: throw new Error(`Unknown Google Sheets value mode: ${String(mode)}`);
   }
+}
+
+function valueInputOption(mode: SpreadsheetInputMode | undefined): string {
+  switch (mode ?? "raw") {
+    case "raw": return "RAW";
+    case "userEntered": return "USER_ENTERED";
+    default: throw new Error(`Unknown Google Sheets input mode: ${String(mode)}`);
+  }
+}
+
+function quoteSheetTitle(title: string): string {
+  if (typeof title !== "string" || title.length === 0 || title.length > MAX_SHEET_TITLE_LENGTH) {
+    throw new Error(`Sheet title must contain between 1 and ${MAX_SHEET_TITLE_LENGTH} characters.`);
+  }
+  if (/[\r\n]/.test(title)) throw new Error("Sheet titles cannot contain line breaks.");
+  if (title.includes("'")) return `'${title.replaceAll("'", "''")}'`;
+  return /[ !:$]/.test(title) ? `'${title}'` : title;
 }
 
 function normalizeCell(value: unknown): SpreadsheetCellValue {
@@ -164,9 +212,9 @@ async function readResponseText(response: Response, maxBytes: number): Promise<s
 export class GoogleSheetsApi {
   constructor(private getAccessToken: AccessTokenProvider) {}
 
-  async #request<T>(url: URL): Promise<T> {
+  async #request<T>(url: URL, init: RequestInit = {}): Promise<T> {
     let response = await fetchWithAuthRetry(
-      url.toString(), {}, this.getAccessToken, { timeoutMs: REQUEST_TIMEOUT_MS },
+      url.toString(), init, this.getAccessToken, { timeoutMs: REQUEST_TIMEOUT_MS },
     );
 
     let text: string;
@@ -244,5 +292,56 @@ export class GoogleSheetsApi {
     let result = await this.#request<{ valueRanges?: RestValueRange[] }>(url);
     let returned = result.valueRanges ?? [];
     return validated.map((range, index) => normalizeRange(returned[index] ?? {}, range));
+  }
+
+  async updateRange(
+    spreadsheetId: string,
+    range: string,
+    values: SpreadsheetCellValue[][],
+    inputMode?: SpreadsheetInputMode,
+  ): Promise<void> {
+    let validated = validateRange(range);
+    let writeValues = validateUpdateValues(validated, values);
+    let url = new URL(
+      `${API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`,
+    );
+    url.searchParams.set("valueInputOption", valueInputOption(inputMode));
+    await this.#request(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ majorDimension: "ROWS", values: writeValues }),
+    });
+  }
+
+  async appendRows(
+    spreadsheetId: string,
+    sheetTitle: string,
+    rows: SpreadsheetCellValue[][],
+    inputMode?: SpreadsheetInputMode,
+  ): Promise<void> {
+    let writeRows = validateWriteValues(rows, MAX_WRITE_ROWS);
+    let range = quoteSheetTitle(sheetTitle);
+    let url = new URL(
+      `${API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:append`,
+    );
+    url.searchParams.set("valueInputOption", valueInputOption(inputMode));
+    url.searchParams.set("insertDataOption", "INSERT_ROWS");
+    await this.#request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ majorDimension: "ROWS", values: writeRows }),
+    });
+  }
+
+  async clearRange(spreadsheetId: string, range: string): Promise<void> {
+    validateRange(range);
+    let url = new URL(
+      `${API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:clear`,
+    );
+    await this.#request(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
   }
 }

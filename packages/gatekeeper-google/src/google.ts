@@ -10,7 +10,8 @@ import { GoogleDocSession, DocMetadata } from "./docs-types";
 import { GoogleDocsApi } from "./docs-api";
 import { GoogleSheetsApi } from "./sheets-api";
 import type {
-  GoogleSpreadsheetSession, SpreadsheetInfo, SpreadsheetRange, SpreadsheetValueMode,
+  GoogleSpreadsheetSession, SpreadsheetCellValue, SpreadsheetInfo, SpreadsheetInputMode,
+  SpreadsheetRange, SpreadsheetValueMode,
 } from "./sheets-types";
 import { docToMarkdown, markdownToDocRequests, computeReplaceOperations, DocSnapshot } from "./markdown-converter";
 import { BigQueryApi, DEFAULT_MAX_BYTES_BILLED } from "./bigquery-api";
@@ -260,7 +261,7 @@ const GOOGLE_DOC_RESOURCE: SupportedResource = {
 const GOOGLE_SHEETS_RESOURCE: SupportedResource = {
   urlPattern: "https://docs.google.com/spreadsheets/d/:spreadsheetId/*",
   title: "Google Spreadsheet",
-  description: "Read values from a spreadsheet you choose.",
+  description: "Read and update values in a spreadsheet you choose.",
   grantable: true,
 };
 
@@ -306,7 +307,7 @@ const RESOURCE_SCOPES: {resource: SupportedResource, scopes: string[]}[] = [
   {
     resource: GOOGLE_SHEETS_RESOURCE,
     scopes: [
-      "https://www.googleapis.com/auth/spreadsheets.readonly",
+      "https://www.googleapis.com/auth/spreadsheets",
       // Read-only Drive file metadata, used to power the spreadsheet picker.
       "https://www.googleapis.com/auth/drive.metadata.readonly",
     ],
@@ -2543,6 +2544,35 @@ class GoogleDocSessionImpl extends RpcTarget implements GoogleDocSession {
 // Google Sheets Gatekeeper
 // =======================================================================================
 
+type GoogleSheetsActionBase = {
+  spreadsheetId: string;
+  submittedAt: number;
+};
+
+type GoogleSheetsAction = GoogleSheetsActionBase & (
+  | {
+      type: "updateRange";
+      range: string;
+      values: SpreadsheetCellValue[][];
+      inputMode: SpreadsheetInputMode;
+    }
+  | {
+      type: "appendRows";
+      sheetTitle: string;
+      rows: SpreadsheetCellValue[][];
+      inputMode: SpreadsheetInputMode;
+    }
+  | {
+      type: "clearRange";
+      range: string;
+    }
+);
+
+const EDIT_SPREADSHEET_ACTION: ActionKind = {
+  tag: "editSpreadsheet",
+  label: "Spreadsheet edits",
+};
+
 type GoogleSheetsGatekeeperImplProps = {
   userObjectId: string;
   spreadsheetId: string;
@@ -2569,7 +2599,7 @@ export class GoogleSheetsGatekeeperImpl
     return {
       url: `https://docs.google.com/spreadsheets/d/${this.ctx.props.spreadsheetId}/edit`,
       title: spreadsheet.title,
-      snippet: `Google Spreadsheet: ${spreadsheet.title} (read-only)`,
+      snippet: `Google Spreadsheet: ${spreadsheet.title}`,
       suggestedBindingName: "GOOGLE_SHEET",
       tsType: "GoogleSpreadsheetSession",
     };
@@ -2580,25 +2610,60 @@ export class GoogleSheetsGatekeeperImpl
   }
 
   async getAutoApprovableActions(): Promise<ActionKind[]> {
-    return [];
+    return [EDIT_SPREADSHEET_ACTION];
   }
 
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<GoogleSpreadsheetSession> {
     let api = new GoogleSheetsApi(opts => this.#getAccessToken(opts));
     return new GoogleSpreadsheetSessionImpl(
-      api, this.ctx.props.spreadsheetId, approvalQueue.dup(),
+      api,
+      this.ctx.props.spreadsheetId,
+      approvalQueue.dup(),
+      new PendingActionStore<GoogleSheetsAction>(this.ctx.storage.kv),
     );
   }
 
-  /** Read-only — no side-effecting actions. */
-  async applyAction(_action: number): Promise<void> {
-    throw new Error("Google Sheets is read-only and implements no actions.");
+  async applyAction(actionId: number): Promise<void> {
+    let pendingActions = new PendingActionStore<GoogleSheetsAction>(this.ctx.storage.kv);
+    let pending = pendingActions.list();
+    let firstPending = pending[0];
+    if (!firstPending || !pendingActions.get(actionId)) {
+      throw new Error(`Unknown pending Google Sheets action: ${actionId}`);
+    }
+    if (firstPending.id !== actionId) {
+      throw new Error(
+        `Google Sheets edits must be approved in order. Approve earlier edit ` +
+        `${firstPending.id} before edit ${actionId}.`,
+      );
+    }
+    let action = firstPending.action;
+    let api = new GoogleSheetsApi(opts => this.#getAccessToken(opts));
+    switch (action.type) {
+      case "updateRange":
+        await api.updateRange(action.spreadsheetId, action.range, action.values, action.inputMode);
+        break;
+      case "appendRows":
+        await api.appendRows(action.spreadsheetId, action.sheetTitle, action.rows, action.inputMode);
+        break;
+      case "clearRange":
+        await api.clearRange(action.spreadsheetId, action.range);
+        break;
+      default:
+        action satisfies never;
+    }
+    pendingActions.remove(actionId);
   }
-  async rejectAction(_action: number): Promise<void> {
-    throw new Error("Google Sheets is read-only and implements no actions.");
+
+  async rejectAction(actionId: number): Promise<void> {
+    let pendingActions = new PendingActionStore<GoogleSheetsAction>(this.ctx.storage.kv);
+    if (!pendingActions.get(actionId)) {
+      throw new Error(`Unknown pending Google Sheets action: ${actionId}`);
+    }
+    pendingActions.remove(actionId);
   }
+
   revertAction(_action: number): Promise<void> {
-    throw new Error("Google Sheets is read-only and implements no actions.");
+    throw new Error("Google Sheets edits cannot be reverted automatically.");
   }
 
   /**
@@ -2624,16 +2689,19 @@ class GoogleSpreadsheetSessionImpl extends RpcTarget implements GoogleSpreadshee
   #api: GoogleSheetsApi;
   #spreadsheetId: string;
   #approvalQueue: RpcStub<ApprovalQueue>;
+  #pendingActions: PendingActionStore<GoogleSheetsAction>;
 
   constructor(
     api: GoogleSheetsApi,
     spreadsheetId: string,
     approvalQueue: RpcStub<ApprovalQueue>,
+    pendingActions: PendingActionStore<GoogleSheetsAction>,
   ) {
     super();
     this.#api = api;
     this.#spreadsheetId = spreadsheetId;
     this.#approvalQueue = approvalQueue;
+    this.#pendingActions = pendingActions;
   }
 
   [Symbol.dispose](): void {
@@ -2686,6 +2754,92 @@ class GoogleSpreadsheetSessionImpl extends RpcTarget implements GoogleSpreadshee
     });
     return result;
   }
+
+  async updateRange(
+    range: string,
+    values: SpreadsheetCellValue[][],
+    options?: { inputMode?: SpreadsheetInputMode },
+  ): Promise<void> {
+    let action: GoogleSheetsAction = {
+      type: "updateRange",
+      spreadsheetId: this.#spreadsheetId,
+      submittedAt: Date.now(),
+      range,
+      values,
+      inputMode: options?.inputMode ?? "raw",
+    };
+    let actionId = this.#pendingActions.submit(action);
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: `Update Google Sheets range ${range}`,
+        description:
+          `Replace cells in ${range} with ${countSpreadsheetValues(values).toLocaleString()} ` +
+          "provided value(s).",
+        implementsRevert: false,
+        actionKind: EDIT_SPREADSHEET_ACTION,
+        autoApprovable: true,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
+      throw error;
+    }
+  }
+
+  async appendRows(
+    sheetTitle: string,
+    rows: SpreadsheetCellValue[][],
+    options?: { inputMode?: SpreadsheetInputMode },
+  ): Promise<void> {
+    let action: GoogleSheetsAction = {
+      type: "appendRows",
+      spreadsheetId: this.#spreadsheetId,
+      submittedAt: Date.now(),
+      sheetTitle,
+      rows,
+      inputMode: options?.inputMode ?? "raw",
+    };
+    let actionId = this.#pendingActions.submit(action);
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: `Append rows to Google Sheet ${sheetTitle}`,
+        description:
+          `Append ${rows.length.toLocaleString()} row(s) with ` +
+          `${countSpreadsheetValues(rows).toLocaleString()} value(s) to worksheet "${sheetTitle}".`,
+        implementsRevert: false,
+        actionKind: EDIT_SPREADSHEET_ACTION,
+        autoApprovable: true,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
+      throw error;
+    }
+  }
+
+  async clearRange(range: string): Promise<void> {
+    let action: GoogleSheetsAction = {
+      type: "clearRange",
+      spreadsheetId: this.#spreadsheetId,
+      submittedAt: Date.now(),
+      range,
+    };
+    let actionId = this.#pendingActions.submit(action);
+    try {
+      await this.#approvalQueue.submitAction(actionId, {
+        title: `Clear Google Sheets range ${range}`,
+        description: `Clear all values from ${range} in the connected spreadsheet.`,
+        implementsRevert: false,
+        actionKind: EDIT_SPREADSHEET_ACTION,
+        autoApprovable: true,
+      });
+    } catch (error) {
+      this.#pendingActions.remove(actionId);
+      throw error;
+    }
+  }
+}
+
+function countSpreadsheetValues(values: SpreadsheetCellValue[][]): number {
+  return values.reduce((total, row) => total + row.length, 0);
 }
 
 // =======================================================================================
