@@ -72,6 +72,24 @@ describe("product feedback Slack notifications", () => {
     });
   });
 
+  it("accepts canonical summaries with listed and additional files", () => {
+    expect(productFeedbackSlackArguments({
+      jobId: "feedback_123",
+      prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Updates 4 files: `src/a.ts`, `src/b.ts`, `src/c.ts`, and 1 more (1 changed line).",
+      idempotencyKey: "product-feedback:feedback_123:pr:456",
+    }).text).toContain("Updates 4 files:");
+  });
+
+  it("accepts the fixed summary used by persisted legacy jobs", () => {
+    expect(productFeedbackSlackArguments({
+      jobId: "feedback_123",
+      prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Applies a small automated source fix.",
+      idempotencyKey: "product-feedback:feedback_123:pr:456",
+    }).text).toContain("Applies a small automated source fix.");
+  });
+
   it("rejects another repository or a mismatched idempotency key", () => {
     expect(() => productFeedbackSlackArguments({
       jobId: "feedback_123",
@@ -110,6 +128,10 @@ describe("product feedback Slack notifications", () => {
       "First line\nsecond line",
       "Updates 1 file.",
       "Updates 1 file: `<@U123>` (2 changed lines).",
+      "Updates 1 files: `src/a.ts` (2 changed lines).",
+      "Updates 1 file: `src/a.ts`, `src/b.ts` (2 changed lines).",
+      "Updates 4 files: `src/a.ts`, `src/b.ts`, `src/c.ts`, and 2 more (2 changed lines).",
+      "Updates 2 files: `src/a.ts`, `src/b.ts` (1 changed lines).",
     ]) {
       expect(() => productFeedbackSlackArguments({
         jobId: "feedback_123",
@@ -156,8 +178,7 @@ describe("JarvisSession", () => {
       }, "vetted"));
       expect(classified).toMatchObject({
         mode: name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool" ? "action" : "read",
-        autoApprovable:
-          name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool",
+        autoApprovable: false,
       });
     }
   });

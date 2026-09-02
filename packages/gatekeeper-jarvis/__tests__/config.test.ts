@@ -244,14 +244,13 @@ describe("applyJarvisToolPolicy", () => {
     expect(applyJarvisToolPolicy(entry("create_skill"))).toBeNull();
   });
 
-  it("keeps list/describe tools read-only and makes dispatcher actions auto-approvable", () => {
+  it("keeps list/describe tools read-only and requires approval for dispatcher actions", () => {
     for (const name of JARVIS_ALLOWED_TOOLS) {
       for (const annotations of [undefined, { readOnlyHint: true }, { readOnlyHint: false }]) {
         const policy = applyJarvisToolPolicy(entry(name, annotations));
         expect(policy?.mode).toBe(
           name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool" ? "action" : "read");
-        expect(policy?.autoApprovable).toBe(
-          name === "jarvis_call_prod_tool" || name === "jarvis_call_wren_tool");
+        expect(policy?.autoApprovable).toBe(false);
         expect(policy?.classifiedBy).toBe("default");
       }
     }

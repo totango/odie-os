@@ -88,9 +88,22 @@ type ProductFeedbackNotifierEnv = Env & {
 const PRODUCT_FEEDBACK_SLACK_CHANNEL = "C09EW0T5VB5";
 const PRODUCT_FEEDBACK_SLACK_TOOL = "jarvis_post_product_feedback_pr";
 const PRODUCT_FEEDBACK_ID = /^[A-Za-z0-9_-]{1,80}$/;
+// Persisted jobs created before structured diff summaries use this fixed text.
 const LEGACY_PRODUCT_FEEDBACK_CHANGE_SUMMARY = "Applies a small automated source fix.";
 const PRODUCT_FEEDBACK_CHANGE_SUMMARY =
-  /^Updates (?:[1-9]|1[0-2]) files?: `[^`<>&\r\n]{1,120}`(?:, `[^`<>&\r\n]{1,120}`){0,2}(?:, and (?:[1-9]|1[0-2]) more)? \((?:[1-9]|[12]\d|30) changed lines?\)\.$/;
+  /^Updates ([1-9]|1[0-2]) (file|files): (`[^`<>&\r\n]{1,120}`(?:, `[^`<>&\r\n]{1,120}`){0,2})(?:, and ([1-9]|1[0-2]) more)? \(([1-9]|[12]\d|30) changed (line|lines)\)\.$/;
+
+function isProductFeedbackChangeSummary(value: string): boolean {
+  const match = PRODUCT_FEEDBACK_CHANGE_SUMMARY.exec(value);
+  if (!match) return false;
+  const fileCount = Number(match[1]);
+  const listedFileCount = (match[3].match(/`/g)?.length ?? 0) / 2;
+  const additionalFileCount = Number(match[4] ?? 0);
+  const changedLineCount = Number(match[5]);
+  return match[2] === (fileCount === 1 ? "file" : "files") &&
+    fileCount === listedFileCount + additionalFileCount &&
+    match[6] === (changedLineCount === 1 ? "line" : "lines");
+}
 
 /** Validates a private notification request and returns the fixed upstream Slack arguments. */
 export function productFeedbackSlackArguments(request: ProductFeedbackNotificationRequest): {
@@ -110,7 +123,7 @@ export function productFeedbackSlackArguments(request: ProductFeedbackNotificati
   if (request.idempotencyKey !== expectedKey) throw new Error("Invalid product feedback idempotency key.");
   const changeSummary = request.changeSummary.trim();
   if (changeSummary !== LEGACY_PRODUCT_FEEDBACK_CHANGE_SUMMARY &&
-      !PRODUCT_FEEDBACK_CHANGE_SUMMARY.test(changeSummary)) {
+      !isProductFeedbackChangeSummary(changeSummary)) {
     throw new Error("Invalid product feedback change summary.");
   }
   return {
