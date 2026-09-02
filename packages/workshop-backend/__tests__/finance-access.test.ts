@@ -217,9 +217,13 @@ describe("Finance hub access policy", () => {
       expect(await readFinanceHubStatus(
           env.TEST_ADMIN, env.TEST_OVERSEER,
           secondAdmin.id.toString(), secondAdmin.profileId, true)).toEqual({
-        authorized: false,
+        authorized: true,
+        workspaceId: workspaceIdString,
         canCreate: false,
       });
+      let secondAdminSession = await workspace.open(
+          secondAdmin.id.toString(), secondAdmin.profileId, () => {}, undefined, undefined, true);
+      secondAdminSession[Symbol.dispose]();
       expect(await admin.claimFinanceWorkspace({
         workspaceId: env.TEST_OVERSEER.newUniqueId().toString(),
         ownerUserId: secondAdmin.id.toString(),

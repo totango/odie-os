@@ -7137,7 +7137,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       claim: FinanceWorkspaceClaim,
       ownerRecord: GadgetMetadata | null,
       userId: string,
-      profileId: string): CollaboratorRole | undefined {
+      profileId: string,
+      isAdmin = false): CollaboratorRole | undefined {
     if (claim.workspaceId !== this.impl.ctx.id.toString() ||
         this.impl.ownerId !== claim.ownerUserId ||
         this.impl.users.idFromName(claim.ownerProfileId).toString() !== claim.ownerUserId ||
@@ -7146,6 +7147,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         ownerRecord.originHubId !== "finance") {
       return undefined;
     }
+    if (isAdmin) return "build";
     if (userId === claim.ownerUserId) {
       return profileId === claim.ownerProfileId ? "build" : undefined;
     }
@@ -7160,11 +7162,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * this workspace is still the Finance-origin workspace before the sharing graph is consulted.
    */
   async hasFinanceHubAccess(
-      claim: FinanceWorkspaceClaim, userId: string, profileId: string): Promise<boolean> {
+      claim: FinanceWorkspaceClaim, userId: string, profileId: string, isAdmin = false): Promise<boolean> {
     let owner = this.impl.users.get(this.impl.users.idFromString(claim.ownerUserId));
     let ownerRecord = await retryOnDoReset(
         () => owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger);
-    return this.#financeRole(claim, ownerRecord, userId, profileId) !== undefined;
+    return this.#financeRole(claim, ownerRecord, userId, profileId, isAdmin) !== undefined;
   }
 
   /**
@@ -7174,7 +7176,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async open(userId: string, profileId: string,
              notifyClosed: NativeRpcStub<() => void>,
              shareKey?: string,
-             configureObservers?: RpcStub<ObserverConfigCallback>): Promise<Overseer> {
+             configureObservers?: RpcStub<ObserverConfigCallback>,
+             isAdmin = false): Promise<Overseer> {
     let deploymentClaim: FinanceWorkspaceClaim | null;
     try {
       deploymentClaim = await retryOnDoReset(() => this.impl.ctx.exports.AdminSettings
@@ -7248,7 +7251,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
     }
     let financeRole = financeClaim
-        ? this.#financeRole(financeClaim, ownerRecord, userId, profileId)
+        ? this.#financeRole(financeClaim, ownerRecord, userId, profileId, isAdmin)
         : undefined;
     if (financeClaim && (!financeRole || shareKey)) {
       throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
