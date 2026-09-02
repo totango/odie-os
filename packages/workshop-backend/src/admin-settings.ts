@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, ConfigurableDeploymentHubId, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isConfigurableDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, ConfigurableDeploymentHubId, FinanceHubDiagnostic, FinanceHubRepairResult, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isConfigurableDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -11,6 +11,7 @@ import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.j
 import { ambientGatekeeperMode, defaultAmbientGatekeeperMode } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import type { UserDurableObject } from './user.js';
+import type { OverseerDurableObject } from './overseer.js';
 import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints } from './format-blueprints.js';
 import { FEATURED_BLUEPRINTS, FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
 
@@ -79,6 +80,7 @@ type AdminSettingsStorage = ReturnType<typeof makeAdminSettingsStorage>;
 export class AdminSettings extends DurableObject<Cloudflare.Env> {
   private storage: AdminSettingsStorage;
   private users: DurableObjectNamespace<UserDurableObject>;
+  private overseers: DurableObjectNamespace<OverseerDurableObject>;
   // Every bound gatekeeper, keyed by vendor id. Deployment-global (from env bindings), so admin
   // resource listing needs no user context.
   private vendors: Map<string, Service<GatekeeperVendor>>;
@@ -94,6 +96,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 
     this.storage = makeAdminSettingsStorage(ctx.storage);
     this.users = this.ctx.exports.UserDurableObject;
+    this.overseers = this.ctx.exports.OverseerDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
   }
 
@@ -129,6 +132,84 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     }
     this.storage.financeWorkspace.put(null);
     return true;
+  }
+
+  /** Return sanitized Finance claim health for the administrator capability. */
+  async diagnoseFinanceHub(): Promise<FinanceHubDiagnostic> {
+    try {
+      return await this.#diagnoseFinanceHub();
+    } catch (error) {
+      logger.warn("failed to diagnose Finance workspace", {
+        event: "finance.diagnosis.failed", error,
+      });
+      return {status: "blocked", reason: "unavailable"};
+    }
+  }
+
+  async #diagnoseFinanceHub(): Promise<FinanceHubDiagnostic> {
+    let claim = this.storage.financeWorkspace.get();
+    if (!claim) return {status: "unclaimed"};
+    let ownerId = this.users.idFromName(claim.ownerProfileId);
+    if (ownerId.toString() !== claim.ownerUserId) {
+      return {status: "blocked", reason: "invalid-claim"};
+    }
+
+    let owner = this.users.get(ownerId);
+    let profile = await owner.whoamiIfExists();
+    if (!profile) return {status: "blocked", reason: "missing-owner-account"};
+    if (profile.id !== claim.ownerProfileId) {
+      return {status: "blocked", reason: "invalid-claim"};
+    }
+
+    let workspaceId: DurableObjectId;
+    try {
+      workspaceId = this.overseers.idFromString(claim.workspaceId);
+    } catch {
+      return {status: "blocked", reason: "invalid-claim"};
+    }
+    let workspace = this.overseers.get(workspaceId);
+    let workspaceStatus = await workspace.validateFinanceWorkspaceOwner(claim);
+    if (workspaceStatus === "uninitialized") {
+      return {status: "blocked", reason: "uninitialized-workspace"};
+    }
+    if (workspaceStatus === "incomplete") {
+      return {status: "blocked", reason: "incomplete-workspace"};
+    }
+    if (workspaceStatus === "owner-mismatch") {
+      return {status: "blocked", reason: "owner-mismatch"};
+    }
+
+    return financeRegistrationDiagnostic(await owner.getFinanceGadgetRegistrationStatus(
+        claim.workspaceId));
+  }
+
+  /**
+   * Repair the claimed owner's Finance registration only after claim identity, workspace ownership,
+   * and completed protected-blueprint initialization validate. Exact retries are no-ops.
+   */
+  async repairFinanceHub(): Promise<FinanceHubRepairResult> {
+    // Keep the singleton claim stable while validation waits on its owner and workspace DOs.
+    return this.ctx.blockConcurrencyWhile(async () => {
+      try {
+        let before = await this.#diagnoseFinanceHub();
+        if (before.status !== "repairable") return {repaired: false, diagnostic: before};
+        let claim = this.storage.financeWorkspace.get();
+        if (!claim) return {repaired: false, diagnostic: {status: "unclaimed"}};
+        let owner = this.users.get(this.users.idFromString(claim.ownerUserId));
+        let result = await owner.repairFinanceGadgetRegistration(claim.workspaceId);
+        let diagnostic = await this.#diagnoseFinanceHub();
+        return {
+          repaired: (result === "inserted" || result === "updated") &&
+              diagnostic.status === "healthy",
+          diagnostic,
+        };
+      } catch (error) {
+        logger.warn("failed to repair Finance workspace registration", {
+          event: "finance.repair.failed", error,
+        });
+        return {repaired: false, diagnostic: {status: "blocked", reason: "unavailable"}};
+      }
+    });
   }
 
   /**
@@ -658,6 +739,19 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 }
 
+function financeRegistrationDiagnostic(
+    status: Awaited<ReturnType<UserDurableObject["getFinanceGadgetRegistrationStatus"]>>,
+): FinanceHubDiagnostic {
+  switch (status) {
+    case "missing": return {status: "repairable", repair: "missing-owner-registration"};
+    case "missing-origin": return {status: "repairable", repair: "missing-finance-origin"};
+    case "healthy": return {status: "healthy"};
+    case "shared": return {status: "blocked", reason: "shared-registration"};
+    case "non-finance": return {status: "blocked", reason: "non-finance-origin"};
+    case "duplicate": return {status: "blocked", reason: "duplicate-finance-registration"};
+  }
+}
+
 // Capability for managing deployment-wide admin settings, obtained via
 // AuthenticatedApi.getAdminApi() (which is null for non-admins). The admin access check happens once
 // when the capability is minted in server.ts, so these methods don't re-check. This is a thin
@@ -677,6 +771,14 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   getSettings(): Promise<AdminSettingsView> {
     return this.admin.getSettings(this.adminUserId);
+  }
+
+  diagnoseFinanceHub(): Promise<FinanceHubDiagnostic> {
+    return this.admin.diagnoseFinanceHub();
+  }
+
+  repairFinanceHub(): Promise<FinanceHubRepairResult> {
+    return this.admin.repairFinanceHub();
   }
 
   async setSignupsEnabled(enabled: boolean): Promise<void> {
