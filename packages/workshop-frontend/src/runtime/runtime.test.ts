@@ -10,6 +10,7 @@ describe('WorkshopRuntime selection', () => {
   beforeEach(() => {
     delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
     localStorage.clear()
+    vi.doUnmock('@tauri-apps/api/core')
     vi.doUnmock('@tauri-apps/plugin-notification')
   })
 
@@ -37,6 +38,19 @@ describe('WorkshopRuntime selection', () => {
     expect(runtime.apiOrigin.origin).toBe('https://odie-os-native-api.odie-os.workers.dev')
     expect(runtime.publicWebOrigin.origin).toBe('https://odie-os.odie-os.workers.dev')
     expect(runtime.appLinkOrigin.origin).toBe('https://odie-os-native-api.odie-os.workers.dev')
+  })
+
+  it('reads native app identity through the narrow Tauri command', async () => {
+    const invoke = vi.fn<(command: string) => Promise<{ platform: string; version: string }>>(async (command) => {
+      expect(command).toBe('native_app_info')
+      return { platform: 'macos', version: '1.2.3' }
+    })
+    vi.doMock('@tauri-apps/api/core', () => ({ invoke }))
+    ;(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {}
+    const { getWorkshopRuntime } = await loadRuntime()
+
+    await expect(getWorkshopRuntime().getNativeAppInfo()).resolves.toEqual({ platform: 'macos', version: '1.2.3' })
+    expect(invoke).toHaveBeenCalledOnce()
   })
 
   it('requests web notification permission only once after denial and sends only while not visible', async () => {

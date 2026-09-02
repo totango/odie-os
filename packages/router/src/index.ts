@@ -39,7 +39,32 @@ const NATIVE_DOWNLOADS = new Map([
     key: "mac/OdieOS-latest.dmg.sha256",
     contentType: "text/plain; charset=utf-8",
   }],
+  ["/downloads/mac/OdieOS-latest.json", {
+    key: "mac/OdieOS-latest.json",
+    contentType: "application/json; charset=utf-8",
+  }],
 ]);
+
+function nativeDownload(pathname: string): { key: string; contentType: string } | undefined {
+  const fixed = NATIVE_DOWNLOADS.get(pathname);
+  if (fixed) return fixed;
+  const versionedDmg = /^\/downloads\/mac\/OdieOS-(\d+\.\d+\.\d+)-([a-f0-9]{64})\.dmg$/.exec(pathname);
+  if (!versionedDmg) return undefined;
+  return {
+    key: `mac/OdieOS-${versionedDmg[1]}-${versionedDmg[2]}.dmg`,
+    contentType: "application/x-apple-diskimage",
+  };
+}
+
+function nativeDownloadResponse(object: R2Object, body: ReadableStream | null, contentType: string): Response {
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("content-type", contentType);
+  headers.set("etag", object.httpEtag);
+  headers.set("cache-control", "public, max-age=300");
+  headers.set("access-control-allow-origin", "*");
+  return new Response(body, { headers });
+}
 
 function associationResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -78,20 +103,21 @@ export default {
       return androidAssetLinks();
     }
 
-    const download = NATIVE_DOWNLOADS.get(url.pathname);
+    const download = nativeDownload(url.pathname);
     if (download && env.NATIVE_DOWNLOADS) {
       if (req.method !== "GET" && req.method !== "HEAD") {
         return new Response("Method Not Allowed", { status: 405, headers: { allow: "GET, HEAD" } });
       }
+      if (req.method === "HEAD") {
+        const object = await env.NATIVE_DOWNLOADS.head(download.key);
+        return object
+          ? nativeDownloadResponse(object, null, download.contentType)
+          : new Response("Not Found", { status: 404 });
+      }
       const object = await env.NATIVE_DOWNLOADS.get(download.key);
-      if (!object) return new Response("Not Found", { status: 404 });
-
-      const headers = new Headers();
-      object.writeHttpMetadata(headers);
-      headers.set("content-type", download.contentType);
-      headers.set("etag", object.httpEtag);
-      headers.set("cache-control", "public, max-age=300");
-      return new Response(req.method === "HEAD" ? null : object.body, { headers });
+      return object
+        ? nativeDownloadResponse(object, object.body, download.contentType)
+        : new Response("Not Found", { status: 404 });
     }
 
     for (const key of Object.keys(env)) {

@@ -25,11 +25,17 @@ export interface SystemNotificationOptions {
   body: string
 }
 
+export interface NativeAppInfo {
+  platform: 'macos' | 'ios' | 'android' | 'other'
+  version: string
+}
+
 export interface WorkshopRuntime {
   readonly kind: 'web' | 'tauri'
   readonly apiOrigin: URL
   readonly publicWebOrigin: URL
   readonly appLinkOrigin: URL
+  getNativeAppInfo(): Promise<NativeAppInfo | null>
   openExternal(url: string): Promise<void>
   openOAuthTrampoline(url: string): Promise<void>
   subscribeDeepLinks(callback: (event: DeepLinkEvent) => void): Promise<Unsubscribe>

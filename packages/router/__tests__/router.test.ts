@@ -26,18 +26,20 @@ async function route(env: Env, path: string, host = 'example.com'): Promise<stri
 }
 
 function stubBucket(objects: Record<string, { body: string; contentType: string }>): R2Bucket {
+  const objectFor = (key: string) => {
+    const object = objects[key];
+    if (!object) return null;
+    return {
+      body: new Response(object.body).body,
+      httpEtag: '"test-etag"',
+      writeHttpMetadata(headers: Headers) {
+        headers.set('content-type', object.contentType);
+      },
+    };
+  };
   return {
-    get: async (key: string) => {
-      const object = objects[key];
-      if (!object) return null;
-      return {
-        body: new Response(object.body).body,
-        httpEtag: '"test-etag"',
-        writeHttpMetadata(headers: Headers) {
-          headers.set('content-type', object.contentType);
-        },
-      };
-    },
+    get: async (key: string) => objectFor(key),
+    head: async (key: string) => objectFor(key),
   } as unknown as R2Bucket;
 }
 
@@ -130,16 +132,29 @@ describe('router fetch', () => {
   });
 
   it('serves only explicit native download objects from R2', async () => {
+    const checksum = 'a'.repeat(64);
     const env = makeEnv({
       NATIVE_API_ONLY: 'true',
       NATIVE_DOWNLOADS: stubBucket({
         'mac/OdieOS-latest.dmg': { body: 'notarized-dmg', contentType: 'application/x-apple-diskimage' },
         'mac/OdieOS-latest.dmg.sha256': { body: 'checksum', contentType: 'text/plain' },
+        'mac/OdieOS-latest.json': { body: '{"version":"1.0.0"}', contentType: 'application/json' },
+        [`mac/OdieOS-1.0.0-${checksum}.dmg`]: { body: 'versioned-dmg', contentType: 'application/x-apple-diskimage' },
       }),
     });
     expect(await route(env, '/downloads/mac/OdieOS-latest.dmg')).toBe('notarized-dmg');
     expect(await route(env, '/downloads/mac/OdieOS-latest.dmg.sha256')).toBe('checksum');
+    expect(await route(env, '/downloads/mac/OdieOS-latest.json')).toBe('{"version":"1.0.0"}');
+    const versionedUrl = `https://example.com/downloads/mac/OdieOS-1.0.0-${checksum}.dmg`;
+    const versioned = await router.fetch!(new Request(versionedUrl), env, {} as ExecutionContext);
+    expect(await versioned.text()).toBe('versioned-dmg');
+    expect(versioned.headers.get('access-control-allow-origin')).toBe('*');
+    const head = await router.fetch!(new Request(versionedUrl, { method: 'HEAD' }), env, {} as ExecutionContext);
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe('');
     expect(await route(env, '/downloads/mac/private.dmg')).toBe('Not Found');
+    expect(await route(env, '/downloads/mac/OdieOS-1.0.0-beta.dmg')).toBe('Not Found');
+    expect(await route(env, '/downloads/mac/OdieOS-1.0.0-abc.dmg')).toBe('Not Found');
   });
 
   it('serves everything else from ASSETS when the binding is present', async () => {

@@ -26,6 +26,7 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useEffect, useState } from 'react'
 import SessionsSidebar from '../sessions/SessionsSidebar'
 import ProductFeedbackButton from '../../ProductFeedbackButton'
+import NativeUpdateCard from './NativeUpdateCard'
 
 /**
  * The persistent left rail. Three pinned regions sandwich a single scrolling region of lists, so
@@ -37,7 +38,7 @@ import ProductFeedbackButton from '../../ProductFeedbackButton'
  *   • primary nav (Home, Workspaces, …)    pinned
  *   • workspace tools (⌘K search)          pinned
  *   • Favorites / Recent workspaces        SCROLLS
- *   • feedback call-to-action              pinned
+ *   • native update / feedback calls-to-action pinned
  *   • utility strip (plug, avatar)         pinned
  */
 export default function Sidebar({
@@ -253,7 +254,8 @@ export default function Sidebar({
       </SidebarWorkspacesProvider>
       )}
 
-      <div className={collapsed ? 'flex shrink-0 justify-center pb-2' : 'shrink-0 px-3 pb-2'}>
+      <div className={collapsed ? 'flex shrink-0 flex-col items-center gap-2 pb-2' : 'flex shrink-0 flex-col gap-2 px-3 pb-2'}>
+        <NativeUpdateCard collapsed={collapsed} />
         <ProductFeedbackButton pathname={pathname} placement="sidebar" collapsed={collapsed} />
       </div>
       <SidebarUtilityStrip collapsed={collapsed} />
