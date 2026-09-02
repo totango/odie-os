@@ -37,7 +37,7 @@ describe('NativeUpdateCard', () => {
       ? new Response(null)
       : Response.json({
           version: metadataVersion,
-          url: `/downloads/mac/OdieOS-${metadataVersion}.dmg`,
+          url: `/downloads/mac/OdieOS-${metadataVersion}-${'a'.repeat(64)}.dmg`,
           sha256: 'a'.repeat(64),
         })))
     const container = document.createElement('div')
@@ -58,7 +58,7 @@ describe('NativeUpdateCard', () => {
     const button = container.querySelector<HTMLButtonElement>('button[aria-label="Download Odie OS 1.1.0 update"]')
     expect(button?.textContent).toContain('Update available')
     await act(async () => button?.click())
-    expect(state.runtime.openExternal).toHaveBeenCalledWith('https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-1.1.0.dmg')
+    expect(state.runtime.openExternal).toHaveBeenCalledWith(`https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-1.1.0-${'a'.repeat(64)}.dmg`)
     await act(async () => root.unmount())
   })
 

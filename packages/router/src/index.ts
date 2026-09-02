@@ -48,10 +48,10 @@ const NATIVE_DOWNLOADS = new Map([
 function nativeDownload(pathname: string): { key: string; contentType: string } | undefined {
   const fixed = NATIVE_DOWNLOADS.get(pathname);
   if (fixed) return fixed;
-  const versionedDmg = /^\/downloads\/mac\/OdieOS-(\d+\.\d+\.\d+)\.dmg$/.exec(pathname);
+  const versionedDmg = /^\/downloads\/mac\/OdieOS-(\d+\.\d+\.\d+)-([a-f0-9]{64})\.dmg$/.exec(pathname);
   if (!versionedDmg) return undefined;
   return {
-    key: `mac/OdieOS-${versionedDmg[1]}.dmg`,
+    key: `mac/OdieOS-${versionedDmg[1]}-${versionedDmg[2]}.dmg`,
     contentType: "application/x-apple-diskimage",
   };
 }

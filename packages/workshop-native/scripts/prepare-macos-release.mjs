@@ -62,11 +62,8 @@ try {
 
 await mkdir(outputDirectory, { recursive: true })
 const dmgName = 'OdieOS-latest.dmg'
-const versionedDmgName = `OdieOS-${version}.dmg`
 const dmgPath = resolve(outputDirectory, dmgName)
 if (source !== dmgPath) await copyFile(source, dmgPath)
-const versionedDmgPath = resolve(outputDirectory, versionedDmgName)
-if (source !== versionedDmgPath) await copyFile(source, versionedDmgPath)
 
 const checksum = await new Promise((resolveChecksum, reject) => {
   const hash = createHash('sha256')
@@ -75,11 +72,14 @@ const checksum = await new Promise((resolveChecksum, reject) => {
     .on('error', reject)
     .on('end', () => resolveChecksum(hash.digest('hex')))
 })
+const versionedDmgName = `OdieOS-${version}-${checksum}.dmg`
+const versionedDmgPath = resolve(outputDirectory, versionedDmgName)
+if (source !== versionedDmgPath) await copyFile(source, versionedDmgPath)
 await Promise.all([
   writeFile(resolve(outputDirectory, `${dmgName}.sha256`), `${checksum}  ${dmgName}\n`),
   writeFile(resolve(outputDirectory, 'OdieOS-latest.json'), `${JSON.stringify({
     version,
-    url: `/downloads/mac/OdieOS-${version}.dmg`,
+    url: `/downloads/mac/${versionedDmgName}`,
     sha256: checksum,
   })}\n`),
 ])

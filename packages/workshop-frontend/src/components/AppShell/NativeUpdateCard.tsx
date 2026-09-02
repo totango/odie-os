@@ -36,7 +36,8 @@ export default function NativeUpdateCard({ collapsed }: { collapsed: boolean }) 
       if (!response.ok) return
       const metadata = await response.json() as { version?: unknown; url?: unknown; sha256?: unknown }
       if (typeof metadata.version !== 'string' || typeof metadata.url !== 'string' || typeof metadata.sha256 !== 'string') return
-      if (metadata.url !== `/downloads/mac/OdieOS-${metadata.version}.dmg` || !/^[a-f0-9]{64}$/.test(metadata.sha256)) return
+      if (!/^[a-f0-9]{64}$/.test(metadata.sha256)) return
+      if (metadata.url !== `/downloads/mac/OdieOS-${metadata.version}-${metadata.sha256}.dmg`) return
       if (!isNewerVersion(metadata.version, app.version)) return
       const artifact = await fetch(new URL(metadata.url, runtime.apiOrigin), { method: 'HEAD' })
       if (!cancelled && artifact.ok) setUpdate({ version: metadata.version, downloadPath: metadata.url })
