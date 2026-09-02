@@ -63,6 +63,14 @@ fn native_identifier_is_mobile_safe() {
 }
 
 #[test]
+fn native_release_versions_match() {
+    let config: Value = serde_json::from_str(&read("tauri.conf.json")).unwrap();
+    let package: Value = serde_json::from_str(&read("../package.json")).unwrap();
+    assert_eq!(config["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(package["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
 fn csp_is_restrictive_and_disallows_remote_scripts() {
     let config: Value = serde_json::from_str(&read("tauri.conf.json")).unwrap();
     let csp = config["app"]["security"]["csp"].as_str().unwrap();

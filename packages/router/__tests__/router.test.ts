@@ -135,10 +135,12 @@ describe('router fetch', () => {
       NATIVE_DOWNLOADS: stubBucket({
         'mac/OdieOS-latest.dmg': { body: 'notarized-dmg', contentType: 'application/x-apple-diskimage' },
         'mac/OdieOS-latest.dmg.sha256': { body: 'checksum', contentType: 'text/plain' },
+        'mac/OdieOS-latest.json': { body: '{"version":"1.0.0"}', contentType: 'application/json' },
       }),
     });
     expect(await route(env, '/downloads/mac/OdieOS-latest.dmg')).toBe('notarized-dmg');
     expect(await route(env, '/downloads/mac/OdieOS-latest.dmg.sha256')).toBe('checksum');
+    expect(await route(env, '/downloads/mac/OdieOS-latest.json')).toBe('{"version":"1.0.0"}');
     expect(await route(env, '/downloads/mac/private.dmg')).toBe('Not Found');
   });
 

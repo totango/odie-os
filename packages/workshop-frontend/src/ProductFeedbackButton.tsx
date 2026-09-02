@@ -56,8 +56,8 @@ export default function ProductFeedbackButton({
         title={collapsed ? 'Share feedback' : undefined}
         className={placement === 'sidebar'
           ? collapsed
-            ? 'flex h-9 w-9 items-center justify-center rounded-lg border border-transparent bg-kumo-brand text-kumo-inverse shadow-sm transition-all hover:brightness-95 hover:shadow-md'
-            : 'flex w-full items-center gap-2.5 rounded-xl border border-transparent bg-kumo-brand px-3 py-2.5 text-left text-kumo-inverse shadow-sm transition-all hover:brightness-95 hover:shadow-md'
+            ? 'flex h-9 w-9 items-center justify-center rounded-lg border border-transparent bg-kumo-brand text-kumo-inverse shadow-sm transition-all hover:brightness-95 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-elevated'
+            : 'flex w-full items-center gap-2.5 rounded-xl border border-transparent bg-kumo-brand px-3 py-2.5 text-left text-kumo-inverse shadow-sm transition-all hover:brightness-95 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-elevated'
           : 'rounded-md border border-kumo-line px-3 py-2 text-sm text-kumo-default shadow-sm hover:bg-kumo-tint'}
       >
         {placement === 'sidebar' && <ChatCenteredDots size={collapsed ? 17 : 18} weight="fill" className="shrink-0" />}

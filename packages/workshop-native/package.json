@@ -1,6 +1,6 @@
 {
   "name": "@gadgets/odie-os-native",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "tauri:build": "pnpm sync:gatekeeper-csp && tauri build",
     "ios:dev": "pnpm sync:gatekeeper-csp && SIMCTL_CHILD_ODIE_DEV_NATIVE_SECRET_FALLBACK=true tauri ios dev",
     "ios:export:app-store": "xcodebuild -exportArchive -archivePath src-tauri/gen/apple/build/odie-os-native_iOS.xcarchive -exportPath src-tauri/gen/apple/build/app-store-export -exportOptionsPlist src-tauri/ExportOptions.app-store.plist",
+    "macos:prepare-release": "node scripts/prepare-macos-release.mjs",
     "android:dev": "pnpm sync:gatekeeper-csp && tauri android dev",
     "rust:fmt": "cargo fmt --check --manifest-path src-tauri/Cargo.toml",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",

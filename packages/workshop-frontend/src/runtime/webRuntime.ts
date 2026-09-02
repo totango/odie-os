@@ -34,6 +34,9 @@ export function createWebRuntime(): WorkshopRuntime {
     apiOrigin: envUrl('VITE_ODIE_API_ORIGIN') ?? browserApiOrigin(),
     publicWebOrigin,
     appLinkOrigin: envUrl('VITE_ODIE_APP_LINK_ORIGIN') ?? publicWebOrigin,
+    async getNativeAppInfo() {
+      return null
+    },
     async openExternal(url: string) {
       const popup = window.open(url, '_blank', 'noopener')
       if (!popup) window.location.assign(url)

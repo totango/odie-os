@@ -20,6 +20,12 @@ const STRONGHOLD_CLIENT: &[u8] = b"odie-os";
 const STRONGHOLD_UNLOCK_ACCOUNT: &str = "workshop.strongholdUnlockKey";
 const ODIE_PRODUCTION_ORIGIN: &str = "https://odie-os-native-api.odie-os.workers.dev";
 
+#[derive(serde::Serialize)]
+struct NativeAppInfo {
+    platform: &'static str,
+    version: String,
+}
+
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Clone)]
 struct StrongholdUnlockKeyStore {
@@ -428,6 +434,23 @@ fn open_external_link(app: AppHandle, url: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn native_app_info<R: Runtime>(app: AppHandle<R>) -> NativeAppInfo {
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "other"
+    };
+    NativeAppInfo {
+        platform,
+        version: app.package_info().version.to_string(),
+    }
+}
+
+#[tauri::command]
 fn lock_session(store: tauri::State<'_, StrongholdUnlockKeyStore>) -> Result<(), String> {
     #[cfg(any(target_os = "ios", target_os = "android"))]
     return store.lock();
@@ -484,6 +507,7 @@ pub fn run() {
             save_text_file,
             open_oauth_trampoline,
             open_external_link,
+            native_app_info,
             lock_session,
             unlock_session,
         ]);

@@ -39,6 +39,10 @@ const NATIVE_DOWNLOADS = new Map([
     key: "mac/OdieOS-latest.dmg.sha256",
     contentType: "text/plain; charset=utf-8",
   }],
+  ["/downloads/mac/OdieOS-latest.json", {
+    key: "mac/OdieOS-latest.json",
+    contentType: "application/json; charset=utf-8",
+  }],
 ]);
 
 function associationResponse(body: unknown): Response {

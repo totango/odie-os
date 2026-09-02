@@ -1,4 +1,4 @@
-import { envUrl, ODIE_NATIVE_API_ORIGIN, ODIE_PRODUCTION_ORIGIN, originUrl, shouldSendSystemNotification, type DeepLinkEvent, type PendingNativeLoginFlow, type SaveFileOptions, type SystemNotificationOptions, type Unsubscribe, type WorkshopRuntime } from './WorkshopRuntime'
+import { envUrl, ODIE_NATIVE_API_ORIGIN, ODIE_PRODUCTION_ORIGIN, originUrl, shouldSendSystemNotification, type DeepLinkEvent, type NativeAppInfo, type PendingNativeLoginFlow, type SaveFileOptions, type SystemNotificationOptions, type Unsubscribe, type WorkshopRuntime } from './WorkshopRuntime'
 
 const SESSION_SECRET_KEY = 'workshop.sessionToken'
 const PENDING_NATIVE_LOGIN_FLOW_KEY = 'workshop.pendingNativeLoginFlow'
@@ -72,6 +72,10 @@ export function createTauriRuntime(): WorkshopRuntime {
     apiOrigin: originUrl(apiOrigin),
     publicWebOrigin: originUrl(publicWebOrigin),
     appLinkOrigin: originUrl(appLinkOrigin),
+    async getNativeAppInfo() {
+      const core = await importTauriCore()
+      return await core.invoke<NativeAppInfo>('native_app_info')
+    },
     async openExternal(url: string) {
       const parsed = new URL(url, apiOrigin)
       const core = await importTauriCore()
