@@ -7,7 +7,7 @@ type AvailableUpdate = { version: string; downloadPath: string }
 const metadataPath = '/downloads/mac/OdieOS-latest.json'
 
 function numericVersion(value: string): bigint[] | null {
-  if (value.length > 32 || !/^\d+(?:\.\d+){0,3}$/.test(value)) return null
+  if (value.length > 32 || !/^\d+\.\d+\.\d+$/.test(value)) return null
   return value.split('.').map(BigInt)
 }
 
