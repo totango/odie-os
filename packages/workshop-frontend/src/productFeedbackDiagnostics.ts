@@ -49,7 +49,7 @@ export function installProductFeedbackDiagnostics() {
     }
   }
   window.addEventListener('error', (event) => push('error', event.message))
-  window.addEventListener('unhandledrejection', (event) => push('error', `Unhandled rejection: ${String(event.reason)}`))
+  window.addEventListener('unhandledrejection', (event) => push('error', `Unhandled rejection: ${safePreview(event.reason)}`))
 }
 
 /** Returns a snapshot of current-tab diagnostics for a consented feedback submission. */

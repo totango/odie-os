@@ -4,6 +4,7 @@ import router, { type Env } from '../src/index';
 // Imported as text so the config-integrity tests run inside workerd without filesystem access.
 import wranglerConfigText from '../wrangler.jsonc?raw';
 import productionWranglerConfigText from '../wrangler.odie-os-production.jsonc?raw';
+import nativeProductionWranglerConfigText from '../wrangler.odie-os-native-production.jsonc?raw';
 
 function stubFetcher(label: string): Fetcher {
   return {
@@ -22,6 +23,22 @@ async function route(env: Env, path: string, host = 'example.com'): Promise<stri
   const req = new Request(`https://${host}${path}`);
   const res = await router.fetch!(req, env, {} as ExecutionContext);
   return res.text();
+}
+
+function stubBucket(objects: Record<string, { body: string; contentType: string }>): R2Bucket {
+  return {
+    get: async (key: string) => {
+      const object = objects[key];
+      if (!object) return null;
+      return {
+        body: new Response(object.body).body,
+        httpEtag: '"test-etag"',
+        writeHttpMetadata(headers: Headers) {
+          headers.set('content-type', object.contentType);
+        },
+      };
+    },
+  } as unknown as R2Bucket;
 }
 
 describe('router fetch', () => {
@@ -74,8 +91,25 @@ describe('router fetch', () => {
     expect(JSON.parse(await route(env, '/.well-known/apple-app-site-association', 'odie-os.odie-os.workers.dev'))).toEqual({ applinks: { apps: [], details: [] } });
     expect(JSON.parse(await route(env, '/.well-known/assetlinks.json', 'odie-os.odie-os.workers.dev'))).toEqual([]);
 
-    const nativeEnv = makeEnv({ NATIVE_API_ONLY: 'true', APP_LINK_HOST: 'odie-os-native-api.odie-os.workers.dev' });
-    expect(JSON.parse(await route(nativeEnv, '/.well-known/apple-app-site-association', 'odie-os-native-api.odie-os.workers.dev'))).toEqual({ applinks: { apps: [], details: [] } });
+    const nativeEnv = makeEnv({
+      NATIVE_API_ONLY: 'true',
+      APP_LINK_HOST: 'odie-os-native-api.odie-os.workers.dev',
+      APPLE_APP_ID: '66J7DJB93K.com.totango.odieos',
+    });
+    expect(JSON.parse(await route(nativeEnv, '/.well-known/apple-app-site-association', 'odie-os-native-api.odie-os.workers.dev'))).toEqual({
+      applinks: {
+        apps: [],
+        details: [{
+          appID: '66J7DJB93K.com.totango.odieos',
+          paths: [
+            '/admin', '/blueprints', '/context', '/explore', '/gatekeepers',
+            '/getting-started', '/outputs', '/profile', '/providers', '/sessions',
+            '/signup', '/workspaces', '/blueprint/*', '/gadget/*', '/gatekeepers/*',
+            '/workspace/*', '/native/oauth-return/*',
+          ],
+        }],
+      },
+    });
     expect(await route(nativeEnv, '/.well-known/apple-app-site-association', 'odie-os.odie-os.workers.dev')).toBe('Not Found');
   });
 
@@ -93,6 +127,19 @@ describe('router fetch', () => {
     expect(await route(env, '/admin')).toBe('Not Found');
     expect(await route(env, '/assets/main.js')).toBe('Not Found');
     expect(await route(env, '/blueprint-screenshot/abc')).toBe('Not Found');
+  });
+
+  it('serves only explicit native download objects from R2', async () => {
+    const env = makeEnv({
+      NATIVE_API_ONLY: 'true',
+      NATIVE_DOWNLOADS: stubBucket({
+        'mac/OdieOS-latest.dmg': { body: 'notarized-dmg', contentType: 'application/x-apple-diskimage' },
+        'mac/OdieOS-latest.dmg.sha256': { body: 'checksum', contentType: 'text/plain' },
+      }),
+    });
+    expect(await route(env, '/downloads/mac/OdieOS-latest.dmg')).toBe('notarized-dmg');
+    expect(await route(env, '/downloads/mac/OdieOS-latest.dmg.sha256')).toBe('checksum');
+    expect(await route(env, '/downloads/mac/private.dmg')).toBe('Not Found');
   });
 
   it('serves everything else from ASSETS when the binding is present', async () => {
@@ -153,6 +200,16 @@ describe('wrangler.jsonc contract', () => {
   it('keeps native OAuth callbacks on the worker in production', () => {
     const production = parse(productionWranglerConfigText);
     expect(production.assets.run_worker_first).toContain('/native/oauth-return/*');
+  });
+
+  it('configures the production native gateway for the signed iOS app', () => {
+    const nativeProduction = parse(nativeProductionWranglerConfigText);
+    expect(nativeProduction.assets).toBeUndefined();
+    expect(nativeProduction.vars).toMatchObject({
+      NATIVE_API_ONLY: 'true',
+      APP_LINK_HOST: 'odie-os-native-api.odie-os.workers.dev',
+      APPLE_APP_ID: '66J7DJB93K.com.totango.odieos',
+    });
   });
 
   it('serves the frontend as a single-page application', () => {

@@ -321,6 +321,9 @@ importers:
       '@gadgets/configurator-ui':
         specifier: workspace:*
         version: link:../configurator-ui
+      '@gadgets/mcp-shared':
+        specifier: workspace:*
+        version: link:../mcp-shared
       '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared

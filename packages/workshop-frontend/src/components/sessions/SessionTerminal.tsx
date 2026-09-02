@@ -224,9 +224,6 @@ export default function SessionTerminal({
             outputBatcher.push(bytes, () => {
               if (!cancelled) cursor = chunk.cursor
             })
-            // Do not hold interactive echo until the next animation frame.
-            // xterm already batches normal output and fast-paths writes after user input.
-            outputBatcher.flush()
             if (!visibleOutputDetected) {
               setState('connected')
             }

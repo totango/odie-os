@@ -9,7 +9,7 @@
     "sync:gatekeeper-csp": "node scripts/sync-gatekeeper-csp.mjs",
     "tauri:dev": "pnpm sync:gatekeeper-csp && tauri dev",
     "tauri:build": "pnpm sync:gatekeeper-csp && tauri build",
-    "ios:dev": "pnpm sync:gatekeeper-csp && tauri ios dev",
+    "ios:dev": "pnpm sync:gatekeeper-csp && SIMCTL_CHILD_ODIE_DEV_NATIVE_SECRET_FALLBACK=true tauri ios dev",
     "android:dev": "pnpm sync:gatekeeper-csp && tauri android dev",
     "rust:fmt": "cargo fmt --check --manifest-path src-tauri/Cargo.toml",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",

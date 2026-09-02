@@ -20,12 +20,26 @@ export interface Env {
   NATIVE_API_ONLY?: string;
   /** Host allowed to serve this deployment's verified-link association documents. */
   APP_LINK_HOST?: string;
+  /** Signed Apple application identifier allowed to open links on APP_LINK_HOST. */
+  APPLE_APP_ID?: string;
+  /** Publicly downloadable, signed native application artifacts. */
+  NATIVE_DOWNLOADS?: R2Bucket;
   /** Dormant until custom domains + Email Routing exist; the handler ships anyway. */
   GATEKEEPER_EMAIL?: Service<EmailEntrypoint>;
   [key: string]: unknown;
 }
 
 const ODIE_APP_LINK_HOST = "odie-os.odie-os.workers.dev";
+const NATIVE_DOWNLOADS = new Map([
+  ["/downloads/mac/OdieOS-latest.dmg", {
+    key: "mac/OdieOS-latest.dmg",
+    contentType: "application/x-apple-diskimage",
+  }],
+  ["/downloads/mac/OdieOS-latest.dmg.sha256", {
+    key: "mac/OdieOS-latest.dmg.sha256",
+    contentType: "text/plain; charset=utf-8",
+  }],
+]);
 
 function associationResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -33,10 +47,17 @@ function associationResponse(body: unknown): Response {
   });
 }
 
-function appleAppSiteAssociation(): Response {
-  // The Apple Team ID is signing-account data and is intentionally not invented here. This keeps the
-  // association document valid and ready to fill during the signing gate without claiming a bogus app.
-  return associationResponse({ applinks: { apps: [], details: [] } });
+function appleAppSiteAssociation(appId?: string): Response {
+  const details = appId ? [{
+    appID: appId,
+    paths: [
+      "/admin", "/blueprints", "/context", "/explore", "/gatekeepers",
+      "/getting-started", "/outputs", "/profile", "/providers", "/sessions",
+      "/signup", "/workspaces", "/blueprint/*", "/gadget/*", "/gatekeepers/*",
+      "/workspace/*", "/native/oauth-return/*",
+    ],
+  }] : [];
+  return associationResponse({ applinks: { apps: [], details } });
 }
 
 function androidAssetLinks(): Response {
@@ -51,10 +72,26 @@ export default {
     const nativeApiOnly = env.NATIVE_API_ONLY === "true";
     const appLinkHost = env.APP_LINK_HOST || ODIE_APP_LINK_HOST;
     if (url.hostname === appLinkHost && url.pathname === "/.well-known/apple-app-site-association") {
-      return appleAppSiteAssociation();
+      return appleAppSiteAssociation(env.APPLE_APP_ID);
     }
     if (url.hostname === appLinkHost && url.pathname === "/.well-known/assetlinks.json") {
       return androidAssetLinks();
+    }
+
+    const download = NATIVE_DOWNLOADS.get(url.pathname);
+    if (download && env.NATIVE_DOWNLOADS) {
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        return new Response("Method Not Allowed", { status: 405, headers: { allow: "GET, HEAD" } });
+      }
+      const object = await env.NATIVE_DOWNLOADS.get(download.key);
+      if (!object) return new Response("Not Found", { status: 404 });
+
+      const headers = new Headers();
+      object.writeHttpMetadata(headers);
+      headers.set("content-type", download.contentType);
+      headers.set("etag", object.httpEtag);
+      headers.set("cache-control", "public, max-age=300");
+      return new Response(req.method === "HEAD" ? null : object.body, { headers });
     }
 
     for (const key of Object.keys(env)) {

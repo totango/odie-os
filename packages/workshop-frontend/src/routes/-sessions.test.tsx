@@ -5,12 +5,15 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CodingSessionRepository, CodingSessionRuntime, CodingSessionSummary } from '@gadgets/workshop-shared/api'
+import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sessions'
 
 const testState = vi.hoisted(() => ({
   piEnabled: false,
   piLoading: false,
   terminalMounts: 0,
   terminalProps: vi.fn<(props: unknown) => void>(),
+  workbenchMounts: 0,
+  workbenchProps: vi.fn<(props: unknown) => void>(),
   authenticatedApi: {
     codingSessionEditorAvailable: vi.fn<() => Promise<boolean>>(async () => true),
     mintCodingSessionEditorCapability: vi.fn<() => Promise<{ url: string; expiresAt: Date }>>(async () => ({
@@ -25,7 +28,7 @@ const testState = vi.hoisted(() => ({
       | { state: 'connected'; accountId: number; label: string },
     activeSession: undefined as CodingSessionSummary | undefined,
     error: undefined as string | undefined,
-    activity: [],
+    activity: [] as CodingSessionActivity[],
     resolveActivity: vi.fn<(id: string, decision: 'approve' | 'reject') => Promise<void>>(),
     restartSession: vi.fn<(id: string) => Promise<void>>(),
     stopSession: vi.fn<(id: string) => Promise<void>>(),
@@ -67,6 +70,16 @@ vi.mock('../components/sessions/SessionTerminal', async () => {
     },
   }
 })
+vi.mock('../components/sessions/OpenCodeWorkbench', async () => {
+  const React = await vi.importActual<typeof import('react')>('react')
+  return {
+    default: (props: unknown) => {
+      const [mountId] = React.useState(() => ++testState.workbenchMounts)
+      testState.workbenchProps({ ...(props as object), mountId })
+      return null
+    },
+  }
+})
 vi.mock('../FeatureFlagsContext', () => ({
   useUiFeatureFlag: () => ({ enabled: testState.piEnabled, loading: testState.piLoading }),
 }))
@@ -85,10 +98,12 @@ describe('SessionsPage locked Code setup', () => {
     vi.clearAllMocks()
     testState.context.github = { state: 'missing' }
     testState.context.error = undefined
+    testState.context.activity = []
     testState.context.activeSession = undefined
     testState.context.runtime = 'opencode'
     testState.context.refresh.mockClear()
     testState.terminalMounts = 0
+    testState.workbenchMounts = 0
     testState.piEnabled = false
     testState.piLoading = false
   })
@@ -188,12 +203,14 @@ describe('SessionsPage locked Code setup', () => {
     }
 
     const rendered = await render()
-    const terminalMode = rendered.querySelector('[aria-label="Terminal mode"]')
+    const terminalMode = rendered.querySelector('[aria-label="Workbench tools"]')
 
+    expect(terminalMode?.textContent).toContain('Agent')
     expect(terminalMode?.textContent).toContain('Pi')
-    expect(terminalMode?.textContent).toContain('Shell')
+    expect(terminalMode?.textContent).toContain('Terminal')
+    expect(terminalMode?.textContent).toContain('Changes')
     expect(terminalMode?.textContent).not.toContain('OpenCode')
-    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'pi' }))
+    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'pi', terminalKind: 'opencode' }))
   })
 
   it('labels the primary terminal for a persisted Prime Agent session', async () => {
@@ -209,8 +226,62 @@ describe('SessionsPage locked Code setup', () => {
     }
 
     const rendered = await render()
-    expect(rendered.querySelector('[aria-label="Terminal mode"]')?.textContent).toContain('Prime Agent')
-    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'prime-agent' }))
+    expect(rendered.querySelector('[aria-label="Workbench tools"]')?.textContent).toContain('Prime Agent')
+    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ runtime: 'prime-agent', terminalKind: 'opencode' }))
+  })
+
+  it('defaults running OpenCode sessions to the Agent tab with the structured workbench', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activeSession = {
+      id: 'session-opencode',
+      title: 'OpenCode repair',
+      repositories: ['jarvis'],
+      runtime: 'opencode',
+      status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+
+    expect(rendered.querySelector('[aria-label="Workbench tools"]')?.textContent).toContain('Agent')
+    expect(rendered.querySelector('[aria-label="Workbench tools"]')?.textContent).toContain('VS Code')
+    expect(testState.workbenchProps).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-opencode', sessionTitle: 'OpenCode repair' }))
+    expect(testState.terminalProps).not.toHaveBeenCalled()
+  })
+
+  it('keeps Terminal and Changes available for OpenCode without removing pending activity', async () => {
+    testState.context.github = { state: 'connected', accountId: 42, label: 'octo@example.com' }
+    testState.context.activity = [{
+      id: 'approval-1',
+      sessionId: 'session-opencode',
+      state: 'pending',
+      resourceTitle: 'GitHub',
+      vendorId: 'github',
+      type: 'action',
+      createdAt: new Date('2026-08-18T00:00:00Z'),
+      description: { title: 'Push', description: 'Push branch' },
+    }]
+    testState.context.activeSession = {
+      id: 'session-opencode', title: 'OpenCode repair', repositories: ['jarvis'], runtime: 'opencode', status: 'running',
+      createdAt: new Date('2026-08-18T00:00:00Z'), lastActiveAt: new Date('2026-08-18T00:00:00Z'),
+    }
+
+    const rendered = await render()
+    const shellTab = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Terminal'))
+    expect(shellTab).toBeTruthy()
+    expect(rendered.textContent).toContain('Tool approvals')
+
+    await act(async () => shellTab!.click())
+
+    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ terminalKind: 'shell', runtime: 'opencode' }))
+    expect(rendered.textContent).toContain('Push')
+
+    const changesTab = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Changes'))
+    await act(async () => changesTab!.click())
+    expect(testState.workbenchProps).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-opencode', surface: 'changes' }))
+    expect(testState.workbenchMounts).toBe(1)
+    testState.context.activity = []
   })
 
   it('refreshes sessions when the terminal reports the environment is unavailable', async () => {
@@ -313,7 +384,7 @@ describe('SessionsPage locked Code setup', () => {
     await act(async () => root!.render(<SessionsPage />))
 
     expect(rendered.textContent).not.toContain('Starting environment')
-    expect(testState.terminalProps).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-1' }))
+    expect(testState.workbenchProps).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'session-1' }))
   })
 
   it('hides browser VS Code when the deployment has no separate editor origin', async () => {

@@ -70,14 +70,15 @@ const MAX_BACKOFF_MS = nativeRuntime ? 5000 : 10000;
 // OAuth stall, so native retries use a bounded deadline while the web app retains its generous one.
 const RECONNECT_PROBE_TIMEOUT_MS = nativeRuntime ? 4000 : 20000;
 const WAKE_PROBE_TIMEOUT_MS = nativeRuntime ? 4000 : 10000;
-const WAKE_PROBE_MIN_IDLE_MS = 15000;
+const WAKE_PROBE_MIN_IDLE_MS = nativeRuntime ? 0 : 15000;
 
 // Callbacks to call whenever `currentStub` or connection state is updated.
 const subscribers = new Set<() => void>();
 const notifySubscribers = () => subscribers.forEach(cb => cb());
-let isConnectionLost = false;
+let isConnectionLost = nativeRuntime;
 let probing = false;
 let lastProvenAt = Date.now();
+let activeConnection: RpcStub<PublicApi> | null = null;
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -89,12 +90,12 @@ const withTimeout = <T,>(promise: Promise<T>, ms: number): Promise<T> => {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 };
 
-function startConnection(): RpcStub<PublicApi> {
+function startConnection(onBroken?: (error: unknown) => void): RpcStub<PublicApi> {
   lastConnectTime = Date.now();
   const apiOrigin = getWorkshopRuntime().apiOrigin;
   const wsUrl = `${apiOrigin.protocol === 'https:' ? 'wss:' : 'ws:'}//${apiOrigin.host}/api`;
   const stub = newWebSocketRpcSession<PublicApi>(wsUrl);
-  stub.onRpcBroken(handleBroken);
+  stub.onRpcBroken(error => onBroken ? onBroken(error) : handleBroken(stub, error));
   return stub;
 }
 
@@ -116,7 +117,12 @@ async function reconnect(): Promise<RpcStub<PublicApi>> {
     }
     skipSleep = false;
 
-    const candidate = startConnection();
+    let candidateBroken = false;
+    let candidate!: RpcStub<PublicApi>;
+    candidate = startConnection(error => {
+      candidateBroken = true;
+      if (activeConnection === candidate) handleBroken(candidate, error);
+    });
     try {
       await withTimeout(candidate.ping(), RECONNECT_PROBE_TIMEOUT_MS);
     } catch (probeError) {
@@ -124,7 +130,12 @@ async function reconnect(): Promise<RpcStub<PublicApi>> {
       disposeQuietly(candidate);
       continue;
     }
+    if (candidateBroken) {
+      disposeQuietly(candidate);
+      continue;
+    }
 
+    activeConnection = candidate;
     lastProvenAt = Date.now();
     isConnectionLost = false;
     console.warn('RPC connection restored.');
@@ -135,9 +146,10 @@ async function reconnect(): Promise<RpcStub<PublicApi>> {
 
 // Subscribers hear exactly twice per outage — lost here, restored in `reconnect` — because
 // `currentStub` is replaced once, by a promise, rather than once per attempt.
-function handleBroken(error: unknown) {
-  if (isConnectionLost) return;  // stale/disposed stub, or recovery already underway
+function handleBroken(stub: RpcStub<PublicApi>, error: unknown) {
+  if (isConnectionLost || activeConnection !== stub) return;
   isConnectionLost = true;
+  activeConnection = null;
 
   console.warn('RPC connection lost:', error);
 
@@ -146,7 +158,9 @@ function handleBroken(error: unknown) {
   // in order, once it resolves — so work issued during the outage waits for the replacement
   // instead of failing against a socket known to be gone. The `RpcPromise` takes ownership of its
   // resolution, keeping the proven stub on a single disposal path.
+  const previous = currentStub;
   currentStub = new RpcPromise<PublicApi>(reconnect());
+  disposeQuietly(previous);
   notifySubscribers();
 }
 
@@ -178,7 +192,13 @@ window.addEventListener('online', () => void probeOnWake());
 
 // Current stub. handleBroken() will replace this on disconnect.
 installWorkshopErrorReporting()
-let currentStub = startConnection();
+let currentStub: RpcStub<PublicApi>;
+if (nativeRuntime) {
+  currentStub = new RpcPromise<PublicApi>(reconnect());
+} else {
+  currentStub = startConnection();
+  activeConnection = currentStub;
+}
 void installNativeLoginCoordinator(getWorkshopRuntime(), () => currentStub).catch(() => {})
 
 const router = createRouter()

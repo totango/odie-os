@@ -1,4 +1,4 @@
-import { useKumoToastManager } from '@cloudflare/kumo'
+import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
 import { useState, useEffect, useRef } from 'react'
 import type { AiChatAuthorInfo, OpenCodeSkillDefinition, OpenCodeUserCustomization } from '@gadgets/workshop-shared/api'
@@ -140,6 +140,11 @@ export default function SettingsPage() {
   // Whether this account has a password (false for OAuth-created accounts). Null while loading.
   const [hasPassword, setHasPassword] = useState<boolean | null>(null)
 
+  // Agent response preference state
+  const [simplifiedTechnicalEnglishEnabled, setSimplifiedTechnicalEnglishEnabled] = useState(false)
+  const [simplifiedTechnicalEnglishLoading, setSimplifiedTechnicalEnglishLoading] = useState(true)
+  const [simplifiedTechnicalEnglishSaving, setSimplifiedTechnicalEnglishSaving] = useState(false)
+
   // OpenCode customization state
   const [openCodePlugins, setOpenCodePlugins] = useState('')
   const [openCodeSkills, setOpenCodeSkills] = useState<OpenCodeSkillDefinition[]>([])
@@ -157,6 +162,29 @@ export default function SettingsPage() {
       .catch(() => {})
     return () => { cancelled = true }
   }, [authenticatedApi])
+
+  // Fetch account-scoped agent response preference.
+  useEffect(() => {
+    let cancelled = false
+    const fetchResponsePreference = async () => {
+      setSimplifiedTechnicalEnglishLoading(true)
+      try {
+        const enabled = await authenticatedApi.getSimplifiedTechnicalEnglishEnabled()
+        if (!cancelled) setSimplifiedTechnicalEnglishEnabled(enabled)
+      } catch (error) {
+        console.error('Failed to fetch agent response preference:', error)
+        if (!cancelled) {
+          setSimplifiedTechnicalEnglishEnabled(false)
+          toasts.add({ title: 'Failed to load agent response settings', variant: 'error' })
+        }
+      } finally {
+        if (!cancelled) setSimplifiedTechnicalEnglishLoading(false)
+      }
+    }
+
+    fetchResponsePreference()
+    return () => { cancelled = true }
+  }, [authenticatedApi, toasts])
 
   // Fetch account-scoped OpenCode customization.
   useEffect(() => {
@@ -292,6 +320,22 @@ export default function SettingsPage() {
       setPasswordError(errorMessage)
     } finally {
       setPasswordLoading(false)
+    }
+  }
+
+  const handleSimplifiedTechnicalEnglishChange = async (enabled: boolean) => {
+    const previous = simplifiedTechnicalEnglishEnabled
+    setSimplifiedTechnicalEnglishEnabled(enabled)
+    setSimplifiedTechnicalEnglishSaving(true)
+    try {
+      await authenticatedApi.setSimplifiedTechnicalEnglishEnabled(enabled)
+      toasts.add({ title: 'Agent response settings saved', variant: 'success' })
+    } catch (error) {
+      console.error('Failed to save agent response preference:', error)
+      setSimplifiedTechnicalEnglishEnabled(previous)
+      toasts.add({ title: 'Failed to save agent response settings', variant: 'error' })
+    } finally {
+      setSimplifiedTechnicalEnglishSaving(false)
     }
   }
 
@@ -491,6 +535,30 @@ export default function SettingsPage() {
 
         {/* Usage & billing — only when the Cloudflare limits flow is enabled server-side */}
         <UsageSettings />
+
+        {/* Agent responses */}
+        <section className="flex flex-col gap-3">
+          <SectionLabel>Agent responses</SectionLabel>
+          <div className="divide-y divide-kumo-line overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
+            <div className="flex items-start gap-4 px-5 py-4">
+              <div className="min-w-0 flex-1">
+                <p id="settings-ste-label" className="text-[14px] font-medium tracking-[-0.25px] text-kumo-default">
+                  Simplified Technical English
+                </p>
+                <p id="settings-ste-description" className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
+                  Ask agents to use concise, direct, consistent language based on Simplified Technical English.
+                </p>
+              </div>
+              <Switch
+                aria-labelledby="settings-ste-label"
+                aria-describedby="settings-ste-description"
+                checked={simplifiedTechnicalEnglishEnabled}
+                disabled={simplifiedTechnicalEnglishLoading || simplifiedTechnicalEnglishSaving}
+                onCheckedChange={handleSimplifiedTechnicalEnglishChange}
+              />
+            </div>
+          </div>
+        </section>
 
         {/* OpenCode */}
         <section className="flex flex-col gap-3">

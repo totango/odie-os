@@ -91,6 +91,10 @@ impl StrongholdUnlockKeyStore {
     fn snapshot_path(&self) -> PathBuf {
         self.app_data_dir.join("odie-os.stronghold")
     }
+
+    fn has_snapshot(&self) -> bool {
+        self.snapshot_path().exists()
+    }
 }
 
 fn release_os_protected_stronghold_key<R: Runtime>(
@@ -286,16 +290,18 @@ async fn read_session_secret<R: Runtime>(
     #[cfg(target_os = "macos")]
     {
         let _ = store;
-        return app
-            .keyring()
+        app.keyring()
             .store
             .get_password(&key)
-            .map_err(|error| format!("could not read native secret from macOS Keychain: {error}"));
+            .map_err(|error| format!("could not read native secret from macOS Keychain: {error}"))
     }
     #[cfg(not(target_os = "macos"))]
     let store = store.inner().clone();
     #[cfg(not(target_os = "macos"))]
     tauri::async_runtime::spawn_blocking(move || {
+        if !store.has_snapshot() {
+            return Ok(None);
+        }
         store.with_stronghold(&app, |stronghold| {
             let client = stronghold_client(stronghold)?;
             let Some(bytes) = client
@@ -325,11 +331,10 @@ async fn write_session_secret<R: Runtime>(
     #[cfg(target_os = "macos")]
     {
         let _ = store;
-        return app
-            .keyring()
+        app.keyring()
             .store
             .set_password(&key, &token)
-            .map_err(|error| format!("could not write native secret to macOS Keychain: {error}"));
+            .map_err(|error| format!("could not write native secret to macOS Keychain: {error}"))
     }
     #[cfg(not(target_os = "macos"))]
     let store = store.inner().clone();
@@ -364,9 +369,10 @@ async fn clear_session_secret<R: Runtime>(
     #[cfg(target_os = "macos")]
     {
         let _ = store;
-        return app.keyring().store.delete(&key).map_err(|error| {
-            format!("could not clear native secret from macOS Keychain: {error}")
-        });
+        app.keyring()
+            .store
+            .delete(&key)
+            .map_err(|error| format!("could not clear native secret from macOS Keychain: {error}"))
     }
     #[cfg(not(target_os = "macos"))]
     let store = store.inner().clone();
@@ -440,7 +446,7 @@ async fn unlock_session<R: Runtime>(
     #[cfg(target_os = "macos")]
     {
         let _ = (app, store);
-        return Ok(true);
+        Ok(true)
     }
     #[cfg(not(target_os = "macos"))]
     let store = store.inner().clone();
@@ -450,6 +456,7 @@ async fn unlock_session<R: Runtime>(
         .map_err(|error| format!("native vault task failed: {error}"))?
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .setup(|app| {
@@ -551,6 +558,13 @@ mod tests {
         store.lock().unwrap();
         assert!(store.unlocked_key.lock().unwrap().is_none());
         assert!(store.stronghold.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn new_store_has_no_snapshot_to_unlock() {
+        let store =
+            StrongholdUnlockKeyStore::new(tempfile::tempdir().unwrap().path().to_path_buf());
+        assert!(!store.has_snapshot());
     }
 
     #[test]

@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   Check,
   Code,
+  GitDiff,
   GithubLogo,
   MagnifyingGlass,
   Plus,
@@ -19,6 +20,7 @@ import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sess
 import { useDocumentTitle } from '../useDocumentTitle'
 import { useAuthenticatedApi } from '../AuthContext'
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from '../components/WorkshopControls'
+import OpenCodeWorkbench from '../components/sessions/OpenCodeWorkbench'
 import SessionTerminal from '../components/sessions/SessionTerminal'
 import { useSessionsContext } from '../components/sessions/SessionsContext'
 import { useUiFeatureFlag } from '../FeatureFlagsContext'
@@ -30,6 +32,8 @@ function runtimeLabel(runtime: CodingSessionRuntime): string {
   if (runtime === 'prime-agent') return 'Prime Agent'
   return 'OpenCode'
 }
+
+type WorkbenchTab = 'agent' | 'terminal' | 'changes'
 
 export function SessionsPage() {
   useDocumentTitle('Code')
@@ -49,7 +53,8 @@ export function SessionsPage() {
     setActiveId,
     refresh,
   } = sessions
-  const [terminalKind, setTerminalKind] = useState<'opencode' | 'shell'>('opencode')
+  const [surface, setSurface] = useState<WorkbenchTab>('agent')
+  const [terminalOpened, setTerminalOpened] = useState(false)
   const [editorAvailable, setEditorAvailable] = useState(false)
   const [editorBusy, setEditorBusy] = useState(false)
   const [editorError, setEditorError] = useState<string>()
@@ -61,6 +66,12 @@ export function SessionsPage() {
       .catch(() => { if (!cancelled) setEditorAvailable(false) })
     return () => { cancelled = true }
   }, [authenticatedApi])
+
+  useEffect(() => {
+    if (!activeSession || activeSession.status !== 'running') return
+    setSurface('agent')
+    setTerminalOpened(false)
+  }, [activeSession?.id, activeSession?.runtime, activeSession?.status])
 
   const openEditor = async (sessionId: string) => {
     if (editorBusy) return
@@ -89,9 +100,9 @@ export function SessionsPage() {
   if (activeSession) {
     const sessionActivity = activity.filter((entry) => entry.sessionId === activeSession.id)
     return (
-      <div className="flex h-full min-h-0 flex-col bg-kumo-base">
+      <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-kumo-base">
         <div className="shrink-0 border-b border-kumo-line text-kumo-default">
-          <div className="flex h-12 items-center gap-2 px-3 sm:gap-3">
+          <div className="flex min-h-12 min-w-0 flex-wrap items-center gap-2 px-3 py-1.5 sm:gap-3">
             <WorkshopIconButton aria-label="Back to new session" onClick={() => setActiveId(undefined)}>
               <ArrowLeft size={16} />
             </WorkshopIconButton>
@@ -101,16 +112,6 @@ export function SessionsPage() {
               <div className="truncate text-[11px] text-kumo-subtle">{activeSession.repositories.join(' / ')}</div>
             </div>
             <span className={`hidden text-[11px] md:inline ${activeSession.status === 'running' ? 'text-kumo-success' : activeSession.status === 'starting' || activeSession.status === 'stopping' ? 'text-kumo-subtle' : 'text-kumo-danger'}`}>{activeSession.status}</span>
-            {activeSession.status === 'running' && editorAvailable && (
-              <WorkshopButton
-                title="Open browser VS Code with preinstalled development extensions"
-                aria-label="Open browser VS Code"
-                disabled={editorBusy}
-                onClick={() => void openEditor(activeSession.id)}
-              >
-                <Code size={13} /> <span className="hidden md:inline">VS Code</span>
-              </WorkshopButton>
-            )}
             <WorkshopButton
               title="Discards uncommitted sandbox changes and reclones repositories"
               aria-label="Restart environment"
@@ -131,35 +132,103 @@ export function SessionsPage() {
               <Archive size={15} />
             </WorkshopIconButton>
           </div>
-          <div className="flex h-10 items-center border-t border-kumo-line px-3 sm:justify-end">
-            <div className="flex rounded-md border border-kumo-line bg-kumo-tint p-0.5 text-[11px]" role="group" aria-label="Terminal mode">
-            {(['opencode', 'shell'] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                onClick={() => setTerminalKind(kind)}
-                aria-pressed={terminalKind === kind}
-                className={`rounded px-2 py-1 capitalize ${terminalKind === kind ? 'bg-kumo-base text-kumo-strong shadow-sm' : 'text-kumo-subtle hover:text-kumo-default'}`}
-              >
-                {kind === 'opencode' ? runtimeLabel(activeSession.runtime) : 'Shell'}
-              </button>
-            ))}
+          <div className="flex min-h-10 min-w-0 items-center border-t border-kumo-line px-3 py-1.5">
+            <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto" role="toolbar" aria-label="Workbench tools">
+              {([
+                { value: 'agent' as const, label: 'Agent', icon: TerminalWindow, description: runtimeLabel(activeSession.runtime) },
+                { value: 'terminal' as const, label: 'Terminal', icon: TerminalWindow, description: 'Shell' },
+                { value: 'changes' as const, label: 'Changes', icon: GitDiff, description: activeSession.runtime === 'opencode' ? 'Diff' : 'Guide' },
+              ]).map((item) => {
+                const Icon = item.icon
+                return (
+                  <button
+                    key={item.value}
+                    type="button"
+                    aria-pressed={surface === item.value}
+                    onClick={() => {
+                      setSurface(item.value)
+                      if (item.value === 'terminal') setTerminalOpened(true)
+                    }}
+                    className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs transition-colors ${surface === item.value ? 'border-kumo-brand bg-kumo-base text-kumo-strong shadow-sm' : 'border-kumo-line bg-kumo-tint text-kumo-subtle hover:text-kumo-default'}`}
+                  >
+                    <Icon size={13} /> {item.label}<span className="hidden text-[10px] text-kumo-inactive sm:inline">{item.description}</span>
+                  </button>
+                )
+              })}
+              {activeSession.status === 'running' && editorAvailable && (
+                <WorkshopButton
+                  title="Open browser VS Code with preinstalled development extensions"
+                  aria-label="Open browser VS Code"
+                  disabled={editorBusy}
+                  onClick={() => void openEditor(activeSession.id)}
+                  className="shrink-0"
+                >
+                  <Code size={13} /> VS Code
+                </WorkshopButton>
+              )}
             </div>
           </div>
         </div>
         {(error || editorError) && <div role="alert" className="border-b border-kumo-danger/20 bg-kumo-danger-tint px-3 py-2 text-xs text-kumo-danger">{editorError ?? error}</div>}
-        <div className={`grid min-h-0 flex-1 ${sessionActivity.some((entry) => entry.state === 'pending') ? 'lg:grid-cols-[minmax(0,1fr)_320px]' : ''}`}>
-          <div className="min-h-0">
+        <div className={`grid min-h-0 min-w-0 flex-1 overflow-hidden ${sessionActivity.some((entry) => entry.state === 'pending') ? 'grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_320px] lg:grid-rows-1' : ''}`}>
+          <div className="min-h-0 min-w-0 overflow-hidden">
             {activeSession.status === 'running' ? (
-              <SessionTerminal
-                key={`${terminalKind}:${activeSession.id}:${activeSession.runtime}`}
-                sessionId={activeSession.id}
-                terminalKind={terminalKind}
-                runtime={activeSession.runtime}
-                initialInput={initialInput}
-                onInitialInputSent={() => markInitialInputSent(activeSession.id)}
-                onSessionUnavailable={refresh}
-              />
+              activeSession.runtime === 'opencode' ? (
+                <>
+                  <div className={surface === 'terminal' ? 'hidden' : 'h-full min-h-0 min-w-0'}>
+                    <OpenCodeWorkbench
+                      key={activeSession.id}
+                      sessionId={activeSession.id}
+                      sessionTitle={activeSession.title}
+                      initialInput={surface === 'agent' ? initialInput : undefined}
+                      onInitialInputSent={() => markInitialInputSent(activeSession.id)}
+                      onSessionUnavailable={refresh}
+                      surface={surface === 'changes' ? 'changes' : 'agent'}
+                    />
+                  </div>
+                  {terminalOpened && (
+                    <div className={surface === 'terminal' ? 'h-full min-h-0 min-w-0' : 'hidden'}>
+                      <SessionTerminal
+                        key={`terminal:${activeSession.id}`}
+                        sessionId={activeSession.id}
+                        terminalKind="shell"
+                        runtime={activeSession.runtime}
+                        onInitialInputSent={() => markInitialInputSent(activeSession.id)}
+                        onSessionUnavailable={refresh}
+                      />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className={surface === 'agent' ? 'h-full min-h-0 min-w-0' : 'hidden'}>
+                    <SessionTerminal
+                      key={`agent:${activeSession.id}:${activeSession.runtime}`}
+                      sessionId={activeSession.id}
+                      terminalKind="opencode"
+                      runtime={activeSession.runtime}
+                      initialInput={initialInput}
+                      onInitialInputSent={() => markInitialInputSent(activeSession.id)}
+                      onSessionUnavailable={refresh}
+                    />
+                  </div>
+                  {terminalOpened && (
+                    <div className={surface === 'terminal' ? 'h-full min-h-0 min-w-0' : 'hidden'}>
+                      <SessionTerminal
+                        key={`terminal:${activeSession.id}:${activeSession.runtime}`}
+                        sessionId={activeSession.id}
+                        terminalKind="shell"
+                        runtime={activeSession.runtime}
+                        onInitialInputSent={() => markInitialInputSent(activeSession.id)}
+                        onSessionUnavailable={refresh}
+                      />
+                    </div>
+                  )}
+                  {surface === 'changes' && (
+                    <ChangesUnavailablePanel runtime={activeSession.runtime} editorAvailable={editorAvailable} editorBusy={editorBusy} onOpenEditor={() => void openEditor(activeSession.id)} />
+                  )}
+                </>
+              )
             ) : activeSession.status === 'starting' || activeSession.status === 'stopping' ? (
               <SessionProgressPanel session={activeSession} />
             ) : (
@@ -193,6 +262,27 @@ function SessionProgressPanel({ session }: { session: { status: string } }) {
         <div className="mx-auto h-10 w-10 rounded-full border-2 border-kumo-line border-t-kumo-brand animate-spin" aria-hidden="true" />
         <h2 className="mt-4 text-lg font-semibold text-kumo-default">{copy.title}</h2>
         <p className="mt-2 text-sm leading-6 text-kumo-subtle">{copy.body}</p>
+      </div>
+    </div>
+  )
+}
+
+function ChangesUnavailablePanel({ runtime, editorAvailable, editorBusy, onOpenEditor }: { runtime: CodingSessionRuntime; editorAvailable: boolean; editorBusy: boolean; onOpenEditor: () => void }) {
+  return (
+    <div className="flex h-full min-h-0 min-w-0 items-center justify-center overflow-hidden bg-kumo-tint/30 px-6 text-center">
+      <div className="max-w-md rounded-2xl border border-kumo-line bg-kumo-base p-6 shadow-sm">
+        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-kumo-fill text-kumo-brand">
+          <GitDiff size={20} weight="bold" />
+        </div>
+        <h2 className="mt-4 text-lg font-semibold text-kumo-default">Changes live in your editor</h2>
+        <p className="mt-2 text-sm leading-6 text-kumo-subtle">
+          {runtimeLabel(runtime)} sessions do not expose structured diff data here yet. Use the Agent terminal for guidance, or open browser VS Code to inspect source control safely in the sandbox.
+        </p>
+        {editorAvailable && (
+          <WorkshopButton tone="primary" className="mt-5 !h-10 !rounded-lg !px-4" disabled={editorBusy} onClick={onOpenEditor} aria-label="Open browser VS Code from Changes">
+            <Code size={14} /> Open VS Code
+          </WorkshopButton>
+        )}
       </div>
     </div>
   )
@@ -440,10 +530,20 @@ function RepositoryOptionRow({ name, label, description, checked, onChange }: { 
   )
 }
 
-function ActivityPanel({ activity, onResolve, compact = false }: { activity: CodingSessionActivity[]; onResolve: (id: string, decision: 'approve' | 'reject') => void; compact?: boolean }) {
+function ActivityPanel({ activity, onResolve, compact = false }: { activity: CodingSessionActivity[]; onResolve: (id: string, decision: 'approve' | 'reject') => Promise<void>; compact?: boolean }) {
   const pending = activity.filter((entry) => entry.state === 'pending')
+  const [resolvingId, setResolvingId] = useState<string>()
+  const resolve = async (id: string, decision: 'approve' | 'reject') => {
+    if (resolvingId) return
+    setResolvingId(id)
+    try {
+      await onResolve(id, decision)
+    } finally {
+      setResolvingId(undefined)
+    }
+  }
   return (
-    <aside className={`${compact ? '' : 'min-h-0 overflow-y-auto border-t border-kumo-line bg-kumo-base lg:border-l lg:border-t-0'}`}>
+    <aside className={`${compact ? '' : 'min-h-0 max-h-[40vh] overflow-y-auto border-t border-kumo-line bg-kumo-base lg:max-h-none lg:border-l lg:border-t-0'}`}>
       <div className="flex h-11 items-center gap-2 border-b border-kumo-line px-3 text-xs font-medium text-kumo-default">
         <ShieldCheck size={14} className="text-kumo-brand" /> Tool approvals
         <span className="ml-auto rounded-full bg-kumo-tint px-1.5 py-0.5 text-[10px] text-kumo-subtle">{pending.length}</span>
@@ -455,8 +555,8 @@ function ActivityPanel({ activity, onResolve, compact = false }: { activity: Cod
             <div className="mt-1 text-[13px] font-medium text-kumo-default">{entry.description.title}</div>
             <div className="mt-1 line-clamp-4 text-xs leading-5 text-kumo-subtle">{entry.description.description}</div>
             <div className="mt-3 flex gap-2">
-              <WorkshopButton tone="primary" onClick={() => onResolve(entry.id, 'approve')}><Check size={13} /> Approve</WorkshopButton>
-              <WorkshopButton onClick={() => onResolve(entry.id, 'reject')}><X size={13} /> Reject</WorkshopButton>
+              <WorkshopButton tone="primary" disabled={Boolean(resolvingId)} onClick={() => void resolve(entry.id, 'approve')}><Check size={13} /> Approve</WorkshopButton>
+              <WorkshopButton disabled={Boolean(resolvingId)} onClick={() => void resolve(entry.id, 'reject')}><X size={13} /> Reject</WorkshopButton>
             </div>
           </div>
         ))}
