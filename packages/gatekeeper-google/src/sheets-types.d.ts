@@ -40,6 +40,13 @@ export type SpreadsheetValueMode =
   /** Formula text for formula cells and ordinary values for other cells. */
   | "formula";
 
+/** How values written to cells should be interpreted by Google Sheets. */
+export type SpreadsheetInputMode =
+  /** Store values exactly as provided. This is the default. */
+  | "raw"
+  /** Parse strings the same way the Google Sheets UI would, including formulas. */
+  | "userEntered";
+
 /** Values read from one rectangular range. */
 export type SpreadsheetRange = {
   /** Canonical A1 range returned by Google Sheets. */
@@ -48,7 +55,7 @@ export type SpreadsheetRange = {
   values: SpreadsheetCellValue[][];
 };
 
-/** Read-only access to one selected Google spreadsheet. */
+/** Access to one selected Google spreadsheet. */
 export interface GoogleSpreadsheetSession {
   /** Return spreadsheet metadata and its worksheet list. */
   getSpreadsheet(): Promise<SpreadsheetInfo>;
@@ -71,4 +78,27 @@ export interface GoogleSpreadsheetSession {
     ranges: string[],
     options?: { valueMode?: SpreadsheetValueMode },
   ): Promise<SpreadsheetRange[]>;
+
+  /**
+   * Replace the cells in a bounded A1 range with the provided rows of values. The value grid must
+   * fit inside the range. Use `null` to write a blank cell.
+   */
+  updateRange(
+    range: string,
+    values: SpreadsheetCellValue[][],
+    options?: { inputMode?: SpreadsheetInputMode },
+  ): Promise<void>;
+
+  /**
+   * Append rows to the end of a worksheet. `sheetTitle` is the exact worksheet tab name, and each
+   * row must contain at least one cell. Use `null` to write a blank cell.
+   */
+  appendRows(
+    sheetTitle: string,
+    rows: SpreadsheetCellValue[][],
+    options?: { inputMode?: SpreadsheetInputMode },
+  ): Promise<void>;
+
+  /** Clear every cell in a bounded A1 range. */
+  clearRange(range: string): Promise<void>;
 }
