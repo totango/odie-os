@@ -33,7 +33,13 @@ describe('NativeUpdateCard', () => {
   })
 
   async function render(metadataVersion = '1.1.0', collapsed = false) {
-    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ version: metadataVersion })))
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => init?.method === 'HEAD'
+      ? new Response(null)
+      : Response.json({
+          version: metadataVersion,
+          url: `/downloads/mac/OdieOS-${metadataVersion}.dmg`,
+          sha256: 'a'.repeat(64),
+        })))
     const container = document.createElement('div')
     const root = createRoot(container)
     await act(async () => root.render(<NativeUpdateCard collapsed={collapsed} />))
@@ -52,7 +58,7 @@ describe('NativeUpdateCard', () => {
     const button = container.querySelector<HTMLButtonElement>('button[aria-label="Download Odie OS 1.1.0 update"]')
     expect(button?.textContent).toContain('Update available')
     await act(async () => button?.click())
-    expect(state.runtime.openExternal).toHaveBeenCalledWith('https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-latest.dmg')
+    expect(state.runtime.openExternal).toHaveBeenCalledWith('https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-1.1.0.dmg')
     await act(async () => root.unmount())
   })
 
@@ -80,6 +86,20 @@ describe('NativeUpdateCard', () => {
     const button = container.querySelector('button')
     expect(button?.getAttribute('aria-label')).toBe('Download Odie OS 2.0.0 update')
     expect(button?.getAttribute('title')).toBe('Update available')
+    await act(async () => root.unmount())
+  })
+
+  it('rejects metadata that is not tied to its versioned installer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({
+      version: '2.0.0',
+      url: '/downloads/mac/OdieOS-latest.dmg',
+      sha256: 'invalid',
+    })))
+    const container = document.createElement('div')
+    const root = createRoot(container)
+    await act(async () => root.render(<NativeUpdateCard collapsed={false} />))
+    await act(async () => {})
+    expect(container.textContent).toBe('')
     await act(async () => root.unmount())
   })
 })

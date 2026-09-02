@@ -36,6 +36,9 @@ if (packageJson.version !== version || cargoVersion !== version) {
   throw new Error('package.json, Cargo.toml, and tauri.conf.json versions must match')
 }
 
+await execFile('/usr/bin/xcrun', ['stapler', 'validate', source])
+await execFile('/usr/sbin/spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', '--verbose', source])
+
 const mountPoint = await mkdtemp(join(tmpdir(), 'odie-release-'))
 try {
   await execFile('/usr/bin/hdiutil', ['attach', '-nobrowse', '-readonly', '-mountpoint', mountPoint, source])
@@ -59,8 +62,11 @@ try {
 
 await mkdir(outputDirectory, { recursive: true })
 const dmgName = 'OdieOS-latest.dmg'
+const versionedDmgName = `OdieOS-${version}.dmg`
 const dmgPath = resolve(outputDirectory, dmgName)
 if (source !== dmgPath) await copyFile(source, dmgPath)
+const versionedDmgPath = resolve(outputDirectory, versionedDmgName)
+if (source !== versionedDmgPath) await copyFile(source, versionedDmgPath)
 
 const checksum = await new Promise((resolveChecksum, reject) => {
   const hash = createHash('sha256')
@@ -71,7 +77,11 @@ const checksum = await new Promise((resolveChecksum, reject) => {
 })
 await Promise.all([
   writeFile(resolve(outputDirectory, `${dmgName}.sha256`), `${checksum}  ${dmgName}\n`),
-  writeFile(resolve(outputDirectory, 'OdieOS-latest.json'), `${JSON.stringify({ version })}\n`),
+  writeFile(resolve(outputDirectory, 'OdieOS-latest.json'), `${JSON.stringify({
+    version,
+    url: `/downloads/mac/OdieOS-${version}.dmg`,
+    sha256: checksum,
+  })}\n`),
 ])
 
 console.log(`Prepared Odie OS ${version} from ${basename(source)} in ${outputDirectory}`)

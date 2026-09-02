@@ -34,11 +34,9 @@ When Odie OS shows an **Update available** card, select it to download the lates
 
 ## Publish a macOS release
 
-After signing, notarizing, and stapling the disk image, validate it and prepare the public artifacts:
+After signing, notarizing, and stapling the disk image, prepare the public artifacts. The script validates the staple, Developer ID signature, bundle identifier, and embedded version before writing metadata:
 
 ```sh
-xcrun stapler validate /path/to/OdieOS.dmg
-spctl --assess --type open --context context:primary-signature --verbose /path/to/OdieOS.dmg
 pnpm --filter @gadgets/odie-os-native macos:prepare-release /path/to/OdieOS.dmg /tmp/odie-macos-release
 ```
 
@@ -46,6 +44,7 @@ Upload the disk image and checksum first. Upload the metadata last so clients ne
 
 ```sh
 pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.dmg --file /tmp/odie-macos-release/OdieOS-latest.dmg --content-type application/x-apple-diskimage
+pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-1.0.1.dmg --file /tmp/odie-macos-release/OdieOS-1.0.1.dmg --content-type application/x-apple-diskimage
 pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.dmg.sha256 --file /tmp/odie-macos-release/OdieOS-latest.dmg.sha256 --content-type text/plain
 pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.json --file /tmp/odie-macos-release/OdieOS-latest.json --content-type application/json
 ```

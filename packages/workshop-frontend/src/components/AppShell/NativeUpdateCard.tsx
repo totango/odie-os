@@ -2,10 +2,9 @@ import { ArrowRight, DownloadSimple } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
 import { getWorkshopRuntime } from '../../runtime'
 
-type AvailableUpdate = { version: string }
+type AvailableUpdate = { version: string; downloadPath: string }
 
 const metadataPath = '/downloads/mac/OdieOS-latest.json'
-const downloadPath = '/downloads/mac/OdieOS-latest.dmg'
 
 function numericVersion(value: string): number[] | null {
   if (value.length > 32 || !/^\d+(?:\.\d+){0,3}$/.test(value)) return null
@@ -35,10 +34,12 @@ export default function NativeUpdateCard({ collapsed }: { collapsed: boolean }) 
       if (app?.platform !== 'macos') return
       const response = await fetch(new URL(metadataPath, runtime.apiOrigin), { headers: { Accept: 'application/json' } })
       if (!response.ok) return
-      const metadata = await response.json() as { version?: unknown }
-      if (!cancelled && typeof metadata.version === 'string' && isNewerVersion(metadata.version, app.version)) {
-        setUpdate({ version: metadata.version })
-      }
+      const metadata = await response.json() as { version?: unknown; url?: unknown; sha256?: unknown }
+      if (typeof metadata.version !== 'string' || typeof metadata.url !== 'string' || typeof metadata.sha256 !== 'string') return
+      if (metadata.url !== `/downloads/mac/OdieOS-${metadata.version}.dmg` || !/^[a-f0-9]{64}$/.test(metadata.sha256)) return
+      if (!isNewerVersion(metadata.version, app.version)) return
+      const artifact = await fetch(new URL(metadata.url, runtime.apiOrigin), { method: 'HEAD' })
+      if (!cancelled && artifact.ok) setUpdate({ version: metadata.version, downloadPath: metadata.url })
     }
     check().catch(() => {})
     return () => { cancelled = true }
@@ -46,7 +47,7 @@ export default function NativeUpdateCard({ collapsed }: { collapsed: boolean }) 
 
   if (!update) return null
   const label = `Download Odie OS ${update.version} update`
-  const download = () => runtime.openExternal(new URL(downloadPath, runtime.apiOrigin).toString()).catch(() => {})
+  const download = () => runtime.openExternal(new URL(update.downloadPath, runtime.apiOrigin).toString()).catch(() => {})
 
   if (collapsed) {
     return (
