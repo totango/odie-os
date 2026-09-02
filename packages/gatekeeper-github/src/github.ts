@@ -23,6 +23,7 @@ import {
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
 import type { CodingSessionRepositoryOption } from "@gadgets/workshop-shared/api";
+import type { McpCallResult, McpToolInfo } from "@gadgets/mcp-shared/types";
 import {
   GitHubApi,
   GitHubApiError,
@@ -108,6 +109,14 @@ type StoredNonce = {
 
 type ResourceKind = "repo" | "issue" | "pull";
 type EntityKind = "issue" | "pull";
+type GitHubCodingSessionToolName =
+  | "github_repo_get_metadata"
+  | "github_issues_search"
+  | "github_issue_get"
+  | "github_issue_create"
+  | "github_issue_comment"
+  | "github_pull_requests_search"
+  | "github_pull_request_get";
 
 type GitHubGatekeeperImplProps = {
   userObjectId: string;
@@ -267,6 +276,10 @@ type GitHubAction =
   | ReplyToDiffCommentAction
   | MergePullRequestAction;
 
+type GitHubCodingSessionAction = Extract<GitHubAction,
+  | { type: "createIssue" }
+  | { type: "postComment" }>;
+
 type StoredActionRecord = {
   action: GitHubAction;
   state: StoredActionState;
@@ -317,6 +330,106 @@ const SUPPORTED_RESOURCES: SupportedResource[] = [
   REPO_RESOURCE,
   ISSUE_RESOURCE,
   PULL_REQUEST_RESOURCE,
+];
+
+const TEXT_SCHEMA = { type: "string" } as const;
+const NUMBER_SCHEMA = { type: "number" } as const;
+const STRING_ARRAY_SCHEMA = { type: "array", items: TEXT_SCHEMA } as const;
+
+const GITHUB_CODING_SESSION_TOOLS: McpToolInfo[] = [
+  {
+    name: "github_repo_get_metadata",
+    title: "Get repository metadata",
+    description: "Read basic metadata for the authorized GitHub repository.",
+    mode: "read",
+    classifiedBy: "server-annotation",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+  },
+  {
+    name: "github_issues_search",
+    title: "Search issues",
+    description: "Search or list issues in the authorized GitHub repository.",
+    mode: "read",
+    classifiedBy: "server-annotation",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        query: TEXT_SCHEMA,
+        state: { type: "string", enum: ["open", "closed", "all"] },
+        labels: STRING_ARRAY_SCHEMA,
+        author: TEXT_SCHEMA,
+        assignee: TEXT_SCHEMA,
+        limit: NUMBER_SCHEMA,
+      },
+    },
+  },
+  {
+    name: "github_issue_get",
+    title: "Read issue",
+    description: "Read an issue's metadata, body, and optionally its discussion comments.",
+    mode: "read",
+    classifiedBy: "server-annotation",
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["number"],
+      properties: { number: NUMBER_SCHEMA, includeDiscussion: { type: "boolean" }, limit: NUMBER_SCHEMA },
+    },
+  },
+  {
+    name: "github_issue_create",
+    title: "Create issue",
+    description: "Create an issue in the authorized GitHub repository after Workshop approval.",
+    mode: "action",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["title"],
+      properties: { title: TEXT_SCHEMA, bodyMarkdown: TEXT_SCHEMA, labels: STRING_ARRAY_SCHEMA, assignees: STRING_ARRAY_SCHEMA },
+    },
+  },
+  {
+    name: "github_issue_comment",
+    title: "Comment on issue or pull request",
+    description: "Post a Markdown comment on an issue or pull request after Workshop approval.",
+    mode: "action",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["number", "bodyMarkdown"],
+      properties: { number: NUMBER_SCHEMA, bodyMarkdown: TEXT_SCHEMA },
+    },
+  },
+  {
+    name: "github_pull_requests_search",
+    title: "Search pull requests",
+    description: "Search or list pull requests in the authorized GitHub repository.",
+    mode: "read",
+    classifiedBy: "server-annotation",
+    inputSchema: {
+      type: "object", additionalProperties: false,
+      properties: {
+        query: TEXT_SCHEMA,
+        state: { type: "string", enum: ["open", "closed", "all"] },
+        labels: STRING_ARRAY_SCHEMA,
+        author: TEXT_SCHEMA,
+        assignee: TEXT_SCHEMA,
+        limit: NUMBER_SCHEMA,
+      },
+    },
+  },
+  {
+    name: "github_pull_request_get",
+    title: "Read pull request",
+    description: "Read a pull request's metadata, body, and optionally its diff and discussion comments.",
+    mode: "read",
+    classifiedBy: "server-annotation",
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["number"],
+      properties: {
+        number: NUMBER_SCHEMA,
+        includeDiscussion: { type: "boolean" },
+        includeDiff: { type: "boolean" },
+        limit: NUMBER_SCHEMA,
+      },
+    },
+  },
 ];
 
 const SELF_CLOSING_HTML = `<!DOCTYPE html>
@@ -1505,7 +1618,7 @@ class DomainSharingApprovalQueue extends RpcTarget implements ApprovalQueue {
 
 @validateRpc()
 export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImplProps>
-  implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
+  implements Gatekeeper<GitHubRepoSession | GitHubIssue | GitHubPullRequest | GitHubCodingSessionImpl> {
 
   #pendingActionsCache?: GitHubAction[];
 
@@ -3370,10 +3483,14 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     this.#clearCaches();
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<GitHubRepoSession | GitHubIssue | GitHubPullRequest> {
+  async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<GitHubRepoSession | GitHubIssue | GitHubPullRequest | GitHubCodingSessionImpl> {
     const queue = this.ctx.props.owner.toLowerCase() === TOTANGO_GITHUB_ORG
       ? new DomainSharingApprovalQueue(approvalQueue) as unknown as RpcStub<ApprovalQueue>
       : approvalQueue.dup();
+    const surface = await approvalQueue.getSessionSurface().catch(() => "chat" as const);
+    if (surface === "code" && this.ctx.props.resourceKind === "repo") {
+      return new GitHubCodingSessionImpl(this, queue);
+    }
     switch (this.ctx.props.resourceKind) {
       case "repo":
         return new GitHubRepoSessionImpl(this, queue);
@@ -3740,6 +3857,21 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
     return this.#searchPullSummaries(query, pageSize);
   }
 
+  codingSessionActionResult(actionId: number): McpCallResult {
+    const record = this.#requireActionRecord(actionId);
+    if (record.state === "approved") {
+      return {
+        status: "ok",
+        content: [{ type: "text", text: `GitHub action ${actionId} was approved and applied.` }],
+        text: `GitHub action ${actionId} was approved and applied.`,
+      };
+    }
+    if (record.state === "rejected") {
+      return { status: "rejected", message: `GitHub action ${actionId} was not approved.` };
+    }
+    return { status: "pending", actionId, message: `GitHub action ${actionId} is awaiting approval.` };
+  }
+
   async prepareCreateIssue(options: GitHubCreateIssueOptions): Promise<CreateIssueAction> {
     return {
       type: "createIssue",
@@ -3927,6 +4059,220 @@ export class GitHubGatekeeperImpl extends DurableObject<Env, GitHubGatekeeperImp
   }
 
   async removeObserver(_id: string): Promise<void> {}
+}
+
+function requireStringArg(args: Record<string, unknown> | undefined, name: string): string {
+  const value = args?.[name];
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`GitHub tool argument ${name} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function optionalStringArg(args: Record<string, unknown> | undefined, name: string): string | undefined {
+  const value = args?.[name];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error(`GitHub tool argument ${name} must be a string.`);
+  return value;
+}
+
+function optionalStringArrayArg(args: Record<string, unknown> | undefined, name: string): string[] | undefined {
+  const value = args?.[name];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every(item => typeof item === "string")) {
+    throw new Error(`GitHub tool argument ${name} must be an array of strings.`);
+  }
+  return value;
+}
+
+function requirePositiveIntegerArg(args: Record<string, unknown> | undefined, name: string): number {
+  const value = args?.[name];
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`GitHub tool argument ${name} must be a positive integer.`);
+  }
+  return value;
+}
+
+function codingSessionLimit(args: Record<string, unknown> | undefined, fallback = 20): number {
+  const value = args?.limit;
+  if (value === undefined) return fallback;
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error("GitHub tool argument limit must be a positive integer.");
+  }
+  return Math.min(value, 50);
+}
+
+function optionalIssueState(args: Record<string, unknown> | undefined): GitHubIssueState | "all" | undefined {
+  const value = args?.state;
+  if (value === undefined) return undefined;
+  if (value === "open" || value === "closed" || value === "all") return value;
+  throw new Error("GitHub tool argument state must be open, closed, or all.");
+}
+
+async function collectCursor<T>(cursor: Cursor<T>, limit: number): Promise<T[]> {
+  const results: T[] = [];
+  try {
+    while (results.length < limit) {
+      const page = await cursor.next();
+      if (!page) break;
+      results.push(...page.slice(0, limit - results.length));
+    }
+  } finally {
+    (cursor as Cursor<T> & { [Symbol.dispose]?(): void })[Symbol.dispose]?.();
+  }
+  return results;
+}
+
+function okResult(structuredContent: unknown): McpCallResult {
+  const text = JSON.stringify(structuredContent, null, 2);
+  return { status: "ok", content: [{ type: "text", text }], text, structuredContent };
+}
+
+@validateRpc()
+class GitHubCodingSessionImpl extends RpcTarget {
+  #gatekeeper: GitHubGatekeeperImpl;
+  #approvalQueue: RpcStub<ApprovalQueue>;
+
+  constructor(gatekeeper: GitHubGatekeeperImpl, approvalQueue: RpcStub<ApprovalQueue>) {
+    super();
+    this.#gatekeeper = gatekeeper;
+    this.#approvalQueue = approvalQueue;
+  }
+
+  [Symbol.dispose](): void {
+    (this.#approvalQueue as RpcStub<ApprovalQueue> & { [Symbol.dispose](): void })[Symbol.dispose]();
+  }
+
+  async listTools(): Promise<McpToolInfo[]> {
+    await this.#approvalQueue.authorizeObservation({
+      title: "GitHub: list coding-session tools",
+      description: "Read the GitHub tool catalog for this coding session repository.",
+    });
+    return GITHUB_CODING_SESSION_TOOLS;
+  }
+
+  async callTool(name: GitHubCodingSessionToolName, args?: Record<string, unknown>): Promise<McpCallResult> {
+    switch (name) {
+      case "github_repo_get_metadata":
+        return this.#observe("Read GitHub repository metadata", "Read repository metadata for this coding session.",
+          async () => this.#gatekeeper.repoMetadata());
+      case "github_issues_search":
+        return this.#observe("Search GitHub issues", "Search issues in this coding session repository.",
+          async () => this.#issues(args));
+      case "github_issue_get":
+        return this.#observe("Read GitHub issue", "Read one issue in this coding session repository.",
+          async () => this.#issue(args));
+      case "github_pull_requests_search":
+        return this.#observe("Search GitHub pull requests", "Search pull requests in this coding session repository.",
+          async () => this.#pullRequests(args));
+      case "github_pull_request_get":
+        return this.#observe("Read GitHub pull request", "Read one pull request in this coding session repository.",
+          async () => this.#pullRequest(args));
+      case "github_issue_create":
+        return this.#action(await this.#gatekeeper.prepareCreateIssue({
+          title: requireStringArg(args, "title"),
+          bodyMarkdown: optionalStringArg(args, "bodyMarkdown"),
+          labels: optionalStringArrayArg(args, "labels"),
+          assignees: optionalStringArrayArg(args, "assignees"),
+        }), "Create GitHub issue", "Create a new issue in this coding session repository.", false);
+      case "github_issue_comment": {
+        const number = requirePositiveIntegerArg(args, "number");
+        return this.#action(await this.#gatekeeper.preparePostComment("issue", String(number), requireStringArg(args, "bodyMarkdown")),
+          `Comment on GitHub issue or pull request #${number}`,
+          `Post a Markdown comment on issue or pull request #${number} in this coding session repository.`, true);
+      }
+      default:
+        throw new Error(`No GitHub coding-session tool named ${String(name)}.`);
+    }
+  }
+
+  getActionResult(actionId: number): Promise<McpCallResult> {
+    return Promise.resolve(this.#gatekeeper.codingSessionActionResult(actionId));
+  }
+
+  getCodingSessionActionResult(actionId: number): Promise<McpCallResult> {
+    return this.getActionResult(actionId);
+  }
+
+  async #observe(title: string, description: string, read: () => Promise<unknown>): Promise<McpCallResult> {
+    await this.#approvalQueue.authorizeObservation({ title, description });
+    const structuredContent = await read();
+    return okResult(structuredContent);
+  }
+
+  async #action(action: GitHubCodingSessionAction, title: string, description: string, implementsRevert: boolean): Promise<McpCallResult> {
+    await this.#gatekeeper.submitActionForApproval(this.#approvalQueue, action, {
+      title, description, implementsRevert, awaitDecision: true,
+    });
+    return {
+      status: "pending",
+      actionId: action.approvalId,
+      message: `GitHub action ${action.approvalId} is awaiting Workshop approval.`,
+    };
+  }
+
+  async #issues(args: Record<string, unknown> | undefined): Promise<GitHubIssueSummary[]> {
+    const limit = codingSessionLimit(args);
+    const query = optionalStringArg(args, "query")?.trim();
+    const filter = {
+      state: optionalIssueState(args),
+      labels: optionalStringArrayArg(args, "labels"),
+      author: optionalStringArg(args, "author"),
+      assignee: optionalStringArg(args, "assignee"),
+      resultsPerPage: Math.min(limit, 50),
+    } satisfies GitHubIssueFilter;
+    const cursor = query
+      ? await this.#gatekeeper.searchIssues({ ...filter, text: query }, filter.resultsPerPage)
+      : await this.#gatekeeper.listIssues(filter, filter.resultsPerPage);
+    return collectCursor(cursor, limit);
+  }
+
+  async #issue(args: Record<string, unknown> | undefined): Promise<{ details: GitHubIssueDetails; discussion?: GitHubDiscussionEntry[] }> {
+    const number = String(requirePositiveIntegerArg(args, "number"));
+    const details = await this.#gatekeeper.openIssue(number);
+    const includeDiscussion = args?.includeDiscussion === true;
+    return {
+      details,
+      discussion: includeDiscussion
+        ? await collectCursor(await this.#gatekeeper.issueDiscussion("issue", number, codingSessionLimit(args)), codingSessionLimit(args))
+        : undefined,
+    };
+  }
+
+  async #pullRequests(args: Record<string, unknown> | undefined): Promise<GitHubPullRequestSummary[]> {
+    const limit = codingSessionLimit(args);
+    const query = optionalStringArg(args, "query")?.trim();
+    const resultsPerPage = Math.min(limit, 50);
+    const filter: Omit<GitHubPullRequestSearch, "text"> = {
+      state: optionalIssueState(args),
+      labels: optionalStringArrayArg(args, "labels"),
+      author: optionalStringArg(args, "author"),
+      assignee: optionalStringArg(args, "assignee"),
+      resultsPerPage,
+    };
+    const cursor = query || filter.labels || filter.author || filter.assignee
+      ? await this.#gatekeeper.searchPullRequests({ ...filter, text: query ?? "" }, resultsPerPage)
+      : await this.#gatekeeper.listPullRequests({ state: filter.state, resultsPerPage }, resultsPerPage);
+    return collectCursor(cursor, limit);
+  }
+
+  async #pullRequest(args: Record<string, unknown> | undefined): Promise<{
+    details: GitHubPullRequestDetails;
+    discussion?: GitHubDiscussionEntry[];
+    diff?: { revision: GitHubPullRequestRevision; files: GitHubPullRequestDiffFile[] };
+  }> {
+    const number = String(requirePositiveIntegerArg(args, "number"));
+    const details = await this.#gatekeeper.openPullRequest(number);
+    const limit = codingSessionLimit(args);
+    const diff = args?.includeDiff === true ? await this.#gatekeeper.pullDiff(number, Math.min(limit, 20)) : undefined;
+    return {
+      details,
+      discussion: args?.includeDiscussion === true
+        ? await collectCursor(await this.#gatekeeper.issueDiscussion("pull", number, limit), limit)
+        : undefined,
+      diff: diff ? { revision: diff.revision, files: await collectCursor(diff.files, limit) } : undefined,
+    };
+  }
 }
 
 @validateRpc()

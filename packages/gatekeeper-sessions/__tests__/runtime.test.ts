@@ -80,16 +80,11 @@ describe("coding session runtimes", () => {
     });
   });
 
-  it("starts OpenCode with pinned Valhalla commands and skills copied from the image", () => {
+  it("starts OpenCode with a minimal repository-scoped command", () => {
     expect(openCodeCommand("odie-os")).toEqual([
       "/bin/bash",
       "-lc",
-      "if [ -d /opt/odie-valhalla/opencode ]; then " +
-        "mkdir -p /workspace/.odie-opencode/command /workspace/.odie-opencode/skills && " +
-        "cp -R /opt/odie-valhalla/opencode/command/. /workspace/.odie-opencode/command/ && " +
-        "cp -R /opt/odie-valhalla/opencode/skills/. /workspace/.odie-opencode/skills/; " +
-        "fi && " +
-        "cd /workspace/odie-os && exec opencode",
+      "cd /workspace/odie-os && exec opencode",
     ]);
   });
 

@@ -144,6 +144,20 @@ type WorkItemProviderSearchResult =
   | { source: WorkItemProviderKind; error: WorkItemProviderError };
 type StoredZendeskTicketMemoryMeta = { partitions: { keyHash: string; lastUsedAt: number }[] };
 type StoredZendeskTicketMemoryEntry = Omit<ZendeskTicketMemoryEntry, "partition">;
+type TeamPiMcpToolMode = "read" | "action";
+type TeamPiMcpToolInfo = {
+  name: string;
+  title?: string;
+  description?: string;
+  mode: TeamPiMcpToolMode;
+  classifiedBy: "default";
+  inputSchema?: unknown;
+};
+type TeamPiMcpCallResult =
+  | { status: "ok"; content: Array<{ type: "text"; text: string }>; text: string; structuredContent?: unknown; isError?: boolean }
+  | { status: "pending"; actionId: number; message: string }
+  | { status: "rejected"; message: string }
+  | { status: "failed"; message: string };
 
 const PROVIDER_CATALOG_ENTRIES: AgentCatalogEntry[] = [
   { id: "provider:gmail", title: "Gmail", description: "Search and read Gmail messages available through Team PI." },
@@ -153,6 +167,120 @@ const PROVIDER_CATALOG_ENTRIES: AgentCatalogEntry[] = [
   { id: "provider:salesforce", title: "Salesforce", description: "Read customer account records available through Team PI." },
   { id: "provider:work-items", title: "Work Items / Jira", description: "Search and read Jira issues and Zendesk tickets through Team PI Work Items. Create Jira issues, add comments, update allowlisted fields, and apply Jira transitions with the approval-backed Work Items actions." },
   { id: "provider:docs", title: "Docs", description: "Discover document-oriented Team PI skills and provider capabilities." },
+];
+
+const WORK_ITEM_REF_SCHEMA = {
+  type: "object",
+  properties: {
+    source: { type: "string", enum: ["jira", "zendesk"] },
+    id: { type: "string", minLength: 1, maxLength: 180 },
+    key: { type: "string", maxLength: 80 },
+  },
+  required: ["source", "id"],
+  additionalProperties: false,
+} as const;
+
+const TEAM_PI_CODING_SESSION_TOOLS: TeamPiMcpToolInfo[] = [
+  {
+    name: "team_pi_work_items_search",
+    title: "Search Team PI Work Items",
+    description: "Search Jira issues and Zendesk tickets through the existing Team PI Work Items read path.",
+    mode: "read",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object",
+      properties: {
+        source: { type: "string", enum: ["jira", "zendesk", "both"], default: "both" },
+        query: { type: "string", maxLength: 300 },
+        limit: { type: "integer", minimum: 1, maximum: 50 },
+        cursors: {
+          type: "object",
+          properties: { jira: { type: "string", maxLength: 500 }, zendesk: { type: "string", maxLength: 500 } },
+          additionalProperties: false,
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "team_pi_read_work_item",
+    title: "Read Team PI Work Item",
+    description: "Read authoritative Jira or Zendesk Work Item detail, comments, activity, transitions, update options, and attachments.",
+    mode: "read",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object",
+      properties: { ref: WORK_ITEM_REF_SCHEMA },
+      required: ["ref"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "team_pi_create_jira_issue",
+    title: "Create Jira Issue through Team PI",
+    description: "Queue an approval-backed Jira issue creation through the existing Team PI Work Items action path.",
+    mode: "action",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectKey: { type: "string", maxLength: 40, default: "AI" },
+        issueType: { type: "string", maxLength: 80, default: "Story" },
+        summary: { type: "string", minLength: 1, maxLength: 300 },
+        description: { type: "string", minLength: 1, maxLength: WORK_ITEM_BODY_MAX },
+        priority: { type: "string", maxLength: 80 },
+      },
+      required: ["summary", "description"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "team_pi_add_work_item_comment",
+    title: "Comment on a Team PI Work Item",
+    description: "Queue an approval-backed public Jira comment or Zendesk comment with explicit visibility.",
+    mode: "action",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: WORK_ITEM_REF_SCHEMA,
+        body: { type: "string", minLength: 1, maxLength: WORK_ITEM_BODY_MAX },
+        visibility: { type: "string", enum: ["internal", "public"] },
+        attachmentTokens: { type: "array", items: { type: "string", maxLength: 1600 }, maxItems: 10 },
+      },
+      required: ["ref", "body"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "team_pi_update_work_item_fields",
+    title: "Update Team PI Work Item Fields",
+    description: "Queue an approval-backed update of Team PI allowlisted Jira or Zendesk Work Item fields.",
+    mode: "action",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: WORK_ITEM_REF_SCHEMA,
+        fields: { type: "object", maxProperties: 10, additionalProperties: true },
+      },
+      required: ["ref", "fields"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "team_pi_transition_jira_issue",
+    title: "Transition Jira Issue through Team PI",
+    description: "Queue an approval-backed Jira transition returned by the read Work Item tool.",
+    mode: "action",
+    classifiedBy: "default",
+    inputSchema: {
+      type: "object",
+      properties: { ref: WORK_ITEM_REF_SCHEMA, transitionId: { type: "string", minLength: 1, maxLength: 80 } },
+      required: ["ref", "transitionId"],
+      additionalProperties: false,
+    },
+  },
 ];
 
 const html = (body: string, init?: ResponseInit) => new Response(body, {
@@ -762,6 +890,38 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
     }
     return { items: search.items };
   }
+  async listTools(): Promise<TeamPiMcpToolInfo[]> {
+    return TEAM_PI_CODING_SESSION_TOOLS.map(tool => ({ ...tool }));
+  }
+  async callTool(name: string, args?: Record<string, unknown>): Promise<TeamPiMcpCallResult> {
+    const toolArgs = asRecord(args);
+    if (name === "team_pi_work_items_search") {
+      return mcpOk(await this.workItemsSearch(workItemSearchRequestFromToolArgs(toolArgs)));
+    }
+    if (name === "team_pi_read_work_item") {
+      return mcpOk(await this.readWorkItem(workItemRefFromToolArgs(toolArgs.ref)));
+    }
+    if (name === "team_pi_create_jira_issue") {
+      return mcpPending(await this.createJiraIssue(createJiraIssueRequestFromToolArgs(toolArgs)), "Jira issue creation is awaiting Workshop approval.");
+    }
+    if (name === "team_pi_add_work_item_comment") {
+      return mcpPending(await this.addWorkItemComment(workItemRefFromToolArgs(toolArgs.ref), workItemCommentInputFromToolArgs(toolArgs)), "Work item comment is awaiting Workshop approval.");
+    }
+    if (name === "team_pi_update_work_item_fields") {
+      return mcpPending(await this.updateWorkItemFields(workItemRefFromToolArgs(toolArgs.ref), workItemFieldPatchFromToolArgs(toolArgs)), "Work item field update is awaiting Workshop approval.");
+    }
+    if (name === "team_pi_transition_jira_issue") {
+      return mcpPending(await this.transitionJiraIssue(workItemRefFromToolArgs(toolArgs.ref), requiredToolString(toolArgs.transitionId, "transitionId", 80)), "Jira transition is awaiting Workshop approval.");
+    }
+    throw new Error(`Unknown Team PI coding-session tool: ${name}`);
+  }
+  async getCodingSessionActionResult(actionId: number): Promise<TeamPiMcpCallResult> {
+    const result = await this.getActionResult(actionId);
+    if (result.status === "ready") return mcpOk(result.result);
+    if (result.status === "pending") return { status: "pending", actionId, message: "Team PI action is still pending or applying." };
+    if (result.status === "rejected") return { status: "rejected", message: "Team PI action was rejected in Workshop." };
+    return { status: "failed", message: result.message };
+  }
   private async read<T>(title: string, description: string, fn: () => Promise<T>): Promise<T> { const result = await fn(); await this.approvalQueue.authorizeObservation(teamPiObservation(title, description)); return result; }
   private async queue(action: PendingAction, title: string, description: string): Promise<TeamPiQueuedAction> {
     const actionId = (this.kv.get<number>("nextActionId") ?? 1);
@@ -777,6 +937,103 @@ export class TeamPiSessionImpl extends RpcTarget implements TeamPiSession {
     }
     return { actionId, status: "pending", pollAfterMs: 1000 };
   }
+}
+
+function mcpOk(structuredContent: unknown): TeamPiMcpCallResult {
+  const text = boundString(JSON.stringify(structuredContent, null, 2), 24_000);
+  return { status: "ok", content: [{ type: "text", text }], text, structuredContent };
+}
+
+function mcpPending(action: TeamPiQueuedAction, message: string): TeamPiMcpCallResult {
+  return { status: "pending", actionId: action.actionId, message };
+}
+
+function workItemSearchRequestFromToolArgs(args: Record<string, unknown>): WorkItemSearchRequest {
+  const source = args.source === "jira" || args.source === "zendesk" || args.source === "both" ? args.source : "both";
+  const cursors = asRecord(args.cursors);
+  return {
+    source,
+    query: optionalToolString(args.query, 300),
+    limit: optionalToolInteger(args.limit, 1, 50),
+    cursors: {
+      jira: optionalToolString(cursors.jira, 500),
+      zendesk: optionalToolString(cursors.zendesk, 500),
+    },
+  };
+}
+
+function workItemRefFromToolArgs(value: unknown): WorkItemProviderRef {
+  const ref = asRecord(value);
+  const source = workItemSourceOrNull(ref.source);
+  if (!source) throw new Error("ref.source must be jira or zendesk.");
+  return normalizeWorkItemRef({
+    source,
+    id: requiredToolString(ref.id, "ref.id", 180),
+    key: optionalToolString(ref.key, 80),
+  });
+}
+
+function createJiraIssueRequestFromToolArgs(args: Record<string, unknown>): TeamPiCreateJiraIssueRequest {
+  return {
+    projectKey: optionalToolString(args.projectKey, 40),
+    issueType: optionalToolString(args.issueType, 80),
+    summary: requiredToolString(args.summary, "summary", 300),
+    description: requiredToolString(args.description, "description", WORK_ITEM_BODY_MAX, true),
+    priority: optionalToolString(args.priority, 80),
+  };
+}
+
+function workItemCommentInputFromToolArgs(args: Record<string, unknown>): WorkItemCommentInput {
+  const visibility = args.visibility === "internal" || args.visibility === "public" ? args.visibility : undefined;
+  const attachmentTokens = stringArray(args.attachmentTokens, 10, 1600);
+  return {
+    body: requiredToolString(args.body, "body", WORK_ITEM_BODY_MAX, true),
+    visibility,
+    ...(attachmentTokens.length > 0 ? { attachmentTokens } : {}),
+  };
+}
+
+function workItemFieldPatchFromToolArgs(args: Record<string, unknown>): WorkItemFieldPatch {
+  const fields = asRecord(args.fields);
+  if (Object.keys(fields).length === 0) throw new Error("fields are required.");
+  const out: WorkItemFieldPatch["fields"] = {};
+  for (const [key, value] of Object.entries(fields).slice(0, 10)) {
+    out[requiredToolString(key, "field name", 120)] = toolFieldValue(value);
+  }
+  return { fields: out };
+}
+
+function toolFieldValue(value: unknown): string | number | boolean | null | string[] {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("Field numbers must be finite.");
+    return value;
+  }
+  if (typeof value === "string") return boundString(value, WORK_ITEM_DESCRIPTION_MAX);
+  if (Array.isArray(value)) return value.slice(0, 50).map(item => requiredToolString(item, "field array item", 200));
+  throw new Error("Field values must be strings, numbers, booleans, null, or string arrays.");
+}
+
+function requiredToolString(value: unknown, name: string, max: number, allowMultiline = false): string {
+  if (typeof value !== "string") throw new Error(`${name} is required.`);
+  const out = boundString(value.trim(), max);
+  if (!out) throw new Error(`${name} is required.`);
+  if (!allowMultiline && /[\r\n]/.test(out)) throw new Error(`${name} must be a single line.`);
+  return out;
+}
+
+function optionalToolString(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const out = boundString(value.trim(), max);
+  if (!out) return undefined;
+  if (/[\r\n]/.test(out)) throw new Error("Tool string arguments must be single-line unless explicitly documented.");
+  return out;
+}
+
+function optionalToolInteger(value: unknown, min: number, max: number): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("Tool integer argument must be numeric.");
+  return Math.max(min, Math.min(max, Math.floor(value)));
 }
 
 async function applyPendingAction(api: TeamPiApi, pending: PendingAction): Promise<unknown> {

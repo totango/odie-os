@@ -287,6 +287,18 @@ export function makeStoredAssistantMessage(message: AssistantMessage): StoredAss
   };
 }
 
+/** Formats the per-turn Simplified Technical English preference for the dynamic system prompt. */
+export function formatSimplifiedTechnicalEnglishDirective(enabled: boolean): string {
+  if (!enabled) return "";
+  return `# Response style\n\n` +
+      `The user prefers concise language based on ASD-STE100 Simplified Technical English. Use ` +
+      `short, direct sentences, active voice, and one idea per sentence. Use one consistent term ` +
+      `for each concept. Avoid idioms, decorative language, and unnecessary jargon. Lead with the ` +
+      `answer. Use short lists for procedures. Apply these rules to user-facing prose only. Do not ` +
+      `simplify code, quotations, identifiers, domain terms, or tool payloads. If the user's ` +
+      `current message explicitly asks for a different style, follow that request for this turn.`;
+}
+
 /**
  * Methods of OverseerImpl that runAgent() needs to call, extracted as an interface to avoid cyclic
  * dependencies.
@@ -443,6 +455,9 @@ export interface AgentHooks {
    * (analogous to consumeCapturedActions).
    */
   consumeCapturedConnectionRequests(chatId: number): AiChatMessageBody[];
+
+  /** Preserve the current turn's initiator so an approval can resume it under the same account. */
+  suspendAgent(chatId: number, reason: "connectionRequest" | "awaitDecision"): void;
 
   /**
    * Blueprint hooks for the agent.
@@ -1271,6 +1286,7 @@ export async function runAgent(
     abortSignal: AbortSignal,
     initiator: AiChatAuthorInfo,
     callbackInitiated: boolean,
+    simplifiedTechnicalEnglish: boolean,
     compaction: CompactionContext): Promise<CompactionCheckpoint | undefined> {
   let checkpoint = compaction.checkpoint;
 
@@ -2270,6 +2286,7 @@ export async function runAgent(
   // Deployment-wide admin instructions, appended to the static system slot (slot 0) so they stay
   // inside the Anthropic prompt cache window. "" when unset.
   let instanceInstructions = formatInstanceInstructions(await hooks.getInstanceInstructions());
+  let responseStyle = formatSimplifiedTechnicalEnglishDirective(simplifiedTechnicalEnglish);
 
   if (agentContext.spawnerConfig) {
     // This is a spawned agent. Build an appropriate system prompt. Spawned agents see only the
@@ -2300,6 +2317,7 @@ export async function runAgent(
           ? `${systemPromptBindings}\n\n${alwaysAvailableResourcesPrompt}`
           : systemPromptBindings,
     ];
+    if (responseStyle) systemPromptSlots[1] += `\n\n${responseStyle}`;
   } else {
     // This is a regular coding agent.
 
@@ -2407,7 +2425,8 @@ export async function runAgent(
           : SYSTEM_PROMPT,
       (standardFormats ? `${standardFormats}\n\n` : "") +
           `${systemPromptWorkspace}${systemPromptConnections}` +
-          (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : ""),
+          (alwaysAvailableResourcesPrompt ? `\n\n${alwaysAvailableResourcesPrompt}` : "") +
+          (responseStyle ? `\n\n${responseStyle}` : ""),
     ];
   }
 
@@ -3296,6 +3315,12 @@ export async function runAgent(
     // it can be determined) for the overseer's triage.
     throw new AgentTurnError(
         turnFailure.message, httpStatusFromError(turnFailure.message, handle), handle.teamPiCodex);
+  }
+
+  if (connectionRequested) {
+    hooks.suspendAgent(chatId, "connectionRequest");
+  } else if (awaitingActionDecision) {
+    hooks.suspendAgent(chatId, "awaitDecision");
   }
 
   // The turn ran, so there is no checkpoint to report.

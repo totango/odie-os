@@ -9,6 +9,7 @@ const testState = vi.hoisted(() => ({
     mintCodingSessionAttachCapability: ReturnType<typeof vi.fn>
     uploadCodingSessionFile: ReturnType<typeof vi.fn>
   },
+  terminalWrites: [] as Uint8Array[],
   terminalWriteCallbacks: [] as Array<() => void>,
   sockets: [] as MockWebSocket[],
   scrollToBottom: vi.fn<() => void>(),
@@ -38,7 +39,8 @@ vi.mock('@xterm/xterm', () => ({
     clear() {}
     dispose() {}
     onData() { return { dispose() {} } }
-    write(_bytes: Uint8Array, callback: () => void) {
+    write(bytes: Uint8Array, callback: () => void) {
+      testState.terminalWrites.push(bytes)
       testState.terminalWriteCallbacks.push(callback)
     }
   },
@@ -181,6 +183,7 @@ async function advance(ms: number) {
 beforeEach(() => {
   vi.useFakeTimers()
   testState.authenticatedApi = createApi()
+  testState.terminalWrites = []
   testState.terminalWriteCallbacks = []
   testState.sockets = []
   testState.scrollToBottom.mockClear()
@@ -363,8 +366,7 @@ describe('SessionTerminal', () => {
     firstSocket!.serverMessage(JSON.stringify({ type: 'ready' }))
     firstSocket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'chunk-cursor' }))
     firstSocket!.serverMessage(new Uint8Array([1, 2, 3]).buffer)
-    // Interactive output reaches xterm without waiting for requestAnimationFrame.
-    expect(testState.terminalWriteCallbacks).toHaveLength(1)
+    expect(testState.terminalWriteCallbacks).toHaveLength(0)
     firstSocket!.serverClose()
 
     await advance(1000)
@@ -382,6 +384,28 @@ describe('SessionTerminal', () => {
     const reconnectUrl = new URL(testState.sockets[1]!.url)
     expect(reconnectUrl.searchParams.get('ticket')).toBe('2')
     expect(reconnectUrl.searchParams.get('cursor')).toBe('chunk-cursor')
+
+    await rendered.unmount()
+  })
+
+  it('coalesces terminal frames that arrive before the next animation frame', async () => {
+    const rendered = await renderTerminal()
+    const socket = testState.sockets[0]
+    expect(socket).toBeDefined()
+
+    await act(async () => {
+      socket!.serverMessage(JSON.stringify({ type: 'ready' }))
+      socket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 2, cursor: 'cursor-1' }))
+      socket!.serverMessage(new Uint8Array([1, 2]).buffer)
+      socket!.serverMessage(JSON.stringify({ type: 'chunk', byteLength: 3, cursor: 'cursor-2' }))
+      socket!.serverMessage(new Uint8Array([3, 4, 5]).buffer)
+    })
+
+    expect(testState.terminalWrites).toEqual([])
+
+    await advance(16)
+
+    expect(testState.terminalWrites.map((chunk) => [...chunk])).toEqual([[1, 2, 3, 4, 5]])
 
     await rendered.unmount()
   })

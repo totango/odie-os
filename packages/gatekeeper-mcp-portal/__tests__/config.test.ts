@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isPortalToolGrantable,
+  portalCodingSessionResourceUrls,
   portalCatalogValidationMode,
   portalResource,
   portalAuthRequiresReconnect,
@@ -90,6 +91,24 @@ describe("portalResource", () => {
     // Origin-scoped, so a resource URL for any other host matches nothing this connector offers.
     expect(portalResource(config).urlPattern).toBe("https://gw.example.com/*");
     expect(portalResource(config).title).toBe("Acme Portal");
+  });
+});
+
+describe("portalCodingSessionResourceUrls", () => {
+  const config = readPortalConfig(env({
+    MCP_PORTAL_URL: "https://gw.example.com/mcp",
+    MCP_PORTAL_NAME: "Acme Portal",
+  }))!;
+
+  it("emits one concrete server-scoped URL per enabled upstream", () => {
+    expect(portalCodingSessionResourceUrls(config, [
+      { id: "github", enabled: true },
+      { id: "jira", enabled: true },
+      { id: "salesforce", enabled: false },
+    ])).toEqual([
+      "https://gw.example.com/mcp#server=github",
+      "https://gw.example.com/mcp#server=jira",
+    ]);
   });
 });
 

@@ -147,9 +147,9 @@ function ProductFeedbackModal({
   const inputClass = 'w-full rounded-xl border border-kumo-line bg-kumo-base px-3.5 py-3 text-sm text-kumo-default shadow-sm outline-none transition placeholder:text-kumo-inactive focus:border-kumo-brand focus:ring-2 focus:ring-kumo-brand/20'
 
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-4 backdrop-blur-[2px]" role="dialog" aria-modal="true" aria-labelledby="product-feedback-title">
-      <div className="max-h-[min(760px,calc(100vh-2rem))] w-full max-w-xl overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base shadow-2xl">
-        <header className="flex items-start gap-3 border-b border-kumo-line px-5 py-4">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/45 p-2 backdrop-blur-[2px] sm:p-4" role="dialog" aria-modal="true" aria-labelledby="product-feedback-title">
+      <div className="flex max-h-[calc(100vh-1rem)] max-h-[calc(100dvh-1rem)] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-base shadow-2xl sm:max-h-[min(760px,calc(100vh-2rem))] sm:max-h-[min(760px,calc(100dvh-2rem))]">
+        <header className="shrink-0 flex items-start gap-3 border-b border-kumo-line px-5 py-4">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-kumo-fill text-kumo-brand">
             <ChatCenteredDots size={20} weight="fill" />
           </div>
@@ -162,7 +162,7 @@ function ProductFeedbackModal({
           </button>
         </header>
 
-        <div className="max-h-[calc(100vh-12rem)] space-y-5 overflow-y-auto px-5 py-5">
+        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-5">
           <fieldset>
             <legend className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-kumo-subtle">Feedback type</legend>
             <div className="grid grid-cols-2 gap-2 rounded-xl bg-kumo-elevated p-1" role="group">
@@ -200,7 +200,7 @@ function ProductFeedbackModal({
           </fieldset>
 
           {preview && <div><div className="mb-2 text-xs font-semibold uppercase tracking-[0.08em] text-kumo-subtle">Submission preview</div><pre className="max-h-52 overflow-auto rounded-xl border border-kumo-line bg-kumo-elevated p-3 text-xs leading-5 text-kumo-subtle">{JSON.stringify(previewSummary, null, 2)}</pre></div>}
-          {error && <p className="rounded-lg bg-kumo-danger/10 px-3 py-2 text-sm text-kumo-danger">{error}</p>}
+          {error && <p role="alert" className="rounded-lg bg-kumo-danger/10 px-3 py-2 text-sm text-kumo-danger">{error}</p>}
 
           {liveStatuses.length > 0 && (
             <section className="border-t border-kumo-line pt-4">
@@ -218,11 +218,12 @@ function ProductFeedbackModal({
           )}
         </div>
 
-        <footer className="flex items-center justify-between gap-3 border-t border-kumo-line bg-kumo-elevated px-5 py-4">
+        <footer className="shrink-0 flex flex-col gap-3 border-t border-kumo-line bg-kumo-elevated px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="hidden text-xs text-kumo-subtle sm:block">Preview is required before sending.</p>
-          <div className="ml-auto flex items-center gap-2">
-            <button type="button" onClick={() => setPreview((value) => !value)} className="rounded-lg border border-kumo-line bg-kumo-base px-3.5 py-2 text-sm font-medium text-kumo-default shadow-sm transition hover:bg-kumo-tint">{preview ? 'Hide preview' : 'Preview'}</button>
-            <button type="button" disabled={submitting || !title.trim() || !description.trim() || !preview} onClick={submit} className="rounded-lg bg-kumo-brand px-4 py-2 text-sm font-semibold text-kumo-inverse shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-40">
+          <div className="flex w-full items-center justify-end gap-2 sm:ml-auto sm:w-auto">
+            <button type="button" onClick={onClose} className="flex-1 rounded-lg border border-kumo-line bg-kumo-base px-3.5 py-2 text-sm font-medium text-kumo-default shadow-sm transition hover:bg-kumo-tint sm:flex-none">Cancel</button>
+            <button type="button" onClick={() => setPreview((value) => !value)} className="flex-1 rounded-lg border border-kumo-line bg-kumo-base px-3.5 py-2 text-sm font-medium text-kumo-default shadow-sm transition hover:bg-kumo-tint sm:flex-none">{preview ? 'Hide preview' : 'Preview'}</button>
+            <button type="button" disabled={submitting || !title.trim() || !description.trim() || !preview} onClick={submit} className="flex-1 rounded-lg bg-kumo-brand px-4 py-2 text-sm font-semibold text-kumo-inverse shadow-sm transition hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-40 sm:flex-none">
               {submitting ? 'Sending…' : 'Send feedback'}
             </button>
           </div>

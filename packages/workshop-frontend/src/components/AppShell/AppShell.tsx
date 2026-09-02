@@ -177,7 +177,7 @@ export default function AppShell({
           </div>
 
           {/* Routed content. Flat enterprise canvas — no texture. */}
-          <main className={`min-h-0 flex-1 ${isSessions || fullscreenContent ? 'overflow-hidden' : 'overflow-y-auto'}`}>{children}</main>
+          <main className={`min-h-0 min-w-0 flex-1 ${isSessions || fullscreenContent ? 'overflow-hidden' : 'overflow-y-auto'}`}>{children}</main>
         </div>
 
         <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

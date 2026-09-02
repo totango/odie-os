@@ -1,6 +1,6 @@
 import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useKumoToastManager } from '@cloudflare/kumo'
+import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
 import {
   AiChatAuthorInfo,
@@ -79,6 +79,7 @@ export default function OnboardingWizard({
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null)
   const [avatarData, setAvatarData] = useState<Uint8Array | null>(null)
   const [avatarProcessing, setAvatarProcessing] = useState(false)
+  const [simplifiedTechnicalEnglishEnabled, setSimplifiedTechnicalEnglishEnabled] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Model state
@@ -292,6 +293,7 @@ export default function OnboardingWizard({
       // selectedModelId is null when the user chose "No agent" or didn't pick one
       await authenticatedApi.setPreferredModel(selectedModelId)
       persistSelectedModel(selectedModelId)
+      await authenticatedApi.setSimplifiedTechnicalEnglishEnabled(simplifiedTechnicalEnglishEnabled)
       await authenticatedApi.completeOnboarding()
       onComplete()
     } catch (err) {
@@ -390,7 +392,7 @@ export default function OnboardingWizard({
               <h2 className="text-lg font-medium text-kumo-default mb-1">
                 Create your profile
               </h2>
-              <p className="text-sm text-kumo-subtle mb-12">
+              <p className="text-sm text-kumo-subtle mb-8">
                 This is how you&apos;ll appear in conversations
               </p>
 
@@ -468,6 +470,25 @@ export default function OnboardingWizard({
                     onChange={(e) => setDisplayName(e.target.value)}
                     placeholder="How should we call you?"
                     className="w-full rounded-lg border border-kumo-line bg-kumo-base px-3 py-2.5 text-[16px] text-kumo-default transition-colors placeholder:text-kumo-inactive focus:border-kumo-brand focus:outline-none sm:text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-7 rounded-xl border border-kumo-line bg-kumo-base px-4 py-3.5">
+                <div className="flex items-start gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p id="onboarding-ste-label" className="text-sm font-medium text-kumo-default">
+                      Simplified Technical English
+                    </p>
+                    <p id="onboarding-ste-description" className="mt-1 text-xs leading-5 text-kumo-subtle">
+                      Ask agents to use concise, direct, consistent language based on Simplified Technical English.
+                    </p>
+                  </div>
+                  <Switch
+                    aria-labelledby="onboarding-ste-label"
+                    aria-describedby="onboarding-ste-description"
+                    checked={simplifiedTechnicalEnglishEnabled}
+                    onCheckedChange={setSimplifiedTechnicalEnglishEnabled}
                   />
                 </div>
               </div>

@@ -737,6 +737,49 @@ describe("Team PI reads, writes, endpoint allowlist, and catalog", () => {
     await expect(session.transitionJiraIssue({ source: "zendesk", id: "1" }, "31")).rejects.toThrow("Only Jira");
   });
 
+  it("exposes a bounded coding-session Work Items MCP catalog and authorizes read tool calls", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(response({ items: [{ source: "jira", id: "J-1", title: "Issue", fields: {} }], hasMore: false }));
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, new Kv() as never);
+
+    await expect(session.listTools()).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "team_pi_work_items_search", mode: "read", inputSchema: expect.objectContaining({ type: "object" }) }),
+      expect.objectContaining({ name: "team_pi_create_jira_issue", mode: "action", inputSchema: expect.objectContaining({ additionalProperties: false }) }),
+    ]));
+    await expect(session.callTool("team_pi_work_items_search", { source: "jira", query: "login", limit: 2 }))
+      .resolves.toMatchObject({ status: "ok", structuredContent: { items: [{ source: "jira", id: "J-1" }] } });
+    expect(approval.authorizeObservation).toHaveBeenCalledWith(expect.objectContaining({ title: "Search Team PI Work Items" }));
+  });
+
+  it("routes coding-session write tools through the existing approval queue and validates arguments", async () => {
+    const kv = new Kv();
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await expect(session.callTool("team_pi_create_jira_issue", { summary: "New", description: "Details" }))
+      .resolves.toMatchObject({ status: "pending", actionId: 1 });
+
+    expect(kv.get("pending:1")).toMatchObject({ kind: "createJiraIssue", request: { projectKey: "AI", summary: "New", description: "Details" } });
+    expect(approval.submitAction).toHaveBeenCalledWith(1, expect.objectContaining({ actionKind: { tag: "team-pi.createJiraIssue", label: "Create Jira issue" } }));
+    await expect(session.callTool("team_pi_add_work_item_comment", { ref: { source: "jira", id: "J-1" }, body: "private", visibility: "internal" }))
+      .rejects.toThrow(/public only/);
+    await expect(session.callTool("team_pi_update_work_item_fields", { ref: { source: "jira", id: "J-1" }, fields: { bad: { nested: true } } }))
+      .rejects.toThrow(/Field values/);
+  });
+
+  it("maps approved coding-session Team PI action results without changing the typed action API", async () => {
+    const kv = new Kv();
+    kv.put("result:7", { status: "ready", result: { item: { source: "jira", id: "AI-1", title: "Issue", fields: {} } } });
+    kv.put("result:8", { status: "rejected" });
+    const approval = { authorizeObservation: vi.fn(), submitAction: vi.fn(), dup() { return this; }, [Symbol.dispose]() {} };
+    const session = new TeamPiSessionImpl(new TeamPiApi(async () => ({ accessToken: "access" }), config.baseUrl), approval as never, kv as never);
+
+    await expect(session.getActionResult(7)).resolves.toMatchObject({ status: "ready" });
+    await expect(session.getCodingSessionActionResult(7)).resolves.toMatchObject({ status: "ok", structuredContent: { item: { id: "AI-1" } } });
+    await expect(session.getCodingSessionActionResult(8)).resolves.toMatchObject({ status: "rejected" });
+  });
+
   it("claims pending actions synchronously and blocks reject/apply races", () => {
     const kv = new Kv();
     kv.put("pending:1", { kind: "startConnection", provider: "gmail" });

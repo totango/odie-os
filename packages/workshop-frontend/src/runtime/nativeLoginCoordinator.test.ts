@@ -64,6 +64,38 @@ describe('native login coordinator', () => {
     expect(rt.clearPendingNativeLoginFlow).not.toHaveBeenCalled()
   })
 
+  it('waits for a stable foreground before consuming a pending flow', async () => {
+    vi.useFakeTimers()
+    const rt = runtime(null)
+    vi.mocked(rt.subscribeDeepLinks).mockResolvedValue(() => {})
+    vi.mocked(rt.readPendingNativeLoginFlow)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
+    const api = {
+      consumeNativeLoginFlow: vi.fn<() => Promise<any>>(async () => ({ status: 'completed', token: 'user:token' })),
+    }
+
+    const cleanup = await installNativeLoginCoordinator(rt, () => api as any)
+    try {
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(251)
+      expect(api.consumeNativeLoginFlow).not.toHaveBeenCalled()
+
+      Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.advanceTimersByTimeAsync(251)
+      expect(api.consumeNativeLoginFlow).toHaveBeenCalled()
+      expect(rt.writeSessionSecret).toHaveBeenCalledWith('user:token')
+      expect(rt.clearPendingNativeLoginFlow).toHaveBeenCalled()
+    } finally {
+      cleanup()
+      vi.useRealTimers()
+    }
+  })
+
   it('clears pending verifier on terminal server outcomes', async () => {
     const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
     const api = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(async () => ({ status: 'expired' })) }
@@ -82,6 +114,22 @@ describe('native login coordinator', () => {
     const cleanup = await installNativeLoginCoordinator(rt, () => api as any)
     await vi.waitFor(() => expect(rt.writeSessionSecret).toHaveBeenCalledWith('user:token'))
     cleanup()
+  })
+
+  it('keeps polling when native deep-link registration fails', async () => {
+    const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
+    vi.mocked(rt.subscribeDeepLinks).mockRejectedValue(new Error('plugin unavailable'))
+    const api = {
+      consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(
+        async () => ({ status: 'completed', token: 'user:token' }),
+      ),
+    }
+    const cleanup = await installNativeLoginCoordinator(rt, () => api as any)
+    try {
+      await vi.waitFor(() => expect(rt.writeSessionSecret).toHaveBeenCalledWith('user:token'))
+    } finally {
+      cleanup()
+    }
   })
 
   it('drops the in-memory native unlock lease when the app is backgrounded', async () => {
@@ -105,8 +153,12 @@ describe('native login coordinator', () => {
       return () => {}
     })
     const api = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(async () => ({ status: 'completed', token: 'user:token' })) }
-    await installNativeLoginCoordinator(rt, () => api as any)
-    callback({ url: 'https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/' + 'a'.repeat(32) })
-    await vi.waitFor(() => expect(api.consumeNativeLoginFlow).toHaveBeenCalled())
+    const cleanup = await installNativeLoginCoordinator(rt, () => api as any)
+    try {
+      callback({ url: 'https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/' + 'a'.repeat(32) })
+      await vi.waitFor(() => expect(api.consumeNativeLoginFlow).toHaveBeenCalled())
+    } finally {
+      cleanup()
+    }
   })
 })

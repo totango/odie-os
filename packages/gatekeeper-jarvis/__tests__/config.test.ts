@@ -153,15 +153,15 @@ describe("JARVIS tool policy", () => {
     expect(upgradeDefaultJarvisToolPolicy(customizedV4Code).code.tools)
       .toEqual(["query_knowledge"]);
 
-    const savedAllVisible = {
+    const futureCustomizedPolicy = {
       revision: 12,
       chat: { tools: JARVIS_ALLOWED_TOOLS.filter(
         tool => tool !== "repo_knowledge" && tool !== "jarvis_call_prod_tool") },
       code: { tools: [...JARVIS_ALLOWED_TOOLS] },
       syncCode: false,
     };
-    expect(upgradeDefaultJarvisToolPolicy(savedAllVisible).chat.tools)
-      .toContain("jarvis_call_prod_tool");
+    expect(upgradeDefaultJarvisToolPolicy(futureCustomizedPolicy))
+      .toBe(futureCustomizedPolicy);
 
     const customized = {
       ...historical,
@@ -244,7 +244,7 @@ describe("applyJarvisToolPolicy", () => {
     expect(applyJarvisToolPolicy(entry("create_skill"))).toBeNull();
   });
 
-  it("keeps list/describe tools read-only and dispatcher tools manual actions", () => {
+  it("keeps list/describe tools read-only and requires approval for dispatcher actions", () => {
     for (const name of JARVIS_ALLOWED_TOOLS) {
       for (const annotations of [undefined, { readOnlyHint: true }, { readOnlyHint: false }]) {
         const policy = applyJarvisToolPolicy(entry(name, annotations));

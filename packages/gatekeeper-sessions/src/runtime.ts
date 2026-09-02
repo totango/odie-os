@@ -103,17 +103,10 @@ export function primeAgentSettings(): Record<string, unknown> {
 }
 
 export function openCodeCommand(repository: string): [string, ...string[]] {
-  const configDir = "/workspace/.odie-opencode";
-  const defaults = "/opt/odie-valhalla/opencode";
   return [
     "/bin/bash",
     "-lc",
-    `if [ -d ${defaults} ]; then ` +
-      `mkdir -p ${configDir}/command ${configDir}/skills && ` +
-      `cp -R ${defaults}/command/. ${configDir}/command/ && ` +
-      `cp -R ${defaults}/skills/. ${configDir}/skills/; ` +
-      `fi && ` +
-      `cd /workspace/${repository} && exec opencode`,
+    `cd /workspace/${repository} && exec opencode`,
   ];
 }
 

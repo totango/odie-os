@@ -9,7 +9,7 @@ import type { SupportedResource } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import type { ConnectedServer, ServerAuthKind } from "@gadgets/mcp-shared/account";
 import { isValidToolName, type McpTool } from "@gadgets/mcp-shared/client";
-import { scopeAllows, type ToolScope } from "@gadgets/mcp-shared/scope";
+import { formatToolScope, scopeAllows, type ToolScope } from "@gadgets/mcp-shared/scope";
 import { fetchOptions } from "@gadgets/mcp-shared/fetch";
 import { sameEndpoint } from "@gadgets/mcp-shared/scope";
 import { isPortalNativeTool, type PortalServer } from "@gadgets/mcp-shared/portal";
@@ -163,6 +163,20 @@ export function portalResource(config: PortalConfig): SupportedResource {
     description:
       "Tools from the servers behind this portal. Writes need approval.",
   };
+}
+
+/**
+ * Concrete server-scoped resource URLs for coding sessions, one per currently enabled portal
+ * upstream. The URLs deliberately use `#server=<id>` rather than the bare portal endpoint, so the
+ * Workshop can mint one binding per upstream server without ever granting the whole portal.
+ */
+export function portalCodingSessionResourceUrls(
+  config: PortalConfig,
+  servers: readonly Pick<PortalServer, "id" | "enabled">[],
+): string[] {
+  return servers
+    .filter(server => server.enabled)
+    .map(server => formatToolScope(config.endpoint, { serverId: server.id }));
 }
 
 /**

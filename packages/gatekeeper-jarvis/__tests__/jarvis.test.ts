@@ -63,23 +63,44 @@ describe("product feedback Slack notifications", () => {
     expect(productFeedbackSlackArguments({
       jobId: "feedback_123",
       prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Updates 1 file: `src/a.ts` (2 changed lines).",
       idempotencyKey: "product-feedback:feedback_123:pr:456",
     })).toEqual({
       channel: "C09EW0T5VB5",
-      text: "Draft product-feedback PR created: https://github.com/totango/odie-os/pull/456",
+      text: "Draft product-feedback PR created. Updates 1 file: `src/a.ts` (2 changed lines). https://github.com/totango/odie-os/pull/456",
       idempotencyKey: "product-feedback:feedback_123:pr:456",
     });
+  });
+
+  it("accepts canonical summaries with listed and additional files", () => {
+    expect(productFeedbackSlackArguments({
+      jobId: "feedback_123",
+      prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Updates 4 files: `src/a.ts`, `src/b.ts`, `src/c.ts`, and 1 more (1 changed line).",
+      idempotencyKey: "product-feedback:feedback_123:pr:456",
+    }).text).toContain("Updates 4 files:");
+  });
+
+  it("accepts the fixed summary used by persisted legacy jobs", () => {
+    expect(productFeedbackSlackArguments({
+      jobId: "feedback_123",
+      prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Applies a small automated source fix.",
+      idempotencyKey: "product-feedback:feedback_123:pr:456",
+    }).text).toContain("Applies a small automated source fix.");
   });
 
   it("rejects another repository or a mismatched idempotency key", () => {
     expect(() => productFeedbackSlackArguments({
       jobId: "feedback_123",
       prUrl: "https://github.com/totango/other/pull/456",
+      changeSummary: "Updates 1 file.",
       idempotencyKey: "product-feedback:feedback_123:pr:456",
     })).toThrow(/PR URL/);
     expect(() => productFeedbackSlackArguments({
       jobId: "feedback_123",
       prUrl: "https://github.com/totango/odie-os/pull/456",
+      changeSummary: "Updates 1 file.",
       idempotencyKey: "product-feedback:feedback_123:pr:999",
     })).toThrow(/idempotency/);
   });
@@ -95,8 +116,29 @@ describe("product feedback Slack notifications", () => {
       expect(() => productFeedbackSlackArguments({
         jobId: "feedback_123",
         prUrl,
+        changeSummary: "Updates 1 file.",
         idempotencyKey: "product-feedback:feedback_123:pr:456",
       })).toThrow(/PR URL/);
+    }
+  });
+
+  it("rejects a non-canonical or Slack-active change summary", () => {
+    for (const changeSummary of [
+      "",
+      "First line\nsecond line",
+      "Updates 1 file.",
+      "Updates 1 file: `<@U123>` (2 changed lines).",
+      "Updates 1 files: `src/a.ts` (2 changed lines).",
+      "Updates 1 file: `src/a.ts`, `src/b.ts` (2 changed lines).",
+      "Updates 4 files: `src/a.ts`, `src/b.ts`, `src/c.ts`, and 2 more (2 changed lines).",
+      "Updates 2 files: `src/a.ts`, `src/b.ts` (1 changed lines).",
+    ]) {
+      expect(() => productFeedbackSlackArguments({
+        jobId: "feedback_123",
+        prUrl: "https://github.com/totango/odie-os/pull/456",
+        changeSummary,
+        idempotencyKey: "product-feedback:feedback_123:pr:456",
+      })).toThrow(/change summary/);
     }
   });
 });

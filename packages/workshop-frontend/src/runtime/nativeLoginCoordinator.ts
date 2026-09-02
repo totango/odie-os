@@ -4,6 +4,7 @@ import { parseNativeDeepLink } from './deepLinks'
 import type { WorkshopRuntime } from './WorkshopRuntime'
 
 export const NATIVE_LOGIN_TOKEN_EVENT = 'workshop:native-login-token'
+const NATIVE_LOGIN_FOREGROUND_DELAY_MS = 250
 
 type NativeLoginTokenEvent = CustomEvent<{ token: string }>
 
@@ -61,6 +62,7 @@ export async function installNativeLoginCoordinator(
 ): Promise<() => void> {
   if (runtime.kind !== 'tauri') return () => {}
   let consuming = false
+  let foregroundTimer: number | null = null
   const consume = async (expectedHandle?: string) => {
     if (consuming) return
     consuming = true
@@ -73,14 +75,32 @@ export async function installNativeLoginCoordinator(
       consuming = false
     }
   }
-  const unsubscribe = await runtime.subscribeDeepLinks(({ url }) => {
-    const parsed = parseNativeDeepLink(url, runtime.appLinkOrigin.origin)
-    if (parsed?.kind === 'oauth-return') void consume(parsed.handle)
-  })
-  const onForeground = () => { if (document.visibilityState === 'visible') void consume() }
+  let unsubscribe = () => {}
+  try {
+    unsubscribe = await runtime.subscribeDeepLinks(({ url }) => {
+      const parsed = parseNativeDeepLink(url, runtime.appLinkOrigin.origin)
+      if (parsed?.kind === 'oauth-return') void consume(parsed.handle)
+    })
+  } catch {
+    // Focus and polling remain a complete fallback when native link registration is unavailable.
+  }
+  const onForeground = () => {
+    if (document.visibilityState !== 'visible' || foregroundTimer !== null) return
+    foregroundTimer = window.setTimeout(() => {
+      foregroundTimer = null
+      if (document.visibilityState === 'visible') void consume()
+    }, NATIVE_LOGIN_FOREGROUND_DELAY_MS)
+  }
   const onVisibilityChange = () => {
-    if (document.visibilityState === 'hidden') void runtime.lock().catch(() => {})
-    else void consume()
+    if (document.visibilityState === 'hidden') {
+      if (foregroundTimer !== null) {
+        window.clearTimeout(foregroundTimer)
+        foregroundTimer = null
+      }
+      void runtime.lock().catch(() => {})
+    } else {
+      onForeground()
+    }
   }
   window.addEventListener('focus', onForeground)
   document.addEventListener('visibilitychange', onVisibilityChange)
@@ -88,6 +108,7 @@ export async function installNativeLoginCoordinator(
   void consume()
   return () => {
     window.clearInterval(poll)
+    if (foregroundTimer !== null) window.clearTimeout(foregroundTimer)
     window.removeEventListener('focus', onForeground)
     document.removeEventListener('visibilitychange', onVisibilityChange)
     unsubscribe()
