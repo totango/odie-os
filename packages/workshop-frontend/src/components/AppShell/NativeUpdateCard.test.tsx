@@ -50,6 +50,7 @@ describe('NativeUpdateCard', () => {
   it('compares bounded numeric app versions', () => {
     expect(isNewerVersion('1.2.0', '1.1.9')).toBe(true)
     expect(isNewerVersion('1.0', '1.0.0')).toBe(false)
+    expect(isNewerVersion('1.9007199254740993', '1.9007199254740992')).toBe(true)
     expect(isNewerVersion('1.0.0-beta', '1.0.0')).toBe(false)
   })
 

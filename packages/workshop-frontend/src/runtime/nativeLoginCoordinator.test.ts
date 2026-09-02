@@ -13,7 +13,7 @@ function runtime(pending: { flowHandle: string; verifier: string } | null): Work
     apiOrigin: new URL('https://odie-os-native-api.odie-os.workers.dev'),
     publicWebOrigin: new URL('https://odie-os.odie-os.workers.dev'),
     appLinkOrigin: new URL('https://odie-os-native-api.odie-os.workers.dev'),
-    getNativeAppInfo: mockFn(async () => null),
+    getNativeAppInfo: vi.fn<WorkshopRuntime['getNativeAppInfo']>(async () => null),
     openExternal: mockFn<(url: string) => Promise<void>>(),
     openOAuthTrampoline: mockFn<(url: string) => Promise<void>>(),
     subscribeDeepLinks: mockFn<WorkshopRuntime['subscribeDeepLinks']>(),

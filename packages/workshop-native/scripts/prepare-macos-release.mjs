@@ -13,8 +13,7 @@ const packageRoot = fileURLToPath(new URL('..', import.meta.url))
 const [sourceArgument, outputArgument = 'release-macos'] = process.argv.slice(2)
 
 if (!sourceArgument) {
-  console.error('Usage: pnpm macos:prepare-release <notarized-dmg> [output-directory]')
-  process.exit(1)
+  throw new Error('Usage: pnpm macos:prepare-release <notarized-dmg> [output-directory]')
 }
 if (process.platform !== 'darwin') throw new Error('macOS release preparation must run on macOS')
 

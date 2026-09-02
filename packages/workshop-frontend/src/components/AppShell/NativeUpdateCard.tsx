@@ -6,9 +6,9 @@ type AvailableUpdate = { version: string; downloadPath: string }
 
 const metadataPath = '/downloads/mac/OdieOS-latest.json'
 
-function numericVersion(value: string): number[] | null {
+function numericVersion(value: string): bigint[] | null {
   if (value.length > 32 || !/^\d+(?:\.\d+){0,3}$/.test(value)) return null
-  return value.split('.').map(Number)
+  return value.split('.').map(BigInt)
 }
 
 export function isNewerVersion(candidate: string, current: string): boolean {
@@ -16,8 +16,9 @@ export function isNewerVersion(candidate: string, current: string): boolean {
   const installed = numericVersion(current)
   if (!next || !installed) return false
   for (let index = 0; index < Math.max(next.length, installed.length); index++) {
-    const difference = (next[index] ?? 0) - (installed[index] ?? 0)
-    if (difference !== 0) return difference > 0
+    const nextPart = next[index] ?? 0n
+    const installedPart = installed[index] ?? 0n
+    if (nextPart !== installedPart) return nextPart > installedPart
   }
   return false
 }
