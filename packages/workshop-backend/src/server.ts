@@ -176,7 +176,7 @@ type BlueprintWorkspaceCreationOps<T extends {[Symbol.dispose](): void}> = {
   register: () => Promise<"inserted" | "existing" | void>;
   open: () => Promise<T>;
   finish: (opened: T) => Promise<void>;
-  rollbackRegistration?: () => Promise<void>;
+  rollbackRegistration?: (opened: T | undefined) => Promise<void>;
   releaseClaim?: () => Promise<unknown>;
 };
 
@@ -202,19 +202,19 @@ export async function runBlueprintWorkspaceCreation<T extends {[Symbol.dispose](
     return opened;
   } catch (error) {
     let cleanupErrors: unknown[] = [];
-    try {
-      opened?.[Symbol.dispose]();
-    } catch (cleanupError) {
-      cleanupErrors.push(cleanupError);
-    }
     let registrationRolledBack = !registered;
     if (claimed && registered && ops.rollbackRegistration) {
       try {
-        await ops.rollbackRegistration();
+        await ops.rollbackRegistration(opened);
         registrationRolledBack = true;
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);
       }
+    }
+    try {
+      opened?.[Symbol.dispose]();
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError);
     }
     if (claimed && registrationRolledBack && ops.releaseClaim) {
       try {
@@ -924,7 +924,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
           : this.#user.newGadget(id, kvRecord.metadata.title, originHubId),
       open: () => this.#openGadgetInternal(id, undefined, undefined, true),
       rollbackRegistration: financeClaim
-          ? () => retryOnDoReset(() => this.#user.deleteGadget(id))
+          ? async (openedOverseer) => {
+            if (openedOverseer) {
+              await openedOverseer.deleteSelf();
+            } else {
+              await retryOnDoReset(() => this.#user.deleteGadget(id));
+            }
+          }
           : undefined,
       releaseClaim: financeClaim
           ? () => retryOnDoReset(() => this.adminSettings
