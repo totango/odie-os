@@ -20,7 +20,7 @@ export const DEFAULT_AMBIENT_GATEKEEPER_MODE: AmbientGatekeeperMode = "optional"
  * Deployment-controlled internal sources are intentionally universal when configured. Other
  * ambient vendors retain the opt-in default because they may confer unrelated authority.
  */
-const DEFAULT_ENABLED_AMBIENT_GATEKEEPERS = new Set(["github_org", "jarvis"]);
+const DEFAULT_ENABLED_AMBIENT_GATEKEEPERS = new Set(["context", "github_org", "jarvis"]);
 
 /** The deployment default for an ambient vendor when no administrator override is stored. */
 export function defaultAmbientGatekeeperMode(vendorId: string): AmbientGatekeeperMode {
