@@ -90,7 +90,10 @@ type ConnectionStatusAccountStub = Required<Pick<GatekeeperUser, "getConnectionS
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
-  if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
+  // Slack previously reported its refreshable access-token expiry here. Ignore those persisted
+  // timestamps; the gatekeeper reports a terminal refresh failure through credentialsExpired.
+  if (record.vendorId !== "slack" &&
+      record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
   return true;
 }
 
