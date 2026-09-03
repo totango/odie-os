@@ -2549,7 +2549,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         });
         return;
       }
-      await account.account.revoke();
+      try {
+        await account.account.revoke();
+      } catch (err) {
+        // Disconnect is a local authority decision. A provider outage or stale remote token must
+        // not leave that authority attached to the user's Workshop account.
+        logger.error("revoke() failed during disconnect", {
+          event: "account.revoke.failed",
+          vendorId: account.vendorId, accountId, error: err,
+        });
+      }
       this.storage.connectedAccounts.delete(accountId);
       // Disconnecting the Cloudflare account also clears the AI Gateway billing state (selected
       // account + cached balance), which is meaningless without the underlying grant.
