@@ -2526,9 +2526,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (account) {
       if (account.autoProvisioned) {
-        // A forced ("enabled") ambient account can't be removed by the user — the admin controls it.
-        if (shouldAutoProvisionAccount(await readAdminConfig(this.env), account.vendorId)) {
-          throw new Error("This account is provided automatically and can't be disconnected.");
+        // Only an opt-in ambient account belongs to the user to remove. Enabled accounts are forced,
+        // while disabled accounts stay dormant so disabling a vendor never destroys its data.
+        let mode = ambientGatekeeperMode(await readAdminConfig(this.env), account.vendorId);
+        if (mode !== "optional") {
+          throw new Error("This account is managed automatically and can't be disconnected.");
         }
         // An opt-in ("optional") ambient account: the user added it, so let them remove it. revoke()
         // gives the gatekeeper a chance to delete its own per-user storage (e.g. the account's
