@@ -182,6 +182,19 @@ type GadgetRecord = GadgetMetadata & {
   // GadgetMetadata).
 };
 
+/** Delete every version and screenshot stored for an owner-authorized blueprint ID. */
+export async function deleteBlueprintContent(
+    bucket: Pick<R2Bucket, "list" | "delete">, id: string): Promise<void> {
+  while (true) {
+    let objects = await bucket.list({
+      prefix: `${id}/`, limit: 1000,
+    });
+    if (objects.objects.length === 0) break;
+    await bucket.delete(objects.objects.map(({key}) => key));
+  }
+  await bucket.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`);
+}
+
 function isFullyCreated(g: GadgetRecord): g is GadgetMetadataWithTimestamps {
   return g.lastActive !== undefined;
 }
@@ -1306,20 +1319,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error("Blueprint not found.");
     }
 
-    if (kvRecord) {
-      if (kvRecord.ownerId !== this.ctx.id.toString()) {
-        throw new Error("You don't own this blueprint.");
-      }
-
-      // Delete all R2 objects with the blueprint ID prefix.
-      for (let v = 1; v <= kvRecord.metadata.version; v++) {
-        await this.env.BLUEPRINT_CONTENT.delete(`${id}/${v}`);
-      }
-      await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`);
-
-      // Delete from KV.
-      await this.env.BLUEPRINTS.delete(id);
+    if (kvRecord && kvRecord.ownerId !== this.ctx.id.toString()) {
+      throw new Error("You don't own this blueprint.");
     }
+
+    let sourceGadgetIds = [publishedRecord?.gadgetId, kvRecord?.gadgetId]
+        .filter((gadgetId): gadgetId is string => gadgetId !== undefined);
+    if (sourceGadgetIds.some(gadgetId => this.storage.gadgets.get(gadgetId))) {
+      throw new Error("Delete this blueprint from its source workspace.");
+    }
+
+    // Local owner records remain authoritative for cleanup when KV publication is absent or stale.
+    // Listing the exact prefix also finds versions newer than the last metadata that propagated.
+    await deleteBlueprintContent(this.env.BLUEPRINT_CONTENT, id);
+
+    // Delete from KV after content cleanup. A retry can still establish ownership from local state.
+    await this.env.BLUEPRINTS.delete(id);
 
     if (publishedRecord?.featured === true) {
       await this.adminSettings.getByName("").deleteFeaturedBlueprint(id);
