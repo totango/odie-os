@@ -3,7 +3,7 @@ import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, SquaresFour, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
-import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, CONFIGURABLE_DEPLOYMENT_HUB_IDS, type ConfigurableDeploymentHubId, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
+import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, CONFIGURABLE_DEPLOYMENT_HUB_IDS, type ConfigurableDeploymentHubId, type FinanceHubDiagnostic, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
 import { cacheBustSiteLogoUrl, prepareSiteLogo } from './siteLogoUtils'
 import SiteLogo from './components/SiteLogo'
@@ -30,6 +30,75 @@ const BANNER_SWATCH: Record<BannerColor, string> = {
   warning: 'var(--color-kumo-warning)',
   danger: 'var(--color-kumo-danger)',
   brand: 'var(--color-accent-100)',
+}
+
+function financeDiagnosticText(diagnostic: FinanceHubDiagnostic | null): string {
+  if (!diagnostic) return 'Status not checked.'
+  if (diagnostic.status === 'unclaimed') return 'No Finance workspace has been claimed.'
+  if (diagnostic.status === 'healthy') return 'Claim, workspace owner, and Finance registration are healthy.'
+  if (diagnostic.status === 'repairable') {
+    return diagnostic.repair === 'missing-owner-registration'
+      ? 'The validated workspace is missing its owner registration.'
+      : 'The validated owner registration is missing its Finance origin.'
+  }
+  const reasons: Record<Extract<FinanceHubDiagnostic, { status: 'blocked' }>['reason'], string> = {
+    'invalid-claim': 'The Finance claim is invalid.',
+    'missing-owner-account': 'The claimed owner account is missing.',
+    'uninitialized-workspace': 'The claimed workspace is not initialized.',
+    'incomplete-workspace': 'The claimed workspace did not complete Finance blueprint initialization.',
+    'owner-mismatch': 'The claimed workspace owner does not match.',
+    'shared-registration': 'The claimed workspace is registered as shared.',
+    'non-finance-origin': 'The owner registration explicitly belongs to another hub.',
+    'duplicate-finance-registration': 'The owner has another Finance workspace registration.',
+    unavailable: 'Finance diagnostics are currently unavailable.',
+  }
+  return reasons[diagnostic.reason]
+}
+
+export function FinanceHubAdminRow({ admin }: { admin: RpcStub<AdminApi> }) {
+  const [diagnostic, setDiagnostic] = useState<FinanceHubDiagnostic | null>(null)
+  const [busy, setBusy] = useState<'check' | 'repair' | null>(null)
+
+  const check = async () => {
+    setBusy('check')
+    try {
+      setDiagnostic(await admin.diagnoseFinanceHub())
+    } catch {
+      setDiagnostic({ status: 'blocked', reason: 'unavailable' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const repair = async () => {
+    setBusy('repair')
+    try {
+      setDiagnostic((await admin.repairFinanceHub()).diagnostic)
+    } catch {
+      setDiagnostic({ status: 'blocked', reason: 'unavailable' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-4 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-kumo-default">Finance</p>
+        <p className="mt-0.5 text-xs text-kumo-subtle">{financeDiagnosticText(diagnostic)}</p>
+      </div>
+      <div className="flex shrink-0 gap-2">
+        <Button variant="secondary" size="sm" onClick={check} loading={busy === 'check'} disabled={busy !== null}>
+          Check status
+        </Button>
+        {diagnostic?.status === 'repairable' && (
+          <Button variant="primary" size="sm" onClick={repair} loading={busy === 'repair'} disabled={busy !== null}>
+            Repair
+          </Button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 export default function AdminPage() {
@@ -474,17 +543,7 @@ export default function AdminPage() {
                 </div>
               )
             })}
-            <div className="flex items-center gap-4 px-4 py-3 opacity-60">
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium text-kumo-default">Finance</p>
-                <p className="mt-0.5 text-xs text-kumo-subtle">
-                  Coming soon after server-enforced Finance entitlements are available.
-                </p>
-              </div>
-              <span className="rounded-full border border-kumo-line bg-kumo-tint px-2 py-1 text-[11px] font-medium text-kumo-subtle">
-                Coming soon
-              </span>
-            </div>
+            <FinanceHubAdminRow admin={admin.api} />
           </div>
         </div>
       )}

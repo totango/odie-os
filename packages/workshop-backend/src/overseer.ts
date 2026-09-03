@@ -7170,6 +7170,29 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * Validate that this claimed workspace has the claimed owner and progressed past the empty
+   * snapshot written by its first open into a blueprint-initialized default gadget.
+   */
+  validateFinanceWorkspaceOwner(
+      claim: FinanceWorkspaceClaim):
+      "valid" | "uninitialized" | "incomplete" | "owner-mismatch" {
+    if (!this.impl.ownerId) return "uninitialized";
+    if (claim.workspaceId !== this.impl.ctx.id.toString() ||
+        this.impl.ownerId !== claim.ownerUserId) {
+      return "owner-mismatch";
+    }
+    let defaultGadgetId = this.impl.defaultGadgetId;
+    let codeVersion = this.impl.storage.codeVersion.get();
+    let hasInitializedCode = Array.from(
+        this.impl.storage.code.list({start: 2, limit: 1})).length > 0;
+    if (defaultGadgetId === undefined || !this.impl.storage.gadgets.get(defaultGadgetId) ||
+        codeVersion <= 1 || !hasInitializedCode) {
+      return "incomplete";
+    }
+    return "valid";
+  }
+
+  /**
    * `notifyClosed` should be invoked when the return `Overseer` stub is disposed, which is used
    * by AuthenticatedApiImpl.#openGadgetInternal() to detect Durable Object disconnects.
    */
