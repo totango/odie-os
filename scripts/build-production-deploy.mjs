@@ -19,6 +19,7 @@ const WORKERS = [
   "gatekeeper-notion",
   "gatekeeper-odie-kg",
   "gatekeeper-scheduler",
+  "gatekeeper-slack",
   "gatekeeper-team-pi",
   "gatekeeper-sessions",
   "workshop-backend",
