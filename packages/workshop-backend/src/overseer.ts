@@ -1,6 +1,6 @@
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isFinanceOperationsWorkbenchBlueprintId, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, CodeUpdate, CodeSubscriber, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID, isFinanceOperationsWorkbenchBlueprintId, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName } from '@gadgets/workshop-shared/api';
 import { Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, resolveRequestedResource, HookController, HookDescription, ActionKind, type ObservationDomainSharingPolicy } from "@gadgets/workshop-shared/gatekeeper";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -7099,6 +7099,35 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     this.impl.storage.version.put(1);
   }
 
+  #applyPrevalidatedBlueprintToDefaultGadget(archiveDoc: Y.Doc, output?: BlueprintOutput): void {
+    this.impl.ensureDefaultGadget();
+    let gadgetId = this.impl.resolveGadgetId(undefined);
+
+    if (output) {
+      let record = this.impl.getGadgetRecord(gadgetId);
+      record.output = output;
+      this.impl.storage.gadgets.put(record);
+    }
+
+    // Copy the blueprint's files into the gadget's files root. Root names don't transfer via Yjs
+    // updates -- the archive always uses the unnamed root "" while the destination gadget may own
+    // any root -- so we copy file-by-file rather than applying the archive update directly.
+    let {ydoc} = this.impl.buildYDoc("current");
+    let updates: Uint8Array[] = [];
+    ydoc.on("updateV2", update => updates.push(update));
+    ydoc.transact(() => {
+      let root = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(gadgetId));
+      for (let [file, content] of archiveDoc.getMap<Y.Text>()) {
+        let text = new Y.Text();
+        text.insert(0, content.toString());
+        root.set(file, text);
+      }
+    });
+    if (updates.length > 0) {
+      this.impl.updateCode(Y.mergeUpdatesV2(updates));
+    }
+  }
+
   /**
    * This workspace's outputs, for the owner to fold into their index. Every registry change and
    * every owner open already pushes, so this exists only to catch up workspaces that predate the
@@ -7538,48 +7567,63 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async initializeFromBlueprint(code: Uint8Array, title: string, output?: BlueprintOutput)
       : Promise<void> {
-    // Set the title. The default gadget (created just below) inherits it.
-    this.impl.storage.title.put(title);
-
-    // Blueprint instantiation still creates a fresh workspace containing one auto-created gadget,
-    // recorded as the default gadget (see ensureDefaultGadget).
-    this.impl.ensureDefaultGadget();
-    let gadgetId = this.impl.resolveGadgetId(undefined);
-
-    // The gadget inherits the blueprint's declared format, so it is named and drawn as a Document
-    // (or whatever it produces) rather than a generic app.
-    if (output) {
-      let record = this.impl.getGadgetRecord(gadgetId);
-      record.output = output;
-      this.impl.storage.gadgets.put(record);
-    }
-
-    // Copy the blueprint's files into the gadget's files root. Root names don't transfer via Yjs
-    // updates -- the archive always uses the unnamed root "" while the destination gadget may own
-    // any root -- so we copy file-by-file rather than applying the archive update directly.
     let archiveDoc = new Y.Doc();
     Y.applyUpdateV2(archiveDoc, code);
 
-    let {ydoc} = this.impl.buildYDoc("current");
-    let updates: Uint8Array[] = [];
-    ydoc.on("updateV2", update => updates.push(update));
-    ydoc.transact(() => {
-      let root = ydoc.getMap<Y.Text>(this.impl.gadgetRootName(gadgetId));
-      for (let [file, content] of archiveDoc.getMap<Y.Text>()) {
-        let text = new Y.Text();
-        text.insert(0, content.toString());
-        root.set(file, text);
-      }
-    });
-    if (updates.length > 0) {
-      this.impl.updateCode(Y.mergeUpdatesV2(updates));
-    }
+    // Set the title. The default gadget (created just below) inherits it.
+    this.impl.storage.title.put(title);
+    this.#applyPrevalidatedBlueprintToDefaultGadget(archiveDoc, output);
 
     // Mark gadget as non-provisional (it has code, so it should appear in the gadget list).
     if (this.impl.ownerId) {
       let owner = this.impl.users.get(this.impl.users.idFromString(this.impl.ownerId));
       await owner.setGadgetLastActive(this.ctx.id.toString(), new Date(), undefined);
     }
+  }
+
+  /**
+   * Initialize a still-empty claimed Finance workspace from the canonical bundled protected app.
+   * The caller must pass the stored deployment claim and the exact bundled blueprint id/title/code;
+   * any mismatch or pre-existing storage is rejected without mutating this workspace.
+   */
+  async recoverUninitializedFinanceWorkspace(
+      claim: FinanceWorkspaceClaim,
+      blueprintId: string,
+      title: string,
+      code: Uint8Array,
+  ): Promise<"recovered" | "already-initialized" | "rejected"> {
+    if (claim.workspaceId !== this.ctx.id.toString() || claim.ownerUserId.trim() === "" ||
+        blueprintId !== FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID ||
+        title !== "Finance Operations Workbench") {
+      return "rejected";
+    }
+
+    let archiveDoc = new Y.Doc();
+    try {
+      Y.applyUpdateV2(archiveDoc, code);
+    } catch {
+      return "rejected";
+    }
+    if (archiveDoc.getMap<Y.Text>().size === 0) return "rejected";
+
+    return this.ctx.blockConcurrencyWhile(async () => {
+      let existingKeys = await this.ctx.storage.kv.list({limit: 1});
+      if (Array.from(existingKeys).length !== 0) {
+        return this.validateFinanceWorkspaceOwner(claim) === "valid" ? "already-initialized" : "rejected";
+      }
+
+      this.ctx.storage.transactionSync(() => {
+        this.impl.ownerId = claim.ownerUserId;
+        this.impl.storage.ownerId.put(claim.ownerUserId);
+        this.impl.storage.title.put(title);
+        this.#initializeEmptyCodeSnapshot();
+        this.#applyPrevalidatedBlueprintToDefaultGadget(archiveDoc);
+      });
+
+      let owner = this.impl.users.get(this.impl.users.idFromString(claim.ownerUserId));
+      await owner.setGadgetLastActive(this.ctx.id.toString(), new Date(), undefined);
+      return "recovered";
+    });
   }
 
   async startGatekeeperSession(

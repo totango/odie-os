@@ -9,7 +9,7 @@
 // no reserved id prefix, no fallback branch in the read path. Failure is tolerable: a deployment
 // with none installed simply has no standard formats.
 
-import { BlueprintMetadata, BlueprintPublicInfo } from "@gadgets/workshop-shared/api";
+import { BlueprintMetadata, BlueprintPublicInfo, FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID } from "@gadgets/workshop-shared/api";
 import { BlueprintKvRecord, parseBlueprintArchive } from "./blueprint-archive.js";
 import {
   BundledFeaturedBlueprint,
@@ -22,7 +22,76 @@ import { createWorkshopLogger } from "./observability";
 
 const logger = createWorkshopLogger("workshop.formats");
 
+const FINANCE_OPERATIONS_WORKBENCH_TITLE = "Finance Operations Workbench";
+
 type InstallEnv = Pick<Cloudflare.Env, "BLUEPRINTS" | "BLUEPRINT_CONTENT">;
+
+/** Canonical bundled Finance app source used only to recover an uninitialized claimed workspace. */
+export type BundledFinanceOperationsWorkbenchSource = {
+  /** Stable protected blueprint id that supplied the source. */
+  blueprintId: typeof FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID;
+  /** Validated metadata with the bundled sidecar's presentation fields applied. */
+  metadata: BlueprintMetadata;
+  /** Uncompressed Yjs V2 update containing the Finance app files. */
+  code: Uint8Array;
+};
+
+/**
+ * Return the validated, immutable Finance Operations Workbench source bundled into this Worker.
+ * This deliberately reads only the generated FEATURED_BLUEPRINTS module, never mutable KV/R2 or
+ * caller-provided bytes, and fails closed if the bundle no longer contains exactly one protected
+ * Finance entry with the expected archive metadata.
+ */
+export async function loadBundledFinanceOperationsWorkbenchSource()
+    : Promise<BundledFinanceOperationsWorkbenchSource> {
+  let matches = FEATURED_BLUEPRINTS.filter(
+      entry => entry.blueprintId === FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID);
+  if (matches.length !== 1) {
+    throw new Error(`Expected exactly one bundled ${FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID}.`);
+  }
+
+  let entry = matches[0]!;
+  if (entry.title !== FINANCE_OPERATIONS_WORKBENCH_TITLE) {
+    throw new Error("Bundled Finance blueprint sidecar title is not canonical.");
+  }
+
+  let {metadata, contentLength, content} = await parseBlueprintArchive(
+      new Response(Uint8Array.fromBase64(entry.archive) as BufferSource).body!);
+  let gzipBytes = new Uint8Array(await new Response(content).arrayBuffer());
+  if (gzipBytes.byteLength !== contentLength) {
+    throw new Error(`Archive declares ${contentLength} content bytes but holds ` +
+        `${gzipBytes.byteLength}.`);
+  }
+  if (metadata.version !== entry.revision) {
+    throw new Error("Bundled Finance archive version does not match its revision.");
+  }
+  if (metadata.title !== FINANCE_OPERATIONS_WORKBENCH_TITLE) {
+    throw new Error("Bundled Finance archive title is not canonical.");
+  }
+  if (Object.keys(metadata.bindings).length !== 0) {
+    throw new Error("Bundled Finance archive declares bindings.");
+  }
+
+  let decompressed = new Response(gzipBytes).body!.pipeThrough(new DecompressionStream("gzip"));
+  let code = new Uint8Array(await new Response(decompressed).arrayBuffer());
+  if (code.byteLength === 0) {
+    throw new Error("Bundled Finance archive has no code.");
+  }
+
+  let installed: BlueprintMetadata = {
+    ...metadata,
+    title: entry.title,
+    description: entry.description,
+    author: entry.author,
+    output: undefined,
+  };
+
+  return {
+    blueprintId: FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
+    metadata: installed,
+    code,
+  };
+}
 
 /**
  * Identifies the exact set of bundled blueprints a deployment has installed, and how. Compared

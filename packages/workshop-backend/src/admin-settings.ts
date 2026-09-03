@@ -12,7 +12,7 @@ import { ambientGatekeeperMode, defaultAmbientGatekeeperMode } from './provision
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import type { UserDurableObject } from './user.js';
 import type { OverseerDurableObject } from './overseer.js';
-import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints } from './format-blueprints.js';
+import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints, loadBundledFinanceOperationsWorkbenchSource } from './format-blueprints.js';
 import { FEATURED_BLUEPRINTS, FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
@@ -170,7 +170,18 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let workspace = this.overseers.get(workspaceId);
     let workspaceStatus = await workspace.validateFinanceWorkspaceOwner(claim);
     if (workspaceStatus === "uninitialized") {
-      return {status: "blocked", reason: "uninitialized-workspace"};
+      let registration = financeRegistrationDiagnostic(await owner.getFinanceGadgetRegistrationStatus(
+          claim.workspaceId));
+      if (registration.status === "blocked") return registration;
+      try {
+        await loadBundledFinanceOperationsWorkbenchSource();
+      } catch (error) {
+        logger.warn("failed to validate bundled Finance workspace source", {
+          event: "finance.bundled-source.validation.failed", error,
+        });
+        return {status: "blocked", reason: "unavailable"};
+      }
+      return {status: "repairable", repair: "uninitialized-workspace"};
     }
     if (workspaceStatus === "incomplete") {
       return {status: "blocked", reason: "incomplete-workspace"};
@@ -196,10 +207,22 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
         let claim = this.storage.financeWorkspace.get();
         if (!claim) return {repaired: false, diagnostic: {status: "unclaimed"}};
         let owner = this.users.get(this.users.idFromString(claim.ownerUserId));
+        let recovered = false;
+        if (before.repair === "uninitialized-workspace") {
+          let workspace = this.overseers.get(this.overseers.idFromString(claim.workspaceId));
+          let source = await loadBundledFinanceOperationsWorkbenchSource();
+          let recovery = await workspace.recoverUninitializedFinanceWorkspace(
+              claim, source.blueprintId, source.metadata.title, source.code);
+          if (recovery === "rejected") {
+            let diagnostic = await this.#diagnoseFinanceHub();
+            return {repaired: false, diagnostic};
+          }
+          recovered = recovery === "recovered";
+        }
         let result = await owner.repairFinanceGadgetRegistration(claim.workspaceId);
         let diagnostic = await this.#diagnoseFinanceHub();
         return {
-          repaired: (result === "inserted" || result === "updated") &&
+          repaired: (recovered || result === "inserted" || result === "updated") &&
               diagnostic.status === "healthy",
           diagnostic,
         };
