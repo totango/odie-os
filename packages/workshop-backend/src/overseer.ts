@@ -1248,10 +1248,6 @@ class OverseerImpl implements AgentHooks {
   // If not set, this gadget doesn't exist yet.
   ownerId?: string;
 
-  // Claimed synchronously before workspace deletion begins, so no blueprint mutation can start
-  // during the awaited cleanup that precedes storage deletion.
-  deleting = false;
-
   // Cached from storage, initialized during the constructor, since it is referenced often but
   // almost never changes.
   defaultGadgetId?: WorkpieceId;
@@ -5679,7 +5675,6 @@ class OverseerImpl implements AgentHooks {
       screenshot?: BlueprintScreenshotUpload | null,
   ): Promise<void> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
-    if (this.deleting) throw new Error("Workspace deletion is in progress.");
 
     // Mark dirty.
     record.dirty = true;
@@ -5736,11 +5731,6 @@ class OverseerImpl implements AgentHooks {
   // Delete a blueprint's propagated data (KV, R2, User DO, local).
   async deleteBlueprintPropagation(record: BlueprintGadgetRecord): Promise<void> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
-    if (this.deleting) throw new Error("Workspace deletion is in progress.");
-
-    // This synchronous marker makes workspace deletion and blueprint deletion mutually exclusive.
-    record.dirty = true;
-    this.storage.blueprints.put(record);
 
     // Delete from KV first (stops public access).
     await this.env.BLUEPRINTS.delete(record.id);
@@ -8373,45 +8363,33 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (!this.isOwner) {
       throw new Error("Only the workspace owner can delete it.");
     }
-    if (this.impl.deleting) {
-      throw new Error("Workspace deletion is already in progress.");
-    }
-    if (Array.from(this.impl.storage.blueprints.list()).some(record => record.dirty)) {
-      throw new Error("Retry or delete unfinished blueprint publications before deleting this workspace.");
-    }
-    this.impl.deleting = true;
     let startedAt = Date.now();
 
-    try {
-      this.impl.recordGadgetAnalytics({
-        event_name: reason === "user" ? "gadget_deleted" : "gadget_creation_rolled_back",
-        user_id: this.#clientUser.id.toString(),
-      });
+    this.impl.recordGadgetAnalytics({
+      event_name: reason === "user" ? "gadget_deleted" : "gadget_creation_rolled_back",
+      user_id: this.#clientUser.id.toString(),
+    });
 
-      this.impl.destroyAllLiveChats();
-      // TODO: Revoke user sessions.
+    this.impl.destroyAllLiveChats();
+    // TODO: Revoke user sessions.
 
-      // Disable all enabled hooks so that the gatekeepers stop delivering events to this gadget.
-      // We do this before deleting storage so that we still have access to the hook controllers.
-      // TODO: If any disablement fails, deletion will be blocked. We could ignore failures, but that
-      //   would leave gatekeepers pointing at gadgets that don't exist anymore, which is also bad.
-      //   What do we really want here?
-      for (let record of Array.from(this.impl.storage.boundHooks.list())) {
-        if (record.enabled) {
-          await this.disableHook(record.id);
-        }
+    // Disable all enabled hooks so that the gatekeepers stop delivering events to this gadget.
+    // We do this before deleting storage so that we still have access to the hook controllers.
+    // TODO: If any disablement fails, deletion will be blocked. We could ignore failures, but that
+    //   would leave gatekeepers pointing at gadgets that don't exist anymore, which is also bad.
+    //   What do we really want here?
+    for (let record of Array.from(this.impl.storage.boundHooks.list())) {
+      if (record.enabled) {
+        await this.disableHook(record.id);
       }
-
-      await this.impl.ctx.blockConcurrencyWhile(async () => {
-        await this.#owner.deleteGadget(this.impl.ctx.id.toString());
-        await this.impl.ctx.storage.deleteAll();
-        this.impl.scheduleRevocationRestart();
-        this.impl.ownerId = undefined;
-      });
-    } catch (err) {
-      this.impl.deleting = false;
-      throw err;
     }
+
+    await this.impl.ctx.blockConcurrencyWhile(async () => {
+      await this.#owner.deleteGadget(this.impl.ctx.id.toString());
+      await this.impl.ctx.storage.deleteAll();
+      this.impl.scheduleRevocationRestart();
+      this.impl.ownerId = undefined;
+    });
 
     this.impl.logger.info("deleted workspace", {
       event: "workspace.delete.completed", durationMs: Date.now() - startedAt,
