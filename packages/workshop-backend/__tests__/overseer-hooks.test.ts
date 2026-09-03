@@ -33,6 +33,7 @@ function makeOverseer(
   Object.assign(overseer, {
     env: { BLUEPRINTS: { get: getConfig } },
     impl: {
+      isWorkspaceDeleting: () => false,
       storage: {
         boundHooks: { get: () => hook && ({ ...hook, gatekeeperId: 1 }) },
         gatekeepers: {
@@ -145,6 +146,8 @@ async function makeTargetOverseer(
     impl: {
       env: {BLUEPRINTS: {get: async () => serializeAdminConfig(config)}},
       ownerId: "user-id",
+      isWorkspaceDeleting: () => false,
+      withWorkspaceMutation: async <T>(operation: () => Promise<T>) => await operation(),
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
       joinPresence: () => () => {},

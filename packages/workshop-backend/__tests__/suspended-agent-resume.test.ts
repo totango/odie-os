@@ -115,6 +115,7 @@ function makeHarness(messages: object[], actions = new Map<number, ActionRecord>
   let impl: any = {
     ownerId: OWNER_USER_ID,
     ownerProfileId: OWNER_PROFILE_ID,
+    isWorkspaceDeleting: () => false,
     logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
     users: {
       idFromString: (id: string) => id,

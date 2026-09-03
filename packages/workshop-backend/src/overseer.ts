@@ -517,6 +517,12 @@ type BlueprintGadgetRecord = {
   dirty?: boolean;
 };
 
+type WorkspaceDeletionRecord = {
+  ownerId: string;
+  reason: "user" | "creation-rollback";
+  startedAt: Date;
+};
+
 // KV record type for the BLUEPRINTS namespace.
 type BlueprintKvRecord = {
   metadata: BlueprintMetadata;
@@ -940,6 +946,10 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       // registration fails, this keeps the owner-table write retryable.
       ownerRegistrationPending: false,
 
+      // Persisted before workspace cleanup starts. While present, no blueprint side effect may
+      // begin; an alarm resumes the idempotent cleanup after a failure or object restart.
+      workspaceDeletion: <WorkspaceDeletionRecord | null>null,
+
       codeVersion: 0,
       totalCost: 0,
 
@@ -1271,6 +1281,7 @@ class OverseerImpl implements AgentHooks {
 
   #preparingChatMessages = new Map<number, Promise<void>>();
   #ensuringAmbientCapsules?: Promise<void>;
+  #workspaceMutationTail = Promise.resolve();
 
   // Set of chatIds that currently have a running agent turn. Used to manage the DO alarm (held
   // while any agent runs) and to let `alarm()` wait for all agents to finish.
@@ -1461,6 +1472,12 @@ class OverseerImpl implements AgentHooks {
 
     // This DO has one alarm shared by agent keep-alive, response-target retry, and delivered-record sweep.
     // Recompute from storage whenever the alarm may have been overwritten by another concern.
+    // A deletion tombstone takes precedence: cleanup must remain restartable even when aborting an
+    // agent causes its normal teardown to recompute the shared alarm.
+    if (this.isWorkspaceDeleting()) {
+      this.ctx.storage.setAlarm(Date.now() + 60_000);
+      return;
+    }
     this.#sweepDeliveredExternalMessageResponses();
 
     let hasReadyExternalMessageResponse = [...this.storage.gadgetResponseDeliveries.readyByIdempotencyKey.list({ limit: 1 })]
@@ -1564,6 +1581,14 @@ class OverseerImpl implements AgentHooks {
             this.applyPendingAction(record, resolvedBy, autoApproved),
         record => this.#deploymentAutoApprover(record));
 
+    let deletion = this.storage.workspaceDeletion.get();
+    if (deletion) {
+      // Keep the persisted owner only in the tombstone; ordinary operations should see a deleted
+      // workspace while recovery finishes.
+      this.ownerId = undefined;
+      return;
+    }
+
     // Mirror every gadget-registry change into the owner's outputs index. Subscribing here makes
     // the registry the single chokepoint, so creation, acceptance, renaming, reverting and
     // deletion all propagate without each call site remembering to. (Workspace deletion is handled
@@ -1605,6 +1630,96 @@ class OverseerImpl implements AgentHooks {
         this.#deliverWaitingExternalMessageResponse(thread.id);
       }
     }
+  }
+
+  isWorkspaceDeleting(): boolean {
+    return this.storage.workspaceDeletion.get() !== null;
+  }
+
+  async #serializeWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+    let previousMutation = this.#workspaceMutationTail;
+    let release!: () => void;
+    this.#workspaceMutationTail = new Promise<void>(resolve => { release = resolve; });
+    await previousMutation;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  async withWorkspaceMutation<T>(operation: () => Promise<T>): Promise<T> {
+    return this.#serializeWorkspaceMutation(async () => {
+      if (!this.ownerId || this.isWorkspaceDeleting()) {
+        throw new Error("Workspace deletion is in progress.");
+      }
+      return operation();
+    });
+  }
+
+  async #finishWorkspaceDeletion(record: WorkspaceDeletionRecord): Promise<void> {
+    this.destroyAllLiveChats();
+
+    // Disable hooks before erasing their controllers. Each completed disable is checkpointed so a
+    // failed attempt or alarm retry resumes from the first hook that still needs work.
+    for (let hook of Array.from(this.storage.boundHooks.list())) {
+      if (!hook.enabled) continue;
+      await hook.controller.disable();
+      hook.enabled = false;
+      this.storage.boundHooks.put(hook);
+
+      let action = this.storage.actions.get(hook.actionId);
+      if (action?.type === "bindHook") {
+        action.enabled = false;
+        this.storage.actions.put(action);
+      }
+    }
+
+    let owner = this.users.get(this.users.idFromString(record.ownerId));
+    await owner.deleteGadget(this.ctx.id.toString());
+
+    await this.ctx.blockConcurrencyWhile(async () => {
+      await this.ctx.storage.deleteAll();
+      this.ownerId = undefined;
+    });
+
+    this.logger.info("deleted workspace", {
+      event: "workspace.delete.completed", durationMs: Date.now() - record.startedAt.valueOf(),
+    });
+  }
+
+  async deleteWorkspace(reason: WorkspaceDeletionRecord["reason"]): Promise<void> {
+    return this.#serializeWorkspaceMutation(async () => {
+      let record = this.storage.workspaceDeletion.get();
+      if (!record) {
+        if (!this.ownerId) throw new Error("Workspace has been deleted.");
+        record = {ownerId: this.ownerId, reason, startedAt: new Date()};
+        this.storage.workspaceDeletion.put(record);
+        this.recordGadgetAnalytics({
+          event_name: reason === "user" ? "gadget_deleted" : "gadget_creation_rolled_back",
+          user_id: record.ownerId,
+        });
+        this.ownerId = undefined;
+        await this.ctx.storage.setAlarm(Date.now() + 60_000);
+      }
+      try {
+        await this.#finishWorkspaceDeletion(record);
+      } finally {
+        // Existing client and gadget capabilities were minted before the tombstone. Restart even
+        // when external cleanup fails so they cannot keep operating while the alarm retries it.
+        this.scheduleRevocationRestart();
+      }
+    });
+  }
+
+  async resumeWorkspaceDeletion(): Promise<boolean> {
+    return this.#serializeWorkspaceMutation(async () => {
+      let record = this.storage.workspaceDeletion.get();
+      if (!record) return false;
+      this.ownerId = undefined;
+      await this.#finishWorkspaceDeletion(record);
+      return true;
+    });
   }
 
   // =======================================================================================
@@ -2072,10 +2187,16 @@ class OverseerImpl implements AgentHooks {
 
   // Disable (if needed) and delete a bound hook, updating its action-log record to match.
   async deleteHook(id: number): Promise<void> {
+    if (!this.ownerId || this.isWorkspaceDeleting()) {
+      throw new Error("Workspace deletion is in progress.");
+    }
     let record = this.storage.boundHooks.get(id);
     if (!record) return;
     if (record.enabled) {
       await record.controller.disable();
+      if (!this.ownerId || this.isWorkspaceDeleting()) {
+        throw new Error("Workspace deletion is in progress.");
+      }
     }
     this.storage.boundHooks.delete(record.id);
 
@@ -3304,6 +3425,9 @@ class OverseerImpl implements AgentHooks {
         gatekeeperId: number, controller: Fetcher<HookController<Hook>>,
         callback: NativeRpcStub<Hook>, description: HookDescription, caller: GatekeeperCaller)
         : Promise<void> {
+    if (!this.ownerId || this.isWorkspaceDeleting()) {
+      throw new Error("Workspace deletion is in progress.");
+    }
     let hookId = this.storage.nextHookId.get();
     this.storage.nextHookId.put(hookId + 1);
 
@@ -5674,6 +5798,15 @@ class OverseerImpl implements AgentHooks {
       codeSnapshot?: Uint8Array,
       screenshot?: BlueprintScreenshotUpload | null,
   ): Promise<void> {
+    return this.withWorkspaceMutation(
+        () => this.#propagateBlueprint(record, codeSnapshot, screenshot));
+  }
+
+  async #propagateBlueprint(
+      record: BlueprintGadgetRecord,
+      codeSnapshot?: Uint8Array,
+      screenshot?: BlueprintScreenshotUpload | null,
+  ): Promise<void> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
 
     // Mark dirty.
@@ -5728,6 +5861,10 @@ class OverseerImpl implements AgentHooks {
 
   // Delete a blueprint's propagated data (KV, R2, User DO, local).
   async deleteBlueprintPropagation(record: BlueprintGadgetRecord): Promise<void> {
+    return this.withWorkspaceMutation(() => this.#deleteBlueprintPropagation(record));
+  }
+
+  async #deleteBlueprintPropagation(record: BlueprintGadgetRecord): Promise<void> {
     if (!this.ownerId) throw new Error("Workspace not initialized.");
 
     // Delete from KV first (stops public access).
@@ -7015,6 +7152,9 @@ class OverseerImpl implements AgentHooks {
   }
 
   restore(params: OverseerRestoreParams): Fetcher<DurableObject> | Fetcher<RestoreForgerEntrypoint> {
+    if (!this.ownerId || this.isWorkspaceDeleting()) {
+      throw new Error("Workspace has been deleted.");
+    }
     if (params.type !== "gadget") {
       throw new TypeError("Unknown restore params type: " + params.type);
     }
@@ -7062,6 +7202,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
     this.impl = new OverseerImpl(ctx, env);
+    if (this.impl.isWorkspaceDeleting()) {
+      // Re-arm recovery before serving requests after an eviction. The alarm itself performs the
+      // external cleanup outside constructor-time blockConcurrencyWhile().
+      ctx.blockConcurrencyWhile(async () => { await ctx.storage.setAlarm(Date.now() + 60_000); });
+    }
   }
 
   /**
@@ -7076,6 +7221,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    *   the agents yet again.
    */
   async alarm() {
+    if (await this.impl.resumeWorkspaceDeletion()) return;
     await this.impl.waitForAllAgentsToComplete();
     await this.impl.deliverReadyExternalMessageResponses();
   }
@@ -7226,8 +7372,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async open(userId: string, profileId: string,
              notifyClosed: NativeRpcStub<() => void>,
              shareKey?: string,
-             configureObservers?: RpcStub<ObserverConfigCallback>,
-             isAdmin = false): Promise<Overseer> {
+              configureObservers?: RpcStub<ObserverConfigCallback>,
+              isAdmin = false): Promise<Overseer> {
+    if (this.impl.isWorkspaceDeleting()) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+    }
     let deploymentClaim: FinanceWorkspaceClaim | null;
     try {
       deploymentClaim = await retryOnDoReset(() => this.impl.ctx.exports.AdminSettings
@@ -7426,6 +7575,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async receiveExternalMessage(
     input: ExternalMessageSubmitInput,
   ): Promise<SubmitExternalMessageResult> {
+    if (this.impl.isWorkspaceDeleting()) {
+      return {accepted: false, message: "This workspace has been deleted."};
+    }
     if (!input.prompt.trim()) {
       return { accepted: false, message: "Please include a prompt." };
     }
@@ -7626,10 +7778,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
   async startGatekeeperSession(
       target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+    if (this.impl.isWorkspaceDeleting()) throw new Error("Workspace has been deleted.");
     return this.impl.startGatekeeperSession(target, caller);
   }
 
   startGatekeeperHook(id: number): NativeRpcStub<RpcTarget> {
+    if (this.impl.isWorkspaceDeleting()) throw new Error("Workspace has been deleted.");
     // TODO: There's a bug in workerd, if we return the RpcTarget directly here, because it is a
     //   Proxy, serializeJsValueWithPipeline() decides it is non-pipelineable, which is incorrect.
     //   Manually wrapping in a stub works around the problem for now.
@@ -7639,6 +7793,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async startHook(hookId: number): Promise<{
     callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue
   }> {
+    if (this.impl.isWorkspaceDeleting()) throw new Error("Workspace has been deleted.");
     let record = this.impl.storage.boundHooks.get(hookId);
     if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");
 
@@ -8361,37 +8516,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (!this.isOwner) {
       throw new Error("Only the workspace owner can delete it.");
     }
-    let startedAt = Date.now();
-
-    this.impl.recordGadgetAnalytics({
-      event_name: reason === "user" ? "gadget_deleted" : "gadget_creation_rolled_back",
-      user_id: this.#clientUser.id.toString(),
-    });
-
-    this.impl.destroyAllLiveChats();
-    // TODO: Revoke user sessions.
-
-    // Disable all enabled hooks so that the gatekeepers stop delivering events to this gadget.
-    // We do this before deleting storage so that we still have access to the hook controllers.
-    // TODO: If any disablement fails, deletion will be blocked. We could ignore failures, but that
-    //   would leave gatekeepers pointing at gadgets that don't exist anymore, which is also bad.
-    //   What do we really want here?
-    for (let record of Array.from(this.impl.storage.boundHooks.list())) {
-      if (record.enabled) {
-        await this.disableHook(record.id);
-      }
-    }
-
-    await this.impl.ctx.blockConcurrencyWhile(async () => {
-      await this.#owner.deleteGadget(this.impl.ctx.id.toString());
-      await this.impl.ctx.storage.deleteAll();
-      this.impl.scheduleRevocationRestart();
-      this.impl.ownerId = undefined;
-    });
-
-    this.impl.logger.info("deleted workspace", {
-      event: "workspace.delete.completed", durationMs: Date.now() - startedAt,
-    });
+    await this.impl.deleteWorkspace(reason);
   }
 
   async subscribeToCode(subscriber: RpcStub<CodeSubscriber>, fromVersion: number = 0)
@@ -8674,6 +8799,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async enableHook(id: number): Promise<void> {
+    return this.impl.withWorkspaceMutation(() => this.#enableHook(id));
+  }
+
+  async #enableHook(id: number): Promise<void> {
     let record = this.impl.storage.boundHooks.get(id);
     if (!record) throw new Error("Invalid hook ID.");
     let gatekeeperRecord = this.impl.storage.gatekeepers?.get(record.gatekeeperId);
@@ -8713,11 +8842,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async disableHook(id: number): Promise<void> {
+    if (!this.impl.ownerId || this.impl.isWorkspaceDeleting()) {
+      throw new Error("Workspace deletion is in progress.");
+    }
     let record = this.impl.storage.boundHooks.get(id);
     if (!record) throw new Error("Invalid hook ID.");
 
     if (record.enabled) {
       await record.controller.disable();
+      if (!this.impl.ownerId || this.impl.isWorkspaceDeleting()) {
+        throw new Error("Workspace deletion is in progress.");
+      }
 
       record.enabled = false;
       this.impl.storage.boundHooks.put(record);
@@ -9660,8 +9795,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       await this.impl.deleteBlueprintPropagation(record);
     } catch (err) {
       // If deletion fails partway through, mark as dirty so the user can retry.
-      record.dirty = true;
-      this.impl.storage.blueprints.put(record);
+      // A workspace deletion rejects queued work after erasing storage; do not resurrect it.
+      if (this.impl.ownerId && !this.impl.isWorkspaceDeleting()) {
+        record.dirty = true;
+        this.impl.storage.blueprints.put(record);
+      }
       throw err;
     }
   }
