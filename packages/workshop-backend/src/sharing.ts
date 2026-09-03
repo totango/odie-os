@@ -264,6 +264,7 @@ export class SharingManager {
     fetchProfile: () => Promise<AiChatAuthorInfo>;
     hasPasswordLogin?: () => Promise<boolean>;
     getActivePolicy?: () => ObservationDomainSharingPolicy | undefined;
+    beforeStore?: (role: CollaboratorRole) => Promise<void>;
     isProfileAllowedByPolicy?: (
         profileId: string,
         hasPasswordLogin: () => Promise<boolean>,
@@ -276,6 +277,9 @@ export class SharingManager {
     let link = resolved;
     let linkId = link.id;
     let role = link.role ?? "build";
+    let effectiveRole = this.#effectiveRoleAfterRedemption(
+        opts.profileId, link, opts.getActivePolicy?.());
+    if (!effectiveRole) return;
 
     if (link.recipientPolicy) {
       if (!opts.hasPasswordLogin || !opts.isProfileAllowedByPolicy ||
@@ -293,13 +297,23 @@ export class SharingManager {
       profile = await opts.fetchProfile();
     }
 
+    // Observer authorization may require RPC, so it runs before the collaborator graph changes.
+    // The key, policy, and effective role are all checked again synchronously below before writing.
+    await opts.beforeStore?.(effectiveRole);
+
     // The profile lookup and SSO check above may have awaited while another operation revoked the
     // link or latched a stricter workspace policy. Re-read the key, link and active policy
     // immediately before mutating the collaborator graph.
     let recheckedLink = this.#resolveRedeemableLink(hash, opts.getActivePolicy?.());
     if (!recheckedLink || recheckedLink.id !== linkId ||
         (recheckedLink.role ?? "build") !== role) return;
+    let recheckedEffectiveRole = this.#effectiveRoleAfterRedemption(
+        opts.profileId, recheckedLink, opts.getActivePolicy?.());
+    if (!recheckedEffectiveRole || roleRank(recheckedEffectiveRole) > roleRank(effectiveRole)) {
+      throw new Error("Share-link access changed while it was being authorized. Please try again.");
+    }
 
+    existing = this.storage.collaborators.get(opts.profileId);
     if (existing) {
       // User is already a collaborator. Only add an edge if they don't already have one for this
       // link (redeeming a second key of the same link is a no-op).
@@ -353,6 +367,19 @@ export class SharingManager {
       throw new Error("This share link is not compatible with the workspace sharing policy.");
     }
     return link;
+  }
+
+  #effectiveRoleAfterRedemption(
+      profileId: string,
+      link: ShareLinkRecord,
+      requiredLinkPolicy: ObservationDomainSharingPolicy | undefined): CollaboratorRole | undefined {
+    let effectiveRoles = this.computeEffectiveRoles({requiredLinkPolicy});
+    let creatorRole = link.createdBy === this.ownerProfileId
+        ? "build" : effectiveRoles.get(link.createdBy);
+    let existingRole = effectiveRoles.get(profileId);
+    if (!creatorRole) return existingRole;
+    let grantedRole = minRole(link.role ?? "build", creatorRole);
+    return existingRole ? maxRole(existingRole, grantedRole) : grantedRole;
   }
 
   // ---------------------------------------------------------------------------------------
@@ -537,6 +564,9 @@ export class SharingManager {
         recipientPolicy?: ObservationDomainSharingPolicy;
         beforeStore?: () => void })
       : Promise<{ key: string; linkId: string; recipientPolicy?: ObservationDomainSharingPolicy }> {
+    if (opts.recipientPolicy && opts.role !== "use") {
+      throw new Error("Internal share links only support Gadget-only access.");
+    }
     let callerRole = this.#requireCallerRole(opts.caller, opts.recipientPolicy);
     if (roleRank(opts.role) > roleRank(callerRole)) {
       throw new Error("You cannot grant a role higher than your own.");

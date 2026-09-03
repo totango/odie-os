@@ -13,6 +13,7 @@ import {
 import type {
   ObservationDescription,
   ObservationDomainSharingPolicy,
+  ResourceDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   assertBlueprintOriginAllowed,
@@ -1161,6 +1162,7 @@ describe("organization-scoped observation sharing policy", () => {
 
     try {
       await authorizeDomainObservation(workspace, TOTANGO_POLICY);
+      await expect(ownerSession.createShareLink("build")).rejects.toThrow(/Gadget-only/);
       let {key, recipientPolicy} = await ownerSession.createShareLink("use");
       expect(recipientPolicy).toEqual(TOTANGO_POLICY);
 
@@ -1180,6 +1182,84 @@ describe("organization-scoped observation sharing policy", () => {
       expect((await ownerSession.listCollaborators()).map(entry => entry.profile.id))
           .toEqual([member.profileId]);
     } finally {
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("does not persist an internal-link grant when observer authorization fails", async () => {
+    let owner = await createSsoUser(`observer-owner-${crypto.randomUUID()}@totango.com`);
+    let member = await createSsoUser(`observer-member-${crypto.randomUUID()}@totango.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Observer denial workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+
+    try {
+      await authorizeDomainObservation(workspace, TOTANGO_POLICY);
+      let {key} = await ownerSession.createShareLink("use");
+      await runInDurableObject(workspace, async (instance: OverseerDurableObject) => {
+        const impl = (instance as unknown as {
+          impl: { ensureObserver: (...args: unknown[]) => Promise<void> };
+        }).impl;
+        const ensureObserver = impl.ensureObserver;
+        impl.ensureObserver = async () => { throw new Error("observer denied"); };
+        try {
+          await expect(instance.open(
+              member.id.toString(), member.profileId, (() => {}) as never, key))
+              .rejects.toThrow();
+        } finally {
+          impl.ensureObserver = ensureObserver;
+        }
+      });
+      expect(await ownerSession.listCollaborators()).toEqual([]);
+    } finally {
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("restarts stale build capabilities before exposing a protected resource description", async () => {
+    let owner = await createSsoUser(`restart-owner-${crypto.randomUUID()}@totango.com`);
+    let outsider = await createSsoUser(`restart-outsider-${crypto.randomUUID()}@example.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Policy restart workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+    let outsiderSession: Awaited<ReturnType<OverseerDurableObject["open"]>> | undefined;
+
+    try {
+      await ownerSession.addCollaborator(outsider.profileId, "build");
+      outsiderSession = await workspace.open(
+          outsider.id.toString(), outsider.profileId, () => {});
+      let restartScheduled = false;
+      await runInDurableObject(workspace, async (instance: OverseerDurableObject) => {
+        const impl = (instance as unknown as {
+          impl: {
+            authorizeResourceDescription(description: ResourceDescription): Promise<void>;
+            scheduleRevocationRestart(): Promise<void>;
+          };
+        }).impl;
+        const scheduleRevocationRestart = impl.scheduleRevocationRestart;
+        impl.scheduleRevocationRestart = async () => { restartScheduled = true; };
+        try {
+          await expect(impl.authorizeResourceDescription({
+            title: "Private repository",
+            snippet: "Sensitive issue details.",
+            url: "https://github.example/private/repository",
+            suggestedBindingName: "GITHUB",
+            tsType: "GitHub",
+            domainSharingPolicy: TOTANGO_POLICY,
+          })).rejects.toThrow(/verified @totango\.com SSO collaborator/);
+        } finally {
+          impl.scheduleRevocationRestart = scheduleRevocationRestart;
+        }
+      });
+      expect(restartScheduled).toBe(true);
+    } finally {
+      outsiderSession?.[Symbol.dispose]();
       ownerSession[Symbol.dispose]();
       await owner.user.deleteGadget(workspaceIdString);
     }

@@ -5,6 +5,7 @@ import capnwebValidate from 'capnweb-validate/vite'
 const EXPECTED_RPC_REJECTIONS = new Set([
   'Collaborators requires an explicitly invited, verified @totango.com SSO collaborator.',
   'Finance workspaces are invite-only and do not support share links.',
+  'Internal share links only support Gadget-only access.',
 ])
 
 /**

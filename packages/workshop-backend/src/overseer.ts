@@ -3019,6 +3019,7 @@ class OverseerImpl implements AgentHooks {
     let facet = this.getGatekeeperFacet(id);
     try {
       let description = await facet.describe();
+      await this.authorizeResourceDescription(description);
       gatekeeperRecord.resourceTitle = description.title;
       gatekeeperRecord.resourceUrl = description.url;
       gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
@@ -3189,18 +3190,38 @@ class OverseerImpl implements AgentHooks {
           "earlier sensitive observations in this workspace.");
     }
 
-    const sharing = await this.getSharingManager();
-    sharing.assertShareLinksCompatible(policy);
+    try {
+      const sharing = await this.getSharingManager();
+      sharing.assertShareLinksCompatible(policy);
 
-    for (const collaborator of sharing.listCollaborators(policy)) {
-      await assertProfileAllowedByDomainSharingPolicy(
-          collaborator.profile.id,
-          () => this.users.get(this.users.idFromName(collaborator.profile.id)).hasPasswordLogin(),
-          policy,
-          "This observation");
+      for (const collaborator of sharing.listCollaborators(policy)) {
+        await assertProfileAllowedByDomainSharingPolicy(
+            collaborator.profile.id,
+            () => this.users.get(this.users.idFromName(collaborator.profile.id)).hasPasswordLogin(),
+            policy,
+            "This observation");
+      }
+    } catch (error) {
+      // The policy was already latched synchronously. Disconnect capabilities issued under the old
+      // policy before rethrowing so denied collaborators cannot retain a stale build session.
+      void this.scheduleRevocationRestart();
+      throw error;
     }
 
     this.storage.domainSharingPolicy.put(policy);
+  }
+
+  async authorizeResourceDescription(description: ResourceDescription): Promise<void> {
+    const policy = description.domainSharingPolicy;
+    if (!policy) return;
+    const existing = this.storage.domainSharingPolicy.get();
+    if (existing && !sameDomainSharingPolicy(existing, policy)) {
+      throw new Error(
+          "This resource requires a different sharing policy than earlier sensitive resources " +
+          "in this workspace.");
+    }
+    this.storage.domainSharingPolicy.put(existing ?? policy);
+    await this.#enforceDomainSharingPolicyForObservation(policy);
   }
 
   async getChatAttachmentData(chatId: number, id: string): Promise<Uint8Array> {
@@ -4239,6 +4260,7 @@ class OverseerImpl implements AgentHooks {
     let facet = this.getGatekeeperFacet(gatekeeper.id);
 
     let desc = await facet.describe();
+    await this.authorizeResourceDescription(desc);
     let types = await facet.getTypeScriptTypes();
 
     return `Binding: ${name}\n` +
@@ -5434,12 +5456,17 @@ class OverseerImpl implements AgentHooks {
       let gk = this.storage.gatekeepers.get(id);
       if (!gk) continue;
       let suggested: string | undefined;
+      let description: ResourceDescription | undefined;
       try {
-        suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
+        description = await this.getGatekeeperFacet(id).describe();
       } catch (err) {
         this.logger.warn("failed to fetch suggested binding name for ambient resource", {
           event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
         });
+      }
+      if (description) {
+        await this.authorizeResourceDescription(description);
+        suggested = description.suggestedBindingName;
       }
       let name = fallbackBindingName(suggested || "RESOURCE", candidate => taken.has(candidate));
       seedMap[name] = id;
@@ -5465,11 +5492,15 @@ class OverseerImpl implements AgentHooks {
         if (name === undefined) {
           let suggested: string | undefined;
           if (target !== undefined && this.storage.gatekeepers.get(target)) {
+            let description: ResourceDescription | undefined;
             try {
-              suggested =
-                  (await this.getGatekeeperFacet(target).describe()).suggestedBindingName;
+              description = await this.getGatekeeperFacet(target).describe();
             } catch {
               // Fall through to the generic fallback.
+            }
+            if (description) {
+              await this.authorizeResourceDescription(description);
+              suggested = description.suggestedBindingName;
             }
           }
           name = fallbackBindingName(suggested || "RESOURCE", n => taken.has(n));
@@ -6751,6 +6782,7 @@ class OverseerImpl implements AgentHooks {
       let candidate = gk.domainSharingPolicy;
       if (!candidate) {
         let description = await this.getGatekeeperFacet(gk.id).describe();
+        await this.authorizeResourceDescription(description);
         candidate = description.domainSharingPolicy;
         gk.resourceTitle = description.title;
         gk.resourceUrl = description.url;
@@ -7479,6 +7511,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
       let sharing = await this.impl.getSharingManager();
       let domainSharingPolicy = this.impl.storage.domainSharingPolicy.get();
+      let observerRole: CollaboratorRole | undefined;
       if (shareKey) {
         const inspectedShareKey = await sharing.inspectShareKey(shareKey);
         if (inspectedShareKey) {
@@ -7504,6 +7537,12 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
             hasPasswordLogin: () => clientUser.hasPasswordLogin(),
             getActivePolicy: () => this.impl.storage.domainSharingPolicy.get(),
             isProfileAllowedByPolicy: isProfileAllowedByDomainSharingPolicy,
+            beforeStore: async candidateRole => {
+              await ensureCapsules;
+              await this.impl.ensureObserver(
+                  profileId, clientUser, candidateRole, configureObservers);
+              observerRole = candidateRole;
+            },
           });
         } catch {
           throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
@@ -7542,7 +7581,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // gatekeepers, configuring their connected accounts if needed. This runs only after a valid
       // role is confirmed, so it never reveals gatekeeper or resource metadata to an unauthorized
       // user. The prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
-      await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+      if (!shareKey || role !== observerRole) {
+        await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+      }
 
       // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
       // (or is refreshed on) their home page.
@@ -7647,8 +7688,17 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           message: "This workspace has sharing disabled, so only its owner can access it.",
         };
       }
-      let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id);
-      if (role !== "build") {
+      try {
+        const policy = this.impl.storage.domainSharingPolicy.get() ??
+            await this.impl.deriveDomainSharingPolicyForRole("build");
+        let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id, policy);
+        if (role !== "build") throw new Error("Build access is required.");
+        if (policy) {
+          await assertProfileAllowedByDomainSharingPolicy(
+              callerProfile.id, () => caller.hasPasswordLogin(), policy, "This workspace");
+        }
+        await this.impl.ensureObserver(callerProfile.id, caller, "build");
+      } catch {
         return {
           accepted: false,
           message: "You do not have access to interact with this workspace through its agent.",
@@ -9999,6 +10049,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     assertShareLinksAllowed(await this.#isFinanceWorkspace());
     const sharing = await this.impl.getSharingManager();
     const recipientPolicy = await this.impl.deriveDomainSharingPolicyForRole(role);
+    if (recipientPolicy && role !== "use") {
+      throw new Error("Internal share links only support Gadget-only access.");
+    }
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
@@ -10480,6 +10533,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     }
 
     let description = await this.impl.getGatekeeperFacet(target).describe();
+    await this.impl.authorizeResourceDescription(description);
     let suggestedName = description.suggestedBindingName;
     let i = 1;
     // Re-read the record after the describe() await, in case bindings changed meanwhile. Dedupe
@@ -10741,10 +10795,14 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async describe(): Promise<ResourceDescription> {
-    return this.facet.describe();
+    const description = await this.facet.describe();
+    await this.impl.authorizeResourceDescription(description);
+    return description;
   }
 
   async openSession(): Promise<RpcStub<Session>> {
+    const description = await this.facet.describe();
+    await this.impl.authorizeResourceDescription(description);
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id, this.caller));
   }

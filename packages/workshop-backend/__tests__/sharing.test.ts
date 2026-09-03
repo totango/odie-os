@@ -175,7 +175,7 @@ describe("redeemShareKey", () => {
     let { storage, mgr } = makeManager();
     let { key } = await mgr.createShareLink({
       caller: owner,
-      role: "build",
+      role: "use",
       recipientPolicy: TOTANGO_POLICY,
     });
 
@@ -194,7 +194,7 @@ describe("redeemShareKey", () => {
     let { storage, mgr } = makeManager();
     let { key, linkId } = await mgr.createShareLink({
       caller: owner,
-      role: "build",
+      role: "use",
       recipientPolicy: TOTANGO_POLICY,
     });
 
@@ -209,7 +209,21 @@ describe("redeemShareKey", () => {
 
     expect(storage.collaborators.get("person@totango.com")!.addedBy)
         .toMatchObject([{ type: "shareKey", keyId: linkId }]);
-    expect(mgr.getEffectiveRole("person@totango.com", TOTANGO_POLICY)).toBe("build");
+    expect(mgr.getEffectiveRole("person@totango.com", TOTANGO_POLICY)).toBe("use");
+  });
+
+  it("does not mutate collaborators when pre-store observer authorization fails", async () => {
+    let { storage, mgr } = makeManager();
+    let { key } = await mgr.createShareLink({ caller: owner, role: "use" });
+
+    await expect(mgr.redeemShareKey({
+      rawKey: key,
+      profileId: "a",
+      fetchProfile: async () => profile("a"),
+      beforeStore: async () => { throw new Error("observer denied"); },
+    })).rejects.toThrow(/observer denied/);
+
+    expect(storage.collaborators.get("a")).toBeUndefined();
   });
 
   it("rechecks active policy after awaited profile lookup before mutating", async () => {
@@ -584,6 +598,16 @@ describe("createShareLink", () => {
     });
     expect(created.recipientPolicy).toEqual(TOTANGO_POLICY);
     expect(mgr.listShareLinkRecords()[0].recipientPolicy).toEqual(TOTANGO_POLICY);
+  });
+
+  it("rejects build access for an internal link", async () => {
+    let { storage, mgr } = makeManager();
+    await expect(mgr.createShareLink({
+      caller: owner,
+      role: "build",
+      recipientPolicy: TOTANGO_POLICY,
+    })).rejects.toThrow(/Gadget-only/);
+    expect([...storage.shareKeys.list()]).toEqual([]);
   });
 
   it("forbids creating a link with a higher role than the caller's own", async () => {
