@@ -28,6 +28,7 @@ import {
 } from "../src/overseer.js";
 import { loadBundledFinanceOperationsWorkbenchSource } from "../src/format-blueprints.js";
 import type { AdminSettings, FinanceWorkspaceClaim } from "../src/admin-settings.js";
+import { retryOnDoReset } from "../src/do-retry.js";
 import type { UserDurableObject } from "../src/user.js";
 
 declare module "cloudflare:workers" {
@@ -519,7 +520,10 @@ describe("Finance hub access policy", () => {
 
     expect(await admin.getFinanceWorkspaceClaim()).toBeNull();
     expect(await owner.user.getGadget(workspaceIdString)).toBeNull();
-    expect(await workspace.validateFinanceWorkspaceOwner(claim)).toBe("uninitialized");
+    // deleteSelf() schedules a revocation restart, so the pre-rollback stub may be invalid here.
+    expect(await retryOnDoReset(
+        () => env.TEST_OVERSEER.get(workspaceId).validateFinanceWorkspaceOwner(claim)))
+        .toBe("uninitialized");
   });
 
   it("cleans up a fresh Finance registration when opening fails", async () => {
