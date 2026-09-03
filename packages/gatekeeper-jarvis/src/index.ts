@@ -128,7 +128,7 @@ export function productFeedbackSlackArguments(request: ProductFeedbackNotificati
   }
   return {
     channel: PRODUCT_FEEDBACK_SLACK_CHANNEL,
-    text: `Draft product-feedback PR created. ${changeSummary} ${prUrl.toString()}`,
+    text: `Draft product-feedback PR created: ${prUrl.toString()}`,
     idempotencyKey: expectedKey,
   };
 }
