@@ -16,7 +16,12 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
-    "ADMINS": ["jacob.beck@totango.com"],
+    "ADMINS": [
+      "jacob.beck@totango.com",
+      "keith@totango.com",
+      "nick.roberts@totango.com",
+      "stacy.kennedy@totango.com"
+    ],
     "AUTH_GATEKEEPERS": "google",
     "CF_ACCESS_AUD": "8201bdec886d2938927bd320749e9aaebf3562bf12286db06d788eaea49b2e21",
     "CF_ACCESS_ISS": "https://weathered-moon-e011.cloudflareaccess.com",
