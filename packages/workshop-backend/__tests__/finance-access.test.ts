@@ -293,25 +293,39 @@ describe("Finance hub access policy", () => {
     };
     let admin = env.TEST_ADMIN.getByName("");
     let disposed = false;
+    let cleanupEvents: string[] = [];
 
     await expect(runBlueprintWorkspaceCreation({
       claim: () => admin.claimFinanceWorkspace(claim),
       register: () => owner.user.registerFinanceGadget(
           workspaceId, "Finance Operations Workbench"),
-      open: async () => ({[Symbol.dispose]() { disposed = true; }}),
+      open: async () => ({
+        async deleteSelf() {
+          cleanupEvents.push("delete");
+          await owner.user.deleteGadget(workspaceId);
+        },
+        [Symbol.dispose]() {
+          cleanupEvents.push("dispose");
+          disposed = true;
+        },
+      }),
       finish: async () => { throw new Error("initialization failed"); },
-      rollbackRegistration: () => owner.user.deleteGadget(workspaceId),
-      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+      rollbackRegistration: opened => opened!.deleteSelf(),
+      releaseClaim: async () => {
+        cleanupEvents.push("release");
+        await admin.releaseFinanceWorkspace(claim);
+      },
     })).rejects.toThrow("initialization failed");
 
     expect(disposed).toBe(true);
+    expect(cleanupEvents).toEqual(["delete", "dispose", "release"]);
     expect(await owner.user.getGadget(workspaceId)).toBeNull();
     expect(await admin.getFinanceWorkspaceClaim()).toBeNull();
     expect(await admin.claimFinanceWorkspace(claim)).toBe("claimed");
     await admin.releaseFinanceWorkspace(claim);
   });
 
-  it("retains the Finance claim when owner registration rollback fails", async () => {
+  it("retains the Finance claim when workspace rollback fails", async () => {
     let owner = await createUser("finance-rollback-failed");
     let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
     let claim: FinanceWorkspaceClaim = {
@@ -327,7 +341,7 @@ describe("Finance hub access policy", () => {
           workspaceId, "Finance Operations Workbench"),
       open: async () => ({[Symbol.dispose]() {}}),
       finish: async () => { throw new Error("initialization failed"); },
-      rollbackRegistration: async () => { throw new Error("registration cleanup failed"); },
+      rollbackRegistration: async () => { throw new Error("workspace cleanup failed"); },
       releaseClaim: () => admin.releaseFinanceWorkspace(claim),
     })).rejects.toThrow("initialization failed");
 
@@ -444,7 +458,7 @@ describe("Finance hub access policy", () => {
     await admin.releaseFinanceWorkspace(claim);
   });
 
-  it("denies an initialized Finance DO after fresh creation rollback removes its owner record", async () => {
+  it("erases an initialized Finance DO during fresh creation rollback", async () => {
     let owner = await createUser("finance-initialized-rollback");
     let workspaceId = env.TEST_OVERSEER.newUniqueId();
     let workspaceIdString = workspaceId.toString();
@@ -461,15 +475,47 @@ describe("Finance hub access policy", () => {
       register: () => owner.user.registerFinanceGadget(
           workspaceIdString, "Finance Operations Workbench"),
       open: async () => await workspace.open(owner.id.toString(), owner.profileId, () => {}),
-      finish: async () => { throw new Error("post-open initialization failed"); },
-      rollbackRegistration: () => owner.user.deleteGadget(workspaceIdString),
+      finish: async () => {
+        await workspace.initializeFromBlueprint(
+            FINANCE_BLUEPRINT_CODE, "Finance Operations Workbench");
+        throw new Error("post-open initialization failed");
+      },
+      rollbackRegistration: opened => opened!.deleteSelf(),
       releaseClaim: () => admin.releaseFinanceWorkspace(claim),
     })).rejects.toThrow("post-open initialization failed");
 
     expect(await admin.getFinanceWorkspaceClaim()).toBeNull();
     expect(await owner.user.getGadget(workspaceIdString)).toBeNull();
-    await expectOpenDenied(
-        () => workspace.open(owner.id.toString(), owner.profileId, () => {}));
+    expect(await workspace.validateFinanceWorkspaceOwner(claim)).toBe("uninitialized");
+  });
+
+  it("cleans up a fresh Finance registration when opening fails", async () => {
+    let owner = await createUser("finance-open-failed");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    let rollbackOpened: unknown = "not-called";
+
+    await expect(runBlueprintWorkspaceCreation({
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: () => owner.user.registerFinanceGadget(
+          workspaceId, "Finance Operations Workbench"),
+      open: async () => { throw new Error("open failed"); },
+      finish: async () => {},
+      rollbackRegistration: async opened => {
+        rollbackOpened = opened;
+        await owner.user.deleteGadget(workspaceId);
+      },
+      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+    })).rejects.toThrow("open failed");
+
+    expect(rollbackOpened).toBeUndefined();
+    expect(await owner.user.getGadget(workspaceId)).toBeNull();
+    expect(await admin.getFinanceWorkspaceClaim()).toBeNull();
   });
 
   it("denies an initialized ordinary workspace after its owner record is removed", async () => {
