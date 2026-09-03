@@ -19,6 +19,7 @@
     { "binding": "GATEKEEPER_ODIE_KG", "service": "odie-os-gk-odie-kg" },
     { "binding": "GATEKEEPER_SCHEDULER", "service": "odie-os-gk-scheduler" },
     { "binding": "GATEKEEPER_SESSIONS", "service": "odie-os-gk-sessions" },
+    { "binding": "GATEKEEPER_SLACK", "service": "odie-os-gk-slack" },
     { "binding": "GATEKEEPER_TEAM_PI", "service": "odie-os-gk-team-pi" }
   ],
   "r2_buckets": [

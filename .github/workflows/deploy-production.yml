@@ -143,6 +143,8 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           NOTION_CLIENT_ID: ${{ secrets.NOTION_CLIENT_ID }}
           NOTION_CLIENT_SECRET: ${{ secrets.NOTION_CLIENT_SECRET }}
+          SLACK_CLIENT_ID: ${{ secrets.SLACK_CLIENT_ID }}
+          SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
         run: |
           sync_oauth_secrets() {
             worker="$1"
@@ -159,6 +161,7 @@ jobs:
           }
           sync_oauth_secrets odie-os-gk-google "$GOOGLE_CLIENT_ID" "$GOOGLE_CLIENT_SECRET"
           sync_oauth_secrets odie-os-gk-notion "$NOTION_CLIENT_ID" "$NOTION_CLIENT_SECRET"
+          sync_oauth_secrets odie-os-gk-slack "$SLACK_CLIENT_ID" "$SLACK_CLIENT_SECRET"
 
       - name: Verify required Worker secrets
         env:
@@ -178,6 +181,7 @@ jobs:
           }
           require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN PRODUCT_FEEDBACK_MCP_TOKEN
+          require_secrets odie-os-gk-slack CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET EDITOR_CAPABILITY_HMAC_SECRET
           require_secrets odie-os-backend CF_AI_GATEWAY_API_TOKEN TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET TEAM_PI_CODEX_MODELS
 
@@ -204,6 +208,7 @@ jobs:
           wrangler deploy --no-bundle --config gatekeeper-notion/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-odie-kg/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-scheduler/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-slack/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-team-pi/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-sessions/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config workshop-backend/wrangler.json --message "$message"

@@ -42,6 +42,7 @@
     { "binding": "GATEKEEPER_ODIE_KG", "service": "odie-os-gk-odie-kg", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_SCHEDULER", "service": "odie-os-gk-scheduler", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_SESSIONS", "service": "odie-os-gk-sessions", "entrypoint": "GatekeeperVendor" },
+    { "binding": "GATEKEEPER_SLACK", "service": "odie-os-gk-slack", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_TEAM_PI", "service": "odie-os-gk-team-pi", "entrypoint": "GatekeeperVendor" }
   ],
   "migrations": [
