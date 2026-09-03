@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ADMIN_CONFIG } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG, applyDeploymentAdminConfigDefaults } from "../src/admin-config.js";
 import {
   ambientGatekeeperMode,
   defaultAmbientGatekeeperMode,
@@ -11,8 +11,8 @@ describe("ambient gatekeeper defaults", () => {
     expect(ambientGatekeeperMode(DEFAULT_ADMIN_CONFIG, "jarvis")).toBe("enabled");
     expect(ambientGatekeeperMode(DEFAULT_ADMIN_CONFIG, "github_org")).toBe("enabled");
     expect(shouldAutoProvisionAccount(DEFAULT_ADMIN_CONFIG, "JARVIS")).toBe(true);
-    expect(ambientGatekeeperMode(DEFAULT_ADMIN_CONFIG, "context")).toBe("enabled");
-    expect(shouldAutoProvisionAccount(DEFAULT_ADMIN_CONFIG, "context")).toBe(true);
+    expect(ambientGatekeeperMode(DEFAULT_ADMIN_CONFIG, "context")).toBe("optional");
+    expect(shouldAutoProvisionAccount(DEFAULT_ADMIN_CONFIG, "context")).toBe(false);
     expect(defaultAmbientGatekeeperMode("github_org")).toBe("enabled");
   });
 
@@ -25,13 +25,20 @@ describe("ambient gatekeeper defaults", () => {
     expect(shouldAutoProvisionAccount(config, "jarvis")).toBe(false);
   });
 
-  it("keeps an explicit optional override for a default-enabled source", () => {
-    let config = {
+  it("keeps an explicit optional override for a deployment-enabled source", () => {
+    let config = applyDeploymentAdminConfigDefaults({
       ...DEFAULT_ADMIN_CONFIG,
       ambientGatekeeperModes: {context: "optional" as const},
-    };
+    }, {DEFAULT_ENABLED_AMBIENT_GATEKEEPERS: "context"});
     expect(ambientGatekeeperMode(config, "context")).toBe("optional");
     expect(shouldAutoProvisionAccount(config, "context")).toBe(false);
+  });
+
+  it("uses an explicit deployment default when no administrator override exists", () => {
+    let config = applyDeploymentAdminConfigDefaults(
+        DEFAULT_ADMIN_CONFIG, {DEFAULT_ENABLED_AMBIENT_GATEKEEPERS: "context"});
+    expect(ambientGatekeeperMode(config, "context")).toBe("enabled");
+    expect(shouldAutoProvisionAccount(config, "context")).toBe(true);
   });
 
   it("preserves a legacy disabled gatekeeper until an ambient override is stored", () => {

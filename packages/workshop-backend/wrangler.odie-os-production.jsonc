@@ -28,6 +28,7 @@
     "CF_AI_GATEWAY": "odie-os-ai",
     "CF_AI_GATEWAY_ACCOUNT_ID": "286469790a4362a2e194b32045c5eca7",
     "CODING_SESSION_PI_RUNTIME_ENABLED": "true",
+    "DEFAULT_ENABLED_AMBIENT_GATEKEEPERS": "context",
     "DEPLOY_URL": "https://os.cloudflare.app/deploy/?instance=0b25cd3c-6772-4200-be89-353ceea1c63e",
     "PUBLIC_BASE_URL": "https://odie-os-native-api.odie-os.workers.dev",
     "DISABLE_PASSWORD_AUTH": "true",

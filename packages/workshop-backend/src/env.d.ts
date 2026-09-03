@@ -10,6 +10,10 @@ declare global {
       // (which is what a secret binding, can carry).
       ADMINS?: string[] | string;
 
+      // Comma-separated vendor ids explicitly authorized by the deployment to default to enabled.
+      // A persisted administrator mode remains authoritative over this deployment default.
+      DEFAULT_ENABLED_AMBIENT_GATEKEEPERS?: string;
+
       // Workers AI binding (injected by generate-wrangler-prod / run-dev-server; not in base wrangler.jsonc).
       WORKERS_AI: Ai;
 
