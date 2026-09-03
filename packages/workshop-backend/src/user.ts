@@ -2526,9 +2526,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (account) {
       if (account.autoProvisioned) {
-        // A forced ("enabled") ambient account can't be removed by the user — the admin controls it.
-        if (shouldAutoProvisionAccount(await readAdminConfig(this.env), account.vendorId)) {
-          throw new Error("This account is provided automatically and can't be disconnected.");
+        // Only an opt-in ambient account belongs to the user to remove. Enabled accounts are forced,
+        // while disabled accounts stay dormant so disabling a vendor never destroys its data.
+        let mode = ambientGatekeeperMode(await readAdminConfig(this.env), account.vendorId);
+        if (mode !== "optional") {
+          throw new Error("This account is managed automatically and can't be disconnected.");
         }
         // An opt-in ("optional") ambient account: the user added it, so let them remove it. revoke()
         // gives the gatekeeper a chance to delete its own per-user storage (e.g. the account's
@@ -2549,7 +2551,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         });
         return;
       }
-      await account.account.revoke();
+      try {
+        await account.account.revoke();
+      } catch (err) {
+        // Disconnect is a local authority decision. A provider outage or stale remote token must
+        // not leave that authority attached to the user's Workshop account.
+        logger.error("revoke() failed during disconnect", {
+          event: "account.revoke.failed",
+          vendorId: account.vendorId, accountId, error: err,
+        });
+      }
       this.storage.connectedAccounts.delete(accountId);
       // Disconnecting the Cloudflare account also clears the AI Gateway billing state (selected
       // account + cached balance), which is meaningless without the underlying grant.

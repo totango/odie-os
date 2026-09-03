@@ -6,9 +6,9 @@ import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
-import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defaultOutputFormatId, listPromotedFormats, normalizeEnabledHubs, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, applyDeploymentAdminConfigDefaults, defaultOutputFormatId, listPromotedFormats, normalizeEnabledHubs, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
-import { ambientGatekeeperMode, defaultAmbientGatekeeperMode } from './provisioning-policy.js';
+import { ambientGatekeeperMode } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import type { UserDurableObject } from './user.js';
 import type { OverseerDurableObject } from './overseer.js';
@@ -502,14 +502,26 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Every read of the stored config goes through here. A config persisted before a field existed
   // is missing that field entirely, so reads must backfill from the defaults or the first
   // deployment to upgrade hits `undefined` on it.
-  #config(): AdminConfig {
-    let config = { ...DEFAULT_ADMIN_CONFIG, ...this.storage.adminConfig.get() };
+  #storedConfig(): AdminConfig {
+    let stored = this.storage.adminConfig.get();
+    let config = {
+      ...DEFAULT_ADMIN_CONFIG,
+      ...stored,
+      ambientGatekeeperModes: {
+        ...DEFAULT_ADMIN_CONFIG.ambientGatekeeperModes,
+        ...stored.ambientGatekeeperModes,
+      },
+    };
     return {
       ...config,
       enabledHubs: normalizeEnabledHubs(config.enabledHubs),
       formats: config.formats.filter(
           ({blueprintId}) => !isFinanceOperationsWorkbenchBlueprintId(blueprintId)),
     };
+  }
+
+  #config(): AdminConfig {
+    return applyDeploymentAdminConfigDefaults(this.#storedConfig(), this.env);
   }
 
   getAdminConfig(): AdminConfig {
@@ -522,7 +534,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.adminConfigMutationTail = new Promise<void>(resolve => { release = resolve; });
     await previousMutation;
     try {
-      let current = this.#config();
+      let current = this.#storedConfig();
       let next = mutate(current);
       this.storage.adminConfig.put(next);
       try {
@@ -734,9 +746,11 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let vendor = this.vendors.get(vendorId);
     let autoProvisions = !!vendor && (await vendor.describe()).autoProvisionsAccount === true;
     if (autoProvisions) {
+      let deploymentDefault = ambientGatekeeperMode(
+          applyDeploymentAdminConfigDefaults(DEFAULT_ADMIN_CONFIG, this.env), vendorId);
       await this.#mutateAdminConfig(config => {
         let modes = { ...config.ambientGatekeeperModes };
-        if (mode === defaultAmbientGatekeeperMode(vendorId)) delete modes[vendorId];
+        if (mode === deploymentDefault) delete modes[vendorId];
         else modes[vendorId] = mode;
         let disabled = config.disabledGatekeepers.filter(id => id !== vendorId);
         return { ...config, ambientGatekeeperModes: modes, disabledGatekeepers: disabled };
