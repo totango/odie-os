@@ -2359,11 +2359,12 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Instruct the workspace to delete itself, removing it from the User's workspace list and
-   * deleting all data. Further method calls will fail.
+   * deleting all data. Further method calls will fail. The creation-rollback reason records the
+   * deletion as failed-creation cleanup rather than a user deletion.
    *
    * TODO: Implement undelete, maybe using PITR...
    */
-  deleteSelf(): Promise<void>;
+  deleteSelf(reason?: "user" | "creation-rollback"): Promise<void>;
 
   /**
    * Subscribe to the workspace's workpiece list.

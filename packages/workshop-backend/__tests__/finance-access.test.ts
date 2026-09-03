@@ -351,6 +351,39 @@ describe("Finance hub access policy", () => {
     await admin.releaseFinanceWorkspace(claim);
   });
 
+  it("retains a fresh Finance claim when registration applies before rejecting", async () => {
+    let owner = await createUser("finance-register-ambiguous");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    let rolledBack = false;
+    let released = false;
+
+    await expect(runBlueprintWorkspaceCreation({
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: async () => {
+        await owner.user.registerFinanceGadget(
+            workspaceId, "Finance Operations Workbench");
+        throw new Error("registration response lost");
+      },
+      open: async () => ({[Symbol.dispose]() {}}),
+      finish: async () => {},
+      rollbackRegistration: async () => { rolledBack = true; },
+      releaseClaim: async () => { released = true; },
+    })).rejects.toThrow("registration response lost");
+
+    expect(rolledBack).toBe(false);
+    expect(released).toBe(false);
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(claim);
+    expect(await owner.user.getGadget(workspaceId)).not.toBeNull();
+    await owner.user.deleteGadget(workspaceId);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
   it("retains the singleton and owner record after successful Finance creation", async () => {
     let owner = await createUser("finance-success");
     let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
@@ -921,20 +954,69 @@ describe("Finance hub access policy", () => {
     await owner.user.deleteGadget(workspaceId);
   });
 
-  it("disposes an opened ordinary blueprint workspace when later initialization fails", async () => {
+  it("deletes an opened ordinary blueprint workspace before disposing it on failure", async () => {
     let owner = await createUser("ordinary-failed");
     let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
-    let disposed = false;
+    let cleanupEvents: string[] = [];
     await expect(runBlueprintWorkspaceCreation({
       register: () => owner.user.newGadget(workspaceId, "Support", "support"),
-      open: async () => ({[Symbol.dispose]() { disposed = true; }}),
+      open: async () => ({
+        async deleteSelf() {
+          cleanupEvents.push("delete");
+          await owner.user.deleteGadget(workspaceId);
+        },
+        [Symbol.dispose]() { cleanupEvents.push("dispose"); },
+      }),
       finish: async () => { throw new Error("binding failed"); },
+      rollbackRegistration: opened => opened!.deleteSelf(),
     })).rejects.toThrow("binding failed");
 
-    expect(disposed).toBe(true);
-    expect(await owner.user.getGadget(workspaceId)).not.toBeNull();
+    expect(cleanupEvents).toEqual(["delete", "dispose"]);
+    expect(await owner.user.getGadget(workspaceId)).toBeNull();
     expect(await env.TEST_ADMIN.getByName("").getFinanceWorkspaceClaim()).toBeNull();
-    await owner.user.deleteGadget(workspaceId);
+  });
+
+  it("cleans an ordinary registration whose write applies before rejecting", async () => {
+    let owner = await createUser("ordinary-register-failed");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let opened = false;
+
+    await expect(runBlueprintWorkspaceCreation({
+      register: async () => {
+        await owner.user.newGadget(workspaceId, "Support", "support");
+        throw new Error("registration response lost");
+      },
+      open: async () => {
+        opened = true;
+        return {[Symbol.dispose]() {}};
+      },
+      finish: async () => {},
+      rollbackRegistration: async value => {
+        expect(value).toBeUndefined();
+        await owner.user.deleteGadget(workspaceId);
+      },
+    })).rejects.toThrow("registration response lost");
+
+    expect(opened).toBe(false);
+    expect(await owner.user.getGadget(workspaceId)).toBeNull();
+  });
+
+  it("cleans an ordinary registration when opening fails", async () => {
+    let owner = await createUser("ordinary-open-failed");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+
+    await expect(runBlueprintWorkspaceCreation({
+      register: () => owner.user.newGadget(workspaceId, "Support", "support"),
+      open: async () => { throw new Error("open failed"); },
+      finish: async () => {},
+      rollbackRegistration: async value => {
+        expect(value).toBeUndefined();
+        await owner.user.deleteGadget(workspaceId);
+      },
+    })).rejects.toThrow("open failed");
+
+    expect(await owner.user.getGadget(workspaceId)).toBeNull();
+    expect(await env.TEST_ADMIN.getByName("").getFinanceWorkspaceClaim()).toBeNull();
   });
 
   it("allows only an admin Finance bootstrap with the protected blueprint-origin pair", () => {

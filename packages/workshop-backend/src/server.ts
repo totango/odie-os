@@ -168,8 +168,8 @@ export async function readFinanceHubStatus(
 }
 
 /**
- * Run blueprint workspace creation with deterministic resource cleanup. A fresh Finance claim
- * owns its fresh registration; an exact retry preserves repairs made beneath the existing claim.
+ * Run workspace creation with deterministic resource cleanup. An ordinary generated ID belongs to
+ * this attempt; a fresh Finance claim owns only its fresh registration, preserving exact retries.
  */
 type BlueprintWorkspaceCreationOps<T extends {[Symbol.dispose](): void}> = {
   claim?: () => Promise<FinanceWorkspaceClaimResult>;
@@ -184,6 +184,7 @@ export async function runBlueprintWorkspaceCreation<T extends {[Symbol.dispose](
     ops: BlueprintWorkspaceCreationOps<T>): Promise<T> {
   let claimed = false;
   let registered = false;
+  let registrationAttempted = false;
   let opened: T | undefined;
   try {
     if (ops.claim) {
@@ -196,14 +197,17 @@ export async function runBlueprintWorkspaceCreation<T extends {[Symbol.dispose](
       }
       claimed = claimResult === "claimed";
     }
+    registrationAttempted = true;
     registered = await ops.register() === "inserted";
     opened = await ops.open();
     await ops.finish(opened);
     return opened;
   } catch (error) {
     let cleanupErrors: unknown[] = [];
-    let registrationRolledBack = !registered;
-    if (claimed && registered && ops.rollbackRegistration) {
+    let ownsRegistration = ops.claim ? claimed && registered : registrationAttempted;
+    // An ambiguous Finance registration must retain its fresh claim as the recovery handle.
+    let registrationRolledBack = !claimed;
+    if (ownsRegistration && ops.rollbackRegistration) {
       try {
         await ops.rollbackRegistration(opened);
         registrationRolledBack = true;
@@ -684,14 +688,27 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       throw new Error("Finance workspaces must be created from the Finance hub.");
     }
     let id = this.overseers.newUniqueId().toString();
-    await this.#user.newGadget(id, "Untitled Workspace", originHubId);
-    recordAnalytics(this.ctx, this.env, {
-      event_name: "gadget_created",
-      user_id: this.#userId.toString(),
-      gadget_id: id,
-      source: "blank",
+    let result = await runBlueprintWorkspaceCreation({
+      register: async () => {
+        await this.#user.newGadget(id, "Untitled Workspace", originHubId);
+      },
+      open: () => this.#openGadgetInternal(id, undefined, undefined, true),
+      finish: async () => {
+        recordAnalytics(this.ctx, this.env, {
+          event_name: "gadget_created",
+          user_id: this.#userId.toString(),
+          gadget_id: id,
+          source: "blank",
+        });
+      },
+      rollbackRegistration: async (openedOverseer) => {
+        if (openedOverseer) {
+          await openedOverseer.deleteSelf("creation-rollback");
+        } else {
+          await retryOnDoReset(() => this.#user.deleteGadget(id));
+        }
+      },
     });
-    let result = await this.#openGadgetInternal(id, undefined, undefined, true);
     if (!result) {
       throw new Error("Open failed despite newly-created workspace?");
     }
@@ -915,6 +932,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       ownerProfileId: this.#userId.name!,
     } : undefined;
     let adminSettings = this.adminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME);
+    let rollbackRegistration = async (openedOverseer: NativeRpcStub<Overseer> | undefined) => {
+      if (openedOverseer) {
+        await openedOverseer.deleteSelf("creation-rollback");
+      } else {
+        await retryOnDoReset(() => this.#user.deleteGadget(id));
+      }
+    };
     let overseerResult = await runBlueprintWorkspaceCreation({
       claim: financeClaim
           ? () => adminSettings.claimFinanceWorkspace(financeClaim)
@@ -923,15 +947,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
           ? this.#user.registerFinanceGadget(id, kvRecord.metadata.title)
           : this.#user.newGadget(id, kvRecord.metadata.title, originHubId),
       open: () => this.#openGadgetInternal(id, undefined, undefined, true),
-      rollbackRegistration: financeClaim
-          ? async (openedOverseer) => {
-            if (openedOverseer) {
-              await openedOverseer.deleteSelf();
-            } else {
-              await retryOnDoReset(() => this.#user.deleteGadget(id));
-            }
-          }
-          : undefined,
+      rollbackRegistration,
       releaseClaim: financeClaim
           ? () => retryOnDoReset(() => this.adminSettings
               .getByName(ADMIN_SETTINGS_SINGLETON_NAME).releaseFinanceWorkspace(financeClaim))

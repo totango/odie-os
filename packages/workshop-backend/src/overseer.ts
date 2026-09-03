@@ -8359,14 +8359,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return new GadgetClientImpl(this.impl, id, this.clientUserId);
   }
 
-  async deleteSelf(): Promise<void> {
+  async deleteSelf(reason: "user" | "creation-rollback" = "user"): Promise<void> {
     if (!this.isOwner) {
       throw new Error("Only the workspace owner can delete it.");
     }
     let startedAt = Date.now();
 
     this.impl.recordGadgetAnalytics({
-      event_name: "gadget_deleted",
+      event_name: reason === "user" ? "gadget_deleted" : "gadget_creation_rolled_back",
       user_id: this.#clientUser.id.toString(),
     });
 
@@ -10000,7 +10000,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
   async setPinned(_pinned: boolean): Promise<void> { this.#deny(); }
-  async deleteSelf(): Promise<void> { this.#deny(); }
+  async deleteSelf(_reason?: "user" | "creation-rollback"): Promise<void> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async subscribeToCode(
       _subscriber: RpcStub<CodeSubscriber>, _fromVersion?: number): Promise<RpcStub<{}>> {
