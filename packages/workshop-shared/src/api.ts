@@ -1492,8 +1492,10 @@ export type FinanceHubStatus =
       canCreate: true;
     };
 
-/** A repairable defect in the claimed Finance workspace's owner registration. */
+/** A repairable defect in the claimed Finance workspace initialization or owner registration. */
 export type FinanceHubRepairKind =
+  /** The claimed workspace is empty and can be restored from the bundled Finance application. */
+  | "uninitialized-workspace"
   /** The claimed owner has no registration for the initialized workspace. */
   | "missing-owner-registration"
   /** The claimed owner's existing owner registration has no hub origin. */
@@ -1536,7 +1538,7 @@ export type FinanceHubDiagnostic =
   | {
       /** The only safe registration mutation that can restore the claim. */
       status: "repairable";
-      /** Which narrowly-scoped owner-registration repair is available. */
+      /** Which narrowly-scoped initialization or owner-registration repair is available. */
       repair: FinanceHubRepairKind;
     }
   | {
@@ -1548,7 +1550,7 @@ export type FinanceHubDiagnostic =
 
 /** Result of an idempotent administrator Finance repair attempt. */
 export type FinanceHubRepairResult = {
-  /** Whether this call inserted or updated the owner registration. */
+  /** Whether this call initialized the workspace or inserted/updated the owner registration. */
   repaired: boolean;
   /** Sanitized Finance health after the attempted repair. */
   diagnostic: FinanceHubDiagnostic;
@@ -1636,8 +1638,9 @@ export interface AdminApi {
   diagnoseFinanceHub(): Promise<FinanceHubDiagnostic>;
 
   /**
-   * Idempotently repair only a missing owner registration or missing Finance origin after the
-   * stored claim, workspace owner, and completed protected-blueprint initialization validate.
+   * Idempotently restore an empty claimed workspace from bundled Finance source, or repair only a
+   * missing owner registration / missing Finance origin after the stored claim and workspace
+   * validate.
    */
   repairFinanceHub(): Promise<FinanceHubRepairResult>;
 

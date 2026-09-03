@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { RpcStub } from "capnweb";
 import { beforeEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
@@ -6,6 +7,7 @@ import {
   isFinanceOperationsWorkbenchBlueprintId,
   type AiChatAuthorInfo,
   type BlueprintUserSummary,
+  type CodeUpdate,
 } from "@gadgets/workshop-shared/api";
 import type { ObservationDomainSharingPolicy } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -24,6 +26,7 @@ import {
   isProfileAllowedByDomainSharingPolicy,
   type OverseerDurableObject,
 } from "../src/overseer.js";
+import { loadBundledFinanceOperationsWorkbenchSource } from "../src/format-blueprints.js";
 import type { AdminSettings, FinanceWorkspaceClaim } from "../src/admin-settings.js";
 import type { UserDurableObject } from "../src/user.js";
 
@@ -81,6 +84,24 @@ async function expectOpenDenied(open: () => PromiseLike<unknown>): Promise<void>
     denied = true;
   }
   expect(denied).toBe(true);
+}
+
+async function readWorkspaceFiles(workspace: Awaited<ReturnType<OverseerDurableObject["open"]>>):
+    Promise<Record<string, string>> {
+  let doc = new Y.Doc();
+  let ready!: () => void;
+  let readyPromise = new Promise<void>(resolve => { ready = resolve; });
+  let subscriber = new RpcStub({
+    update(update: CodeUpdate) { Y.applyUpdateV2(doc, update.update); },
+    ready() { ready(); },
+  });
+  let subscription = await workspace.subscribeToCode(subscriber);
+  await readyPromise;
+  subscription[Symbol.dispose]();
+  subscriber[Symbol.dispose]();
+  let files: Record<string, string> = {};
+  doc.getMap<Y.Text>("").forEach((text, name) => { files[name] = text.toString(); });
+  return files;
 }
 
 function blueprintSummary(id: string): BlueprintUserSummary {
@@ -287,6 +308,32 @@ describe("Finance hub access policy", () => {
     expect(await owner.user.getGadget(workspaceId)).toBeNull();
     expect(await admin.getFinanceWorkspaceClaim()).toBeNull();
     expect(await admin.claimFinanceWorkspace(claim)).toBe("claimed");
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("retains the Finance claim when owner registration rollback fails", async () => {
+    let owner = await createUser("finance-rollback-failed");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId().toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+
+    await expect(runBlueprintWorkspaceCreation({
+      claim: () => admin.claimFinanceWorkspace(claim),
+      register: () => owner.user.registerFinanceGadget(
+          workspaceId, "Finance Operations Workbench"),
+      open: async () => ({[Symbol.dispose]() {}}),
+      finish: async () => { throw new Error("initialization failed"); },
+      rollbackRegistration: async () => { throw new Error("registration cleanup failed"); },
+      releaseClaim: () => admin.releaseFinanceWorkspace(claim),
+    })).rejects.toThrow("initialization failed");
+
+    expect(await admin.getFinanceWorkspaceClaim()).toEqual(claim);
+    expect(await owner.user.getGadget(workspaceId)).not.toBeNull();
+    await owner.user.deleteGadget(workspaceId);
     await admin.releaseFinanceWorkspace(claim);
   });
 
@@ -622,13 +669,113 @@ describe("Finance hub access policy", () => {
       repaired: false,
       diagnostic: {status: "blocked", reason: "incomplete-workspace"},
     });
+    let source = await loadBundledFinanceOperationsWorkbenchSource();
+    expect(await workspace.recoverUninitializedFinanceWorkspace(
+        claim, source.blueprintId, source.metadata.title, source.code)).toBe("rejected");
     expect((await owner.user.getGadget(workspaceIdString))?.originHubId).toBeUndefined();
 
     await owner.user.deleteGadget(workspaceIdString);
     await admin.releaseFinanceWorkspace(claim);
   });
 
-  it("refuses uninitialized workspaces and initialized owner mismatches", async () => {
+  it("recovers an uninitialized claimed workspace from the bundled Finance application", async () => {
+    let owner = await createUser("finance-bundled-recovery");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: workspaceIdString,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    await admin.claimFinanceWorkspace(claim);
+
+    expect(await admin.diagnoseFinanceHub()).toEqual({
+      status: "repairable", repair: "uninitialized-workspace",
+    });
+    expect(await admin.repairFinanceHub()).toEqual({
+      repaired: true, diagnostic: {status: "healthy"},
+    });
+    expect(await owner.user.getGadget(workspaceIdString)).toEqual(expect.objectContaining({
+      title: "Finance Operations Workbench", originHubId: "finance",
+    }));
+
+    let session = await env.TEST_OVERSEER.get(workspaceId).open(
+        owner.id.toString(), owner.profileId, () => {});
+    let files = await readWorkspaceFiles(session);
+    session[Symbol.dispose]();
+    expect(files["server.js"]).toContain("export");
+    expect(files["client.js"]).toBeDefined();
+    expect(files["README.md"]).toContain("Finance");
+
+    expect(await admin.repairFinanceHub()).toEqual({
+      repaired: false, diagnostic: {status: "healthy"},
+    });
+
+    await owner.user.deleteGadget(workspaceIdString);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("rejects direct Finance recovery for the wrong protected blueprint", async () => {
+    let owner = await createUser("finance-wrong-blueprint");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: workspaceId.toString(),
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let source = await loadBundledFinanceOperationsWorkbenchSource();
+
+    expect(await env.TEST_OVERSEER.get(workspaceId).recoverUninitializedFinanceWorkspace(
+        claim, "starter.not-finance", source.metadata.title, source.code)).toBe("rejected");
+    expect(await env.TEST_OVERSEER.get(workspaceId).validateFinanceWorkspaceOwner(claim))
+        .toBe("uninitialized");
+  });
+
+  it("refuses uninitialized recovery when owner registration conflicts before workspace mutation", async () => {
+    let owner = await createUser("finance-uninitialized-conflict");
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    let claim: FinanceWorkspaceClaim = {
+      workspaceId: workspaceIdString,
+      ownerUserId: owner.id.toString(),
+      ownerProfileId: owner.profileId,
+    };
+    let admin = env.TEST_ADMIN.getByName("");
+    await admin.claimFinanceWorkspace(claim);
+
+    await owner.user.recordSharedGadgetOpen(workspaceIdString, "Shared", {
+      type: "user", id: "other@example.com", name: "Other",
+    });
+    expect(await admin.repairFinanceHub()).toEqual({
+      repaired: false, diagnostic: {status: "blocked", reason: "shared-registration"},
+    });
+    expect(await env.TEST_OVERSEER.get(workspaceId).validateFinanceWorkspaceOwner(claim))
+        .toBe("uninitialized");
+
+    await owner.user.deleteGadget(workspaceIdString);
+    await owner.user.newGadget(workspaceIdString, "Support", "support");
+    expect(await admin.repairFinanceHub()).toEqual({
+      repaired: false, diagnostic: {status: "blocked", reason: "non-finance-origin"},
+    });
+    expect(await env.TEST_OVERSEER.get(workspaceId).validateFinanceWorkspaceOwner(claim))
+        .toBe("uninitialized");
+
+    await owner.user.deleteGadget(workspaceIdString);
+    let duplicateId = env.TEST_OVERSEER.newUniqueId().toString();
+    await owner.user.registerFinanceGadget(
+        duplicateId, "Finance Operations Workbench");
+    expect(await admin.repairFinanceHub()).toEqual({
+      repaired: false, diagnostic: {status: "blocked", reason: "duplicate-finance-registration"},
+    });
+    expect(await env.TEST_OVERSEER.get(workspaceId).validateFinanceWorkspaceOwner(claim))
+        .toBe("uninitialized");
+
+    await owner.user.deleteGadget(duplicateId);
+    await admin.releaseFinanceWorkspace(claim);
+  });
+
+  it("refuses initialized owner mismatches", async () => {
     let owner = await createUser("finance-uninitialized");
     let workspaceId = env.TEST_OVERSEER.newUniqueId();
     let claim: FinanceWorkspaceClaim = {
@@ -639,22 +786,25 @@ describe("Finance hub access policy", () => {
     let admin = env.TEST_ADMIN.getByName("");
     await admin.claimFinanceWorkspace(claim);
     expect(await admin.repairFinanceHub()).toEqual({
-      repaired: false,
-      diagnostic: {status: "blocked", reason: "uninitialized-workspace"},
+      repaired: true,
+      diagnostic: {status: "healthy"},
     });
+    await owner.user.deleteGadget(workspaceId.toString());
     await admin.releaseFinanceWorkspace(claim);
 
     let other = await createUser("finance-other-owner");
-    await other.user.newGadget(workspaceId.toString(), "Other workspace");
-    let session = await env.TEST_OVERSEER.get(workspaceId).open(
+    let mismatchWorkspaceId = env.TEST_OVERSEER.newUniqueId();
+    let mismatchClaim = {...claim, workspaceId: mismatchWorkspaceId.toString()};
+    await other.user.newGadget(mismatchWorkspaceId.toString(), "Other workspace");
+    let session = await env.TEST_OVERSEER.get(mismatchWorkspaceId).open(
         other.id.toString(), other.profileId, () => {});
     session[Symbol.dispose]();
-    await admin.claimFinanceWorkspace(claim);
+    await admin.claimFinanceWorkspace(mismatchClaim);
     expect(await admin.diagnoseFinanceHub()).toEqual({
       status: "blocked", reason: "owner-mismatch",
     });
-    await admin.releaseFinanceWorkspace(claim);
-    await other.user.deleteGadget(workspaceId.toString());
+    await admin.releaseFinanceWorkspace(mismatchClaim);
+    await other.user.deleteGadget(mismatchWorkspaceId.toString());
   });
 
   it("refuses shared, explicit non-Finance, and duplicate owner registrations", async () => {

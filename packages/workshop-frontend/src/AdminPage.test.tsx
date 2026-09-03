@@ -67,6 +67,26 @@ describe('FinanceHubAdminRow', () => {
     expect(container!.textContent).not.toContain('Repair')
   })
 
+  it('describes uninitialized Finance recovery as bundled app restoration', async () => {
+    const admin = {
+      diagnoseFinanceHub: vi.fn<AdminApi['diagnoseFinanceHub']>(async () => ({
+        status: 'repairable',
+        repair: 'uninitialized-workspace',
+      })),
+      repairFinanceHub: vi.fn<AdminApi['repairFinanceHub']>(async () => ({
+        repaired: true,
+        diagnostic: { status: 'healthy' },
+      })),
+    } as unknown as AdminApi
+    await render(admin)
+
+    await act(async () => {
+      Array.from(container!.querySelectorAll('button')).find(button => button.textContent === 'Check status')!.click()
+    })
+    expect(container!.textContent).toContain('restored from the bundled Finance application')
+    expect(container!.textContent).toContain('Repair')
+  })
+
   it('shows incomplete blueprint initialization as blocked', async () => {
     const admin = {
       diagnoseFinanceHub: vi.fn<AdminApi['diagnoseFinanceHub']>(async () => ({

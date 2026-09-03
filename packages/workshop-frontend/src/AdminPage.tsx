@@ -37,6 +37,9 @@ function financeDiagnosticText(diagnostic: FinanceHubDiagnostic | null): string 
   if (diagnostic.status === 'unclaimed') return 'No Finance workspace has been claimed.'
   if (diagnostic.status === 'healthy') return 'Claim, workspace owner, and Finance registration are healthy.'
   if (diagnostic.status === 'repairable') {
+    if (diagnostic.repair === 'uninitialized-workspace') {
+      return 'The claimed workspace can be restored from the bundled Finance application.'
+    }
     return diagnostic.repair === 'missing-owner-registration'
       ? 'The validated workspace is missing its owner registration.'
       : 'The validated owner registration is missing its Finance origin.'

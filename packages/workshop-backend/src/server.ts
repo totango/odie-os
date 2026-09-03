@@ -40,6 +40,7 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
+import { loadBundledFinanceOperationsWorkbenchSource } from "./format-blueprints.js";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -206,14 +207,16 @@ export async function runBlueprintWorkspaceCreation<T extends {[Symbol.dispose](
     } catch (cleanupError) {
       cleanupErrors.push(cleanupError);
     }
+    let registrationRolledBack = !registered;
     if (claimed && registered && ops.rollbackRegistration) {
       try {
         await ops.rollbackRegistration();
+        registrationRolledBack = true;
       } catch (cleanupError) {
         cleanupErrors.push(cleanupError);
       }
     }
-    if (claimed && ops.releaseClaim) {
+    if (claimed && registrationRolledBack && ops.releaseClaim) {
       try {
         await ops.releaseClaim();
       } catch (cleanupError) {
@@ -887,13 +890,22 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     }
     let isFinanceBlueprint = assertBlueprintOriginAllowed(
         blueprintId, originHubId, this.#isAdmin());
-    // 1. Read blueprint from KV.
-    let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
-    if (!kvRecord) throw new Error("Blueprint not found.");
-
-    // 2. Read gzip-compressed Yjs doc from R2 and decompress.
-    let codeBytes = await readBlueprintContent(this.env, blueprintId, kvRecord.metadata.version);
-    if (!codeBytes) throw new Error("Blueprint content not found in R2.");
+    // Protected Finance creation and recovery always use the immutable source bundled into this
+    // Worker. Ordinary blueprints use their installed KV metadata and R2 code snapshot.
+    let kvRecord: BlueprintKvRecord;
+    let codeBytes: Uint8Array;
+    if (isFinanceBlueprint) {
+      let source = await loadBundledFinanceOperationsWorkbenchSource();
+      kvRecord = {metadata: source.metadata};
+      codeBytes = source.code;
+    } else {
+      let stored = await readBlueprintKvRecord(this.env, blueprintId);
+      if (!stored) throw new Error("Blueprint not found.");
+      kvRecord = stored;
+      let storedCode = await readBlueprintContent(this.env, blueprintId, stored.metadata.version);
+      if (!storedCode) throw new Error("Blueprint content not found in R2.");
+      codeBytes = storedCode;
+    }
 
     // 3. Create new Overseer DO (same as newGadget()).
     let id = this.overseers.newUniqueId().toString();
