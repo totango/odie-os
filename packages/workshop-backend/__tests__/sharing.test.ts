@@ -7,7 +7,18 @@ import {
   ShareKeyRecord,
 } from "../src/sharing.js";
 import { AiChatAuthorInfo, PermissionEdge, CollaboratorRole } from "@gadgets/workshop-shared/api";
+import type { ObservationDomainSharingPolicy } from "@gadgets/workshop-shared/gatekeeper";
 import { makeMockStorage } from "./mock-storage.js";
+
+const TOTANGO_POLICY: ObservationDomainSharingPolicy = {
+  type: "verified-sso-email-domain",
+  emailDomain: "totango.com",
+};
+
+const EXAMPLE_POLICY: ObservationDomainSharingPolicy = {
+  type: "verified-sso-email-domain",
+  emailDomain: "example.com",
+};
 
 function makeStorage(): SharingStorage {
   return createTypedStorage(makeMockStorage(), {
@@ -51,8 +62,9 @@ function seedCollaborator(storage: SharingStorage, id: string, addedBy: Permissi
 // Seed a share link. A link is stored as its first key, so `linkId` is that key's hash -- which is
 // what `shareKey` edges reference.
 function seedLink(
-    storage: SharingStorage, linkId: string, createdBy: string, role: CollaboratorRole = "build") {
-  storage.shareKeys.put({ id: linkId, created: new Date(), createdBy, role });
+    storage: SharingStorage, linkId: string, createdBy: string, role: CollaboratorRole = "build",
+    recipientPolicy?: ObservationDomainSharingPolicy) {
+  storage.shareKeys.put({ id: linkId, created: new Date(), createdBy, role, recipientPolicy });
 }
 
 // Read back a link record, asserting that the id names a link rather than one of its aliases.
@@ -157,6 +169,65 @@ describe("redeemShareKey", () => {
     expect(storage.collaborators.get("a")!.addedBy)
         .toEqual([expect.objectContaining({ type: "shareKey", role: "use" })]);
     expect(mgr.getEffectiveRole("a")).toBe("use");
+  });
+
+  it("does not mutate collaborators when internal link redemption is denied", async () => {
+    let { storage, mgr } = makeManager();
+    let { key } = await mgr.createShareLink({
+      caller: owner,
+      role: "build",
+      recipientPolicy: TOTANGO_POLICY,
+    });
+
+    await expect(mgr.redeemShareKey({
+      rawKey: key,
+      profileId: "outsider@example.com",
+      fetchProfile: async () => profile("outsider@example.com"),
+      hasPasswordLogin: async () => false,
+      isProfileAllowedByPolicy: async () => false,
+    })).rejects.toThrow(/internal link/);
+
+    expect(storage.collaborators.get("outsider@example.com")).toBeUndefined();
+  });
+
+  it("lets a domain-safe internal-link redeemer reopen through the persisted edge", async () => {
+    let { storage, mgr } = makeManager();
+    let { key, linkId } = await mgr.createShareLink({
+      caller: owner,
+      role: "build",
+      recipientPolicy: TOTANGO_POLICY,
+    });
+
+    await mgr.redeemShareKey({
+      rawKey: key,
+      profileId: "person@totango.com",
+      fetchProfile: async () => profile("person@totango.com"),
+      hasPasswordLogin: async () => false,
+      getActivePolicy: () => TOTANGO_POLICY,
+      isProfileAllowedByPolicy: async () => true,
+    });
+
+    expect(storage.collaborators.get("person@totango.com")!.addedBy)
+        .toMatchObject([{ type: "shareKey", keyId: linkId }]);
+    expect(mgr.getEffectiveRole("person@totango.com", TOTANGO_POLICY)).toBe("build");
+  });
+
+  it("rechecks active policy after awaited profile lookup before mutating", async () => {
+    let { storage, mgr } = makeManager();
+    let { key } = await mgr.createShareLink({ caller: owner, role: "build" });
+    let activePolicy: ObservationDomainSharingPolicy | undefined;
+
+    await expect(mgr.redeemShareKey({
+      rawKey: key,
+      profileId: "late@example.com",
+      fetchProfile: async () => {
+        activePolicy = TOTANGO_POLICY;
+        return profile("late@example.com");
+      },
+      getActivePolicy: () => activePolicy,
+    })).rejects.toThrow(/not compatible/);
+
+    expect(storage.collaborators.get("late@example.com")).toBeUndefined();
   });
 
   it("adds a key edge to an existing collaborator without fetching the profile", async () => {
@@ -504,11 +575,45 @@ describe("createShareLink", () => {
     expect(linkId).toBe(records[0].id);
   });
 
+  it("persists an internal recipient policy", async () => {
+    let { mgr } = makeManager();
+    let created = await mgr.createShareLink({
+      caller: owner,
+      role: "use",
+      recipientPolicy: TOTANGO_POLICY,
+    });
+    expect(created.recipientPolicy).toEqual(TOTANGO_POLICY);
+    expect(mgr.listShareLinkRecords()[0].recipientPolicy).toEqual(TOTANGO_POLICY);
+  });
+
   it("forbids creating a link with a higher role than the caller's own", () => {
     let { storage, mgr } = makeManager();
     seedCollaborator(storage, "a", [userEdge(OWNER, "use")]);
     expect(() => mgr.createShareLink({ caller: collab("a"), role: "build" }))
         .rejects.toThrow(/higher than your own/);
+  });
+
+  it("rejects a stale public-link caller under an internal policy", async () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "public", OWNER);
+    seedCollaborator(storage, "a", [keyEdge("public")]);
+
+    await expect(mgr.createShareLink({
+      caller: collab("a"),
+      role: "use",
+      recipientPolicy: TOTANGO_POLICY,
+    })).rejects.toThrow(/permission/);
+    expect(mgr.listShareLinkRecords().map(record => record.id)).toEqual(["public"]);
+  });
+
+  it("runs the final policy guard before storing the link", async () => {
+    let { mgr } = makeManager();
+    await expect(mgr.createShareLink({
+      caller: owner,
+      role: "use",
+      beforeStore: () => { throw new Error("sharing policy changed"); },
+    })).rejects.toThrow(/policy changed/);
+    expect(mgr.listShareLinkRecords()).toEqual([]);
   });
 });
 
@@ -554,6 +659,59 @@ describe("newShareLinkKey", () => {
     expect(storage.collaborators.get("a")).toBeUndefined();
   });
 
+  it("copies only links compatible with the required policy and preserves that policy", async () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "public", OWNER);
+    seedLink(storage, "internal", OWNER, "build", TOTANGO_POLICY);
+    seedLink(storage, "other", OWNER, "build", EXAMPLE_POLICY);
+
+    await expect(mgr.newShareLinkKey({
+      caller: owner,
+      linkId: "public",
+      requiredPolicy: TOTANGO_POLICY,
+    })).rejects.toThrow(/not compatible/);
+    await expect(mgr.newShareLinkKey({
+      caller: owner,
+      linkId: "other",
+      requiredPolicy: TOTANGO_POLICY,
+    })).rejects.toThrow(/not compatible/);
+
+    let copy = await mgr.newShareLinkKey({
+      caller: owner,
+      linkId: "internal",
+      requiredPolicy: TOTANGO_POLICY,
+    });
+    expect(copy.recipientPolicy).toEqual(TOTANGO_POLICY);
+  });
+
+  it("runs the final policy guard before storing a copied key", async () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "internal", OWNER, "build", TOTANGO_POLICY);
+
+    await expect(mgr.newShareLinkKey({
+      caller: owner,
+      linkId: "internal",
+      requiredPolicy: TOTANGO_POLICY,
+      beforeStore: () => { throw new Error("sharing policy changed"); },
+    })).rejects.toThrow(/policy changed/);
+    expect([...storage.shareKeys.list()].map(record => record.id)).toEqual(["internal"]);
+  });
+
+  it("rechecks link revocation after key hashing", async () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "internal", OWNER, "build", TOTANGO_POLICY);
+
+    await expect(mgr.newShareLinkKey({
+      caller: owner,
+      linkId: "internal",
+      requiredPolicy: TOTANGO_POLICY,
+      beforeStore: () => {
+        storage.shareKeys.put({...link(storage, "internal"), revoked: true});
+      },
+    })).rejects.toThrow(/not found/);
+    expect([...storage.shareKeys.list()].map(record => record.id)).toEqual(["internal"]);
+  });
+
   it("forbids a non-owner from copying a link they didn't create", () => {
     let { storage, mgr } = makeManager();
     seedLink(storage, "k1", OWNER);
@@ -586,6 +744,32 @@ describe("newShareLinkKey", () => {
     expect(() => mgr.revokeShareLink(owner, aliasId, [])).toThrow(/not found/);
   });
 
+});
+
+describe("policy-aware sharing mutations", () => {
+  it("denies stale public-link authority across synchronous mutators", () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "public", "a");
+    seedCollaborator(storage, "a", [keyEdge("public")]);
+    seedCollaborator(storage, "b", [userEdge("a")]);
+
+    expect(() => mgr.addCollaborator({
+      caller: collab("a"),
+      profile: profile("c"),
+      role: "use",
+      requiredLinkPolicy: TOTANGO_POLICY,
+    })).toThrow(/permission/);
+    expect(() => mgr.previewRemoveCollaborator(collab("a"), "b", TOTANGO_POLICY))
+        .toThrow(/permission/);
+    expect(() => mgr.removeCollaborator(collab("a"), "b", [], TOTANGO_POLICY))
+        .toThrow(/permission/);
+    expect(() => mgr.updateShareLink(collab("a"), "public", "x", TOTANGO_POLICY))
+        .toThrow(/permission/);
+    expect(() => mgr.previewRevokeShareLink(collab("a"), "public", TOTANGO_POLICY))
+        .toThrow(/permission/);
+    expect(() => mgr.revokeShareLink(collab("a"), "public", [], TOTANGO_POLICY))
+        .toThrow(/permission/);
+  });
 });
 
 describe("pre-copy share keys", () => {
@@ -626,6 +810,30 @@ describe("listCollaborators", () => {
     seedCollaborator(storage, "dead", []);  // record with no incoming edges
     let list = mgr.listCollaborators();
     expect(ids(list)).toEqual(["a"]);
+  });
+
+  it("does not count public-link edges under a latched domain policy", () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "public", OWNER);
+    seedLink(storage, "internal", OWNER, "build", TOTANGO_POLICY);
+    seedCollaborator(storage, "public-user", [keyEdge("public")]);
+    seedCollaborator(storage, "internal-user", [keyEdge("internal")]);
+
+    expect(ids(mgr.listCollaborators())).toEqual(["internal-user", "public-user"]);
+    expect(ids(mgr.listCollaborators(TOTANGO_POLICY))).toEqual(["internal-user"]);
+    expect(mgr.getEffectiveRole("public-user", TOTANGO_POLICY)).toBeUndefined();
+    expect(mgr.getEffectiveRole("internal-user", TOTANGO_POLICY)).toBe("build");
+  });
+});
+
+describe("assertShareLinksCompatible", () => {
+  it("permits matching internal links and rejects public or mismatched links", () => {
+    let { storage, mgr } = makeManager();
+    seedLink(storage, "internal", OWNER, "build", TOTANGO_POLICY);
+    expect(() => mgr.assertShareLinksCompatible(TOTANGO_POLICY)).not.toThrow();
+
+    seedLink(storage, "public", OWNER);
+    expect(() => mgr.assertShareLinksCompatible(TOTANGO_POLICY)).toThrow(/public or incompatible/);
   });
 });
 

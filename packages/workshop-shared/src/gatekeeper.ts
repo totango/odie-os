@@ -1210,10 +1210,11 @@ export interface ApprovalQueue extends ObservationAuthorizer {
  * Restricts how a sensitive observation may be shared after it has been read.
  *
  * A `verified-sso-email-domain` policy means the observation may be visible to the owner and to
- * direct collaborators whose Workshop identity is a verified SSO-backed email address in
- * `emailDomain`. Bearer/public share links are not compatible with the policy because the redeemer
- * is not known when the link is created, and password-created Workshop identities are not compatible
- * because their email-shaped usernames have not been verified by an identity provider.
+ * direct collaborators or internal share-link redeemers whose Workshop identity is a verified
+ * SSO-backed email address in `emailDomain`. Public/legacy bearer share links are not compatible
+ * with the policy because possession of the secret alone is insufficient, and password-created
+ * Workshop identities are not compatible because their email-shaped usernames have not been
+ * verified by an identity provider.
  */
 export type ObservationDomainSharingPolicy = {
   /** Policy discriminator. Additional policy kinds may be added in the future. */
@@ -1265,13 +1266,15 @@ export type ObservationDescription = {
 
   /**
    * If present, this observation contains organization-scoped sensitive information that may only
-   * be shared with explicitly invited collaborators satisfying this domain policy. The Workshop
-   * enforces the policy before authorizing the observation, when adding future direct collaborators,
-   * when non-owners open the workspace, and when creating or copying share links.
+   * be shared with explicitly invited collaborators and matching internal share links satisfying
+   * this domain policy. The Workshop enforces the policy before authorizing the observation, when
+   * adding future direct collaborators, when non-owners open the workspace, and when creating,
+   * copying, or redeeming share links.
    *
    * This is intentionally weaker than `prohibitAllSharing`: it does not put the workspace into
-   * owner-only lockdown or block future actions/web fetches, but it still blocks public/bearer-link
-   * sharing and password-created identities. If both fields are set, `prohibitAllSharing` wins.
+   * owner-only lockdown or block future actions/web fetches, but it still blocks public/legacy
+   * bearer-link sharing and password-created identities. If both fields are set,
+   * `prohibitAllSharing` wins.
    */
   domainSharingPolicy?: ObservationDomainSharingPolicy;
 

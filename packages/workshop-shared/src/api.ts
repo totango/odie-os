@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState, type ObservationDomainSharingPolicy } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
@@ -2757,14 +2757,15 @@ export interface Overseer extends RpcTarget {
   /**
    * Remove a collaborator (identified by profile.id).
    *
-   * Owner can remove anyone. A non-owner collaborator can only remove their own edge(s)
-   * from the target. If the target still has edges from other sources, they keep access
-   * and the return is an empty array. If no edges remain, the target is fully removed.
+    * Owner can remove anyone. A non-owner collaborator can only remove their own edge(s)
+    * from the target. If the target still has edges from other sources, they keep access
+    * and the return is an empty array. Otherwise, the target becomes unreachable, but their
+    * collaborator record and outgoing grants remain stored so re-adding them restores the chain.
    *
    * When a target is fully removed, `keepUsers` lists the profile.ids of users who would
    * lose access transitively but should be retained. Their PermissionEdges through the
-   * removed user are replaced with new edges from the caller. Users reachable only through
-   * the removed user who are NOT in `keepUsers` are also removed.
+    * removed user are supplemented with new edges from the caller. Users reachable only through
+    * the removed user who are NOT in `keepUsers` become unreachable without being deleted.
    *
    * Returns the list of users whose access actually changed (removed or downgraded), including
    * the primary target. An empty array means the caller's edge was removed but no one's effective
@@ -2791,16 +2792,19 @@ export interface Overseer extends RpcTarget {
    * hash, and returns the raw key (hex-encoded) along with the id of the link it created. The
    * caller constructs a URL from the key. The raw key is never stored server-side. `role` is the
    * access level granted to anyone who redeems the link; the caller may not grant a role higher
-   * than their own effective role.
+   * than their own effective role. If resources visible to that role require a recipient domain,
+   * the returned `recipientPolicy` marks the link as internal and redemption requires a verified
+   * SSO identity in that domain.
    */
   createShareLink(role: CollaboratorRole, note?: string)
-      : Promise<{ key: string; linkId: string }>;
+      : Promise<{ key: string; linkId: string; recipientPolicy?: ObservationDomainSharingPolicy }>;
 
   /**
    * Mint a fresh secret for an existing link so the user can copy a new URL without creating a
    * whole new link. The old secrets remain valid, and revoking the link revokes them all together.
+   * Copies preserve the logical link's `recipientPolicy`.
    */
-  newShareLinkKey(linkId: string): Promise<{ key: string }>;
+  newShareLinkKey(linkId: string): Promise<{ key: string; recipientPolicy?: ObservationDomainSharingPolicy }>;
 
   /** List active share links (for management UI). */
   listShareLinks(): Promise<ShareLinkInfo[]>;
@@ -4436,9 +4440,13 @@ export type AffectedCollaborator = {
  * When users "copy" an existing link, they are getting a new key.
  */
 export type ShareLinkInfo = {
+  /** Stable logical link id. Every copied secret for this link resolves back to this id. */
   linkId: string;
+  /** Optional human-entered management label. */
   note?: string;
+  /** Time the logical link was created. */
   created: Date;
+  /** User who created the logical link. */
   createdBy: AiChatAuthorInfo;
 
   /**
@@ -4446,4 +4454,11 @@ export type ShareLinkInfo = {
    * before roles were introduced.
    */
   role?: CollaboratorRole;
+
+  /**
+   * If present, this is an internal link: bearer possession is not enough to redeem it. The
+   * redeemer must also have a verified SSO Workshop identity satisfying this domain policy.
+   * Undefined means a public/legacy bearer link.
+   */
+  recipientPolicy?: ObservationDomainSharingPolicy;
 };

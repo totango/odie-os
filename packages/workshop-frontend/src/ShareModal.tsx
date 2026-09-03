@@ -14,6 +14,7 @@ import {
   CollaboratorRole,
   ObserverBindingNeed,
 } from '@gadgets/workshop-shared/api'
+import type { ObservationDomainSharingPolicy } from '@gadgets/workshop-shared/gatekeeper'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import { PersonAvatar } from './components/PersonAvatar'
 import { copyToClipboard } from './clipboard'
@@ -63,6 +64,10 @@ const ROLE_DESCRIPTIONS: Record<CollaboratorRole, string> = {
 
 function roleLabel(role: CollaboratorRole | undefined): string {
   return ROLE_LABELS[role ?? 'build']
+}
+
+function formatRecipientPolicy(policy: ObservationDomainSharingPolicy): string {
+  return `@${policy.emailDomain.replace(/^@+/, '').toLowerCase()}`
 }
 
 const ROLE_OPTIONS: CollaboratorRole[] = ['build', 'use']
@@ -305,6 +310,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const [newLinkNote, setNewLinkNote] = useState('')
   const [newShareLink, setNewShareLink] = useState<string | null>(null)
   const [newShareLinkId, setNewShareLinkId] = useState<string | null>(null)
+  const [newShareLinkPolicy, setNewShareLinkPolicy] = useState<ObservationDomainSharingPolicy | null>(null)
   const [newShareLinkCopied, setNewShareLinkCopied] = useState(false)
   const [invitedName, setInvitedName] = useState<string | null>(null)
   const [invitedLinkCopied, setInvitedLinkCopied] = useState(false)
@@ -429,6 +435,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
         setAddRole('use')
         setNewShareLink(null)
         setNewShareLinkId(null)
+        setNewShareLinkPolicy(null)
         setNewShareLinkCopied(false)
         setInvitedName(null)
         setInvitedLinkCopied(false)
@@ -592,13 +599,14 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
     creatingLinkRef.current = true
     setCreatingLink(true)
     try {
-      const { key, linkId } = await overseer.createShareLink(
+      const { key, linkId, recipientPolicy } = await overseer.createShareLink(
         newLinkRole, newLinkNote.trim() || undefined)
       const url = `${new URL(`/workspace/${metadata.id}`, getWorkshopRuntime().publicWebOrigin).toString()}#share=${key}`
       setNewShareLink(url)
       setNewShareLinkCopied(false)
       setNewLinkNote('')
       setNewShareLinkId(linkId)
+      setNewShareLinkPolicy(recipientPolicy ?? null)
       copiedUrlsRef.current.set(linkId, url)
       await loadData()
       showLandedRow('shareLink', linkId)
@@ -738,6 +746,7 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       if (revokeTarget.linkId === newShareLinkId) {
         setNewShareLink(null)
         setNewShareLinkId(null)
+        setNewShareLinkPolicy(null)
         setNewShareLinkCopied(false)
         setShowLinkComposer(false)
       }
@@ -886,30 +895,35 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             {(showLinkComposer || newShareLink) ? (
               newShareLink ? (
                 <div className="themed-compact-shadow flex flex-wrap items-center gap-3 rounded-2xl border border-kumo-line/80 bg-kumo-base px-3 py-2.5 share-fade-in">
-                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-kumo-tint text-kumo-subtle">
-                      {newShareLinkCopied ? <Check size={15} weight="bold" /> : <Link size={15} />}
+                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-kumo-tint text-kumo-subtle">
+                    {newShareLinkCopied ? <Check size={15} weight="bold" /> : <Link size={15} />}
+                  </div>
+                  <div className="min-w-[160px] flex-1">
+                    <div className="flex items-baseline gap-1.5">
+                      <p className="text-[13px] leading-[18px] font-medium text-kumo-default">
+                        {newShareLinkCopied ? 'Link copied' : 'Link ready'}
+                      </p>
+                      <span className="text-[11px] leading-4 text-kumo-inactive">
+                        You can copy it again anytime from Share links
+                      </span>
                     </div>
-                    <div className="min-w-[160px] flex-1">
-                      <div className="flex items-baseline gap-1.5">
-                        <p className="text-[13px] leading-[18px] font-medium text-kumo-default">
-                          {newShareLinkCopied ? 'Link copied' : 'Link ready'}
-                        </p>
-                        <span className="text-[11px] leading-4 text-kumo-inactive">
-                          You can copy it again anytime from Share links
-                        </span>
-                      </div>
-                      <p className="truncate font-mono text-[11px] leading-4 text-kumo-subtle">{newShareLink}</p>
-                    </div>
-                    <WorkshopButton tone="primary" onClick={copyNewLink} className="w-[78px] gap-1.5 !rounded-xl">
-                      {newShareLinkCopied ? <Check size={13} weight="bold" /> : <Copy size={13} />}
-                      {newShareLinkCopied ? 'Copied' : 'Copy'}
-                    </WorkshopButton>
-                    <WorkshopIconButton
-                      aria-label="Dismiss created link"
-                      onClick={() => { setNewShareLink(null); setNewShareLinkId(null); setNewShareLinkCopied(false); setShowLinkComposer(false) }}
-                    >
-                      <X size={14} />
-                    </WorkshopIconButton>
+                    <p className="truncate font-mono text-[11px] leading-4 text-kumo-subtle">{newShareLink}</p>
+                    {newShareLinkPolicy && (
+                      <p className="mt-0.5 text-[11px] leading-4 text-kumo-subtle">
+                        Internal link · only verified {formatRecipientPolicy(newShareLinkPolicy)} SSO users can open
+                      </p>
+                    )}
+                  </div>
+                  <WorkshopButton tone="primary" onClick={copyNewLink} className="w-[78px] gap-1.5 !rounded-xl">
+                    {newShareLinkCopied ? <Check size={13} weight="bold" /> : <Copy size={13} />}
+                    {newShareLinkCopied ? 'Copied' : 'Copy'}
+                  </WorkshopButton>
+                  <WorkshopIconButton
+                    aria-label="Dismiss created link"
+                    onClick={() => { setNewShareLink(null); setNewShareLinkId(null); setNewShareLinkPolicy(null); setNewShareLinkCopied(false); setShowLinkComposer(false) }}
+                  >
+                    <X size={14} />
+                  </WorkshopIconButton>
                 </div>
               ) : (
                 <div className="themed-compact-shadow flex h-12 items-center gap-2 overflow-hidden rounded-2xl border border-kumo-line/80 bg-kumo-base p-1.5 pl-3 transition-[border-color,box-shadow] focus-within:border-kumo-fill share-fade-in">
@@ -1030,12 +1044,12 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
           </section>
 
           {!financeWorkspace && shareLinks.length > 0 && (
-          <section aria-labelledby="links-heading" className="mt-4">
-            <div className="mb-2 px-1">
-              <h3 id="links-heading" className="text-[12px] leading-4 font-medium tracking-[-0.15px] text-kumo-subtle">
-                Share links
-              </h3>
-            </div>
+            <section aria-labelledby="links-heading" className="mt-4">
+              <div className="mb-2 px-1">
+                <h3 id="links-heading" className="text-[12px] leading-4 font-medium tracking-[-0.15px] text-kumo-subtle">
+                  Share links
+                </h3>
+              </div>
 
               <div className="overflow-hidden rounded-2xl border border-kumo-line/80 bg-kumo-base">
                 {sortedShareLinks.map((sk, index) => {
@@ -1065,7 +1079,16 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
                           ) : (
                             <p className="truncate text-[13px] leading-[17px] font-medium tracking-[-0.25px] text-kumo-default">{sk.note || 'Untitled link'}</p>
                           )}
-                          <p className="truncate text-[12px] leading-[15px] tracking-[-0.15px] text-kumo-subtle">Created by {sk.createdBy.name} · {formatRelativeTime(sk.created)}</p>
+                          <p className="truncate text-[12px] leading-[15px] tracking-[-0.15px] text-kumo-subtle">
+                            {sk.recipientPolicy
+                              ? `Internal link · only verified ${formatRecipientPolicy(sk.recipientPolicy)} SSO users can open`
+                              : `Created by ${sk.createdBy.name} · ${formatRelativeTime(sk.created)}`}
+                          </p>
+                          {sk.recipientPolicy && (
+                            <p className="truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                              Created by {sk.createdBy.name} · {formatRelativeTime(sk.created)}
+                            </p>
+                          )}
                         </div>
                         {isRenaming ? (
                           <InlineConfirm

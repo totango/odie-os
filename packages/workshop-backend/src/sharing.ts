@@ -23,6 +23,7 @@
 
 import { AiChatAuthorInfo, CollaboratorInfo, PermissionEdge, CollaboratorRole, AffectedCollaborator }
     from "@gadgets/workshop-shared/api";
+import type { ObservationDomainSharingPolicy } from "@gadgets/workshop-shared/gatekeeper";
 import { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
 
 // Roles are totally ordered: build > use. Higher rank means strictly more access.
@@ -42,6 +43,21 @@ function maxRole(a: CollaboratorRole, b: CollaboratorRole): CollaboratorRole {
 
 function minRole(a: CollaboratorRole, b: CollaboratorRole): CollaboratorRole {
   return roleRank(a) <= roleRank(b) ? a : b;
+}
+
+function normalizeSharingDomain(domain: string): string {
+  return domain.trim().replace(/^@+/, "").toLowerCase();
+}
+
+function sameDomainSharingPolicy(
+    a: ObservationDomainSharingPolicy, b: ObservationDomainSharingPolicy): boolean {
+  return a.type === b.type && normalizeSharingDomain(a.emailDomain) === normalizeSharingDomain(b.emailDomain);
+}
+
+function linkPolicyCompatible(
+    required: ObservationDomainSharingPolicy | undefined,
+    actual: ObservationDomainSharingPolicy | undefined): boolean {
+  return !required || (!!actual && sameDomainSharingPolicy(required, actual));
 }
 
 // Fixed 256-bit key used to domain-separate share key hashes from other hashes in the system.
@@ -93,6 +109,12 @@ export type ShareLinkRecord = {
    * introduced; treated as "build".
    */
   role?: CollaboratorRole;
+
+  /**
+   * If present, the link is internal: redeeming it also requires a verified SSO identity satisfying
+   * this policy. Undefined means a public/legacy bearer link.
+   */
+  recipientPolicy?: ObservationDomainSharingPolicy;
 
   /**
    * Soft-revocation flag. Revoking a link sets this rather than deleting the record, so that the
@@ -200,9 +222,11 @@ export class SharingManager {
    * The effective role of `profileId` -- the maximum role reachable from the owner through valid
    * permission edges -- or undefined if the user has no access. The owner always has "build".
    */
-  getEffectiveRole(profileId: string): CollaboratorRole | undefined {
+  getEffectiveRole(
+      profileId: string,
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): CollaboratorRole | undefined {
     if (profileId === this.ownerProfileId) return "build";
-    return this.computeEffectiveRoles().get(profileId);
+    return this.computeEffectiveRoles({requiredLinkPolicy}).get(profileId);
   }
 
   /** Return a collaborator's role only when it was granted directly by the owner. */
@@ -238,20 +262,44 @@ export class SharingManager {
     rawKey: string;
     profileId: string;
     fetchProfile: () => Promise<AiChatAuthorInfo>;
+    hasPasswordLogin?: () => Promise<boolean>;
+    getActivePolicy?: () => ObservationDomainSharingPolicy | undefined;
+    isProfileAllowedByPolicy?: (
+        profileId: string,
+        hasPasswordLogin: () => Promise<boolean>,
+        policy: ObservationDomainSharingPolicy) => Promise<boolean>;
   }): Promise<void> {
     let hash = await hashShareKey(opts.rawKey);
-    let keyRecord = this.storage.shareKeys.get(hash);
-    if (!keyRecord) return;
+    let resolved = this.#resolveRedeemableLink(hash, opts.getActivePolicy?.());
+    if (!resolved) return;
 
-    // Edges point at the link, not the individual key, so a link's keys collapse to one grant.
-    // A copy of a link is an alias; follow it to the link that owns the metadata.
-    let link = keyRecord.alias === undefined
-        ? keyRecord : asLink(this.storage.shareKeys.get(keyRecord.alias));
-    if (!link || link.revoked) return;
+    let link = resolved;
     let linkId = link.id;
     let role = link.role ?? "build";
 
+    if (link.recipientPolicy) {
+      if (!opts.hasPasswordLogin || !opts.isProfileAllowedByPolicy ||
+          !(await opts.isProfileAllowedByPolicy(
+              opts.profileId, opts.hasPasswordLogin, link.recipientPolicy))) {
+        throw new Error("This internal link is only available to verified SSO users in its domain.");
+      }
+    }
+
     let existing = this.storage.collaborators.get(opts.profileId);
+    let profile: AiChatAuthorInfo | undefined;
+    if (!existing) {
+      // New collaborator -- need full profile from their user DO. This may await, so link and
+      // active-policy state are revalidated below before writing the collaborator record.
+      profile = await opts.fetchProfile();
+    }
+
+    // The profile lookup and SSO check above may have awaited while another operation revoked the
+    // link or latched a stricter workspace policy. Re-read the key, link and active policy
+    // immediately before mutating the collaborator graph.
+    let recheckedLink = this.#resolveRedeemableLink(hash, opts.getActivePolicy?.());
+    if (!recheckedLink || recheckedLink.id !== linkId ||
+        (recheckedLink.role ?? "build") !== role) return;
+
     if (existing) {
       // User is already a collaborator. Only add an edge if they don't already have one for this
       // link (redeeming a second key of the same link is a no-op).
@@ -267,10 +315,8 @@ export class SharingManager {
         this.storage.collaborators.put(existing);
       }
     } else {
-      // New collaborator -- need full profile from their user DO.
-      let profile = await opts.fetchProfile();
       this.storage.collaborators.put({
-        profile,
+        profile: profile!,
         addedBy: [{
           type: "shareKey",
           keyId: linkId,
@@ -281,6 +327,34 @@ export class SharingManager {
     }
   }
 
+  /**
+   * Resolve a raw share key without mutating the collaborator graph. Used by open() to derive the
+   * role-scoped workspace policy before redemption, so incompatible public links can be denied
+   * before any access edge is written.
+   */
+  async inspectShareKey(rawKey: string): Promise<{
+    role: CollaboratorRole;
+    recipientPolicy?: ObservationDomainSharingPolicy;
+  } | undefined> {
+    let hash = await hashShareKey(rawKey);
+    let link = this.#resolveRedeemableLink(hash, undefined);
+    return link ? { role: link.role ?? "build", recipientPolicy: link.recipientPolicy } : undefined;
+  }
+
+  #resolveRedeemableLink(
+      hash: string,
+      activePolicy: ObservationDomainSharingPolicy | undefined): ShareLinkRecord | undefined {
+    let keyRecord = this.storage.shareKeys.get(hash);
+    if (!keyRecord) return undefined;
+    let link = keyRecord.alias === undefined
+        ? keyRecord : asLink(this.storage.shareKeys.get(keyRecord.alias));
+    if (!link || link.revoked) return undefined;
+    if (!linkPolicyCompatible(activePolicy, link.recipientPolicy)) {
+      throw new Error("This share link is not compatible with the workspace sharing policy.");
+    }
+    return link;
+  }
+
   // ---------------------------------------------------------------------------------------
   // Collaborator management
 
@@ -289,8 +363,8 @@ export class SharingManager {
    * revocation model, removed collaborators linger in storage with no reachable role; they are
    * omitted here (they reappear if re-added).
    */
-  listCollaborators(): CollaboratorInfo[] {
-    let roles = this.computeEffectiveRoles();
+  listCollaborators(requiredLinkPolicy?: ObservationDomainSharingPolicy): CollaboratorInfo[] {
+    let roles = this.computeEffectiveRoles({requiredLinkPolicy});
     let result: CollaboratorInfo[] = [];
     for (let record of this.storage.collaborators.list()) {
       let role = roles.get(record.profile.id);
@@ -314,13 +388,14 @@ export class SharingManager {
     profile: AiChatAuthorInfo;
     role: CollaboratorRole;
     note?: string;
+    requiredLinkPolicy?: ObservationDomainSharingPolicy;
   }): CollaboratorInfo {
     // Don't add the owner as a collaborator.
     if (opts.profile.id === this.ownerProfileId) {
       throw new Error("Cannot add the workspace owner as a collaborator.");
     }
 
-    let callerRole = this.#requireCallerRole(opts.caller);
+    let callerRole = this.#requireCallerRole(opts.caller, opts.requiredLinkPolicy);
     if (roleRank(opts.role) > roleRank(callerRole)) {
       throw new Error("You cannot grant a role higher than your own.");
     }
@@ -349,7 +424,8 @@ export class SharingManager {
       return {
         profile: existing.profile,
         addedBy: existing.addedBy,
-        role: this.computeEffectiveRoles().get(existing.profile.id) ?? opts.role,
+        role: this.computeEffectiveRoles({requiredLinkPolicy: opts.requiredLinkPolicy})
+            .get(existing.profile.id) ?? opts.role,
       };
     }
 
@@ -361,19 +437,23 @@ export class SharingManager {
     return {
       profile: record.profile,
       addedBy: record.addedBy,
-      role: this.computeEffectiveRoles().get(record.profile.id) ?? opts.role,
+      role: this.computeEffectiveRoles({requiredLinkPolicy: opts.requiredLinkPolicy})
+          .get(record.profile.id) ?? opts.role,
     };
   }
 
-  previewRemoveCollaborator(caller: SharingCaller, profileId: string): AffectedCollaborator[] {
+  previewRemoveCollaborator(
+      caller: SharingCaller, profileId: string,
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): AffectedCollaborator[] {
     let target = this.storage.collaborators.get(profileId);
     if (!target) return [];
+    this.#requireCallerRole(caller, requiredLinkPolicy);
 
-    let baseline = this.computeEffectiveRoles();
+    let baseline = this.computeEffectiveRoles({requiredLinkPolicy});
     let modified = caller.isOwner
-        ? this.computeEffectiveRoles({ removedUser: profileId })
+        ? this.computeEffectiveRoles({ removedUser: profileId, requiredLinkPolicy })
         : this.computeEffectiveRoles({
-            removedEdge: { target: profileId, sharer: caller.profileId } });
+            removedEdge: { target: profileId, sharer: caller.profileId }, requiredLinkPolicy });
 
     return this.#computeAffected(baseline, modified);
   }
@@ -396,7 +476,8 @@ export class SharingManager {
    * downgraded), excluding kept users.
    */
   removeCollaborator(
-      caller: SharingCaller, profileId: string, keepUsers: string[]): AffectedCollaborator[] {
+      caller: SharingCaller, profileId: string, keepUsers: string[],
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): AffectedCollaborator[] {
     let target = this.storage.collaborators.get(profileId);
     if (!target) {
       throw new Error("User is not a collaborator.");
@@ -411,8 +492,9 @@ export class SharingManager {
         throw new Error("You can only remove users that you added.");
       }
     }
+    this.#requireCallerRole(caller, requiredLinkPolicy);
 
-    let baseline = this.computeEffectiveRoles();
+    let baseline = this.computeEffectiveRoles({requiredLinkPolicy});
 
     // Sever the edges that grant the target access. The record is retained even if it becomes
     // empty, so the target's own outgoing grants survive and the removal can be undone.
@@ -424,9 +506,10 @@ export class SharingManager {
     }
     this.storage.collaborators.put(target);
 
-    this.#reRootKeptUsers(caller, baseline, new Set(keepUsers));
+    this.#reRootKeptUsers(caller, baseline, new Set(keepUsers), requiredLinkPolicy);
 
-    return this.#computeAffected(baseline, this.computeEffectiveRoles());
+    return this.#computeAffected(
+        baseline, this.computeEffectiveRoles({requiredLinkPolicy}));
   }
 
   // ---------------------------------------------------------------------------------------
@@ -450,32 +533,46 @@ export class SharingManager {
   }
 
   async createShareLink(
-      opts: { caller: SharingCaller; role: CollaboratorRole; note?: string })
-      : Promise<{ key: string; linkId: string }> {
-    let callerRole = this.#requireCallerRole(opts.caller);
+      opts: { caller: SharingCaller; role: CollaboratorRole; note?: string;
+        recipientPolicy?: ObservationDomainSharingPolicy;
+        beforeStore?: () => void })
+      : Promise<{ key: string; linkId: string; recipientPolicy?: ObservationDomainSharingPolicy }> {
+    let callerRole = this.#requireCallerRole(opts.caller, opts.recipientPolicy);
     if (roleRank(opts.role) > roleRank(callerRole)) {
       throw new Error("You cannot grant a role higher than your own.");
     }
 
     // The link is stored as its first key: the record is keyed by that key's hash.
     let { key, hash } = await this.#mintKey();
+    opts.beforeStore?.();
+    callerRole = this.#requireCallerRole(opts.caller, opts.recipientPolicy);
+    if (roleRank(opts.role) > roleRank(callerRole)) {
+      throw new Error("You cannot grant a role higher than your own.");
+    }
     this.storage.shareKeys.put({
       id: hash,
       note: opts.note,
       created: new Date(),
       createdBy: opts.caller.profileId,
       role: opts.role,
+      recipientPolicy: opts.recipientPolicy,
     });
-    return { key, linkId: hash };
+    return { key, linkId: hash, recipientPolicy: opts.recipientPolicy };
   }
 
   /** Mints another key for an existing link. */
-  async newShareLinkKey(opts: { caller: SharingCaller; linkId: string }): Promise<{ key: string }> {
+  async newShareLinkKey(opts: { caller: SharingCaller; linkId: string;
+    requiredPolicy?: ObservationDomainSharingPolicy; beforeStore?: () => void }): Promise<{
+      key: string; recipientPolicy?: ObservationDomainSharingPolicy;
+    }> {
     let link = this.#requireLink(opts.linkId);
     if (link.revoked) {
       throw new Error("Share link not found.");
     }
     this.#requireLinkManager(opts.caller, link, "copy");
+    if (!linkPolicyCompatible(opts.requiredPolicy, link.recipientPolicy)) {
+      throw new Error("This share link is not compatible with the workspace sharing policy.");
+    }
 
     // Re-check the ceiling: the caller's role may have dropped below the link's since it was
     // created, and a fresh key must never grant more than the caller currently has.
@@ -485,8 +582,22 @@ export class SharingManager {
     }
 
     let { key, hash } = await this.#mintKey();
+    opts.beforeStore?.();
+
+    // Link revocation and role changes can run while the key hash is being computed. Re-read every
+    // piece of authority before the alias write; no await occurs between these checks and put().
+    link = this.#requireLink(opts.linkId);
+    if (link.revoked) throw new Error("Share link not found.");
+    this.#requireLinkManager(opts.caller, link, "copy");
+    if (!linkPolicyCompatible(opts.requiredPolicy, link.recipientPolicy)) {
+      throw new Error("This share link is not compatible with the workspace sharing policy.");
+    }
+    callerRole = this.#requireCallerRole(opts.caller, opts.requiredPolicy);
+    if (roleRank(link.role ?? "build") > roleRank(callerRole)) {
+      throw new Error("You cannot grant a role higher than your own.");
+    }
     this.storage.shareKeys.put({ id: hash, alias: link.id });
-    return { key };
+    return { key, recipientPolicy: link.recipientPolicy };
   }
 
   // Generate a random 128-bit key, returning it along with the hash it is stored under. The caller
@@ -506,6 +617,23 @@ export class SharingManager {
     return [...this.#listLinks()].filter(link => !link.revoked);
   }
 
+  /** Return an active logical link's grant role without minting a new key. */
+  getShareLinkRole(linkId: string): CollaboratorRole | undefined {
+    let link = asLink(this.storage.shareKeys.get(linkId));
+    if (!link || link.revoked) return undefined;
+    return link.role ?? "build";
+  }
+
+  /** Throw if any active link is public or carries a different recipient policy. */
+  assertShareLinksCompatible(policy: ObservationDomainSharingPolicy): void {
+    for (let link of this.listShareLinkRecords()) {
+      if (!linkPolicyCompatible(policy, link.recipientPolicy)) {
+        throw new Error(
+            "This workspace contains public or incompatible share links. Revoke them and try again.");
+      }
+    }
+  }
+
   /**
    * Resolve the display profile for a share link's creator using only locally-available data
    * (the collaborator table). Returns undefined if the creator is neither a current collaborator
@@ -516,22 +644,28 @@ export class SharingManager {
     return this.storage.collaborators.get(createdBy)?.profile;
   }
 
-  updateShareLink(caller: SharingCaller, linkId: string, note?: string): void {
+  updateShareLink(
+      caller: SharingCaller, linkId: string, note?: string,
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): void {
     let link = this.#requireLink(linkId);
     this.#requireLinkManager(caller, link, "edit");
+    this.#requireCallerRole(caller, requiredLinkPolicy);
 
     link.note = note === undefined ? undefined : note.slice(0, 500);
     this.storage.shareKeys.put(link);
   }
 
-  previewRevokeShareLink(caller: SharingCaller, linkId: string): AffectedCollaborator[] {
+  previewRevokeShareLink(
+      caller: SharingCaller, linkId: string,
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): AffectedCollaborator[] {
     let link = asLink(this.storage.shareKeys.get(linkId));
     if (!link) return [];
     this.#requireLinkManager(caller, link, "revoke");
     if (link.revoked) return [];
+    this.#requireCallerRole(caller, requiredLinkPolicy);
 
-    let baseline = this.computeEffectiveRoles();
-    let modified = this.computeEffectiveRoles({ revokedLinkId: linkId });
+    let baseline = this.computeEffectiveRoles({requiredLinkPolicy});
+    let modified = this.computeEffectiveRoles({ revokedLinkId: linkId, requiredLinkPolicy });
     return this.#computeAffected(baseline, modified);
   }
 
@@ -547,11 +681,13 @@ export class SharingManager {
    * collaborators whose access actually changed (removed or downgraded), excluding kept users.
    */
   revokeShareLink(
-      caller: SharingCaller, linkId: string, keepUsers: string[]): AffectedCollaborator[] {
+      caller: SharingCaller, linkId: string, keepUsers: string[],
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): AffectedCollaborator[] {
     let link = this.#requireLink(linkId);
     this.#requireLinkManager(caller, link, "revoke");
+    this.#requireCallerRole(caller, requiredLinkPolicy);
 
-    let baseline = this.computeEffectiveRoles();
+    let baseline = this.computeEffectiveRoles({requiredLinkPolicy});
 
     link.revoked = true;
     this.storage.shareKeys.put(link);
@@ -559,9 +695,10 @@ export class SharingManager {
     // Revoking makes the copies useless, and nothing references them, so delete them.
     this.storage.shareKeys.byAlias.delete(link.id);
 
-    this.#reRootKeptUsers(caller, baseline, new Set(keepUsers));
+    this.#reRootKeptUsers(caller, baseline, new Set(keepUsers), requiredLinkPolicy);
 
-    return this.#computeAffected(baseline, this.computeEffectiveRoles());
+    return this.#computeAffected(
+        baseline, this.computeEffectiveRoles({requiredLinkPolicy}));
   }
 
   // ---------------------------------------------------------------------------------------
@@ -586,16 +723,19 @@ export class SharingManager {
     removedUser?: string | null;
     removedEdge?: { target: string; sharer: string } | null;
     revokedLinkId?: string | null;
+    requiredLinkPolicy?: ObservationDomainSharingPolicy;
   } = {}): Map<string, CollaboratorRole> {
     let removedUser = opts.removedUser ?? null;
     let removedEdge = opts.removedEdge ?? null;
     let revokedLinkId = opts.revokedLinkId ?? null;
+    let requiredLinkPolicy = opts.requiredLinkPolicy;
 
     // Map linkId → {creator, role}, excluding revoked links (the persisted `revoked` flag, and the
     // hypothetical `revokedLinkId` used by preview).
     let linkInfo = new Map<string, { creator: string; role: CollaboratorRole }>();
     for (let link of this.#listLinks()) {
       if (link.id === revokedLinkId || link.revoked) continue;
+      if (!linkPolicyCompatible(requiredLinkPolicy, link.recipientPolicy)) continue;
       linkInfo.set(link.id, {
         creator: link.createdBy,
         role: link.role ?? "build",
@@ -658,9 +798,11 @@ export class SharingManager {
 
   // The caller's effective role, throwing if the caller has no access at all (which should not
   // happen for an authorized session).
-  #requireCallerRole(caller: SharingCaller): CollaboratorRole {
+  #requireCallerRole(
+      caller: SharingCaller,
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): CollaboratorRole {
     if (caller.isOwner) return "build";
-    let role = this.computeEffectiveRoles().get(caller.profileId);
+    let role = this.computeEffectiveRoles({requiredLinkPolicy}).get(caller.profileId);
     if (!role) {
       throw new Error("You do not have permission to share this workspace.");
     }
@@ -697,11 +839,12 @@ export class SharingManager {
   // fresh `user` edge from the caller at their prior role (bounded by what the caller can grant),
   // so they retain their access independently of the severed path.
   #reRootKeptUsers(
-      caller: SharingCaller, baseline: Map<string, CollaboratorRole>, keepSet: Set<string>): void {
+      caller: SharingCaller, baseline: Map<string, CollaboratorRole>, keepSet: Set<string>,
+      requiredLinkPolicy?: ObservationDomainSharingPolicy): void {
     if (keepSet.size === 0) return;
 
-    let callerRole = this.#requireCallerRole(caller);
-    let afterSever = this.computeEffectiveRoles();
+    let callerRole = this.#requireCallerRole(caller, requiredLinkPolicy);
+    let afterSever = this.computeEffectiveRoles({requiredLinkPolicy});
 
     for (let id of keepSet) {
       let prior = baseline.get(id);
