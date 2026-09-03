@@ -31,19 +31,35 @@ export interface Env {
 
 const ODIE_APP_LINK_HOST = "odie-os.odie-os.workers.dev";
 const NATIVE_DOWNLOADS = new Map([
-  ["/downloads/mac/OdieOS-latest.dmg", {
-    key: "mac/OdieOS-latest.dmg",
-    contentType: "application/x-apple-diskimage",
-  }],
-  ["/downloads/mac/OdieOS-latest.dmg.sha256", {
-    key: "mac/OdieOS-latest.dmg.sha256",
-    contentType: "text/plain; charset=utf-8",
-  }],
   ["/downloads/mac/OdieOS-latest.json", {
     key: "mac/OdieOS-latest.json",
     contentType: "application/json; charset=utf-8",
   }],
 ]);
+
+const LATEST_MAC_DMG_PATH = "/downloads/mac/OdieOS-latest.dmg";
+const LATEST_MAC_CHECKSUM_PATH = `${LATEST_MAC_DMG_PATH}.sha256`;
+
+type MacReleaseMetadata = { version: string; url: string; sha256: string };
+
+function parseMacReleaseMetadata(value: unknown): MacReleaseMetadata | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { version, url, sha256 } = value as Record<string, unknown>;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) return undefined;
+  if (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256)) return undefined;
+  if (url !== `/downloads/mac/OdieOS-${version}-${sha256}.dmg`) return undefined;
+  return { version, url, sha256 };
+}
+
+function generatedNativeDownloadResponse(body: string | null, contentType: string): Response {
+  return new Response(body, {
+    headers: {
+      "content-type": contentType,
+      "cache-control": "public, max-age=300",
+      "access-control-allow-origin": "*",
+    },
+  });
+}
 
 function nativeDownload(pathname: string): { key: string; contentType: string } | undefined {
   const fixed = NATIVE_DOWNLOADS.get(pathname);
@@ -103,11 +119,26 @@ export default {
       return androidAssetLinks();
     }
 
-    const download = nativeDownload(url.pathname);
-    if (download && env.NATIVE_DOWNLOADS) {
+    let download = nativeDownload(url.pathname);
+    const latestMacDownload = url.pathname === LATEST_MAC_DMG_PATH || url.pathname === LATEST_MAC_CHECKSUM_PATH;
+    if ((download || latestMacDownload) && env.NATIVE_DOWNLOADS) {
       if (req.method !== "GET" && req.method !== "HEAD") {
         return new Response("Method Not Allowed", { status: 405, headers: { allow: "GET, HEAD" } });
       }
+      if (latestMacDownload) {
+        const metadataObject = await env.NATIVE_DOWNLOADS.get("mac/OdieOS-latest.json");
+        const metadata = metadataObject && parseMacReleaseMetadata(await metadataObject.json().catch(() => undefined));
+        if (!metadata) return new Response("Not Found", { status: 404 });
+        if (url.pathname === LATEST_MAC_CHECKSUM_PATH) {
+          const body = req.method === "HEAD" ? null : `${metadata.sha256}  OdieOS-latest.dmg\n`;
+          return generatedNativeDownloadResponse(body, "text/plain; charset=utf-8");
+        }
+        download = {
+          key: metadata.url.slice("/downloads/".length),
+          contentType: "application/x-apple-diskimage",
+        };
+      }
+      if (!download) return new Response("Not Found", { status: 404 });
       if (req.method === "HEAD") {
         const object = await env.NATIVE_DOWNLOADS.head(download.key);
         return object

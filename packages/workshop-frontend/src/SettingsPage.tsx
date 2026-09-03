@@ -4,17 +4,20 @@ import { useState, useEffect, useRef } from 'react'
 import type { AiChatAuthorInfo, OpenCodeSkillDefinition, OpenCodeUserCustomization } from '@gadgets/workshop-shared/api'
 import { hashPassword } from './passwordHash'
 import { CF_ACCESS_MODE } from './useAuth'
-import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash, Plus, Trash } from '@phosphor-icons/react'
+import { User, Pencil, Check, X, Lock, Camera, Copy, Eye, EyeSlash, Plus, Trash, Desktop, DownloadSimple } from '@phosphor-icons/react'
 import { useAvatar, invalidateAvatarCache } from './useAvatar'
 import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
 import { useDocumentTitle } from './useDocumentTitle'
+import { getWorkshopRuntime } from './runtime'
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
 // system rather than a stack of default Kumo cards.
 const PRIMARY_BTN =
   'press inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-kumo-brand px-3.5 text-[13px] font-medium tracking-[-0.25px] text-white transition-colors hover:bg-kumo-brand-hover disabled:cursor-not-allowed disabled:opacity-60'
+const APP_DOWNLOAD_BTN =
+  'press inline-flex h-9 cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-kumo-default px-3.5 text-[13px] font-medium tracking-[-0.25px] text-kumo-base transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring focus-visible:ring-offset-2 focus-visible:ring-offset-kumo-base'
 const ICON_BTN =
   'press grid h-8 w-8 shrink-0 cursor-pointer place-items-center rounded-lg text-kumo-inactive transition-colors hover:bg-kumo-tint hover:text-kumo-default'
 const INPUT =
@@ -28,6 +31,7 @@ const EMPTY_OPENCODE_CUSTOMIZATION: OpenCodeUserCustomization = {
 }
 
 const NPM_PACKAGE_NAME_REGEX = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:@\S+)?$/
+const MACOS_DOWNLOAD_URL = 'https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-latest.dmg'
 
 function normalizeOpenCodeCustomization(pluginPackageLines: string, skills: OpenCodeSkillDefinition[]): OpenCodeUserCustomization {
   return {
@@ -267,6 +271,14 @@ export default function SettingsPage() {
     }
   }
 
+  const handleOpenAppLink = async (url: string) => {
+    try {
+      await getWorkshopRuntime().openExternal(url)
+    } catch {
+      toasts.add({ title: 'Failed to open app download', variant: 'error' })
+    }
+  }
+
   const handleAvatarUpload = async (file: File) => {
     if (!file.type.startsWith('image/')) {
       toasts.add({ title: 'Please select an image file', variant: 'error' })
@@ -406,7 +418,7 @@ export default function SettingsPage() {
       <header className="px-1 pb-2 pt-6 sm:pt-10">
         <h1 className="text-2xl font-semibold tracking-tight text-kumo-default">Profile</h1>
         <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-          Manage your account details, avatar, and security.
+          Manage your account details, apps, avatar, and security.
         </p>
       </header>
 
@@ -530,6 +542,31 @@ export default function SettingsPage() {
                 <Copy size={14} />
               </button>
             </div>
+          </div>
+        </section>
+
+        {/* Native apps */}
+        <section className="flex flex-col gap-3">
+          <SectionLabel>Apps</SectionLabel>
+          <div className="rounded-xl border border-kumo-line bg-kumo-base p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-kumo-brand/10 text-kumo-brand">
+                <Desktop size={21} weight="duotone" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">Odie OS for Mac</h3>
+                <p className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
+                  Install the signed and notarized desktop app on macOS 15 or later.
+                </p>
+              </div>
+              <button type="button" onClick={() => handleOpenAppLink(MACOS_DOWNLOAD_URL)} className={`${APP_DOWNLOAD_BTN} w-full sm:w-auto`}>
+                <DownloadSimple size={15} weight="bold" />
+                Download for Mac
+              </button>
+            </div>
+            <p className="mt-4 border-t border-kumo-line pt-3 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
+              The iPhone and iPad app is pending approval for private-link App Store distribution.
+            </p>
           </div>
         </section>
 
