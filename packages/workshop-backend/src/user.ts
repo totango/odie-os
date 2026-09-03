@@ -185,17 +185,12 @@ type GadgetRecord = GadgetMetadata & {
 /** Delete every version and screenshot stored for an owner-authorized blueprint ID. */
 export async function deleteBlueprintContent(
     bucket: Pick<R2Bucket, "list" | "delete">, id: string): Promise<void> {
-  let contentKeys: string[] = [];
-  let cursor: string | undefined;
-  do {
+  while (true) {
     let objects = await bucket.list({
-      prefix: `${id}/`, limit: 1000, ...(cursor ? {cursor} : {}),
+      prefix: `${id}/`, limit: 1000,
     });
-    contentKeys.push(...objects.objects.map(({key}) => key));
-    cursor = objects.truncated ? objects.cursor : undefined;
-  } while (cursor);
-  for (let offset = 0; offset < contentKeys.length; offset += 1000) {
-    await bucket.delete(contentKeys.slice(offset, offset + 1000));
+    if (objects.objects.length === 0) break;
+    await bucket.delete(objects.objects.map(({key}) => key));
   }
   await bucket.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`);
 }

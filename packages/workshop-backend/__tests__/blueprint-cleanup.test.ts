@@ -2,30 +2,28 @@ import { describe, expect, it } from "vitest";
 import { deleteBlueprintContent } from "../src/user.js";
 
 describe("owned blueprint content cleanup", () => {
-  it("deletes all paginated versions and the screenshot", async () => {
+  it("deletes every bounded page and the screenshot", async () => {
     let blueprintId = "blueprint-id";
     let keys = new Set([
-      `${blueprintId}/1`,
-      `${blueprintId}/2`,
-      `${blueprintId}/3`,
+      ...Array.from({length: 1001}, (_, index) => `${blueprintId}/${index}`),
       `screenshots/${blueprintId}`,
       "other-blueprint/1",
     ]);
     let deleted: string[] = [];
+    let deleteBatchSizes: number[] = [];
     let bucket = {
       async list(options: R2ListOptions): Promise<R2Objects> {
         let matches = [...keys].filter(key => key.startsWith(options.prefix!)).toSorted();
-        let offset = options.cursor ? Number(options.cursor) : 0;
-        let objects = matches.slice(offset, offset + 2).map(key => ({key} as R2Object));
-        let nextOffset = offset + objects.length;
+        let objects = matches.slice(0, options.limit).map(key => ({key} as R2Object));
         return {
           objects,
-          truncated: nextOffset < matches.length,
-          ...(nextOffset < matches.length ? {cursor: String(nextOffset)} : {}),
+          truncated: objects.length < matches.length,
+          ...(objects.length < matches.length ? {cursor: "next"} : {}),
           delimitedPrefixes: [],
         };
       },
       async delete(input: string | string[]): Promise<void> {
+        if (Array.isArray(input)) deleteBatchSizes.push(input.length);
         for (let key of typeof input === "string" ? [input] : input) {
           deleted.push(key);
           keys.delete(key);
@@ -35,12 +33,9 @@ describe("owned blueprint content cleanup", () => {
 
     await deleteBlueprintContent(bucket, blueprintId);
 
-    expect(deleted).toEqual([
-      `${blueprintId}/1`,
-      `${blueprintId}/2`,
-      `${blueprintId}/3`,
-      `screenshots/${blueprintId}`,
-    ]);
+    expect(deleteBatchSizes).toEqual([1000, 1]);
+    expect(deleted).toHaveLength(1002);
+    expect(deleted).toContain(`screenshots/${blueprintId}`);
     expect([...keys]).toEqual(["other-blueprint/1"]);
   });
 
