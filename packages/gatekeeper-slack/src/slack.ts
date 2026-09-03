@@ -421,12 +421,11 @@ export class UserAccount extends DurableObject<Env> {
     });
 
     if (completion.reconnecting) {
-      await completion.callback.credentialsRestored(completion.grant.accessToken.expires);
+      await completion.callback.credentialsRestored();
     } else {
       try {
         let props: SlackUserImplProps = { userObjectId: this.ctx.id.toString() };
-        await completion.callback.complete(
-            this.ctx.exports.SlackUserImpl({ props }), completion.grant.accessToken.expires);
+        await completion.callback.complete(this.ctx.exports.SlackUserImpl({ props }));
       } catch (err) {
         await this.#updateCredentials(async () => {
           let storedToken = this.ctx.storage.kv.get<SlackAccessToken>("accessToken");
