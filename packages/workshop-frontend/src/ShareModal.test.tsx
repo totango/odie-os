@@ -96,6 +96,13 @@ const SHARE_LINK: ShareLinkInfo = {
   role: 'use',
 }
 
+const INTERNAL_SHARE_LINK: ShareLinkInfo = {
+  ...SHARE_LINK,
+  linkId: 'internal-link-1',
+  note: 'Totango link',
+  recipientPolicy: { type: 'verified-sso-email-domain', emailDomain: 'totango.com' },
+}
+
 type OverseerOverrides = {
   requirements?: Partial<Record<CollaboratorRole, ObserverBindingNeed[]>>
   listObserverRequirements?: (role: CollaboratorRole) => Promise<ObserverBindingNeed[]>
@@ -311,5 +318,12 @@ describe('ShareModal', () => {
 
     expect(updateShareLink).not.toHaveBeenCalled()
     expect(rendered.querySelector('input[aria-label="Share link name"]')).toBeNull()
+  })
+
+  it('labels internal share links with verified SSO domain guidance', async () => {
+    const rendered = await render(fakeOverseer({ shareLinks: [INTERNAL_SHARE_LINK] }))
+
+    expect(rendered.textContent).toContain('Internal link')
+    expect(rendered.textContent).toContain('only verified @totango.com SSO users can open')
   })
 })

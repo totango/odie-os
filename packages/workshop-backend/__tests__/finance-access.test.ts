@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { RpcStub } from "capnweb";
 import { beforeEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
@@ -9,7 +10,11 @@ import {
   type BlueprintUserSummary,
   type CodeUpdate,
 } from "@gadgets/workshop-shared/api";
-import type { ObservationDomainSharingPolicy } from "@gadgets/workshop-shared/gatekeeper";
+import type {
+  ObservationDescription,
+  ObservationDomainSharingPolicy,
+  ResourceDescription,
+} from "@gadgets/workshop-shared/gatekeeper";
 import {
   assertBlueprintOriginAllowed,
   readFinanceHubStatus,
@@ -69,6 +74,34 @@ async function createSsoUser(email: string) {
   let user = env.TEST_USER.get(id);
   await user.authenticateFromCfAccess(email, true);
   return {id, profileId: email, user};
+}
+
+async function createPasswordUser(email: string) {
+  let id = env.TEST_USER.idFromName(email);
+  let user = env.TEST_USER.get(id);
+  await user.createAccount(email, email.split("@", 1)[0], PASSWORD_HASH);
+  return {id, profileId: email, user};
+}
+
+async function authorizeDomainObservation(
+    workspace: DurableObjectStub<OverseerDurableObject>,
+    policy: ObservationDomainSharingPolicy): Promise<void> {
+  await runInDurableObject(workspace, async (instance: OverseerDurableObject) => {
+    const overseer = instance as unknown as {
+      impl: {
+        authorizeObservation(
+          gatekeeperId: number,
+          description: ObservationDescription,
+          caller: {from: "user"},
+        ): Promise<void>;
+      };
+    };
+    await overseer.impl.authorizeObservation(0, {
+      title: "Organization data",
+      description: "Read organization-scoped data.",
+      domainSharingPolicy: policy,
+    }, {from: "user"});
+  });
 }
 
 async function clearFinanceClaim(): Promise<void> {
@@ -604,7 +637,7 @@ describe("Finance hub access policy", () => {
     await owner.user.newGadget(workspaceIdString, "Finance Operations Workbench");
     let workspace = env.TEST_OVERSEER.get(workspaceId);
     let ordinarySession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
-    let {key} = await ordinarySession.createShareLink("use");
+    let {key, linkId} = await ordinarySession.createShareLink("use");
     await owner.user.updateProvisionalWorkspaceOrigin(workspaceIdString, "finance");
     let claim: FinanceWorkspaceClaim = {
       workspaceId: workspaceIdString,
@@ -618,6 +651,13 @@ describe("Finance hub access policy", () => {
         collaborator.id.toString(), collaborator.profileId, () => {}, key));
     await expectOpenDenied(() => workspace.open(
         owner.id.toString(), owner.profileId, () => {}, key));
+    await expect(ordinarySession.createShareLink("use")).rejects.toThrow(/invite-only/);
+    await expect(ordinarySession.newShareLinkKey(linkId)).rejects.toThrow(/invite-only/);
+
+    let financeSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+    await expect(financeSession.createShareLink("use")).rejects.toThrow(/invite-only/);
+    await expect(financeSession.newShareLinkKey(linkId)).rejects.toThrow(/invite-only/);
+    financeSession[Symbol.dispose]();
 
     ordinarySession[Symbol.dispose]();
     await owner.user.deleteGadget(workspaceIdString);
@@ -1102,7 +1142,219 @@ describe("organization-scoped observation sharing policy", () => {
         passwordTotango.profileId.replace("@example.com", "@totango.com"),
         () => passwordTotango.user.hasPasswordLogin(), TOTANGO_POLICY)).resolves.toBe(false);
     expect(() => assertShareLinkAllowedByDomainSharingPolicy(TOTANGO_POLICY))
-        .toThrow(/does not support share links/);
+        .toThrow(/matching internal share links/);
+    expect(() => assertShareLinkAllowedByDomainSharingPolicy(TOTANGO_POLICY, TOTANGO_POLICY))
+        .not.toThrow();
     expect(() => assertShareLinkAllowedByDomainSharingPolicy(undefined)).not.toThrow();
+  });
+
+  it("creates internal links that admit matching SSO users and persist their grant", async () => {
+    let owner = await createSsoUser(`internal-owner-${crypto.randomUUID()}@totango.com`);
+    let member = await createSsoUser(`internal-member-${crypto.randomUUID()}@totango.com`);
+    let outsider = await createSsoUser(`internal-outsider-${crypto.randomUUID()}@example.com`);
+    let passwordMember = await createPasswordUser(
+        `internal-password-${crypto.randomUUID()}@totango.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Internal sharing workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+
+    try {
+      await authorizeDomainObservation(workspace, TOTANGO_POLICY);
+      await expect(ownerSession.createShareLink("build")).rejects.toThrow(/Gadget-only/);
+      let {key, recipientPolicy} = await ownerSession.createShareLink("use");
+      expect(recipientPolicy).toEqual(TOTANGO_POLICY);
+
+      let firstOpen = await workspace.open(
+          member.id.toString(), member.profileId, () => {}, key);
+      expect((await firstOpen.getMetadata()).role).toBe("use");
+      firstOpen[Symbol.dispose]();
+
+      let reopen = await workspace.open(member.id.toString(), member.profileId, () => {});
+      expect((await reopen.getMetadata()).role).toBe("use");
+      reopen[Symbol.dispose]();
+
+      await expectOpenDenied(() => workspace.open(
+          outsider.id.toString(), outsider.profileId, () => {}, key));
+      await expectOpenDenied(() => workspace.open(
+          passwordMember.id.toString(), passwordMember.profileId, () => {}, key));
+      expect((await ownerSession.listCollaborators()).map(entry => entry.profile.id))
+          .toEqual([member.profileId]);
+    } finally {
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("does not persist an internal-link grant when observer authorization fails", async () => {
+    let owner = await createSsoUser(`observer-owner-${crypto.randomUUID()}@totango.com`);
+    let member = await createSsoUser(`observer-member-${crypto.randomUUID()}@totango.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Observer denial workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+
+    try {
+      await authorizeDomainObservation(workspace, TOTANGO_POLICY);
+      let {key} = await ownerSession.createShareLink("use");
+      await runInDurableObject(workspace, async (instance: OverseerDurableObject) => {
+        const impl = (instance as unknown as {
+          impl: { ensureObserver: (...args: unknown[]) => Promise<void> };
+        }).impl;
+        const ensureObserver = impl.ensureObserver;
+        impl.ensureObserver = async () => { throw new Error("observer denied"); };
+        try {
+          await expect(instance.open(
+              member.id.toString(), member.profileId, (() => {}) as never, key))
+              .rejects.toThrow();
+        } finally {
+          impl.ensureObserver = ensureObserver;
+        }
+      });
+      expect(await ownerSession.listCollaborators()).toEqual([]);
+    } finally {
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("restarts stale build capabilities before exposing a protected resource description", async () => {
+    let owner = await createSsoUser(`restart-owner-${crypto.randomUUID()}@totango.com`);
+    let outsider = await createSsoUser(`restart-outsider-${crypto.randomUUID()}@example.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Policy restart workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+    let outsiderSession: Awaited<ReturnType<OverseerDurableObject["open"]>> | undefined;
+
+    try {
+      await ownerSession.addCollaborator(outsider.profileId, "build");
+      outsiderSession = await workspace.open(
+          outsider.id.toString(), outsider.profileId, () => {});
+      let restartScheduled = false;
+      await runInDurableObject(workspace, async (instance: OverseerDurableObject) => {
+        const impl = (instance as unknown as {
+          impl: {
+            authorizeResourceDescription(description: ResourceDescription): Promise<void>;
+            scheduleRevocationRestart(): Promise<void>;
+          };
+        }).impl;
+        const scheduleRevocationRestart = impl.scheduleRevocationRestart;
+        impl.scheduleRevocationRestart = async () => { restartScheduled = true; };
+        try {
+          await expect(impl.authorizeResourceDescription({
+            title: "Private repository",
+            snippet: "Sensitive issue details.",
+            url: "https://github.example/private/repository",
+            suggestedBindingName: "GITHUB",
+            tsType: "GitHub",
+            domainSharingPolicy: TOTANGO_POLICY,
+          })).rejects.toThrow(/verified @totango\.com SSO collaborator/);
+        } finally {
+          impl.scheduleRevocationRestart = scheduleRevocationRestart;
+        }
+      });
+      expect(restartScheduled).toBe(true);
+    } finally {
+      outsiderSession?.[Symbol.dispose]();
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("latches policy but writes no action when a public link makes observation unsafe", async () => {
+    let owner = await createSsoUser(`public-owner-${crypto.randomUUID()}@totango.com`);
+    let member = await createSsoUser(`public-member-${crypto.randomUUID()}@totango.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Public link workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+
+    try {
+      let {key} = await ownerSession.createShareLink("use");
+      let before = await ownerSession.listActions();
+      await expect(authorizeDomainObservation(workspace, TOTANGO_POLICY))
+          .rejects.toThrow(/public or incompatible share links/);
+      expect(await ownerSession.listActions()).toEqual(before);
+      await expectOpenDenied(() => workspace.open(
+          member.id.toString(), member.profileId, () => {}, key));
+      expect(await ownerSession.listCollaborators()).toEqual([]);
+    } finally {
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("validates kept collaborators before changing a policy-constrained graph", async () => {
+    let owner = await createSsoUser(`keep-owner-${crypto.randomUUID()}@totango.com`);
+    let intermediary = await createSsoUser(`keep-a-${crypto.randomUUID()}@totango.com`);
+    let ineligible = await createPasswordUser(`keep-b-${crypto.randomUUID()}@totango.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Keep users workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+
+    try {
+      await ownerSession.addCollaborator(intermediary.profileId, "build");
+      let intermediarySession = await workspace.open(
+          intermediary.id.toString(), intermediary.profileId, () => {});
+      await intermediarySession.addCollaborator(ineligible.profileId, "use");
+      intermediarySession[Symbol.dispose]();
+
+      let before = await ownerSession.listActions();
+      await expect(authorizeDomainObservation(workspace, TOTANGO_POLICY))
+          .rejects.toThrow(/verified @totango\.com SSO collaborator/);
+      expect(await ownerSession.listActions()).toEqual(before);
+      await expect(ownerSession.removeCollaborator(
+          intermediary.profileId, [ineligible.profileId]))
+          .rejects.toThrow(/verified @totango\.com SSO collaborator/);
+      expect((await ownerSession.listCollaborators()).map(entry => entry.profile.id).toSorted())
+          .toEqual([ineligible.profileId, intermediary.profileId].toSorted());
+    } finally {
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
+  });
+
+  it("re-roots an eligible kept collaborator under the active policy", async () => {
+    let owner = await createSsoUser(`reroot-owner-${crypto.randomUUID()}@totango.com`);
+    let intermediary = await createSsoUser(`reroot-a-${crypto.randomUUID()}@totango.com`);
+    let kept = await createSsoUser(`reroot-b-${crypto.randomUUID()}@totango.com`);
+    let workspaceId = env.TEST_OVERSEER.newUniqueId();
+    let workspaceIdString = workspaceId.toString();
+    await owner.user.newGadget(workspaceIdString, "Re-root workspace");
+    let workspace = env.TEST_OVERSEER.get(workspaceId);
+    let ownerSession = await workspace.open(owner.id.toString(), owner.profileId, () => {});
+
+    try {
+      await authorizeDomainObservation(workspace, TOTANGO_POLICY);
+      await ownerSession.addCollaborator(intermediary.profileId, "build");
+      let intermediarySession = await workspace.open(
+          intermediary.id.toString(), intermediary.profileId, () => {});
+      await intermediarySession.addCollaborator(kept.profileId, "use");
+      intermediarySession[Symbol.dispose]();
+
+      let affected = await ownerSession.removeCollaborator(
+          intermediary.profileId, [kept.profileId]);
+      expect(affected.map(entry => entry.profile.id)).toEqual([intermediary.profileId]);
+      let keptRecord = (await ownerSession.listCollaborators())
+          .find(entry => entry.profile.id === kept.profileId);
+      expect(keptRecord).toMatchObject({
+        role: "use",
+        addedBy: expect.arrayContaining([expect.objectContaining({
+          type: "user",
+          sharer: owner.profileId,
+          role: "use",
+        })]),
+      });
+    } finally {
+      ownerSession[Symbol.dispose]();
+      await owner.user.deleteGadget(workspaceIdString);
+    }
   });
 });

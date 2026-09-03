@@ -808,10 +808,11 @@ async function assertProfileAllowedByDomainSharingPolicy(
 
 /** Throw when a workspace policy is incompatible with bearer/public share links. */
 export function assertShareLinkAllowedByDomainSharingPolicy(
-    policy: ObservationDomainSharingPolicy | undefined): void {
-  if (policy) {
+    policy: ObservationDomainSharingPolicy | undefined,
+    recipientPolicy?: ObservationDomainSharingPolicy): void {
+  if (policy && (!recipientPolicy || !sameDomainSharingPolicy(policy, recipientPolicy))) {
     throw new Error(
-        "This workspace has observed organization-scoped data and does not support share links.");
+        "This workspace has observed organization-scoped data and only supports matching internal share links.");
   }
 }
 
@@ -3018,6 +3019,7 @@ class OverseerImpl implements AgentHooks {
     let facet = this.getGatekeeperFacet(id);
     try {
       let description = await facet.describe();
+      await this.authorizeResourceDescription(description);
       gatekeeperRecord.resourceTitle = description.title;
       gatekeeperRecord.resourceUrl = description.url;
       gatekeeperRecord.hasSlashCommands = description.hasSlashCommands;
@@ -3188,22 +3190,38 @@ class OverseerImpl implements AgentHooks {
           "earlier sensitive observations in this workspace.");
     }
 
-    const sharing = await this.getSharingManager();
-    if (sharing.listShareLinkRecords().length > 0) {
-      throw new Error(
-          "This observation was blocked because it contains organization-scoped data that cannot " +
-          "be exposed through public share links. Revoke all share links and try again.");
-    }
+    try {
+      const sharing = await this.getSharingManager();
+      sharing.assertShareLinksCompatible(policy);
 
-    for (const collaborator of sharing.listCollaborators()) {
-      await assertProfileAllowedByDomainSharingPolicy(
-          collaborator.profile.id,
-          () => this.users.get(this.users.idFromName(collaborator.profile.id)).hasPasswordLogin(),
-          policy,
-          "This observation");
+      for (const collaborator of sharing.listCollaborators(policy)) {
+        await assertProfileAllowedByDomainSharingPolicy(
+            collaborator.profile.id,
+            () => this.users.get(this.users.idFromName(collaborator.profile.id)).hasPasswordLogin(),
+            policy,
+            "This observation");
+      }
+    } catch (error) {
+      // The policy was already latched synchronously. Disconnect capabilities issued under the old
+      // policy before rethrowing so denied collaborators cannot retain a stale build session.
+      void this.scheduleRevocationRestart();
+      throw error;
     }
 
     this.storage.domainSharingPolicy.put(policy);
+  }
+
+  async authorizeResourceDescription(description: ResourceDescription): Promise<void> {
+    const policy = description.domainSharingPolicy;
+    if (!policy) return;
+    const existing = this.storage.domainSharingPolicy.get();
+    if (existing && !sameDomainSharingPolicy(existing, policy)) {
+      throw new Error(
+          "This resource requires a different sharing policy than earlier sensitive resources " +
+          "in this workspace.");
+    }
+    this.storage.domainSharingPolicy.put(existing ?? policy);
+    await this.#enforceDomainSharingPolicyForObservation(policy);
   }
 
   async getChatAttachmentData(chatId: number, id: string): Promise<Uint8Array> {
@@ -4242,6 +4260,7 @@ class OverseerImpl implements AgentHooks {
     let facet = this.getGatekeeperFacet(gatekeeper.id);
 
     let desc = await facet.describe();
+    await this.authorizeResourceDescription(desc);
     let types = await facet.getTypeScriptTypes();
 
     return `Binding: ${name}\n` +
@@ -5437,12 +5456,17 @@ class OverseerImpl implements AgentHooks {
       let gk = this.storage.gatekeepers.get(id);
       if (!gk) continue;
       let suggested: string | undefined;
+      let description: ResourceDescription | undefined;
       try {
-        suggested = (await this.getGatekeeperFacet(id).describe()).suggestedBindingName;
+        description = await this.getGatekeeperFacet(id).describe();
       } catch (err) {
         this.logger.warn("failed to fetch suggested binding name for ambient resource", {
           event: "chat.binding.ambient.describe.failed", gatekeeperId: id, error: err,
         });
+      }
+      if (description) {
+        await this.authorizeResourceDescription(description);
+        suggested = description.suggestedBindingName;
       }
       let name = fallbackBindingName(suggested || "RESOURCE", candidate => taken.has(candidate));
       seedMap[name] = id;
@@ -5468,11 +5492,15 @@ class OverseerImpl implements AgentHooks {
         if (name === undefined) {
           let suggested: string | undefined;
           if (target !== undefined && this.storage.gatekeepers.get(target)) {
+            let description: ResourceDescription | undefined;
             try {
-              suggested =
-                  (await this.getGatekeeperFacet(target).describe()).suggestedBindingName;
+              description = await this.getGatekeeperFacet(target).describe();
             } catch {
               // Fall through to the generic fallback.
+            }
+            if (description) {
+              await this.authorizeResourceDescription(description);
+              suggested = description.suggestedBindingName;
             }
           }
           name = fallbackBindingName(suggested || "RESOURCE", n => taken.has(n));
@@ -6754,6 +6782,7 @@ class OverseerImpl implements AgentHooks {
       let candidate = gk.domainSharingPolicy;
       if (!candidate) {
         let description = await this.getGatekeeperFacet(gk.id).describe();
+        await this.authorizeResourceDescription(description);
         candidate = description.domainSharingPolicy;
         gk.resourceTitle = description.title;
         gk.resourceUrl = description.url;
@@ -6769,7 +6798,13 @@ class OverseerImpl implements AgentHooks {
       policy = candidate;
     }
 
-    if (policy) this.storage.domainSharingPolicy.put(policy);
+    if (policy) {
+      // Latch before validation awaits so concurrent sharing operations immediately apply the
+      // conservative policy. This description-level policy protects existing workspace data as
+      // soon as the resource is discovered, so failed legacy-link validation retains the latch.
+      this.storage.domainSharingPolicy.put(policy);
+      await this.#enforceDomainSharingPolicyForObservation(policy);
+    }
     return policy;
   }
 
@@ -7475,23 +7510,43 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       }
 
       let sharing = await this.impl.getSharingManager();
-      let domainSharingPolicy = shareKey
-          ? await this.impl.deriveDomainSharingPolicyForRole("build")
-          : this.impl.storage.domainSharingPolicy.get();
-      if (domainSharingPolicy) {
-        if (shareKey) {
-          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+      let domainSharingPolicy = this.impl.storage.domainSharingPolicy.get();
+      let observerRole: CollaboratorRole | undefined;
+      if (shareKey) {
+        const inspectedShareKey = await sharing.inspectShareKey(shareKey);
+        if (inspectedShareKey) {
+          try {
+            const derivedPolicy = await this.impl.deriveDomainSharingPolicyForRole(inspectedShareKey.role);
+            domainSharingPolicy = this.impl.storage.domainSharingPolicy.get() ?? derivedPolicy;
+            assertShareLinkAllowedByDomainSharingPolicy(
+                domainSharingPolicy, inspectedShareKey.recipientPolicy);
+          } catch {
+            throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+          }
         }
       }
 
       // If a share key was provided, redeem it. The owner already has full access and should not
       // appear in the collaborators table.
       if (shareKey) {
-        await sharing.redeemShareKey({
-          rawKey: shareKey,
-          profileId,
-          fetchProfile: () => clientUser.whoami(),
-        });
+        try {
+          await sharing.redeemShareKey({
+            rawKey: shareKey,
+            profileId,
+            fetchProfile: () => clientUser.whoami(),
+            hasPasswordLogin: () => clientUser.hasPasswordLogin(),
+            getActivePolicy: () => this.impl.storage.domainSharingPolicy.get(),
+            isProfileAllowedByPolicy: isProfileAllowedByDomainSharingPolicy,
+            beforeStore: async candidateRole => {
+              await ensureCapsules;
+              await this.impl.ensureObserver(
+                  profileId, clientUser, candidateRole, configureObservers);
+              observerRole = candidateRole;
+            },
+          });
+        } catch {
+          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+        }
       }
 
       // Check authorization. Compute the caller's effective role from the permission graph; this
@@ -7501,7 +7556,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // distinct denial without workspace metadata. A removed collaborator who reconnects after
       // their session is force-restarted lands here and sees the terminal access-denied page.
       if (!financeWorkspace) {
-        let effectiveRole = sharing.getEffectiveRole(profileId);
+        let effectiveRole = sharing.getEffectiveRole(profileId, domainSharingPolicy);
         if (!effectiveRole) {
           throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
         }
@@ -7511,9 +7566,6 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       domainSharingPolicy ??= await this.impl.deriveDomainSharingPolicyForRole(role);
 
       if (domainSharingPolicy) {
-        if (!sharing.hasDirectInvite(profileId)) {
-          throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
-        }
         await assertProfileAllowedByDomainSharingPolicy(
             profileId,
             () => clientUser.hasPasswordLogin(),
@@ -7529,7 +7581,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // gatekeepers, configuring their connected accounts if needed. This runs only after a valid
       // role is confirmed, so it never reveals gatekeeper or resource metadata to an unauthorized
       // user. The prohibitAllSharing short-circuit above still wins -- lockdown takes precedence.
-      await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+      if (!shareKey || role !== observerRole) {
+        await this.impl.ensureObserver(profileId, clientUser, role, configureObservers);
+      }
 
       // Fire-and-forget a call to the collaborator's user DO so the gadget appears on
       // (or is refreshed on) their home page.
@@ -7634,8 +7688,17 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
           message: "This workspace has sharing disabled, so only its owner can access it.",
         };
       }
-      let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id);
-      if (role !== "build") {
+      try {
+        const policy = this.impl.storage.domainSharingPolicy.get() ??
+            await this.impl.deriveDomainSharingPolicyForRole("build");
+        let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id, policy);
+        if (role !== "build") throw new Error("Build access is required.");
+        if (policy) {
+          await assertProfileAllowedByDomainSharingPolicy(
+              callerProfile.id, () => caller.hasPasswordLogin(), policy, "This workspace");
+        }
+        await this.impl.ensureObserver(callerProfile.id, caller, "build");
+      } catch {
         return {
           accepted: false,
           message: "You do not have access to interact with this workspace through its agent.",
@@ -8279,7 +8342,6 @@ export function assertShareLinksAllowed(financeWorkspace: boolean): void {
 @validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
-  #financeWorkspacePromise: Promise<boolean> | undefined;
 
   constructor(private impl: OverseerImpl,
               private clientProfileId: string,
@@ -8325,6 +8387,53 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return { profileId: this.clientProfileId, isOwner: this.isOwner };
   }
 
+  async #withAuthorizedSharingMutation<T>(
+      mutate: (activePolicy: ObservationDomainSharingPolicy | undefined) => T,
+      opts: {
+        proposedPolicy?: ObservationDomainSharingPolicy;
+        profiles?: string[];
+        requireSharingAllowed?: boolean;
+      } = {}): Promise<T> {
+    while (true) {
+      const activePolicy = this.impl.storage.domainSharingPolicy.get();
+      if (activePolicy && opts.proposedPolicy &&
+          !sameDomainSharingPolicy(activePolicy, opts.proposedPolicy)) {
+        throw new Error("This share link is not compatible with the workspace sharing policy.");
+      }
+      const requiredPolicy = activePolicy ?? opts.proposedPolicy;
+
+      if (requiredPolicy) {
+        const profilesToCheck = this.isOwner
+            ? opts.profiles ?? []
+            : [this.clientProfileId, ...(opts.profiles ?? [])];
+        for (const profileId of new Set(profilesToCheck)) {
+          const user = profileId === this.clientProfileId
+              ? this.#clientUser
+              : this.impl.users.get(this.impl.users.idFromName(profileId));
+          await assertProfileAllowedByDomainSharingPolicy(
+              profileId,
+              () => user.hasPasswordLogin(),
+              requiredPolicy,
+              profileId === this.clientProfileId ? "This workspace" : "Collaborators");
+        }
+      }
+
+      // Policy latching is monotonic but can happen while identity checks await. Retry until the
+      // policy validated above is still current, then execute the storage mutation synchronously.
+      const currentPolicy = this.impl.storage.domainSharingPolicy.get();
+      if ((currentPolicy === undefined) !== (activePolicy === undefined) ||
+          (currentPolicy && activePolicy && !sameDomainSharingPolicy(currentPolicy, activePolicy))) {
+        continue;
+      }
+      if (opts.requireSharingAllowed && this.impl.storage.prohibitAllSharing.get()) {
+        throw new Error(
+            "This workspace has observed sensitive data. To prevent leaks, the workspace cannot " +
+            "be shared.");
+      }
+      return mutate(currentPolicy ?? opts.proposedPolicy);
+    }
+  }
+
   async #getClientProfile(): Promise<AiChatAuthorInfo> {
     if (!this.#clientProfilePromise) {
       this.#clientProfilePromise = retryOnDoReset(
@@ -8340,10 +8449,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async #isFinanceWorkspace(): Promise<boolean> {
-    this.#financeWorkspacePromise ??= retryOnDoReset(
+    const ownerRecord = await retryOnDoReset(
         () => this.#owner.getGadget(this.impl.ctx.id.toString()), this.impl.logger)
-        .then(record => record?.originHubId === "finance");
-    return this.#financeWorkspacePromise;
+    return ownerRecord?.originHubId === "finance";
   }
 
   async getMetadata(): Promise<GadgetMetadata> {
@@ -9827,7 +9935,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listCollaborators(): Promise<CollaboratorInfo[]> {
-    return (await this.impl.getSharingManager()).listCollaborators();
+    const sharing = await this.impl.getSharingManager();
+    return this.#withAuthorizedSharingMutation(
+        policy => sharing.listCollaborators(policy));
   }
 
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
@@ -9855,7 +9965,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // authorizeObservation() can latch a policy while the identity check above is awaiting. The
     // policy is monotonic, so one final synchronous read closes the mutation window.
     const activeDomainSharingPolicy = this.impl.storage.domainSharingPolicy.get();
-    if (activeDomainSharingPolicy && !domainSharingPolicy) {
+    if (activeDomainSharingPolicy && (!domainSharingPolicy ||
+        !sameDomainSharingPolicy(activeDomainSharingPolicy, domainSharingPolicy))) {
       await assertProfileAllowedByDomainSharingPolicy(
           profile.id,
           () => userDo.hasPasswordLogin(),
@@ -9869,22 +9980,32 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           "shared.");
     }
 
-    return sharing.addCollaborator({
-      caller: this.#sharingCaller(),
-      profile,
-      role,
-      note,
-    });
+    return this.#withAuthorizedSharingMutation(
+        policy => sharing.addCollaborator({
+          caller: this.#sharingCaller(),
+          profile,
+          role,
+          note,
+          requiredLinkPolicy: policy,
+        }),
+        {
+          proposedPolicy: domainSharingPolicy,
+          profiles: [profile.id],
+          requireSharingAllowed: true,
+        });
   }
 
   async previewRemoveCollaborator(profileId: string): Promise<AffectedCollaborator[]> {
-    return (await this.impl.getSharingManager())
-        .previewRemoveCollaborator(this.#sharingCaller(), profileId);
+    const sharing = await this.impl.getSharingManager();
+    return this.#withAuthorizedSharingMutation(
+        policy => sharing.previewRemoveCollaborator(this.#sharingCaller(), profileId, policy));
   }
 
   async removeCollaborator(profileId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .removeCollaborator(this.#sharingCaller(), profileId, keepUsers);
+    const sharing = await this.impl.getSharingManager();
+    let affected = await this.#withAuthorizedSharingMutation(
+        policy => sharing.removeCollaborator(this.#sharingCaller(), profileId, keepUsers, policy),
+        {profiles: keepUsers});
     // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
     await this.impl.tearDownLostObservers(affected);
     // Likewise update or remove their cached workspace listing. Must happen before the restart
@@ -9900,13 +10021,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async previewRevokeShareLink(linkId: string): Promise<AffectedCollaborator[]> {
-    return (await this.impl.getSharingManager())
-        .previewRevokeShareLink(this.#sharingCaller(), linkId);
+    const sharing = await this.impl.getSharingManager();
+    return this.#withAuthorizedSharingMutation(
+        policy => sharing.previewRevokeShareLink(this.#sharingCaller(), linkId, policy));
   }
 
   async revokeShareLink(linkId: string, keepUsers: string[]): Promise<AffectedCollaborator[]> {
-    let affected = (await this.impl.getSharingManager())
-        .revokeShareLink(this.#sharingCaller(), linkId, keepUsers);
+    const sharing = await this.impl.getSharingManager();
+    let affected = await this.#withAuthorizedSharingMutation(
+        policy => sharing.revokeShareLink(this.#sharingCaller(), linkId, keepUsers, policy),
+        {profiles: keepUsers});
     // Tear down observer records for anyone who lost access (best-effort; see tearDownLostObservers).
     await this.impl.tearDownLostObservers(affected);
     // Likewise update or remove their cached workspace listing (see removeCollaborator).
@@ -9921,34 +10045,74 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // --- Share link management ---
 
   async createShareLink(role: CollaboratorRole, note?: string)
-      : Promise<{ key: string; linkId: string }> {
+      : Promise<{ key: string; linkId: string; recipientPolicy?: ObservationDomainSharingPolicy }> {
     assertShareLinksAllowed(await this.#isFinanceWorkspace());
     const sharing = await this.impl.getSharingManager();
-    assertShareLinkAllowedByDomainSharingPolicy(
-        await this.impl.deriveDomainSharingPolicyForRole("build"));
+    const recipientPolicy = await this.impl.deriveDomainSharingPolicyForRole(role);
+    if (recipientPolicy && role !== "use") {
+      throw new Error("Internal share links only support Gadget-only access.");
+    }
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
-    assertShareLinkAllowedByDomainSharingPolicy(this.impl.storage.domainSharingPolicy.get());
-    return sharing.createShareLink({ caller: this.#sharingCaller(), role, note });
+    assertShareLinkAllowedByDomainSharingPolicy(
+        this.impl.storage.domainSharingPolicy.get(), recipientPolicy);
+    await this.#withAuthorizedSharingMutation(
+        () => undefined, {proposedPolicy: recipientPolicy});
+    return sharing.createShareLink({
+      caller: this.#sharingCaller(),
+      role,
+      note,
+      recipientPolicy,
+      beforeStore: () => {
+        if (this.impl.storage.prohibitAllSharing.get()) {
+          throw new Error(
+              "This workspace has observed sensitive data. To prevent leaks, the workspace cannot " +
+              "be shared.");
+        }
+        assertShareLinkAllowedByDomainSharingPolicy(
+            this.impl.storage.domainSharingPolicy.get(), recipientPolicy);
+      },
+    });
   }
 
-  async newShareLinkKey(linkId: string): Promise<{ key: string }> {
+  async newShareLinkKey(linkId: string): Promise<{
+    key: string; recipientPolicy?: ObservationDomainSharingPolicy;
+  }> {
     assertShareLinksAllowed(await this.#isFinanceWorkspace());
     const sharing = await this.impl.getSharingManager();
-    assertShareLinkAllowedByDomainSharingPolicy(
-        await this.impl.deriveDomainSharingPolicyForRole("build"));
+    const linkRole = sharing.getShareLinkRole(linkId);
+    const requiredPolicy = this.impl.storage.domainSharingPolicy.get() ??
+        (linkRole ? await this.impl.deriveDomainSharingPolicyForRole(linkRole) : undefined);
     if (this.impl.storage.prohibitAllSharing.get()) {
       throw new Error(
           "This workspace has observed sensitive data. To prevent leaks, the workspace cannot be " +
           "shared.");
     }
 
-    assertShareLinkAllowedByDomainSharingPolicy(this.impl.storage.domainSharingPolicy.get());
-    return sharing.newShareLinkKey({ caller: this.#sharingCaller(), linkId });
+    const activePolicy = this.impl.storage.domainSharingPolicy.get();
+    if (activePolicy && requiredPolicy && !sameDomainSharingPolicy(activePolicy, requiredPolicy)) {
+      throw new Error("This share link is not compatible with the workspace sharing policy.");
+    }
+    await this.#withAuthorizedSharingMutation(
+        () => undefined, {proposedPolicy: requiredPolicy});
+    return sharing.newShareLinkKey({
+      caller: this.#sharingCaller(),
+      linkId,
+      requiredPolicy,
+      beforeStore: () => {
+        if (this.impl.storage.prohibitAllSharing.get()) {
+          throw new Error(
+              "This workspace has observed sensitive data. To prevent leaks, the workspace cannot " +
+              "be shared.");
+        }
+        assertShareLinkAllowedByDomainSharingPolicy(
+            this.impl.storage.domainSharingPolicy.get(), requiredPolicy);
+      },
+    });
   }
 
   async listShareLinks(): Promise<ShareLinkInfo[]> {
@@ -9957,7 +10121,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Collect all records synchronously to release the kv.list() iterator before any await
     // points below. Only one kv.list() iterator can be active at a time, and concurrent RPC
     // calls (e.g. listCollaborators) may start their own.
-    let records = sharing.listShareLinkRecords();
+    let records = await this.#withAuthorizedSharingMutation(
+        () => sharing.listShareLinkRecords());
 
     let result: ShareLinkInfo[] = [];
     // Cache profile lookups.
@@ -9987,14 +10152,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         created: record.created,
         createdBy,
         role: record.role ?? "build",
+        recipientPolicy: record.recipientPolicy,
       });
     }
     return result;
   }
 
   async updateShareLink(linkId: string, note?: string): Promise<void> {
-    (await this.impl.getSharingManager())
-        .updateShareLink(this.#sharingCaller(), linkId, note);
+    const sharing = await this.impl.getSharingManager();
+    await this.#withAuthorizedSharingMutation(
+        policy => sharing.updateShareLink(this.#sharingCaller(), linkId, note, policy));
   }
 }
 
@@ -10366,6 +10533,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     }
 
     let description = await this.impl.getGatekeeperFacet(target).describe();
+    await this.impl.authorizeResourceDescription(description);
     let suggestedName = description.suggestedBindingName;
     let i = 1;
     // Re-read the record after the describe() await, in case bindings changed meanwhile. Dedupe
@@ -10627,10 +10795,14 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   }
 
   async describe(): Promise<ResourceDescription> {
-    return this.facet.describe();
+    const description = await this.facet.describe();
+    await this.impl.authorizeResourceDescription(description);
+    return description;
   }
 
   async openSession(): Promise<RpcStub<Session>> {
+    const description = await this.facet.describe();
+    await this.impl.authorizeResourceDescription(description);
     // @ts-expect-error TODO: Remove annotation when Cap'n Web fixes cyclic type issues
     return this.facet.startSession(new ApprovalQueueImpl(this.impl, this.id, this.caller));
   }
