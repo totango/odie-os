@@ -44,10 +44,10 @@ Upload the disk image and checksum first. Upload the metadata last so clients ne
 
 ```sh
 VERSIONED_DMG="$(node -p "require('/tmp/odie-macos-release/OdieOS-latest.json').url.split('/').pop()")"
-pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.dmg --file /tmp/odie-macos-release/OdieOS-latest.dmg --content-type application/x-apple-diskimage
-pnpm exec wrangler r2 object put "odie-os-native-downloads/mac/$VERSIONED_DMG" --file "/tmp/odie-macos-release/$VERSIONED_DMG" --content-type application/x-apple-diskimage
-pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.dmg.sha256 --file /tmp/odie-macos-release/OdieOS-latest.dmg.sha256 --content-type text/plain
-pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.json --file /tmp/odie-macos-release/OdieOS-latest.json --content-type application/json
+pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.dmg --remote --file /tmp/odie-macos-release/OdieOS-latest.dmg --content-type application/x-apple-diskimage
+pnpm exec wrangler r2 object put "odie-os-native-downloads/mac/$VERSIONED_DMG" --remote --file "/tmp/odie-macos-release/$VERSIONED_DMG" --content-type application/x-apple-diskimage
+pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.dmg.sha256 --remote --file /tmp/odie-macos-release/OdieOS-latest.dmg.sha256 --content-type text/plain
+pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.json --remote --file /tmp/odie-macos-release/OdieOS-latest.json --content-type application/json
 ```
 
 Verify all four public URLs after upload: the latest DMG, versioned DMG, checksum, and metadata. Increment the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` before every release; the preparation script rejects mismatched versions.
