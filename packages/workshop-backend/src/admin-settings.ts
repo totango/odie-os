@@ -60,6 +60,10 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // deployment that installed before curation existed still gets promoted.
       promotedFormatBlueprints: <string[]>[],
 
+      // True until the authoritative featured collection has been mirrored to KV. Default true
+      // also heals deployments left inconsistent by a failed write before this marker existed.
+      featuredBlueprintSnapshotDirty: true,
+
       // The one Finance workspace for this deployment. This lives beside admin configuration
       // because the singleton DO, rather than any one user's listing, is the coordination point.
       financeWorkspace: <FinanceWorkspaceClaim | null>null,
@@ -90,6 +94,9 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // R2 and config are separate stores. Serialize logo changes so reset/upload operations cannot
   // interleave while switching whether the fixed public object is enabled.
   private siteLogoMutationTail = Promise.resolve();
+  // The featured collection and its KV snapshot form one logical value. Serialize mutations so a
+  // slower older snapshot cannot overwrite a newer one after concurrent RPCs interleave at KV I/O.
+  private featuredBlueprintMutationTail = Promise.resolve();
 
   constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
     super(ctx, env);
@@ -262,10 +269,12 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       let installed = await installFormatBlueprints(this.env);
 
       if (installed.length > 0) {
-        for (let publicInfo of installed) {
-          this.storage.featuredBlueprints.put(publicInfo);
-        }
-        await this.#writeFeaturedSnapshot();
+        await this.#mutateFeaturedMirror(() => {
+          for (let publicInfo of installed) {
+            this.storage.featuredBlueprints.put(publicInfo);
+          }
+          return true;
+        });
       }
 
       // Stamped only once the whole manifest is live, so a crash or a single bad archive retries
@@ -286,14 +295,16 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     if (this.storage.installedFeaturedBlueprints.get() !== featuredManifestVersion) {
       let installed = await installFeaturedBlueprints(this.env);
       if (installed.length > 0) {
-        for (let publicInfo of installed) {
-          if (isFinanceOperationsWorkbenchBlueprintId(publicInfo.id)) {
-            this.storage.featuredBlueprints.delete(publicInfo.id);
-          } else {
-            this.storage.featuredBlueprints.put(publicInfo);
+        await this.#mutateFeaturedMirror(() => {
+          for (let publicInfo of installed) {
+            if (isFinanceOperationsWorkbenchBlueprintId(publicInfo.id)) {
+              this.storage.featuredBlueprints.delete(publicInfo.id);
+            } else {
+              this.storage.featuredBlueprints.put(publicInfo);
+            }
           }
-        }
-        await this.#writeFeaturedSnapshot();
+          return true;
+        });
       }
 
       let featuredComplete = installed.length === FEATURED_BLUEPRINTS.length;
@@ -311,6 +322,8 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     // Promotion is checked on every run, not just after an install, so a deployment that installed
     // before curation existed still ends up offering its bundled formats.
     await this.#promoteBundledFormats();
+    // Heal a snapshot write that failed before the dirty marker was introduced.
+    await this.#mutateFeaturedMirror(() => false);
     return complete;
   }
 
@@ -348,36 +361,48 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     await this.env.BLUEPRINTS.put(FEATURED_BLUEPRINTS_KEY, serializeFeaturedBlueprints(featured));
   }
 
-  // Reconcile the mirrored featured list to match the authoritative bit stored in the owner
-  // User DO, while also refreshing stale metadata snapshots for featured entries.
-  async #syncFeaturedMirror(publicInfo: BlueprintPublicInfo, featured: boolean): Promise<void> {
+  async #mutateFeaturedMirror(mutate: () => boolean | Promise<boolean>): Promise<void> {
+    let previousMutation = this.featuredBlueprintMutationTail;
+    let release!: () => void;
+    this.featuredBlueprintMutationTail = new Promise<void>(resolve => { release = resolve; });
+    await previousMutation;
+    try {
+      let changed = await mutate();
+      if (changed) this.storage.featuredBlueprintSnapshotDirty.put(true);
+      if (!this.storage.featuredBlueprintSnapshotDirty.get()) return;
+      await this.#writeFeaturedSnapshot();
+      this.storage.featuredBlueprintSnapshotDirty.put(false);
+    } finally {
+      release();
+    }
+  }
+
+  // Apply one owner-authorized state to the local collection. Metadata only moves forward, since
+  // an admin toggle may have read KV while a newer Overseer propagation was still publishing.
+  #applyFeaturedMirror(publicInfo: BlueprintPublicInfo, featured: boolean): boolean {
     if (isFinanceOperationsWorkbenchBlueprintId(publicInfo.id)) featured = false;
     let existing = this.storage.featuredBlueprints.get(publicInfo.id);
-    let changed = false;
-
     if (!featured) {
-      if (existing) {
-        this.storage.featuredBlueprints.delete(publicInfo.id);
-        changed = true;
-      }
-    } else if (
-      !existing ||
-      existing.metadata.version !== publicInfo.metadata.version ||
-      existing.metadata.lastUpdated.valueOf() !== publicInfo.metadata.lastUpdated.valueOf()
-    ) {
-      this.storage.featuredBlueprints.put(publicInfo);
-      changed = true;
+      if (!existing) return false;
+      this.storage.featuredBlueprints.delete(publicInfo.id);
+      return true;
     }
-
-    if (changed) {
-      await this.#writeFeaturedSnapshot();
+    if (existing) {
+      let current = existing.metadata;
+      let incoming = publicInfo.metadata;
+      if (incoming.version < current.version || (
+        incoming.version === current.version &&
+        incoming.lastUpdated.valueOf() < current.lastUpdated.valueOf()
+      )) return false;
     }
+    this.storage.featuredBlueprints.put(publicInfo);
+    return true;
   }
 
   async #getOwnerBlueprint(blueprintId: string): Promise<{
     // Absent for a blueprint with no owning user, in which case `featureable` is false.
     owner: DurableObjectStub<UserDurableObject> | undefined;
-    publicInfo: BlueprintPublicInfo;
+    ownerId: string | undefined;
     featureable: boolean;
   }> {
     if (isReservedBlueprintKey(blueprintId)) {
@@ -392,13 +417,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let kvRecord = parseBlueprintKvRecord(raw);
 
     return {
+      ownerId: kvRecord.ownerId,
       owner: kvRecord.ownerId
           ? this.users.get(this.users.idFromString(kvRecord.ownerId))
           : undefined,
-      publicInfo: {
-        id: blueprintId,
-        metadata: kvRecord.metadata,
-      },
       // A deployment-installed blueprint (see format-blueprints.ts) has no owning User DO to hold
       // the authoritative featured bit, so the owner-anchored toggle doesn't apply -- the same
       // answer as an uploaded blueprint. It reaches users through the deployment's curation.
@@ -407,42 +429,72 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 
   async isBlueprintFeatured(blueprintId: string): Promise<boolean | null> {
-    let { owner, publicInfo, featureable } = await this.#getOwnerBlueprint(blueprintId);
+    let { owner, ownerId, featureable } = await this.#getOwnerBlueprint(blueprintId);
     if (!featureable || !owner) {
       return null;
     }
 
-    let featured = await owner.isBlueprintFeatured(blueprintId);
-    if (featured === null) {
-      return null;
-    }
-
-    // Heal partial failures before answering so admin reads never observe disagreement.
-    await this.#syncFeaturedMirror(publicInfo, featured);
+    let featured: boolean | null = null;
+    await this.#mutateFeaturedMirror(async () => {
+      let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
+      featured = await owner.isBlueprintFeatured(blueprintId);
+      if (!kvRecord || kvRecord.ownerId !== ownerId || featured === null) {
+        featured = null;
+        if (!this.storage.featuredBlueprints.get(blueprintId)) return false;
+        this.storage.featuredBlueprints.delete(blueprintId);
+        return true;
+      }
+      return this.#applyFeaturedMirror({
+        id: blueprintId,
+        metadata: kvRecord.metadata,
+      }, featured);
+    });
     return featured;
   }
 
   async setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
-    let { owner, publicInfo, featureable } = await this.#getOwnerBlueprint(blueprintId);
+    let { owner, ownerId, featureable } = await this.#getOwnerBlueprint(blueprintId);
     if (!featureable || !owner) {
       throw new Error('Blueprint not featureable.');
     }
 
-    await owner.setBlueprintFeatured(blueprintId, featured);
-    await this.#syncFeaturedMirror(publicInfo, featured);
+    await this.#mutateFeaturedMirror(async () => {
+      let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
+      if (!kvRecord?.gadgetId || kvRecord.ownerId !== ownerId) {
+        throw new Error('Blueprint not featureable.');
+      }
+      await owner.setBlueprintFeatured(blueprintId, featured);
+      return this.#applyFeaturedMirror({
+        id: blueprintId,
+        metadata: kvRecord.metadata,
+      }, featured);
+    });
   }
 
-  async syncFeaturedBlueprint(publicInfo: BlueprintPublicInfo): Promise<void> {
+  async syncFeaturedBlueprint(publicInfo: BlueprintPublicInfo, ownerId: string): Promise<void> {
     // Overseer propagation calls this after blueprint updates so the mirror keeps up with the
-    // latest published metadata, but only while the owner-side featured bit stays enabled.
-    await this.#syncFeaturedMirror(publicInfo, true);
+    // latest published metadata. Re-read both canonical KV metadata and the owner bit inside the
+    // mutation lane: either may have changed since the cross-DO caller formed its arguments.
+    let owner = this.users.get(this.users.idFromString(ownerId));
+    await this.#mutateFeaturedMirror(async () => {
+      let kvRecord = await readBlueprintKvRecord(this.env, publicInfo.id);
+      if (!kvRecord || kvRecord.ownerId !== ownerId) {
+        return this.#applyFeaturedMirror(publicInfo, false);
+      }
+      let featured = await owner.isBlueprintFeatured(publicInfo.id);
+      return this.#applyFeaturedMirror({
+        id: publicInfo.id,
+        metadata: kvRecord.metadata,
+      }, featured === true);
+    });
   }
 
   async deleteFeaturedBlueprint(blueprintId: string): Promise<void> {
-    if (this.storage.featuredBlueprints.get(blueprintId)) {
+    await this.#mutateFeaturedMirror(() => {
+      if (!this.storage.featuredBlueprints.get(blueprintId)) return false;
       this.storage.featuredBlueprints.delete(blueprintId);
-      await this.#writeFeaturedSnapshot();
-    }
+      return true;
+    });
   }
 
   // --- Deployment admin config ---
