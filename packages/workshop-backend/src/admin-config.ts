@@ -97,6 +97,26 @@ export const DEFAULT_ADMIN_CONFIG: AdminConfig = {
 };
 
 /**
+ * Apply deployment-authorized ambient defaults beneath persisted administrator choices.
+ *
+ * The environment allowlist is explicit operator configuration. It must not replace an existing
+ * mode because the admin panel remains the authoritative way to opt a deployment out later.
+ */
+export function applyDeploymentAdminConfigDefaults(
+    config: AdminConfig,
+    env: Pick<Cloudflare.Env, "DEFAULT_ENABLED_AMBIENT_GATEKEEPERS">): AdminConfig {
+  let ambientGatekeeperModes = { ...config.ambientGatekeeperModes };
+  for (let vendorId of (env.DEFAULT_ENABLED_AMBIENT_GATEKEEPERS ?? "").split(",")) {
+    let normalized = vendorId.trim().toLowerCase();
+    if (normalized && !ambientGatekeeperModes[normalized] &&
+        !config.disabledGatekeepers.includes(normalized)) {
+      ambientGatekeeperModes[normalized] = "enabled";
+    }
+  }
+  return { ...config, ambientGatekeeperModes };
+}
+
+/**
  * Longest `agentHint` a promoted format may carry. Every enabled format's hint goes into the
  * system prompt on every turn, so this is a budget rather than a validation limit; a sentence or
  * two is what the panel asks for.
@@ -340,7 +360,8 @@ export function serializeAdminConfig(config: AdminConfig): string {
 
 /** Read the admin config from the KV mirror. Cheap enough for the hot path (a single KV get). */
 export async function readAdminConfig(env: Cloudflare.Env): Promise<AdminConfig> {
-  return parseAdminConfig(await env.BLUEPRINTS.get(ADMIN_CONFIG_KEY));
+  return applyDeploymentAdminConfigDefaults(
+      parseAdminConfig(await env.BLUEPRINTS.get(ADMIN_CONFIG_KEY)), env);
 }
 
 // --- Resource-disable helpers ---

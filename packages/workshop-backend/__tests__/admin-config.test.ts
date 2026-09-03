@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_ADMIN_CONFIG, defaultOutputFormatId, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides, serializeAdminConfig } from "../src/admin-config.js";
+import { DEFAULT_ADMIN_CONFIG, applyDeploymentAdminConfigDefaults, defaultOutputFormatId, parseAdminConfig, reorderFormats, resolveFormatOutput, sanitizeOutputOverrides, serializeAdminConfig } from "../src/admin-config.js";
 
 describe("parseAdminConfig", () => {
   it("backfills fields missing from a config persisted before they existed", () => {
@@ -57,6 +57,31 @@ describe("parseAdminConfig", () => {
       { blueprintId: "dup", enabled: true, agentHint: "first" },
       { blueprintId: "other", enabled: true },
     ]);
+  });
+});
+
+describe("deployment admin config defaults", () => {
+  it("enables explicitly authorized ambient vendors", () => {
+    let config = applyDeploymentAdminConfigDefaults(DEFAULT_ADMIN_CONFIG, {
+      DEFAULT_ENABLED_AMBIENT_GATEKEEPERS: " Context,OTHER ",
+    });
+    expect(config.ambientGatekeeperModes).toEqual({context: "enabled", other: "enabled"});
+  });
+
+  it("keeps persisted administrator modes authoritative", () => {
+    let config = applyDeploymentAdminConfigDefaults({
+      ...DEFAULT_ADMIN_CONFIG,
+      ambientGatekeeperModes: {context: "optional"},
+    }, {DEFAULT_ENABLED_AMBIENT_GATEKEEPERS: "context"});
+    expect(config.ambientGatekeeperModes.context).toBe("optional");
+  });
+
+  it("preserves a legacy disabled gatekeeper", () => {
+    let config = applyDeploymentAdminConfigDefaults({
+      ...DEFAULT_ADMIN_CONFIG,
+      disabledGatekeepers: ["context"],
+    }, {DEFAULT_ENABLED_AMBIENT_GATEKEEPERS: "context"});
+    expect(config.ambientGatekeeperModes.context).toBeUndefined();
   });
 });
 
