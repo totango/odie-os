@@ -9,7 +9,7 @@ export type ProductAnalyticsConnectionType = "gatekeeper" | "ai_model" | "agent_
 // Events:
 // - account_created: an account was created.
 // - user_authenticated: a user authenticated.
-// - gadget_created/opened/deleted: gadget lifecycle and open events.
+// - gadget_created/opened/deleted/creation_rolled_back: gadget lifecycle and open events.
 // - gadget_interaction: chat, UI connection, and code merge interactions.
 // - connection_created/removed: gatekeeper, AI model, or agent spawner connections changed.
 // - blueprint_created/imported: blueprint lifecycle events.
@@ -46,6 +46,12 @@ export type ProductAnalyticsGadgetInput =
     }
   | {
       event_name: "gadget_deleted";
+      user_id: string;
+      gadget_id?: string;
+      gadget_owner_user_id?: string;
+    }
+  | {
+      event_name: "gadget_creation_rolled_back";
       user_id: string;
       gadget_id?: string;
       gadget_owner_user_id?: string;
