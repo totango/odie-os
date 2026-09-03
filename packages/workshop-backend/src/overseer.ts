@@ -5704,16 +5704,7 @@ class OverseerImpl implements AgentHooks {
 
     // Propagate to User DO.
     let owner = this.users.get(this.users.idFromString(this.ownerId));
-    let isFeatured = await owner.updateBlueprint(
-      record.id, record.metadata, this.ctx.id.toString()
-    );
-
-    if (isFeatured) {
-      await this.ctx.exports.AdminSettings.getByName("").syncFeaturedBlueprint({
-        id: record.id,
-        metadata: record.metadata,
-      });
-    }
+    await owner.updateBlueprint(record.id, record.metadata, this.ctx.id.toString());
 
     // Write to KV.
     let kvRecord: BlueprintKvRecord = {
@@ -5722,6 +5713,13 @@ class OverseerImpl implements AgentHooks {
       gadgetId: this.ctx.id.toString(),
     };
     await this.env.BLUEPRINTS.put(record.id, JSON.stringify(kvRecord));
+
+    // Reconcile after KV is canonical. This is unconditional so an admin toggle that raced an
+    // update while the blueprint was unfeatured cannot strand the mirror on older metadata.
+    await this.ctx.exports.AdminSettings.getByName("").syncFeaturedBlueprint({
+      id: record.id,
+      metadata: record.metadata,
+    }, this.ownerId);
 
     // Clear dirty flag.
     record.dirty = false;
