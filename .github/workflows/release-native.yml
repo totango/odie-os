@@ -1,0 +1,379 @@
+name: Release native apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Native platform to release
+        required: true
+        default: macos
+        type: choice
+        options:
+          - macos
+          - ios
+          - both
+      build_number:
+        description: Positive iOS build number, required when releasing iOS
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "24.19.0"
+  RUST_TOOLCHAIN: "1.96.0"
+  PUBLIC_NATIVE_DOWNLOAD_BASE_URL: https://odie-os-native-api.odie-os.workers.dev/downloads/mac
+
+jobs:
+  guard:
+    name: Permit main branch releases only
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ref guard
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            printf '%s\n' "Native releases are only permitted from refs/heads/main." >&2
+            exit 1
+          fi
+
+  macos:
+    name: Release macOS DMG
+    if: github.ref == 'refs/heads/main' && (inputs.platform == 'both' || inputs.platform == 'macos')
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment:
+      name: native-release
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and pnpm
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: true
+          run-install: false
+
+      - name: Install dependencies with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release inputs, secrets and variables
+        env:
+          APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          NATIVE_RELEASE_KEYCHAIN_PASSWORD: ${{ secrets.NATIVE_RELEASE_KEYCHAIN_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          if ! [[ "$APP_STORE_CONNECT_API_KEY_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            printf '%s\n' "APP_STORE_CONNECT_API_KEY_ID must be 10 uppercase letters or digits" >&2
+            exit 1
+          fi
+          for name in \
+            APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 \
+            APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD \
+            NATIVE_RELEASE_KEYCHAIN_PASSWORD \
+            APP_STORE_CONNECT_API_KEY_P8_BASE64 \
+            APP_STORE_CONNECT_API_KEY_ID \
+            APP_STORE_CONNECT_API_ISSUER_ID \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID
+          do
+            if [ -z "${!name}" ]; then
+              printf '%s\n' "Missing required native release configuration: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Install Developer ID signing assets
+        env:
+          APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          NATIVE_RELEASE_KEYCHAIN_PASSWORD: ${{ secrets.NATIVE_RELEASE_KEYCHAIN_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/native-release.keychain-db"
+          certificate_path="$RUNNER_TEMP/developer-id-certificate.p12"
+          api_key_path="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          printf 'NATIVE_RELEASE_KEYCHAIN_PATH=%s\n' "$keychain_path" >> "$GITHUB_ENV"
+          printf '%s' "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
+          chmod 600 "$certificate_path" "$api_key_path"
+          security create-keychain -p "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$keychain_path" -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/xcrun
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Developer ID Application/ { print $2; exit }')"
+          if [ -z "$signing_identity" ]; then
+            printf '%s\n' "Developer ID Application identity not found in imported certificate" >&2
+            exit 1
+          fi
+          {
+            printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path"
+            printf 'APPLE_SIGNING_IDENTITY=%s\n' "$signing_identity"
+          } >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize ARM64 DMG
+        env:
+          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup override set "$RUST_TOOLCHAIN"
+          rustup target add --toolchain "$RUST_TOOLCHAIN" aarch64-apple-darwin
+          rustc --version
+          xcodebuild -version
+          pnpm --dir packages/workshop-native sync:gatekeeper-csp
+          pnpm --dir packages/workshop-native tauri build --target aarch64-apple-darwin --bundles dmg
+
+      - name: Prepare verified macOS release artifacts
+        run: |
+          set -euo pipefail
+          dmg_count="$(find packages/workshop-native/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' -type f | wc -l | tr -d ' ')"
+          if [ "$dmg_count" != "1" ]; then
+            printf '%s\n' "Expected exactly one notarized ARM64 DMG, found $dmg_count" >&2
+            exit 1
+          fi
+          dmg_path="$(find packages/workshop-native/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' -type f)"
+          pnpm --dir packages/workshop-native macos:prepare-release "$GITHUB_WORKSPACE/$dmg_path" "$GITHUB_WORKSPACE/release-macos"
+          version="$(node -p "JSON.parse(require('node:fs').readFileSync('packages/workshop-native/package.json','utf8')).version")"
+          metadata_version="$(node -p "JSON.parse(require('node:fs').readFileSync('release-macos/OdieOS-latest.json','utf8')).version")"
+          test "$version" = "$metadata_version"
+
+      - name: Upload macOS artifacts to R2 metadata last
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          versioned_dmg="$(node -p "JSON.parse(require('node:fs').readFileSync('release-macos/OdieOS-latest.json','utf8')).url.split('/').pop()")"
+          pnpm exec wrangler r2 object put "odie-os-native-downloads/mac/$versioned_dmg" --remote --file "release-macos/$versioned_dmg" --content-type application/x-apple-diskimage
+          pnpm exec wrangler r2 object put odie-os-native-downloads/mac/OdieOS-latest.json --remote --file release-macos/OdieOS-latest.json --content-type application/json
+
+      - name: Verify public macOS release artifacts
+        run: |
+          set -euo pipefail
+          versioned_dmg="$(node -p "JSON.parse(require('node:fs').readFileSync('release-macos/OdieOS-latest.json','utf8')).url.split('/').pop()")"
+          curl --fail --silent --show-error "$PUBLIC_NATIVE_DOWNLOAD_BASE_URL/OdieOS-latest.json" --output verified-latest.json
+          test "$(node -p "JSON.parse(require('node:fs').readFileSync('verified-latest.json','utf8')).url.split('/').pop()")" = "$versioned_dmg"
+          curl --fail --silent --show-error --head "$PUBLIC_NATIVE_DOWNLOAD_BASE_URL/$versioned_dmg" >/dev/null
+          curl --fail --silent --show-error "$PUBLIC_NATIVE_DOWNLOAD_BASE_URL/OdieOS-latest.dmg.sha256" --output verified-latest.sha256
+          diff -u release-macos/OdieOS-latest.dmg.sha256 verified-latest.sha256
+          curl --fail --silent --show-error --location "$PUBLIC_NATIVE_DOWNLOAD_BASE_URL/OdieOS-latest.dmg" --output verified-latest.dmg
+          expected_sha="$(awk '{print $1}' release-macos/OdieOS-latest.dmg.sha256)"
+          actual_sha="$(shasum -a 256 verified-latest.dmg | awk '{print $1}')"
+          test "$expected_sha" = "$actual_sha"
+
+      - name: Upload prepared macOS release files
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-macos-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-macos/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Clean macOS signing assets
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${NATIVE_RELEASE_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$NATIVE_RELEASE_KEYCHAIN_PATH" || true
+          fi
+          rm -f "$RUNNER_TEMP"/developer-id-certificate.p12 "$RUNNER_TEMP"/AuthKey_*.p8
+
+  ios:
+    name: Upload iOS App Store build
+    if: github.ref == 'refs/heads/main' && (inputs.platform == 'both' || inputs.platform == 'ios')
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment:
+      name: native-release
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and pnpm
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: true
+          run-install: false
+
+      - name: Install dependencies with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release inputs, secrets and variables
+        env:
+          APPLE_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          APPLE_IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_IOS_PROVISIONING_PROFILE_BASE64 }}
+          NATIVE_RELEASE_KEYCHAIN_PASSWORD: ${{ secrets.NATIVE_RELEASE_KEYCHAIN_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+          BUILD_NUMBER_INPUT: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          if ! [[ "$APP_STORE_CONNECT_API_KEY_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            printf '%s\n' "APP_STORE_CONNECT_API_KEY_ID must be 10 uppercase letters or digits" >&2
+            exit 1
+          fi
+          build_number="$BUILD_NUMBER_INPUT"
+          case "$build_number" in
+            ''|*[!0-9]*) printf '%s\n' "build_number must be a positive integer" >&2; exit 1 ;;
+            *) if [ "$build_number" -le 0 ]; then printf '%s\n' "build_number must be positive" >&2; exit 1; fi ;;
+          esac
+          printf 'NATIVE_IOS_BUILD_NUMBER=%s\n' "$build_number" >> "$GITHUB_ENV"
+          for name in \
+            APPLE_DISTRIBUTION_CERTIFICATE_BASE64 \
+            APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD \
+            APPLE_IOS_PROVISIONING_PROFILE_BASE64 \
+            NATIVE_RELEASE_KEYCHAIN_PASSWORD \
+            APP_STORE_CONNECT_API_KEY_P8_BASE64 \
+            APP_STORE_CONNECT_API_KEY_ID \
+            APP_STORE_CONNECT_API_ISSUER_ID
+          do
+            if [ -z "${!name}" ]; then
+              printf '%s\n' "Missing required native release configuration: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Install iOS signing assets
+        env:
+          APPLE_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          APPLE_IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_IOS_PROVISIONING_PROFILE_BASE64 }}
+          NATIVE_RELEASE_KEYCHAIN_PASSWORD: ${{ secrets.NATIVE_RELEASE_KEYCHAIN_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/native-release.keychain-db"
+          certificate_path="$RUNNER_TEMP/ios-distribution-certificate.p12"
+          profile_path="$RUNNER_TEMP/odie-os-app-store.mobileprovision"
+          api_key_dir="$HOME/.appstoreconnect/private_keys"
+          api_key_path="$api_key_dir/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          printf 'NATIVE_RELEASE_KEYCHAIN_PATH=%s\n' "$keychain_path" >> "$GITHUB_ENV"
+          mkdir -p "$api_key_dir" "$HOME/Library/MobileDevice/Provisioning Profiles"
+          printf '%s' "$APPLE_DISTRIBUTION_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_IOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$profile_path"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_P8_BASE64" | base64 -D > "$api_key_path"
+          chmod 600 "$certificate_path" "$profile_path" "$api_key_path"
+          security create-keychain -p "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$keychain_path" -T /usr/bin/codesign -T /usr/bin/xcodebuild -T /usr/bin/xcrun
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          profile_plist="$RUNNER_TEMP/ios-profile.plist"
+          security cms -D -i "$profile_path" > "$profile_plist"
+          profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print UUID' "$profile_plist")"
+          cp "$profile_path" "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
+          signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Apple Distribution/ { print $2; exit }')"
+          if [ -z "$signing_identity" ]; then
+            printf '%s\n' "Apple Distribution identity not found in imported certificate" >&2
+            exit 1
+          fi
+          {
+            printf 'NATIVE_IOS_PROFILE_PATH=%s\n' "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
+            printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path"
+            printf 'APPLE_SIGNING_IDENTITY=%s\n' "$signing_identity"
+          } >> "$GITHUB_ENV"
+
+      - name: Build fresh App Store Connect IPA
+        env:
+          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APPLE_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
+          rustup override set "$RUST_TOOLCHAIN"
+          rustup target add --toolchain "$RUST_TOOLCHAIN" aarch64-apple-ios
+          rustc --version
+          xcodebuild -version
+          pnpm --dir packages/workshop-native sync:gatekeeper-csp
+          pnpm --dir packages/workshop-native tauri ios build --ci --export-method app-store-connect --build-number "$NATIVE_IOS_BUILD_NUMBER"
+          ipa_count="$(find packages/workshop-native/src-tauri/gen/apple/build -name '*.ipa' -type f | wc -l | tr -d ' ')"
+          if [ "$ipa_count" != "1" ]; then
+            printf '%s\n' "Expected exactly one IPA, found $ipa_count" >&2
+            exit 1
+          fi
+          ipa_path="$(find packages/workshop-native/src-tauri/gen/apple/build -name '*.ipa' -type f)"
+          printf 'NATIVE_IOS_IPA_PATH=%s\n' "$ipa_path" >> "$GITHUB_ENV"
+
+      - name: Verify iOS bundle, team and signing metadata
+        run: |
+          set -euo pipefail
+          work_dir="$RUNNER_TEMP/ipa-verify"
+          rm -rf "$work_dir"
+          mkdir -p "$work_dir"
+          ditto -x -k "$NATIVE_IOS_IPA_PATH" "$work_dir"
+          app_count="$(find "$work_dir/Payload" -maxdepth 1 -name '*.app' -type d | wc -l | tr -d ' ')"
+          if [ "$app_count" != "1" ]; then
+            printf '%s\n' "Expected exactly one app bundle in IPA, found $app_count" >&2
+            exit 1
+          fi
+          app_path="$(find "$work_dir/Payload" -maxdepth 1 -name '*.app' -type d)"
+          info_plist="$app_path/Info.plist"
+          expected_version="$(node -p "JSON.parse(require('node:fs').readFileSync('packages/workshop-native/package.json','utf8')).version")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$info_plist")" = "com.totango.odieos"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$info_plist")" = "$expected_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$info_plist")" = "$NATIVE_IOS_BUILD_NUMBER"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          codesign -dv "$app_path" 2> "$RUNNER_TEMP/codesign-details.txt"
+          grep -q 'TeamIdentifier=66J7DJB93K' "$RUNNER_TEMP/codesign-details.txt"
+
+      - name: Upload IPA to App Store Connect
+        env:
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_API_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          xcrun altool --upload-app --type ios --file "$NATIVE_IOS_IPA_PATH" --apiKey "$APP_STORE_CONNECT_API_KEY_ID" --apiIssuer "$APP_STORE_CONNECT_API_ISSUER_ID"
+          {
+            printf '### iOS build uploaded\n\n'
+            printf 'Build %s is processing in App Store Connect. Select it on the App Store version and submit that version for review; this workflow does not publish it automatically.\n' "$NATIVE_IOS_BUILD_NUMBER"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean iOS signing assets
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${NATIVE_RELEASE_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$NATIVE_RELEASE_KEYCHAIN_PATH" || true
+          fi
+          rm -f "$RUNNER_TEMP"/ios-distribution-certificate.p12 "$RUNNER_TEMP"/odie-os-app-store.mobileprovision "$RUNNER_TEMP"/ios-profile.plist "$RUNNER_TEMP"/AuthKey_*.p8
+          rm -f "${NATIVE_IOS_PROFILE_PATH:-}" "$HOME/.appstoreconnect/private_keys"/AuthKey_*.p8
