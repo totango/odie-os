@@ -17,8 +17,9 @@ import { AdminConfig } from "./admin-config.js";
 export const DEFAULT_AMBIENT_GATEKEEPER_MODE: AmbientGatekeeperMode = "optional";
 
 /**
- * Deployment-controlled internal sources are intentionally universal when configured. Other
- * ambient vendors retain the opt-in default because they may confer unrelated authority.
+ * This allowlist is deployment policy: adding an internal source here explicitly authorizes its
+ * universal account, rather than letting a gatekeeper assert its own ambience. Other ambient
+ * vendors retain the opt-in default because they may confer unrelated authority.
  */
 const DEFAULT_ENABLED_AMBIENT_GATEKEEPERS = new Set(["github_org", "jarvis"]);
 
