@@ -2057,12 +2057,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   ): Promise<CodingSessionResource[]> {
     const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
     const catalogs = await Promise.all((await this.#codingSessionBindings(repositories)).map(async binding => {
-      const session = await binding.facet.startSession(
-        new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+      let session: McpSessionBase | undefined;
       try {
+        session = await binding.facet.startSession(
+          new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
         return { binding, resources: await session.listResources() };
+      } catch {
+        return { binding, resources: [] as CodingSessionResource[] };
       } finally {
-        session[Symbol.dispose]();
+        session?.[Symbol.dispose]();
       }
     }));
     const resources = catalogs.flatMap(({ binding, resources: upstreamResources }) =>
@@ -2111,7 +2114,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const session = await binding.facet.startSession(
       new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
     try {
-      return this.#codingSessionToolResult(await session.callTool(toolName, args));
+      const result = this.#codingSessionToolResult(await session.callTool(toolName, args));
+      assertCodingSessionMcpResponseSize(result);
+      return result;
     } finally {
       session[Symbol.dispose]();
     }
@@ -2140,7 +2145,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       };
       const result = await (codingSessionSession.getCodingSessionActionResult?.(actionId) ??
         session.getActionResult(actionId));
-      return this.#codingSessionToolResult(result);
+      const codingSessionResult = this.#codingSessionToolResult(result);
+      assertCodingSessionMcpResponseSize(codingSessionResult);
+      return codingSessionResult;
     } finally {
       session[Symbol.dispose]();
     }
