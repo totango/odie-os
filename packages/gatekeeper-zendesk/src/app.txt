@@ -1,0 +1,1 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:system-ui;margin:1rem;color:#0f172a}</style></head><body><h1>Zendesk Work Items source</h1><p>This embedded source capability is consumed by the Work Items shell. Open the Work Items app to search and edit tickets.</p></body></html>
