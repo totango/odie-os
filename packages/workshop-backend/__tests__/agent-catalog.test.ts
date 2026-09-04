@@ -114,6 +114,8 @@ describe("normalizeAgentCatalog", () => {
     expect(message).toContain("only when the task needs capabilities the organization source does not provide");
     expect(message).toContain("do not request another connection to the same vendor");
     expect(message).toContain("a duplicate binding does not add methods");
+    expect(message).toContain("use its Work Items API for Jira lookups and status checks");
+    expect(message).toContain("instead of requesting a separate Jira connection");
     expect(message).toContain("never create a Gadget, document, or other local artifact as a substitute");
     expect(message).toContain("ask where the user wants it sent");
     expect(message).toContain("provide a concise draft directly in chat");

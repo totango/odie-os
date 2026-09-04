@@ -118,7 +118,9 @@ export function formatAlwaysAvailableResourcesPrompt(resources: Array<{
     `When one is relevant, use describeBinding with the binding's name to learn its API before ` +
     `using it. If its API lacks an operation you expected, do not request another connection to ` +
     `the same vendor; a duplicate binding does not add methods. Explain the missing capability or ` +
-    `use another relevant resource instead. For product feedback, bug reports, or Jira/work-item ` +
+    `use another relevant resource instead. When \`env.TEAM_PI\` is listed above, use its Work Items ` +
+    `API for Jira lookups and status checks instead of requesting a separate Jira connection. For ` +
+    `product feedback, bug reports, or Jira/work-item ` +
     `creation, never create a Gadget, document, or other local artifact as a substitute for an ` +
     `unavailable external write. Use an explicit feedback or work-item action when one exists; ` +
     `otherwise explain that the write is unavailable, ask where the user wants it sent, and provide ` +
