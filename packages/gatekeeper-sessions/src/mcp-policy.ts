@@ -13,6 +13,11 @@ export function negotiateWorkshopMcpProtocolVersion(requested: unknown): string 
     ? requested : WORKSHOP_MCP_PROTOCOL_VERSION;
 }
 
+/** Returns whether a post-initialize request names a protocol version supported by Workshop. */
+export function isSupportedWorkshopMcpProtocolVersion(value: string): boolean {
+  return WORKSHOP_MCP_COMPATIBLE_PROTOCOL_VERSIONS.has(value);
+}
+
 /** Hostname used only inside the coding-session sandbox for Workshop MCP traffic. */
 export const WORKSHOP_MCP_HOST = "workshop-mcp.internal";
 

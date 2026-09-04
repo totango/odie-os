@@ -719,6 +719,22 @@ describe("coding session asynchronous startup", () => {
     await expect(invalid.json()).resolves.toMatchObject({ error: { code: -32602 } });
   });
 
+  it("rejects an unsupported post-initialize MCP protocol version", async () => {
+    const { policy } = createPolicy();
+    const response = await policy.handleWorkshopMcpRequest(
+      new Request("https://workshop-mcp.internal/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "MCP-Protocol-Version": "2099-01-01",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      }));
+
+    expect(response.status).toBe(400);
+    await expect(response.text()).resolves.toBe("Unsupported MCP protocol version.");
+  });
+
   it.each([
     ["initialize", undefined, { protocolVersion: "2025-06-18" }],
     ["tools/list", null, undefined],

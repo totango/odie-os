@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isSupportedWorkshopMcpProtocolVersion,
   isValidWorkshopMcpRequestId,
   negotiateWorkshopMcpProtocolVersion,
   normalizeMcpToolInputSchema,
@@ -84,6 +85,12 @@ describe("Workshop MCP protocol negotiation", () => {
     expect(negotiateWorkshopMcpProtocolVersion(undefined)).toBeNull();
     expect(negotiateWorkshopMcpProtocolVersion(20250618)).toBeNull();
     expect(negotiateWorkshopMcpProtocolVersion("x".repeat(33))).toBeNull();
+  });
+
+  it("recognizes only supported post-initialize protocol versions", () => {
+    expect(isSupportedWorkshopMcpProtocolVersion("2025-03-26")).toBe(true);
+    expect(isSupportedWorkshopMcpProtocolVersion("2025-06-18")).toBe(true);
+    expect(isSupportedWorkshopMcpProtocolVersion("2099-01-01")).toBe(false);
   });
 });
 

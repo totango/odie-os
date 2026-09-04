@@ -43,6 +43,7 @@ import {
   type GitHubInstallationToken,
 } from "./github-app.js";
 import {
+  isSupportedWorkshopMcpProtocolVersion,
   isValidWorkshopMcpRequestId,
   negotiateWorkshopMcpProtocolVersion,
   workshopMcpToolDefinition,
@@ -672,6 +673,11 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     if (message.jsonrpc !== "2.0" || typeof message.method !== "string") {
       return mcpError(message.id ?? null, -32600, "Invalid Request");
     }
+    const protocolVersion = request.headers.get("MCP-Protocol-Version");
+    if (message.method !== "initialize" && protocolVersion !== null &&
+        !isSupportedWorkshopMcpProtocolVersion(protocolVersion)) {
+      return new Response("Unsupported MCP protocol version.", { status: 400 });
+    }
     if (message.method === "notifications/initialized") return new Response(null, { status: 202 });
     if ((message.method === "initialize" || message.method === "tools/list" ||
          message.method === "resources/list" || message.method === "resources/read" ||
@@ -683,12 +689,12 @@ export class CodingSessionPolicy extends DurableObject<Env> {
       const sandboxId = required(policy.sandboxId, "Workshop MCP sandboxId");
       if (message.method === "initialize") {
         const params = message.params as { protocolVersion?: unknown } | undefined;
-        const protocolVersion = negotiateWorkshopMcpProtocolVersion(params?.protocolVersion);
-        if (protocolVersion === null) {
+        const negotiatedProtocolVersion = negotiateWorkshopMcpProtocolVersion(params?.protocolVersion);
+        if (negotiatedProtocolVersion === null) {
           return mcpError(message.id, -32602, "A valid protocolVersion is required");
         }
         return mcpResult(message.id, {
-          protocolVersion,
+          protocolVersion: negotiatedProtocolVersion,
           capabilities: { tools: {}, resources: {} },
           serverInfo: { name: "Workshop connections", version: "1.0.0" },
         });
