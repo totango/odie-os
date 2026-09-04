@@ -8,7 +8,7 @@ import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { WorkshopButton } from './components/WorkshopControls'
 import { logRpcFailure } from './rpcErrors'
-import { getWorkshopRuntime } from './runtime'
+import { accountBrowserFlows } from './accountBrowserFlow'
 import { AppLoadingSkeleton } from './components/AppLoadingSkeleton'
 
 type RequiredConnectionsGateProps = {
@@ -205,22 +205,16 @@ function RequiredConnectionCard({
 
   const startConnection = async () => {
     if (unavailable) return
-    const runtime = getWorkshopRuntime()
-    const popup = runtime.kind === 'web' ? window.open('about:blank', '_blank') : null
-    if (popup) popup.opener = null
     setBusy(true)
     setActionError(undefined)
     setPopupBlocked(false)
     try {
-      const { url } = expired && connection.accountId !== undefined
-        ? await authenticatedApi.reconnectAccount(connection.accountId)
-        : await authenticatedApi.connectAccount(connection.vendorId)
-      setManualUrl(url)
-      if (runtime.kind === 'tauri') await runtime.openExternal(url)
-      else if (popup) popup.location.href = url
-      else setPopupBlocked(true)
+      const result = expired && connection.accountId !== undefined
+        ? await accountBrowserFlows.reconnect(authenticatedApi, connection.accountId, { webPopup: 'preopen', webFallback: 'manual' })
+        : await accountBrowserFlows.connect(authenticatedApi, connection.vendorId, undefined, { webPopup: 'preopen', webFallback: 'manual' })
+      setManualUrl(result.url)
+      if (result.popupBlocked) setPopupBlocked(true)
     } catch (error) {
-      popup?.close()
       logRpcFailure(`Could not start required ${expired ? 'reconnect' : 'connect'} flow:`, error)
       setActionError(`Could not start ${expired ? 'reconnect' : 'connect'} flow. Try again in a moment.`)
     } finally {

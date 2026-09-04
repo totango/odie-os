@@ -6,7 +6,8 @@ Optional connectors are intentionally non-authoritative until a user/admin wires
 
 - `ZENDESK`
 - `GMAIL`
-- `TEAM_PI`
+- `ZENDESK`
+- `JIRA_SITE`
 - `JARVIS`
 - `JIRA` or `LINEAR`
 

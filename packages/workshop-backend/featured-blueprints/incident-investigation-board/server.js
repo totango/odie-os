@@ -9,10 +9,10 @@ const MAX_TITLE = 180;
 
 const CONNECTORS = [
   { key: "JARVIS", label: "JARVIS", names: ["JARVIS"], hint: "Optional ambient JARVIS binding for agents. This persistent gadget records that it is connected but does not call JARVIS tools directly." },
-  { key: "TEAM_PI", label: "Team PI", names: ["TEAM_PI"], hint: "Connect Team PI from Connections for documented read routes such as connection inventory, Gmail search, and Zendesk search." },
   { key: "GMAIL", label: "Gmail", names: ["GMAIL_INBOX", "GMAIL_SEARCH", "GMAIL_LABEL"], hint: "Connect Gmail inbox/search/label resources when incident evidence lives in mail. Manual records remain the fallback." },
-  { key: "ZENDESK", label: "Zendesk", names: [], hint: "No native Zendesk package is assumed. Route Zendesk context through Team PI or a vetted MCP connector, then capture findings manually." },
-  { key: "LINEAR", label: "Linear", names: ["LINEAR_WORKSPACE", "LINEAR_TEAM", "LINEAR_ISSUE"], hint: "Connect Linear workspace/team/issue resources for remediation tracking. Jira should be routed through Team PI or a vetted MCP connector." },
+  { key: "ZENDESK", label: "Zendesk", names: ["ZENDESK", "ZENDESK_TICKET"], hint: "Connect a native Zendesk account or ticket resource for support evidence." },
+  { key: "JIRA", label: "Jira", names: ["JIRA_SITE", "JIRA_PROJECT", "JIRA_ISSUE"], hint: "Connect a native Jira site, project, or issue resource for remediation tracking." },
+  { key: "LINEAR", label: "Linear", names: ["LINEAR_WORKSPACE", "LINEAR_TEAM", "LINEAR_ISSUE"], hint: "Connect Linear workspace/team/issue resources for remediation tracking." },
   { key: "GITHUB_REPO", label: "GitHub repository", names: ["GITHUB_REPO"], hint: "Connect a GitHub repository to read repository metadata, open pull requests, and open issues." },
   { key: "GITHUB_ISSUE", label: "GitHub issue", names: ["GITHUB_ISSUE"], hint: "Connect a single GitHub issue for evidence. It will show as connected, but repository-wide lists require GITHUB_REPO." },
   { key: "GITHUB_PULL_REQUEST", label: "GitHub pull request", names: ["GITHUB_PULL_REQUEST"], hint: "Connect a single GitHub pull request for evidence. It will show as connected, but repository-wide lists require GITHUB_REPO." },
@@ -103,7 +103,7 @@ export class Gadget extends DurableObject {
   async sourceSnapshot() {
     const connectors = await this.listConnectors();
     const enabled = key => connectors.find(connector => connector.key === key)?.status !== "Skipped";
-    const live = { repository: null, githubPullRequests: [], githubIssues: [], teamPiConnections: [], notes: [] };
+    const live = { repository: null, githubPullRequests: [], githubIssues: [], notes: [] };
     if (enabled("GITHUB_REPO") && this.env.GITHUB_REPO) {
       try {
         live.repository = await this.env.GITHUB_REPO.getMetadata();
@@ -116,14 +116,6 @@ export class Gadget extends DurableObject {
     if (enabled("GITHUB_ISSUE") && this.env.GITHUB_ISSUE) live.notes.push("GITHUB_ISSUE is connected. Add findings manually or ask an agent to read documented issue details; repository lists require GITHUB_REPO.");
     if (enabled("GITHUB_PULL_REQUEST") && this.env.GITHUB_PULL_REQUEST) live.notes.push("GITHUB_PULL_REQUEST is connected. Add findings manually or ask an agent to read documented PR details; repository lists require GITHUB_REPO.");
     if (enabled("JARVIS") && this.env.JARVIS) live.notes.push("JARVIS is connected for agent-routed production context. This gadget does not invoke JARVIS tools directly from persistent code.");
-    if (enabled("TEAM_PI") && this.env.TEAM_PI) {
-      try {
-        const page = await this.env.TEAM_PI.listConnections({ limit: 8 });
-        live.teamPiConnections = Array.isArray(page.items) ? page.items.slice(0, 8) : [];
-      } catch (error) {
-        live.notes.push(`TEAM_PI is connected, but connection inventory was unavailable: ${error?.message ?? String(error)}`);
-      }
-    }
     return { connectors, live, generatedAt: nowIso() };
   }
 
@@ -209,7 +201,7 @@ export class Gadget extends DurableObject {
         { id: "demo_t1", type: "timeline", title: "Alert fired", body: "Synthetic payments-canary alert crossed 5% error rate for two regions.", source: "Demo monitor", owner: "SRE", status: "Confirmed", severity: "High", tags: ["checkout", "5xx"], occurredAt: base, link: "", createdAt: base, updatedAt: base },
         { id: "demo_e1", type: "evidence", title: "Recent deploy narrowed", body: "Manual evidence indicates the only deployment inside the window changed retry behavior around the payment gateway.", source: "Manual import", owner: "Incident commander", status: "Needs validation", severity: "High", tags: ["deploy", "payments"], occurredAt: "2026-08-11T15:07:00.000Z", link: "", createdAt: base, updatedAt: base },
         { id: "demo_d1", type: "decision", title: "Rollback first, then preserve traces", body: "Prefer customer impact reduction before deep forensic collection. Capture dashboard screenshots and owner notes before rollback completes.", source: "War room", owner: "Maya Chen", status: "Accepted", severity: "Medium", tags: ["rollback"], occurredAt: "2026-08-11T15:12:00.000Z", link: "", createdAt: base, updatedAt: base },
-        { id: "demo_a1", type: "action", title: "Open remediation ticket", body: "Track idempotency retry fix and customer notification readiness. Link Linear directly when available; route Jira through Team PI or a vetted MCP connector.", source: "Demo follow-up", owner: "Platform", status: "Open", severity: "Medium", tags: ["follow-up"], occurredAt: "2026-08-11T15:25:00.000Z", link: "", createdAt: base, updatedAt: base }
+        { id: "demo_a1", type: "action", title: "Open remediation ticket", body: "Track idempotency retry fix and customer notification readiness. Link native Jira or Linear when available.", source: "Demo follow-up", owner: "Platform", status: "Open", severity: "Medium", tags: ["follow-up"], occurredAt: "2026-08-11T15:25:00.000Z", link: "", createdAt: base, updatedAt: base }
       ],
     };
   }

@@ -463,7 +463,7 @@ function NewSessionPane() {
             <div className="mt-2 grid gap-2 sm:grid-cols-3" role="group" aria-label="Coding agent runtime">
               {([
                 ['opencode', 'OpenCode', 'Established runtime with your account plugins and skills.'],
-                ['pi', 'Pi', 'Focused runtime using Team PI and Workshop tools.'],
+                ['pi', 'Pi', 'Focused runtime using Team PI Codex and Workshop tools.'],
                 ['prime-agent', 'Prime Agent', 'IPython-based runtime using shared Codex and Workshop tools.'],
               ] as const).map(([value, label, description]) => (
                 <button

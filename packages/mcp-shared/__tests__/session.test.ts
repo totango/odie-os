@@ -280,3 +280,58 @@ it("refuses oversized tool names before consulting the host", async () => {
   await expect(session.callTool(oversized)).rejects.toThrow(/tool name.*at most/i);
   expect(finds).toBe(0);
 });
+
+
+it("only exposes and reads resources referenced by granted MCP Apps tools", async () => {
+  const observations: unknown[] = [];
+  const calls: string[] = [];
+  const appTool = classifyTool({
+    name: "weather", _meta: { ui: { resourceUri: "ui://weather/dashboard" } },
+  }, "byo");
+  const host = {
+    serverName: "Weather", endpoint: "https://mcp.example.com", scope: {},
+    tools: async () => [appTool],
+    call: async (fn: (client: unknown) => Promise<unknown>) => fn({
+      listResources: async () => ({ resources: [
+        { uri: "ui://weather/dashboard", name: "Weather" },
+        { uri: "ui://private/admin", name: "Admin" },
+      ], truncated: false }),
+      readResource: async (uri: string) => {
+        calls.push(uri);
+        return { contents: [{ uri, mimeType: "text/html", text: "<main>Weather</main>" }] };
+      },
+    }),
+  } as unknown as McpSessionHost;
+  const session = new McpSessionBase(host, {
+    authorizeObservation: (description: unknown) => { observations.push(description); },
+  } as never);
+  await expect(session.listResources()).resolves.toEqual([
+    { uri: "ui://weather/dashboard", name: "Weather" },
+  ]);
+  await expect(session.readResource("ui://private/admin")).rejects.toThrow(/not referenced/);
+  await expect(session.readResource("ui://weather/dashboard")).resolves.toEqual({
+    contents: [{ uri: "ui://weather/dashboard", mimeType: "text/html", text: "<main>Weather</main>" }],
+  });
+  expect(calls).toEqual(["ui://weather/dashboard"]);
+  expect(observations).toHaveLength(2);
+});
+
+
+it("fails closed on truncated app catalogs and mismatched upstream resource content", async () => {
+  const appTool = classifyTool({
+    name: "app", _meta: { ui: { resourceUri: "ui://app/main" } },
+  }, "byo");
+  const makeSession = (client: unknown) => new McpSessionBase({
+    serverName: "App", endpoint: "https://mcp.example.com", scope: {},
+    tools: async () => [appTool],
+    call: async (fn: (value: unknown) => Promise<unknown>) => fn(client),
+  } as unknown as McpSessionHost, { authorizeObservation() {} } as never);
+
+  await expect(makeSession({
+    listResources: async () => ({ resources: [], truncated: true }),
+  }).listResources()).rejects.toThrow(/bounded listing limit/);
+
+  await expect(makeSession({
+    readResource: async () => ({ contents: [{ uri: "ui://other/main", text: "wrong" }] }),
+  }).readResource("ui://app/main")).rejects.toThrow(/different resource URI/);
+});

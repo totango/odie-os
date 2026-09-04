@@ -16,9 +16,8 @@ const CONNECTORS = [
   { key: "GMAIL_INBOX", label: "Gmail inbox", kind: "presence", purpose: "Stakeholder threads; detected for context but not imported by the risk starter" },
   { key: "GMAIL_SEARCH", label: "Gmail search", kind: "presence", purpose: "Stakeholder search scope; detected for context but not imported by the risk starter" },
   { key: "GMAIL_LABEL", label: "Gmail label", kind: "presence", purpose: "Stakeholder label scope; detected for context but not imported by the risk starter" },
-  { key: "TEAM_PI", label: "Team PI", kind: "presence", purpose: "Planning confidence and team context; detected for future agent workflows" },
+  { key: "JIRA_SITE", label: "Jira site", kind: "presence", purpose: "Native Jira planning and delivery context" },
   { key: "JARVIS", label: "JARVIS", kind: "presence", purpose: "Internal launch docs and playbooks; detected for future agent workflows" },
-  { key: "JIRA_ROUTE", label: "Jira", kind: "route", purpose: "No native Jira binding is bundled. Use Linear for native issue lists, or add a vetted MCP Jira resource from Connections." },
 ];
 
 const DEMO_RECORDS = [

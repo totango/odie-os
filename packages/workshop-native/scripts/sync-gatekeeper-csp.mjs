@@ -10,7 +10,7 @@ const appPaths = [
   "gatekeeper-context/src/generated/app.txt",
   "gatekeeper-jarvis/src/generated/app.txt",
   "gatekeeper-scheduler/src/generated/app.txt",
-  "gatekeeper-team-pi/src/generated/app.txt",
+  "gatekeeper-work-items/src/generated/app.txt",
 ].map((path) => resolve(repositoryRoot, "packages", path));
 
 const hashes = [];

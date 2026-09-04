@@ -15,10 +15,10 @@ describe("ambient connection requests", () => {
     ]);
 
     expect(findAmbientBindingName(
-        {TEAM_PI: 4, REPO: 5}, "TEAM_PI", target => records.get(target)))
-      .toBe("TEAM_PI");
+        {SOURCE: 4, REPO: 5}, "team_pi", target => records.get(target)))
+      .toBe("SOURCE");
     expect(findAmbientBindingName(
-        {TEAM_PI: 4, REPO: 5}, "github", target => records.get(target)))
+        {SOURCE: 4, REPO: 5}, "github", target => records.get(target)))
       .toBeUndefined();
   });
 });
@@ -100,6 +100,13 @@ describe("OverseerDurableObject.startHook", () => {
     let config = { ...DEFAULT_ADMIN_CONFIG, disabledGatekeepers: ["email"] };
     let overseer = makeOverseer(
         async () => serializeAdminConfig(config), { enabled: true }, "email");
+
+    await expect(overseer.startHook(1)).rejects.toThrow("Gatekeeper is disabled.");
+  });
+
+  it("rejects delivery for retired Team PI capability records without admin config", async () => {
+    let overseer = makeOverseer(
+        async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG), { enabled: true }, "team_pi");
 
     await expect(overseer.startHook(1)).rejects.toThrow("Gatekeeper is disabled.");
   });

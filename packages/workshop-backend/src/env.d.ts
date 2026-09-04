@@ -28,10 +28,10 @@ declare global {
       // Note: outside gateway mode, Workers AI (provider "cloudflare") is BYOK like every other
       // provider -- the account ID and API token live in the user's model config, not in env.
 
-      // Optional deployment-provided Codex models routed through Team PI. Both BASE_URL and
+      // Optional deployment-provided Codex models routed through Team PI Codex. Both BASE_URL and
       // HMAC_SECRET must be present to list/resolve these built-ins; MODELS defaults to
       // "gpt-5.6-sol" when omitted.
-      // Relay prefix, e.g. https://team-pi-proxy.example.com/api/odie. The Codex adapter appends
+      // Team PI Codex relay prefix, e.g. https://team-pi-proxy.example.com/api/odie. The adapter appends
       // /codex/responses.
       TEAM_PI_CODEX_BASE_URL?: string;
       TEAM_PI_CODEX_HMAC_SECRET?: string;

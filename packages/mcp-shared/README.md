@@ -18,7 +18,7 @@ does so through a named hook (`staticToken`, `mintAccount`), not a private copy.
 
 | Module | Purpose |
 | --- | --- |
-| `client` | Bounded Streamable HTTP transport (`initialize`, `tools/list`, `tools/call`) using official MCP wire types |
+| `client` | Bounded Streamable HTTP transport (`initialize`, tool list/call, resource list/read) using official MCP wire types |
 | `oauth` | Small adapter around the official MCP client's OAuth errors and token revocation gap |
 | `tools` | The trust boundary: read/action classification, auto-approval eligibility, approval prompts, catalog fingerprinting |
 | `schema-to-ts` | JSON Schema to TypeScript, strict `callTool` overloads plus progressive discovery |
@@ -136,3 +136,22 @@ Fixed rather than configurable.
 pnpm --filter @gadgets/mcp-shared build   # tsc
 pnpm --filter @gadgets/mcp-shared test:run    # vitest
 ```
+
+
+### MCP Apps in coding sessions
+
+The Workshop proxy keeps upstream OAuth and resource reads inside the owning gatekeeper. Resource
+URIs are rewritten into an owner-bound Workshop namespace. The pinned `pi-mcp-adapter` does not yet
+forward a trusted iframe origin with `tools/call`, so Workshop marks every proxied tool as
+`ui.visibility: ["model"]`. The adapter host therefore rejects all app-originated calls, including
+cross-binding, read-only, and otherwise auto-approved tools. This is intentionally fail-closed until
+the adapter can provide an unforgeable originating resource/binding context; do not accept an app
+supplied header or call argument as that context.
+
+`pi-mcp-adapter` 2.28 adds an approval broker with `origin: "iframe"`, which can require an
+explicit local approval. Its broker request contains the aggregator server and target tool names but
+not the originating UI resource URI or binding. Since Workshop deliberately exposes all connected
+accounts through one namespaced aggregator, 2.28 still cannot prove that an app from binding A is
+calling binding A rather than binding B. Do not upgrade to restore app calls until the broker carries
+an unforgeable originating resource/binding and Workshop can enforce an exact generation-bound
+match before its own approval flow.

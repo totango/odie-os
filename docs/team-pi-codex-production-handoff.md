@@ -35,7 +35,6 @@ Odie -> Team PI relay -> Jarvis bridge -> codex-lb
 - Jarvis image digest: `sha256:973357ada1bda0b7218c41cb373781ba4b4eb7a755676390974bd2132f1da127`
 - codex-lb chart and app version: `1.22.0`, Helm revision 13 at verification time
 - JARVIS gatekeeper: `odie-os-gk-jarvis`, version `2c39d4ef-7ed7-44c2-9bb4-7efd94cade38`
-- Team PI gatekeeper: `odie-os-gk-team-pi`, version `e22ce9c3-7fe6-486a-b14e-c5b3af366ad4`
 
 The backend has no public route. `workers_dev` and preview URLs are disabled. The router reaches
 the backend through a Worker service binding.
@@ -130,7 +129,6 @@ Preserved backend resources:
 - Context service: `odie-os-gk-context#GatekeeperVendor`
 - JARVIS service: `odie-os-gk-jarvis#GatekeeperVendor`
 - Scheduler service: `odie-os-gk-scheduler#GatekeeperVendor`
-- Team PI service: `odie-os-gk-team-pi#GatekeeperVendor`
 - Durable Object migration tags through `v2`
 
 ## Gatekeeper Capabilities
@@ -169,28 +167,6 @@ verified 2026-08-07 rather than taken from the tool descriptions:
 JARVIS tool helpers are generated with camel-case names. Call
 `JARVIS.jarvisInvestigateCustomerIssue(...)`, not the MCP wire name; snake_case names remain
 reachable only through `callTool("jarvis_investigate_customer_issue", ...)`.
-
-Team PI uses per-user Auth0 device authorization against `https://auth.unison.totango.com`, audience
-`https://team-pi.totango.com/api`, and API origin `https://team-pi-proxy.unison.totango.com`.
-Skill listing/instructions, connection status, and provider reads are observations. `installSkill`
-and `startConnection` are approval-gated actions. Connection results expose only same-origin
-`/connect/<provider>/page` URLs with `user` or `shared` query parameters; bearer, Nango, Auth0, and
-raw connection-link values are not returned to gadgets.
-
-Team PI identity contract: Auth0 access tokens minted for the custom API omit the `email` claim, so
-the Team PI server derives identity from a verified ID token sent as `x-team-pi-id-token`. The
-gatekeeper therefore persists the ID token beside the access and refresh tokens, requests
-`openid profile email offline_access` on refresh, and forwards the ID token only to the configured
-Team PI origin. Without it, public `/api/skills` succeeds while `/connections`, `/connect/*`, and
-provider routes return HTTP 403. An account connected before this change is upgraded in place by
-one forced refresh; a failed upgrade preserves the existing valid credentials, and a refresh that
-returns no usable ID token is retried at most once every five minutes.
-
-Ambient Team PI discovery lists only deployment-public skill manifests and does not read per-user
-connections, so it is not marked sensitive. Explicit session reads still authorize with
-`prohibitAllSharing`, and the kernel permanently blocks all later actions in any workspace that has
-recorded such an observation. Run `installSkill` or `startConnection` in a workspace that has not
-yet performed an explicit Team PI read.
 
 A connected account's persisted gatekeeper capability is pinned to the Worker version present when
 the account was connected (the gatekeeper Workers set `allow_irrevocable_stub_storage`, so a stored
@@ -237,7 +213,6 @@ chats in every workspace get the current one.
 - `packages/workshop-backend/src/auto-approval.ts`: joinable single-flight approval draining
 - `packages/workshop-shared/src/api.ts`: model context and output-limit configuration
 - `packages/gatekeeper-jarvis/`: fixed-policy JARVIS MCP gatekeeper
-- `packages/gatekeeper-team-pi/`: Team PI Auth0, REST, approval, and sanitization gatekeeper
 - `packages/workshop-frontend/src/routes/getting-started.tsx`: live deployment readiness guide
 - Team PI `src/platform/odie-codex-proxy.ts`: HMAC verification, replay claim, and forwarding contract
 - Jarvis `dashboard/server/internal/api/team_pi_codex_bridge.go`: streaming bridge
@@ -263,7 +238,6 @@ Additional focused verification completed:
 
 ```text
 JARVIS gatekeeper tests                           # 21 passed
-Team PI gatekeeper tests                          # 24 passed
 Getting Started route tests                       # 5 passed
 Auto-approval and managed Codex focused tests     # 31 passed
 Release-manifest golden test                      # passed
@@ -277,34 +251,18 @@ Production verification completed:
 
 - Unauthenticated public request returned HTTP 302 to Cloudflare Access.
 - Direct backend hostname returned HTTP 404.
-- Team PI `/health` returned `ok: true`.
 - Fresh signed relay request returned HTTP 200 SSE.
 - Fresh UI conversation returned `10 plus 6 equals 16.`.
 - A second invocation in the same conversation returned `11 plus 7 equals 18.`, verifying replay
   IDs are unique per invocation while chat affinity remains stable.
-- `/getting-started` loaded through Cloudflare Access and detected the JARVIS singleton and a
-  connected Team PI account.
+- `/getting-started` loaded through Cloudflare Access and detected the JARVIS singleton.
 - JARVIS knowledge reads, a manually approved investigation, and investigation-result observation
   reached production.
-- Team PI `listSkills({ limit: 3 })` reached production as an observation.
 - After two transient HTTP 502 responses and a stale-workspace continuity-owner error, a new
   workspace returned `MODEL ROUTE HEALTHY`, confirming the managed model route itself was healthy.
 - In that fresh workspace, one JARVIS investigation was approved, the resumed agent polled
   `JARVIS.getActionResult`, and the full terminal payload appeared as a normal assistant message
   without opening activity details.
-- Team PI `getSkill("connection-setup")` returned full skill instructions in chat.
-- After the identity fix and an account reconnect, Team PI `listConnections({ limit: 20 })` returned
-  sanitized entries for user `docs`, shared `zendesk`, shared `salesforce`, and token `chorus`, with
-  no tokens or connection links.
-- Team PI `zendeskSearch({ query: "type:ticket", limit: 1 })` returned a bounded provider read that
-  was summarized directly in chat.
-- Team PI `installSkill("connection-setup")` was approved and polled to the terminal result
-  `{"status":"ready","result":{"ok":true,...}}` for skill version `0.1.0`, rendered in chat.
-- Team PI `startConnection("gmail")` was approved and polled to the terminal result
-  `{"status":"ready","result":{"provider":"gmail","connectionId":"jacob-beck-totango-com-gmail",
-  "browserUrl":"https://team-pi-proxy.unison.totango.com/connect/gmail/page?user=..."}}`, rendered
-  in chat. The URL is same-origin `/connect/gmail/page` carrying only `user`; no session token,
-  Nango `connectLink`, or Auth0 material reached the agent.
 
 This completes the planned production end-to-end verification.
 

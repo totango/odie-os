@@ -3,9 +3,9 @@ export const CREATE_JIRA_ISSUE_PROMPT = [
   'First gather the project, issue type, priority, summary, description, reproduction steps, expected behavior, actual behavior, acceptance criteria, and customer context.',
   'Ask follow-up questions for any missing required fields before drafting.',
   'Show me the final draft for approval before taking any write action.',
-  'Then use only the approval-backed TEAM_PI.createJiraIssue action exposed by Team PI Work Items.',
-  'After creation, use TEAM_PI.readWorkItem and the approval-backed TEAM_PI.addWorkItemComment, TEAM_PI.updateWorkItemFields, or TEAM_PI.transitionJiraIssue actions for any requested follow-up management.',
+  'Then use only the approval-backed jira_create_issue tool exposed by the native JIRA_SITE or JIRA_PROJECT binding.',
+  'After creation, use jira_read_issue and the approval-backed jira_add_comment, jira_update_issue, or jira_transition_issue tools for any requested follow-up management.',
   'Present the returned provider URL as an Open work item link; Odie opens recognized Jira links in its Work Items panel by default.',
   'Do not request or connect a generic Atlassian MCP server, and do not invent or call any other Jira API.',
-  'If TEAM_PI.createJiraIssue is unavailable or reports an authentication, connection, or permission failure, retain the draft and call requestConnection only for the Team PI account resource team-pi://account so I can reconnect or update Team PI access.',
+  'If jira_create_issue is unavailable or reports an authentication, connection, or permission failure, retain the draft and call requestConnection only for the native Jira site or project resource so I can connect or update Jira access.',
 ].join(' ');

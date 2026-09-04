@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'sha256-xujUsdOfPkCZW/0lEGXNpb4f19MkA104+zIb+SZ/LQY=' 'sha256-pMLnezU9s1py1a8oIKuwlWPc/4noOpwqODtK648RwVo=' 'sha256-ZuyxzU9D5E+dZltOCPi0Xz71xPvu5ZK5QJb2hBw9JNE=' 'sha256-3dJaNZt6q6jppzdwqXSUBquNP4j3eTg55F2EnnkO/40=' 'sha256-3nxqSFVOHsR74t6CdI0JpMlp74NvjI7EizrUebR1AME=' 'sha256-3+ID8FW4jqyf5b1heNWMusCQCEGamLq/AG3q6S8LaeA='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://odie-os.odie-os.workers.dev https://odie-os-native-api.odie-os.workers.dev; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost https://odie-os-native-api.odie-os.workers.dev wss://odie-os-native-api.odie-os.workers.dev; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; script-src 'self' 'sha256-xujUsdOfPkCZW/0lEGXNpb4f19MkA104+zIb+SZ/LQY=' 'sha256-pMLnezU9s1py1a8oIKuwlWPc/4noOpwqODtK648RwVo=' 'sha256-ZuyxzU9D5E+dZltOCPi0Xz71xPvu5ZK5QJb2hBw9JNE=' 'sha256-3dJaNZt6q6jppzdwqXSUBquNP4j3eTg55F2EnnkO/40=' 'sha256-3nxqSFVOHsR74t6CdI0JpMlp74NvjI7EizrUebR1AME=' 'sha256-c2+ZbfkP2DKW7Yp5Ju3iwKTT5jlKMy/814ReiH9rYvc='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://odie-os.odie-os.workers.dev https://odie-os-native-api.odie-os.workers.dev; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost https://odie-os-native-api.odie-os.workers.dev wss://odie-os-native-api.odie-os.workers.dev; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {

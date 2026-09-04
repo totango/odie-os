@@ -128,7 +128,7 @@ describe('RequiredConnectionsGate', () => {
   })
 
   it('locks a previously healthy route when a live recheck fails', async () => {
-    const api = createApi([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'healthy' }])
+    const api = createApi([{ vendorId: 'jira', displayName: 'Jira', state: 'healthy' }])
     const rendered = await renderGate(api, '/')
     expect(rendered.textContent).toContain('Unlocked app')
     api.getRequiredConnectionStatuses.mockRejectedValueOnce(new Error('offline'))
@@ -140,22 +140,22 @@ describe('RequiredConnectionsGate', () => {
   })
 
   it('ignores an older health response that finishes after a newer recheck', async () => {
-    const api = createApi([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'missing' }])
+    const api = createApi([{ vendorId: 'jira', displayName: 'Jira', state: 'missing' }])
     const rendered = await renderGate(api, '/')
     const slow = deferred<RequiredConnectionStatus[]>()
     api.getRequiredConnectionStatuses
       .mockImplementationOnce(() => slow.promise)
-      .mockResolvedValueOnce([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'healthy' }])
+      .mockResolvedValueOnce([{ vendorId: 'jira', displayName: 'Jira', state: 'healthy' }])
 
     await act(async () => {
-      api.subscriber!.add(1, { displayName: 'Team PI' } as never, { displayName: 'Team PI' } as never, [], true, 'team_pi')
+      api.subscriber!.add(1, { displayName: 'Jira' } as never, { displayName: 'Jira' } as never, [], true, 'jira')
     })
     await act(async () => {
       api.subscriber!.ready()
     })
     expect(rendered.textContent).toContain('Unlocked app')
 
-    await act(async () => slow.resolve([{ vendorId: 'team_pi', displayName: 'Team PI', state: 'missing' }]))
+    await act(async () => slow.resolve([{ vendorId: 'jira', displayName: 'Jira', state: 'missing' }]))
     expect(rendered.textContent).toContain('Unlocked app')
   })
 

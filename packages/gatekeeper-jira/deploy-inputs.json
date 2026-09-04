@@ -1,0 +1,19 @@
+[
+  {
+    "name": "CLIENT_ID",
+    "kind": "secret",
+    "label": "Atlassian OAuth client ID",
+    "consoleUrl": "https://developer.atlassian.com/console/myapps/",
+    "setupSteps": [
+      "Create an OAuth 2.0 (3LO) app in the Atlassian developer console.",
+      "Configure Jira API permissions and add the redirect URI below as the callback URL.",
+      "Copy the app client ID and secret here."
+    ],
+    "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/jira/oauth"
+  },
+  {
+    "name": "CLIENT_SECRET",
+    "kind": "secret",
+    "label": "Atlassian OAuth client secret"
+  }
+]

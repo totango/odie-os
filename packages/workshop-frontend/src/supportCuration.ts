@@ -10,7 +10,6 @@ const SUPPORT_CURATION_KEYS: ReadonlySet<CuratedAssetKey> = new Set([
   'connector:jira',
   'connector:linear',
   'connector:odie-kg',
-  'connector:team-pi',
   'connector:totango-kg',
   'connector:zendesk',
   'featured:customer-impact',

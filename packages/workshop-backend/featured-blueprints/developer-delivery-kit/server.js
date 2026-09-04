@@ -11,9 +11,9 @@ const CONNECTORS = [
   { key: "GITHUB_REPO", label: "GitHub repository", names: ["GITHUB_REPO"], primary: true, hint: "Connect the native GitHub repository binding for metadata, PR queue, and issue queue reads." },
   { key: "GITHUB_ISSUE", label: "GitHub issue", names: ["GITHUB_ISSUE"], hint: "Optional single-issue binding. It shows as connected; repository-wide queues require GITHUB_REPO." },
   { key: "GITHUB_PULL_REQUEST", label: "GitHub pull request", names: ["GITHUB_PULL_REQUEST"], hint: "Optional single-PR binding. It shows as connected; repository-wide queues require GITHUB_REPO." },
-  { key: "LINEAR", label: "Linear", names: ["LINEAR_WORKSPACE", "LINEAR_TEAM", "LINEAR_ISSUE"], hint: "Optional Linear workspace/team/issue binding for delivery risks. Jira should be routed through Team PI or a vetted MCP connector." },
+  { key: "LINEAR", label: "Linear", names: ["LINEAR_WORKSPACE", "LINEAR_TEAM", "LINEAR_ISSUE"], hint: "Optional Linear workspace/team/issue binding for delivery risks." },
+  { key: "JIRA", label: "Jira", names: ["JIRA_SITE", "JIRA_PROJECT", "JIRA_ISSUE"], hint: "Optional native Jira site, project, or issue binding for delivery risks." },
   { key: "GMAIL", label: "Gmail", names: ["GMAIL_INBOX", "GMAIL_SEARCH", "GMAIL_LABEL"], hint: "Optional Gmail inbox/search/label binding for release approvals and customer escalations." },
-  { key: "TEAM_PI", label: "Team PI", names: ["TEAM_PI"], hint: "Optional Team PI binding for documented read routes, especially connection inventory and agent-routed delivery context." },
   { key: "JARVIS", label: "JARVIS", names: ["JARVIS"], hint: "Optional ambient JARVIS binding for agents. This persistent gadget records availability but does not call JARVIS tools directly." },
 ];
 
@@ -84,7 +84,7 @@ export class Gadget extends DurableObject {
   async sourceSnapshot() {
     const connectors = await this.listConnectors();
     const enabled = key => connectors.find(connector => connector.key === key)?.status !== "Skipped";
-    const live = { repository: null, pullRequests: [], issues: [], teamPiConnections: [], notes: [] };
+    const live = { repository: null, pullRequests: [], issues: [], notes: [] };
     if (enabled("GITHUB_REPO") && this.env.GITHUB_REPO) {
       try {
         live.repository = await this.env.GITHUB_REPO.getMetadata();
@@ -97,14 +97,6 @@ export class Gadget extends DurableObject {
     if (enabled("GITHUB_ISSUE") && this.env.GITHUB_ISSUE) live.notes.push("GITHUB_ISSUE is connected. Repository-wide issue queues require GITHUB_REPO; keep single-issue findings as manual records or ask an agent to read details.");
     if (enabled("GITHUB_PULL_REQUEST") && this.env.GITHUB_PULL_REQUEST) live.notes.push("GITHUB_PULL_REQUEST is connected. Repository-wide PR queues require GITHUB_REPO; keep single-PR findings as manual records or ask an agent to read details.");
     if (enabled("JARVIS") && this.env.JARVIS) live.notes.push("JARVIS is connected for agent-routed operational context. This persistent gadget does not invoke JARVIS tools directly.");
-    if (enabled("TEAM_PI") && this.env.TEAM_PI) {
-      try {
-        const page = await this.env.TEAM_PI.listConnections({ limit: 8 });
-        live.teamPiConnections = Array.isArray(page.items) ? page.items.slice(0, 8) : [];
-      } catch (error) {
-        live.notes.push(`TEAM_PI is connected, but connection inventory was unavailable: ${error?.message ?? String(error)}`);
-      }
-    }
     return { connectors, live, generatedAt: nowIso() };
   }
 
@@ -190,7 +182,7 @@ export class Gadget extends DurableObject {
         { id: "demo_health", type: "repo-health", title: "Main branch confidence", body: "Demo signal: build is green, but flaky integration tests were observed twice this week. Replace with live GitHub checks after connecting a repo.", owner: "Platform", status: "Watch", impact: "Medium", source: "Demo", link: "", due: "", labels: ["ci", "quality"], createdAt, updatedAt: createdAt },
         { id: "demo_pr", type: "pr-review", title: "PR #482 retry budget refactor", body: "Needs security and SRE review before release cut. Use GitHub connection for real open PRs; this record is manual demo data.", owner: "Avery", status: "Needs review", impact: "High", source: "Demo GitHub", link: "", due: "2026-08-14", labels: ["payments", "review"], createdAt, updatedAt: createdAt },
         { id: "demo_gate", type: "release-gate", title: "Rollback plan approved", body: "Runbook owner confirmed the rollback button and data migration guardrail. Approval email can be linked manually or via Gmail connection.", owner: "Release captain", status: "Ready", impact: "High", source: "Manual", link: "", due: "2026-08-15", labels: ["rollback", "approval"], createdAt, updatedAt: createdAt },
-        { id: "demo_risk", type: "delivery-risk", title: "Ticket scope drift", body: "Linked Linear work includes two ambiguous acceptance criteria. Route Jira context through Team PI or a vetted MCP connector, then capture the decision here.", owner: "PM", status: "Open", impact: "Medium", source: "Demo Linear", link: "", due: "2026-08-13", labels: ["scope", "tickets"], createdAt, updatedAt: createdAt }
+        { id: "demo_risk", type: "delivery-risk", title: "Ticket scope drift", body: "Linked work includes two ambiguous acceptance criteria. Connect native Jira or Linear, then capture the decision here.", owner: "PM", status: "Open", impact: "Medium", source: "Demo Linear", link: "", due: "2026-08-13", labels: ["scope", "tickets"], createdAt, updatedAt: createdAt }
       ],
     };
   }

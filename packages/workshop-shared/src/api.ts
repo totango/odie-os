@@ -24,7 +24,7 @@
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState, type ObservationDomainSharingPolicy } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState, type GatekeeperUiComposition, type ObservationDomainSharingPolicy } from "./gatekeeper.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
@@ -1232,7 +1232,8 @@ export interface AuthenticatedApi extends RpcTarget {
    * List the connected accounts that expose a full-page management UI
    * (AccountDescription.providesUi) and are available to this user. The Workshop renders a nav entry
    * + page per entry. Independent of whether the account also provides an agent singleton. Apps whose
-   * `providesUi.adminOnly` metadata is true are omitted for non-admin callers.
+   * `providesUi.adminOnly` metadata is true are omitted for non-admin callers. Embedded-only apps
+   * are included for composition discovery but should not receive their own navigation entry.
    */
   listGatekeeperApps(): Promise<GatekeeperAppInfo[]>;
 
@@ -1286,6 +1287,8 @@ export type GatekeeperAppInfo = {
   title: string;
   /** Optional icon. */
   icon?: AvatarImage;
+  /** Optional metadata for composing this app with other caller-owned management capabilities. */
+  composition?: GatekeeperUiComposition;
 };
 
 // ---------------------------------------------------------------------------

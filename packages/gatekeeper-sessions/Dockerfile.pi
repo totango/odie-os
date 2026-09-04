@@ -51,7 +51,8 @@ ADD --checksum=sha256:207c80dd995e103c271fae8c8ffb8528d86c15ab0c4eef1be23ba1792e
     /tmp/vscode-rust-analyzer.vsix
 
 COPY --from=uv /uv /uvx /bin/
-COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs /opt/odie-pi/
+COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs \
+    pi-image/verify-mcp-app-fail-closed.mjs /opt/odie-pi/
 COPY pi-image/prime-kernel-requirements.txt /opt/odie-prime-agent/requirements.txt
 
 ENV PATH="/opt/node/bin:${PATH}" \
@@ -133,6 +134,9 @@ RUN test "$(node --version)" = "v${NODE_VERSION}" \
     && node \
       --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
       --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))' \
+    && node \
+      --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
+      /opt/odie-pi/verify-mcp-app-fail-closed.mjs \
     && rm -rf \
       /root/.npm \
       /root/.cache/uv \

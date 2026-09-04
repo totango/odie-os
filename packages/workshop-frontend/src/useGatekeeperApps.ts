@@ -10,6 +10,34 @@ const appsRequestByApi = new WeakMap<object, Promise<GatekeeperAppInfo[]>>()
 // Mounted useGatekeeperApps() hooks register here so an explicit refresh can prompt them to refetch.
 const refreshListeners = new Set<() => void>()
 
+/** Omits management apps intended only as capabilities of a composite app. */
+export function navigableGatekeeperApps(apps: GatekeeperAppInfo[]): GatekeeperAppInfo[] {
+  return apps.filter((app) => app.composition?.embeddedOnly !== true)
+}
+
+/** Selects explicitly declared embedded sources for one composite app, failing closed on bad metadata. */
+export function compositeSourceApps(
+  shell: GatekeeperAppInfo,
+  apps: GatekeeperAppInfo[],
+): GatekeeperAppInfo[] {
+  const kind = shell.composition?.kind
+  if (typeof kind !== 'string' || kind.length === 0
+      || shell.composition?.role !== undefined || shell.composition?.embeddedOnly === true) {
+    return []
+  }
+  return apps.filter((candidate) => {
+    const composition = candidate.composition
+    if (candidate.id === shell.id || composition?.kind !== kind || composition.embeddedOnly !== true) {
+      return false
+    }
+    if (kind === 'work-items') {
+      return (composition.role === 'jira' && candidate.vendorId === 'jira')
+        || (composition.role === 'zendesk' && candidate.vendorId === 'zendesk')
+    }
+    return typeof composition.role === 'string' && composition.role.length > 0
+  })
+}
+
 /**
  * Drop the cached apps request and prompt mounted hooks to refetch. Unlike connected accounts, the
  * apps list has no live subscription, so callers must invoke this after an action that changes which
@@ -23,11 +51,11 @@ export function refreshGatekeeperApps(api: object): void {
 /**
  * The gatekeeper-served management apps available to the current user (one per gatekeeper that sets
  * `providesUi`, e.g. the Context Library). The Workshop hosts each at `/gatekeepers/$appId` and lists
- * them in the nav — no gatekeeper is hardcoded here; the set comes from the backend's discovery of
- * bound gatekeepers. Returns [] until authenticated/loaded. `GatekeeperAppInfo` is plain data, so
- * it's safe to hold in state.
+ * navigable apps without hardcoding any gatekeeper. Composite source apps are included only when
+ * explicitly requested. Returns [] until authenticated/loaded.
+ * `GatekeeperAppInfo` is plain data, so it's safe to hold in state.
  */
-export function useGatekeeperApps(): GatekeeperAppInfo[] {
+export function useGatekeeperApps(options?: { includeEmbedded?: boolean }): GatekeeperAppInfo[] {
   const auth = useOptionalAuthenticatedApi()
   const [apps, setApps] = useState<GatekeeperAppInfo[]>([])
   // Bumped by refreshGatekeeperApps() to re-run the fetch effect after the cache is invalidated.
@@ -63,5 +91,7 @@ export function useGatekeeperApps(): GatekeeperAppInfo[] {
     }
   }, [auth, refreshTick])
 
-  return apps
+  return options?.includeEmbedded
+    ? apps
+    : navigableGatekeeperApps(apps)
 }

@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { useNavigate } from '@tanstack/react-router'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
+import type { GatekeeperAppInfo } from '@gadgets/workshop-shared/api'
 import type {
   GatekeeperAppTheme,
   GatekeeperAppThemeReceiver,
@@ -39,6 +40,14 @@ type ResolveWorkspaceTitles = (ids: string[]) => Promise<(string | null)[]>
 type OpenPrompt = (prompt: string) => void
 type RequestCodingSession = (target: WorkItemTarget, title: string) => void
 type RouteStateSetter = (value: string) => void
+
+/** One independently authorized management capability exposed to a composite gatekeeper app. */
+export type GatekeeperAppDependency = {
+  app: GatekeeperAppInfo
+  capability: any
+}
+
+const EMPTY_DEPENDENCIES: GatekeeperAppDependency[] = []
 
 type OverlayState = 'full' | null
 
@@ -101,7 +110,11 @@ function iframeStyleForOverlay(overlay: OverlayState): CSSProperties {
 // rate-limits. `setPresenting` stays in Workshop and only grows/restores the iframe's layout.
 class GatekeeperAppHostImpl extends RpcTarget {
   readonly #ui: RpcStub<RpcTarget>
-  readonly #disposeRateLimiter: () => void
+  readonly #capabilities = new Map<string, {
+    app: GatekeeperAppInfo
+    capability: any
+  }>()
+  readonly #disposeRateLimiters: (() => void)[] = []
   readonly #present: PresentController
   readonly #openTarget: OpenTarget
   readonly #openPrompt: OpenPrompt
@@ -131,6 +144,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
     resolveWorkspaceTitles: ResolveWorkspaceTitles,
     getRouteState: () => string,
     setRouteState: RouteStateSetter,
+    dependencies: GatekeeperAppDependency[],
   ) {
     super()
     this.#theme = theme
@@ -142,7 +156,21 @@ class GatekeeperAppHostImpl extends RpcTarget {
       label: 'Gatekeeper app',
     })
     this.#ui = ui
-    this.#disposeRateLimiter = dispose
+    this.#disposeRateLimiters.push(dispose)
+    for (const dependency of dependencies) {
+      const limited = createRateLimitedCapability(dependency.capability, {
+        maxConcurrency: 8,
+        maxCallsPerMinute: 600,
+        maxPendingCalls: 128,
+        onRateLimit: 'throttle',
+        label: `Gatekeeper app dependency ${dependency.app.id}`,
+      })
+      this.#capabilities.set(dependency.app.id, {
+        app: dependency.app,
+        capability: limited.capability,
+      })
+      this.#disposeRateLimiters.push(limited.dispose)
+    }
     this.#present = present
     this.#openTarget = openTarget
     this.#openPrompt = openPrompt
@@ -156,6 +184,15 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   get ui(): RpcStub<RpcTarget> {
     return this.#ui
+  }
+
+  // Metadata carries no authority. The app must request one of the listed opaque IDs separately.
+  listCapabilities(): GatekeeperAppInfo[] {
+    return [...this.#capabilities.values()].map(({ app }) => app)
+  }
+
+  getCapability(id: string): RpcStub<RpcTarget> | null {
+    return this.#capabilities.get(id)?.capability ?? null
   }
 
   // Navigate to a workspace the app knows about. The IDs are validated here because the app is
@@ -181,12 +218,12 @@ class GatekeeperAppHostImpl extends RpcTarget {
     return this.#codingSessionRequestAllowed && this.#codingSessionAvailable()
   }
 
-  requestCodingSession(source: unknown, id: unknown, key: unknown, title: string): void {
+  requestCodingSession(source: unknown, id: unknown, key: unknown, url: unknown, title: string): void {
     if (!this.#codingSessionRequestAllowed || !this.#codingSessionAvailable()) {
       throw new Error('Coding-session requests are not available to this app.')
     }
     this.#requestCodingSession(
-      normalizeWorkItemTarget(source, id, key),
+      normalizeWorkItemTarget(source, id, key, url),
       normalizeGatekeeperAppCodingSessionTitle(title),
     )
   }
@@ -252,7 +289,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   // Cancel the rate limiter's pending resume timer once this host is no longer in use.
   dispose() {
-    this.#disposeRateLimiter()
+    for (const dispose of this.#disposeRateLimiters) dispose()
     this.#themeReceiver?.[Symbol.dispose]?.()
     this.#themeReceiver = null
     if (this.#frameId !== null) {
@@ -277,16 +314,20 @@ class GatekeeperAppHostImpl extends RpcTarget {
 export default function SandboxedGatekeeperApp({
   frame,
   gatekeeperVendorId,
+  dependencies = EMPTY_DEPENDENCIES,
   routeState,
   setRouteState,
   codingSessionAvailable = false,
+  workItemHandoffs = false,
   onRequestCodingSession,
 }: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
+  dependencies?: GatekeeperAppDependency[],
   routeState?: string,
   setRouteState?: RouteStateSetter,
   codingSessionAvailable?: boolean,
+  workItemHandoffs?: boolean,
   onRequestCodingSession?: RequestCodingSession,
 }) {
   const navigate = useNavigate()
@@ -402,11 +443,12 @@ export default function SandboxedGatekeeperApp({
         openTarget,
         openPrompt,
         () => codingSessionAvailableRef.current,
-        gatekeeperVendorId === 'team-pi',
+        workItemHandoffs,
         (target, title) => requestCodingSessionRef.current(target, title),
         resolveWorkspaceTitles,
         () => routeStateRef.current,
         (value) => setRouteStateRef.current(value),
+        dependencies,
       )
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
@@ -439,8 +481,8 @@ export default function SandboxedGatekeeperApp({
     }
     // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
     // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
-  }, [frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget,
-      present, resolveWorkspaceTitles, setOverlayPhase])
+  }, [dependencies, frame.iframeHtml, frame.ui, gatekeeperVendorId, openPrompt, openTarget,
+      present, resolveWorkspaceTitles, setOverlayPhase, workItemHandoffs])
 
   return (
     <iframe

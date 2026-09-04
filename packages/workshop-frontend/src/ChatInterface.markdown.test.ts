@@ -62,7 +62,12 @@ describe("MarkdownMessage line breaks", () => {
     await act(async () => link.dispatchEvent(click));
 
     expect(click.defaultPrevented).toBe(true);
-    expect(onOpenWorkItem).toHaveBeenCalledWith({ source: "jira", id: "AI-3540", key: "AI-3540" });
+    expect(onOpenWorkItem).toHaveBeenCalledWith({
+      source: "jira",
+      id: "AI-3540",
+      key: "AI-3540",
+      url: "https://example.atlassian.net/browse/AI-3540",
+    });
     expect(link.getAttribute("aria-label")).toBe("Open AI-3540 in Work Items");
     expect(link.textContent).toBe("Open work item");
   });

@@ -28,6 +28,7 @@ import { useSiteName } from '../ServerConfigContext'
 import { AccountsSubscriberAdapter } from '../accountsSubscriber'
 import { useHub } from '../HubContext'
 import { isSupportCuratedAsset, rankForSelectedHub } from '../supportCuration'
+import { accountBrowserFlows } from '../accountBrowserFlow'
 
 export const Route = createFileRoute('/gatekeepers')({
   component: ConnectorsPage,
@@ -574,8 +575,6 @@ function ConnectorsPage() {
   const handleConfirmConnect = async (resourceUrlPatterns?: string[]) => {
     if (!modalTarget || modalTarget.kind !== 'connect') return
     const vendorId = modalTarget.vendorId
-    const popup = isTargetAmbient ? null : window.open('about:blank', '_blank')
-    if (popup) popup.opener = null
     setConnecting(true)
     try {
       if (isTargetAmbient) {
@@ -586,13 +585,10 @@ function ConnectorsPage() {
         // If the gatekeeper provides a management UI, its nav entry should appear without a reload.
         refreshGatekeeperApps(authenticatedApi)
       } else {
-        const { url } = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-        if (popup) popup.location.href = url
-        else window.location.assign(url)
+        await accountBrowserFlows.connect(authenticatedApi, vendorId, resourceUrlPatterns, { webPopup: 'preopen' })
       }
       handleCloseModal()
     } catch (err) {
-      popup?.close()
       console.error('Failed to connect account:', err)
       toasts.add({ title: 'Failed to start connection', variant: 'error' })
     } finally {
@@ -602,22 +598,17 @@ function ConnectorsPage() {
 
   const handleEnsureResources = async (resourceUrlPatterns: string[]) => {
     if (!modalTarget || modalTarget.kind !== 'manage') return
-    const popup = window.open('about:blank', '_blank')
-    if (popup) popup.opener = null
     setEnsuringResourceUrlPatterns((prev) => [...new Set([...prev, ...resourceUrlPatterns])])
     try {
-      const result = await authenticatedApi.ensureAccountResources(
+      await accountBrowserFlows.grant(
+        authenticatedApi,
         modalTarget.accountId,
         resourceUrlPatterns,
+        { webPopup: 'preopen' },
       )
-      if (result.url) {
-        if (popup) popup.location.href = result.url
-        else window.location.assign(result.url)
-      } else popup?.close()
       // On success the new grant arrives via subscribeConnectedAccounts(); the toggle reflects it
       // once `grantedResourceUrlPatterns` updates.
     } catch (err) {
-      popup?.close()
       console.error('Failed to expand account access:', err)
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })
     } finally {
@@ -647,15 +638,10 @@ function ConnectorsPage() {
   }
 
   const handleReconnect = async (accountId: number) => {
-    const popup = window.open('about:blank', '_blank')
-    if (popup) popup.opener = null
     setReconnectingAccountId(accountId)
     try {
-      const { url } = await authenticatedApi.reconnectAccount(accountId)
-      if (popup) popup.location.href = url
-      else window.location.assign(url)
+      await accountBrowserFlows.reconnect(authenticatedApi, accountId, { webPopup: 'preopen' })
     } catch (err) {
-      popup?.close()
       console.error('Failed to reconnect account:', err)
       toasts.add({ title: 'Failed to reconnect account', variant: 'error' })
     } finally {

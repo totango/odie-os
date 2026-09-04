@@ -121,9 +121,24 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          JIRA_CLIENT_ID: ${{ secrets.JIRA_CLIENT_ID }}
+          JIRA_CLIENT_SECRET: ${{ secrets.JIRA_CLIENT_SECRET }}
+          ZENDESK_CLIENT_ID: ${{ secrets.ZENDESK_CLIENT_ID }}
+          ZENDESK_CLIENT_SECRET: ${{ secrets.ZENDESK_CLIENT_SECRET }}
         run: |
-          test -n "$CLOUDFLARE_ACCOUNT_ID"
-          test -n "$CLOUDFLARE_API_TOKEN"
+          for name in \
+            CLOUDFLARE_ACCOUNT_ID \
+            CLOUDFLARE_API_TOKEN \
+            JIRA_CLIENT_ID \
+            JIRA_CLIENT_SECRET \
+            ZENDESK_CLIENT_ID \
+            ZENDESK_CLIENT_SECRET
+          do
+            if [ -z "${!name}" ]; then
+              printf '%s\n' "Missing required production deployment configuration: $name" >&2
+              exit 1
+            fi
+          done
 
       - name: Verify current main before Slack bootstrap
         env:
@@ -136,13 +151,17 @@ jobs:
             | jq --raw-output '.object.sha')"
           test "$main_sha" = "$DEPLOY_SHA"
 
-      - name: Deploy Slack connector before its initial secret sync
+      - name: Deploy new OAuth connectors before their initial secret sync
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           WRANGLER_OUTPUT_FILE_DIRECTORY: ${{ github.workspace }}/deploy-receipts
         working-directory: production-deploy
-        run: wrangler deploy --no-bundle --config gatekeeper-slack/wrangler.json --message "GitHub Actions $DEPLOY_SHA"
+        run: |
+          message="GitHub Actions $DEPLOY_SHA"
+          wrangler deploy --no-bundle --config gatekeeper-slack/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-jira/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-zendesk/wrangler.json --message "$message"
 
       - name: Sync browser editor capability secret
         env:
@@ -160,17 +179,21 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          JIRA_CLIENT_ID: ${{ secrets.JIRA_CLIENT_ID }}
+          JIRA_CLIENT_SECRET: ${{ secrets.JIRA_CLIENT_SECRET }}
           NOTION_CLIENT_ID: ${{ secrets.NOTION_CLIENT_ID }}
           NOTION_CLIENT_SECRET: ${{ secrets.NOTION_CLIENT_SECRET }}
           SLACK_CLIENT_ID: ${{ secrets.SLACK_CLIENT_ID }}
           SLACK_CLIENT_SECRET: ${{ secrets.SLACK_CLIENT_SECRET }}
+          ZENDESK_CLIENT_ID: ${{ secrets.ZENDESK_CLIENT_ID }}
+          ZENDESK_CLIENT_SECRET: ${{ secrets.ZENDESK_CLIENT_SECRET }}
         run: |
           sync_oauth_secrets() {
             worker="$1"
             client_id="$2"
             client_secret="$3"
             if [ -z "$client_id" ] && [ -z "$client_secret" ]; then
-              echo "No GitHub OAuth secrets configured for $worker; leaving existing Worker secrets unchanged."
+              echo "No OAuth secrets configured for $worker; leaving existing Worker secrets unchanged."
               return 0
             fi
             test -n "$client_id"
@@ -179,8 +202,10 @@ jobs:
             printf '%s' "$client_secret" | wrangler secret put CLIENT_SECRET --name "$worker"
           }
           sync_oauth_secrets odie-os-gk-google "$GOOGLE_CLIENT_ID" "$GOOGLE_CLIENT_SECRET"
+          sync_oauth_secrets odie-os-gk-jira "$JIRA_CLIENT_ID" "$JIRA_CLIENT_SECRET"
           sync_oauth_secrets odie-os-gk-notion "$NOTION_CLIENT_ID" "$NOTION_CLIENT_SECRET"
           sync_oauth_secrets odie-os-gk-slack "$SLACK_CLIENT_ID" "$SLACK_CLIENT_SECRET"
+          sync_oauth_secrets odie-os-gk-zendesk "$ZENDESK_CLIENT_ID" "$ZENDESK_CLIENT_SECRET"
 
       - name: Verify required Worker secrets
         env:
@@ -200,7 +225,9 @@ jobs:
           }
           require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN PRODUCT_FEEDBACK_MCP_TOKEN
+          require_secrets odie-os-gk-jira CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-slack CLIENT_ID CLIENT_SECRET
+          require_secrets odie-os-gk-zendesk CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-sessions GITHUB_APP_ID GITHUB_APP_INSTALLATION_ID GITHUB_APP_PRIVATE_KEY TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET EDITOR_CAPABILITY_HMAC_SECRET
           require_secrets odie-os-backend CF_AI_GATEWAY_API_TOKEN TEAM_PI_CODEX_BASE_URL TEAM_PI_CODEX_HMAC_SECRET TEAM_PI_CODEX_MODELS
 
@@ -223,11 +250,13 @@ jobs:
           wrangler deploy --no-bundle --config gatekeeper-github/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-google/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-jarvis/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-jira/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-mcp/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-notion/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-odie-kg/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-scheduler/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-team-pi/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-work-items/wrangler.json --message "$message"
+          wrangler deploy --no-bundle --config gatekeeper-zendesk/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config gatekeeper-sessions/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config workshop-backend/wrangler.json --message "$message"
           wrangler deploy --no-bundle --config router-native/wrangler.json --message "$message"

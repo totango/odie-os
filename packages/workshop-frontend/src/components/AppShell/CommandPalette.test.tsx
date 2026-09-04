@@ -24,7 +24,7 @@ vi.mock('@cloudflare/kumo', () => ({
 }));
 
 vi.mock('../../useGatekeeperApps', () => ({
-  useGatekeeperApps: () => [{ id: 'team-pi', title: 'Work Items', vendorId: 'team-pi' }],
+  useGatekeeperApps: () => [{ id: 'work-items', title: 'Work Items', vendorId: 'work-items' }],
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -61,7 +61,7 @@ describe('CommandPalette', () => {
     if (!button) throw new Error('Missing Work Items command')
     await act(async () => { button.click(); await Promise.resolve() })
 
-    expect(router.state.location.pathname).toBe('/gatekeepers/team-pi')
+    expect(router.state.location.pathname).toBe('/gatekeepers/work-items')
   })
 
   it('seeds the Home composer for first-class Jira creation', async () => {

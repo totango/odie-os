@@ -146,7 +146,7 @@ jobs:
           rustup target add --toolchain "$RUST_TOOLCHAIN" aarch64-apple-darwin
           rustc --version
           xcodebuild -version
-          pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-team-pi --cache build:app
+          pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-work-items --cache build:app
           pnpm --dir packages/gatekeeper-jarvis run build:app
           pnpm --dir packages/workshop-native sync:gatekeeper-csp
           pnpm --dir packages/workshop-native tauri build --target aarch64-apple-darwin --bundles dmg
@@ -324,7 +324,7 @@ jobs:
           rustup target add --toolchain "$RUST_TOOLCHAIN" aarch64-apple-ios
           rustc --version
           xcodebuild -version
-          pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-team-pi --cache build:app
+          pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-work-items --cache build:app
           pnpm --dir packages/gatekeeper-jarvis run build:app
           pnpm --dir packages/workshop-native sync:gatekeeper-csp
           ios_config="{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$NATIVE_IOS_BUILD_NUMBER\"}}}"

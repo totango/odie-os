@@ -1,11 +1,11 @@
 import { RpcStub, RpcTarget } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateCodingSessionFileUploadRequest, validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService, type ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
-import type { CodingSessionActivity, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
+import type { CodingSessionActivity, CodingSessionReadResourceResult, CodingSessionResource, CodingSessionTool, CodingSessionToolResult } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import { PRODUCT_FEEDBACK_MAX_DIAGNOSTIC_LENGTH, PRODUCT_FEEDBACK_MAX_DIAGNOSTICS, PRODUCT_FEEDBACK_MAX_TEXT_LENGTH, sanitizeProductFeedbackText, validateSubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import type { GitHubVerifierApi } from "@gadgets/workshop-shared/github-gatekeeper";
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, type GatekeeperReconnectWithCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, type ActionDescription, type ApprovalQueue, type ObservationDescription } from "@gadgets/workshop-shared/gatekeeper";
 import type { McpSessionBase } from "@gadgets/mcp-shared/session";
 import type { McpCallResult, McpToolInfo } from "@gadgets/mcp-shared/types";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -23,6 +23,13 @@ import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import {
+  assertCodingSessionMcpResponseSize,
+  namespaceCodingSessionResourceUri,
+  namespaceCodingSessionToolMetadata,
+  parseCodingSessionResourceUri,
+  selectCodingSessionResourceBinding,
+} from "./coding-session-mcp.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -33,6 +40,22 @@ const CODING_SESSION_REPOSITORY_OWNER = "totango";
 const CODING_SESSION_REPOSITORY_OPTION_LIMIT = 50;
 const PRODUCT_FEEDBACK_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_CODING_SESSION_DISCOVERED_BINDINGS_PER_ACCOUNT = 32;
+const RETIRED_GATEKEEPER_VENDOR_IDS = new Set(["team_pi"]);
+
+// The original Team PI gatekeeper service binding has been removed. Keep its persisted records
+// inert in code, rather than depending on admin config or on stale stubs failing to deserialize. The
+// deployment-provided Team PI Codex model relay is configured through TEAM_PI_CODEX_* env vars, not a
+// gatekeeper vendor record, and must not be included in this retirement gate. Operationally, drain or
+// reject pending Team PI approvals before removing the binding; this gate prevents new authority but
+// does not reach into the retired gatekeeper's own approval queue storage.
+/** Returns true for gatekeeper vendor IDs whose persisted accounts/capabilities must stay inert. */
+export function isRetiredGatekeeperVendor(vendorId: string): boolean {
+  return RETIRED_GATEKEEPER_VENDOR_IDS.has(vendorId.toLowerCase());
+}
+
+function retiredGatekeeperError(vendorId: string): Error {
+  return new Error(`The "${vendorId}" gatekeeper has been retired on this deployment.`);
+}
 
 /** Rejects missing, inactive, archived, or stale coding-session generations. */
 export async function assertCurrentCodingSessionGeneration(
@@ -61,6 +84,12 @@ type ConnectedAccountRecord = {
   // disconnect, since deleting one permanently destroys the user's data in that gatekeeper.
   autoProvisioned?: boolean;
   codingSessionGeneration?: string;
+  pendingNativeFlow?: { flowHandle: string; kind: "reconnect" | "grant" };
+};
+
+type NativeAccountBrowserFlowOptions = {
+  flowHandle: string;
+  returnUrl: string;
 };
 
 /**
@@ -1439,6 +1468,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let promises: Promise<GatekeeperVendorInfo | null>[] = [];
 
     for (let [id, vendor] of this.vendors) {
+      if (isRetiredGatekeeperVendor(id)) {
+        continue;
+      }
       if (disabledGatekeeperSet.has(id)) {
         continue;  // Whole gatekeeper disabled by admin.
       }
@@ -1492,6 +1524,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async #requiredConnectionStatus(vendorId: string, disabledGatekeepers: Set<string>)
       : Promise<RequiredConnectionStatus> {
+    if (isRetiredGatekeeperVendor(vendorId)) {
+      return { vendorId, displayName: vendorId, state: "unavailable", message: "Required service has been retired." };
+    }
     const vendor = this.vendors.get(vendorId);
     const displayName = await this.#requiredVendorDisplayName(vendorId, vendor);
     if (!vendor) {
@@ -1557,7 +1592,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<{url: string}> {
+  async connectAccount(vendorId: string, resourceUrlPatterns?: string[], nativeFlow?: NativeAccountBrowserFlowOptions): Promise<{url: string}> {
+    if (isRetiredGatekeeperVendor(vendorId)) {
+      throw retiredGatekeeperError(vendorId);
+    }
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
       throw new Error("No such service: " + vendorId);
@@ -1575,9 +1613,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       vendorId,
     };
 
-    let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
+    let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({
+      props: nativeFlow ? { ...props, flowHandle: nativeFlow.flowHandle } : props,
+    });
 
-    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns});
+    let {url} = await vendor.connectAccount(callback, {
+      resourceUrlPatterns,
+      returnUrl: nativeFlow?.returnUrl,
+    });
     logger.info("account connect started", {
       event: "account.connect.started", vendorId, accountId,
     });
@@ -1994,12 +2037,70 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         session?.[Symbol.dispose]();
       }
     }));
-    return catalogs.flatMap(({ binding, tools }) => tools.map(tool => ({
+    const tools = catalogs.flatMap(({ binding, tools: upstreamTools }) => upstreamTools.map(tool => ({
       name: this.#codingSessionToolName(binding.id, tool.name),
       title: tool.title,
       description: tool.description,
       inputSchema: tool.inputSchema,
+      outputSchema: tool.outputSchema,
+      securitySchemes: tool.securitySchemes,
+      _meta: namespaceCodingSessionToolMetadata(
+        binding.id, binding.generation, tool._meta),
     })));
+    assertCodingSessionMcpResponseSize({ tools });
+    return tools;
+  }
+
+  async listCodingSessionResources(
+    sessionId: string,
+    sandboxId: string,
+  ): Promise<CodingSessionResource[]> {
+    const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
+    const catalogs = await Promise.all((await this.#codingSessionBindings(repositories)).map(async binding => {
+      let session: McpSessionBase | undefined;
+      try {
+        session = await binding.facet.startSession(
+          new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+        return { binding, resources: await session.listResources() };
+      } catch {
+        return { binding, resources: [] as CodingSessionResource[] };
+      } finally {
+        session?.[Symbol.dispose]();
+      }
+    }));
+    const resources = catalogs.flatMap(({ binding, resources: upstreamResources }) =>
+      upstreamResources.map(resource => ({
+        ...resource,
+        uri: namespaceCodingSessionResourceUri(binding.id, binding.generation, resource.uri),
+      })));
+    assertCodingSessionMcpResponseSize({ resources });
+    return resources;
+  }
+
+  async readCodingSessionResource(
+    sessionId: string,
+    uri: string,
+    sandboxId: string,
+  ): Promise<CodingSessionReadResourceResult> {
+    const repositories = await this.#assertCodingSessionAccess(sessionId, sandboxId);
+    const { bindingId, bindingGeneration, upstreamUri } = parseCodingSessionResourceUri(uri);
+    const binding = selectCodingSessionResourceBinding(
+      bindingId, bindingGeneration, await this.#codingSessionBindings(repositories));
+    const session = await binding.facet.startSession(
+      new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
+    try {
+      const result = await session.readResource(upstreamUri);
+      const namespaced = {
+        contents: result.contents.map(content => ({
+          ...content,
+          uri: namespaceCodingSessionResourceUri(binding.id, binding.generation, content.uri),
+        })),
+      };
+      assertCodingSessionMcpResponseSize(namespaced);
+      return namespaced;
+    } finally {
+      session[Symbol.dispose]();
+    }
   }
 
   async callCodingSessionTool(
@@ -2013,7 +2114,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const session = await binding.facet.startSession(
       new CodingSessionApprovalQueue(this, sessionId, binding)) as unknown as McpSessionBase;
     try {
-      return this.#codingSessionToolResult(await session.callTool(toolName, args));
+      const result = this.#codingSessionToolResult(await session.callTool(toolName, args));
+      assertCodingSessionMcpResponseSize(result);
+      return result;
     } finally {
       session[Symbol.dispose]();
     }
@@ -2042,7 +2145,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       };
       const result = await (codingSessionSession.getCodingSessionActionResult?.(actionId) ??
         session.getActionResult(actionId));
-      return this.#codingSessionToolResult(result);
+      const codingSessionResult = this.#codingSessionToolResult(result);
+      assertCodingSessionMcpResponseSize(codingSessionResult);
+      return codingSessionResult;
     } finally {
       session[Symbol.dispose]();
     }
@@ -2060,6 +2165,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     const config = await readAdminConfig(this.env);
     const bindings: CodingSessionMcpBinding[] = [];
     for (const record of this.#connectedAccountRecords()) {
+      if (isRetiredGatekeeperVendor(record.vendorId)) continue;
       if (!areCredentialsValid(record) || config.disabledGatekeepers.includes(record.vendorId)) continue;
       if (record.autoProvisioned && ambientGatekeeperMode(config, record.vendorId) === "disabled") continue;
       const generation = record.codingSessionGeneration ?? crypto.randomUUID();
@@ -2197,6 +2303,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async #ambientVendors():
       Promise<Array<{vendorId: string, vendor: Service<GatekeeperVendor>, description: VendorDescription}>> {
     let described = await Promise.all([...this.vendors].map(async ([vendorId, vendor]) => {
+      if (isRetiredGatekeeperVendor(vendorId)) return null;
       try {
         let description = await vendor.describe();
         return description.autoProvisionsAccount ? {vendorId, vendor, description} : null;
@@ -2330,6 +2437,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let config = await readAdminConfig(this.env);
     let result: ProvidedAccountInfo[] = [];
     for (let rec of this.#connectedAccountRecords()) {
+      if (isRetiredGatekeeperVendor(rec.vendorId)) continue;
       if (config.disabledGatekeepers.includes(rec.vendorId)) continue;
       if (!areCredentialsValid(rec)) continue;
       // Auto-provisioned provider declarations may evolve after an account was persisted (for
@@ -2366,6 +2474,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // Present only when description.singleton is set; gate on that, then call through the derived
     // SingletonAccountStub view (see its definition for why the cast is needed).
     if (!record?.description.singleton) return null;
+    if (isRetiredGatekeeperVendor(record.vendorId)) return null;
     if (!areCredentialsValid(record)) return null;
     let config = await readAdminConfig(this.env);
     if (config.disabledGatekeepers.includes(record.vendorId) ||
@@ -2386,12 +2495,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async startAccountAppUi(accountId: number, context: AppUiContext): Promise<GatekeeperUiFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record?.description.providesUi) throw new Error("No such app.");
+    if (isRetiredGatekeeperVendor(record.vendorId)) throw new Error("No such app.");
     return (record.account as unknown as SingletonAccountStub).startAppUi(context);
   }
 
-  async ensureAccountResources(accountId: number, resourceUrlPatterns: string[]): Promise<{url?: string}> {
+  async ensureAccountResources(accountId: number, resourceUrlPatterns: string[], nativeFlow?: NativeAccountBrowserFlowOptions): Promise<{url?: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    if (isRetiredGatekeeperVendor(record.vendorId)) throw retiredGatekeeperError(record.vendorId);
     if (!areCredentialsValid(record)) throw new Error("This connection needs to be reconnected before it can be used.");
     let config = await readAdminConfig(this.env);
     let vendorId = record.vendorId.toLowerCase();
@@ -2399,7 +2510,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         resourceUrlPatterns.some(pattern => isResourceDisabled(config, vendorId, pattern))) {
       throw new Error("This connection is disabled on this deployment by an administrator.");
     }
-    return record.account.ensureResources(resourceUrlPatterns);
+    let result = await record.account.ensureResources(resourceUrlPatterns, { returnUrl: nativeFlow?.returnUrl });
+    if (nativeFlow && result.url) {
+      this.storage.connectedAccounts.put({
+        ...record,
+        pendingNativeFlow: { flowHandle: nativeFlow.flowHandle, kind: "grant" },
+      });
+    }
+    return result;
   }
 
   async subscribeConnectedAccounts(
@@ -2421,6 +2539,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let disabledGatekeeperSet = new Set(config.disabledGatekeepers);
 
     async function notifyAdd(record: ConnectedAccountRecord) {
+      if (isRetiredGatekeeperVendor(record.vendorId)) return;
       // Ambient (auto-provisioned) accounts only appear in the Connectors list when their vendor is
       // "optional" — i.e. the user opted in and can manage/remove it. "enabled" (forced) accounts have
       // nothing to manage, and "disabled" ones are dormant, so both are hidden.
@@ -2531,6 +2650,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (account.autoProvisioned) {
         // Only an opt-in ambient account belongs to the user to remove. Enabled accounts are forced,
         // while disabled accounts stay dormant so disabling a vendor never destroys its data.
+        if (isRetiredGatekeeperVendor(account.vendorId)) {
+          throw new Error("This account is managed automatically and can't be disconnected.");
+        }
         let mode = ambientGatekeeperMode(await readAdminConfig(this.env), account.vendorId);
         if (mode !== "optional") {
           throw new Error("This account is managed automatically and can't be disconnected.");
@@ -2577,21 +2699,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async reconnectAccount(accountId: number): Promise<{url: string}> {
+  async reconnectAccount(accountId: number, nativeFlow?: NativeAccountBrowserFlowOptions): Promise<{url: string}> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    if (isRetiredGatekeeperVendor(record.vendorId)) throw retiredGatekeeperError(record.vendorId);
     if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(
         record.vendorId.toLowerCase())) {
       throw new Error("This connection is disabled on this deployment by an administrator.");
     }
-    if (record.vendorId.replaceAll("_", "-") === "team-pi") {
-      const callback = this.ctx.exports.GatekeeperConnectCallbackImpl({
-        props: { userId: this.ctx.id.toString(), accountId, vendorId: record.vendorId },
+    let result = await record.account.reconnect({ returnUrl: nativeFlow?.returnUrl });
+    if (nativeFlow) {
+      this.storage.connectedAccounts.put({
+        ...record,
+        pendingNativeFlow: { flowHandle: nativeFlow.flowHandle, kind: "reconnect" },
       });
-      return (record.account as Fetcher<GatekeeperReconnectWithCallback>)
-          .reconnectWithCallback(callback);
     }
-    return record.account.reconnect();
+    return result;
   }
 
   async startResourceConfigurator(
@@ -2599,6 +2722,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    if (isRetiredGatekeeperVendor(record.vendorId)) throw retiredGatekeeperError(record.vendorId);
     let config = await readAdminConfig(this.env);
     let vendorId = record.vendorId.toLowerCase();
     if (config.disabledGatekeepers.includes(vendorId) ||
@@ -2617,6 +2741,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async linkConnectedAccountFromLogin(
       account: Fetcher<GatekeeperUser>, vendorId: string, expiresAt?: Date): Promise<void> {
+    if (isRetiredGatekeeperVendor(vendorId)) {
+      try {
+        await account.revoke();
+      } catch (err) {
+        logger.error("failed to revoke retired login grant", {
+          event: "account.retired.login.grant.revoke.failed", vendorId, error: err,
+        });
+      }
+      throw retiredGatekeeperError(vendorId);
+    }
     let description = await account.describe();
     let uniqueName = description.uniqueName;
 
@@ -2686,6 +2820,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async putConnectedAccount(record: ConnectedAccountRecord) {
+    if (isRetiredGatekeeperVendor(record.vendorId)) {
+      try {
+        await record.account.revoke();
+      } catch (err) {
+        logger.error("failed to revoke retired connected account", {
+          event: "account.retired.connected.revoke.failed",
+          vendorId: record.vendorId, accountId: record.id, error: err,
+        });
+      }
+      throw retiredGatekeeperError(record.vendorId);
+    }
+
     let uniqueName = record.description.uniqueName;
     if (uniqueName &&
         this.#findConnectedAccountByIdentity(record.vendorId, uniqueName, record.id)) {
@@ -2712,13 +2858,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async markCredentialsRestored(accountId: number, expiresAt?: Date) {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
+    let nativeFlow = record.pendingNativeFlow;
 
-    // Re-fetch description since the user may have re-authed with different info.
-    record.description = await record.account.describe();
-    record.credentialsExpired = false;
-    record.credentialExpiresAt = expiresAt;
-    record.codingSessionGeneration = crypto.randomUUID();
-    this.storage.connectedAccounts.put(record);
+    try {
+      // Re-fetch description since the user may have re-authed with different info.
+      record.description = await record.account.describe();
+      record.credentialsExpired = false;
+      record.credentialExpiresAt = expiresAt;
+      record.codingSessionGeneration = crypto.randomUUID();
+      delete record.pendingNativeFlow;
+      this.storage.connectedAccounts.put(record);
+      if (nativeFlow) await completeNativeAccountBrowserFlow(this.ctx, nativeFlow.flowHandle);
+    } catch (err) {
+      if (nativeFlow) {
+        await failNativeAccountBrowserFlow(this.ctx, nativeFlow.flowHandle, "Account reconnection failed. Please try again.");
+      }
+      throw err;
+    }
   }
 
   async getGatekeeperClassFor(accountId: number, url: string)
@@ -2727,6 +2883,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
                   singletonAuthorityKey?: string}> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
+    if (isRetiredGatekeeperVendor(account.vendorId)) throw retiredGatekeeperError(account.vendorId);
     if (!areCredentialsValid(account)) throw new Error("This connection needs to be reconnected before it can be used.");
     let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
 
@@ -2775,6 +2932,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       : Promise<Fetcher<GatekeeperUserVerifier> | null> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) return null;
+    if (isRetiredGatekeeperVendor(account.vendorId)) return null;
     if (account.vendorId !== expectedVendorId) {
       // Details stay server-side: this error reaches the browser via ensureObserver → open.
       console.error(
@@ -2791,6 +2949,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async describeConnectedAccount(accountId: number): Promise<AccountDescription | null> {
     let account = this.storage.connectedAccounts.get(accountId);
+    if (account && isRetiredGatekeeperVendor(account.vendorId)) return null;
     return account ? account.description : null;
   }
 
@@ -2800,36 +2959,70 @@ type GatekeeperConnectCallbackProps = {
   userId: string;
   accountId: number;
   vendorId: string;
+  flowHandle?: string;
+}
+
+function nativeAccountBrowserFlow(ctx: { exports: any }, flowHandle: string) {
+  const flows = ctx.exports.NativeBrowserFlow as unknown as DurableObjectNamespace;
+  return flows.get(flows.idFromName(flowHandle)) as unknown as {
+    completeAccount(): Promise<void>;
+    fail(message: string): Promise<void>;
+  };
+}
+
+async function completeNativeAccountBrowserFlow(ctx: { exports: any }, flowHandle: string): Promise<void> {
+  await nativeAccountBrowserFlow(ctx, flowHandle).completeAccount();
+}
+
+async function failNativeAccountBrowserFlow(ctx: { exports: any }, flowHandle: string, message: string): Promise<void> {
+  await nativeAccountBrowserFlow(ctx, flowHandle).fail(message);
 }
 
 export class GatekeeperConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
     implements GatekeeperConnectCallback {
-  #getUserStub() {
+  private getUserStub() {
     let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
     return this.ctx.exports.UserDurableObject.get(userId);
   }
 
   async complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<void> {
-    let userStub = this.#getUserStub();
+    try {
+      let userStub = this.getUserStub();
 
-    await userStub.putConnectedAccount({
-      id: this.ctx.props.accountId,
-      account,
-      description: await account.describe(),
-      vendorId: this.ctx.props.vendorId,
-      credentialExpiresAt: expiresAt,
-    });
+      await userStub.putConnectedAccount({
+        id: this.ctx.props.accountId,
+        account,
+        description: await account.describe(),
+        vendorId: this.ctx.props.vendorId,
+        credentialExpiresAt: expiresAt,
+      });
+      if (this.ctx.props.flowHandle) {
+        await completeNativeAccountBrowserFlow(this.ctx, this.ctx.props.flowHandle);
+      }
+    } catch (err) {
+      if (this.ctx.props.flowHandle) {
+        await failNativeAccountBrowserFlow(this.ctx, this.ctx.props.flowHandle, "Account connection failed. Please try again.");
+      }
+      throw err;
+    }
   }
 
   async credentialsExpired(): Promise<void> {
-    let userStub = this.#getUserStub();
+    let userStub = this.getUserStub();
     await userStub.markCredentialsExpired(this.ctx.props.accountId);
   }
 
   async credentialsRestored(expiresAt?: Date): Promise<void> {
-    let userStub = this.#getUserStub();
-    await userStub.markCredentialsRestored(this.ctx.props.accountId, expiresAt);
+    try {
+      let userStub = this.getUserStub();
+      await userStub.markCredentialsRestored(this.ctx.props.accountId, expiresAt);
+    } catch (err) {
+      if (this.ctx.props.flowHandle) {
+        await failNativeAccountBrowserFlow(this.ctx, this.ctx.props.flowHandle, "Account reconnection failed. Please try again.");
+      }
+      throw err;
+    }
   }
 }
 

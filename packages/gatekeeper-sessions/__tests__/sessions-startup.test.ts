@@ -694,14 +694,78 @@ describe("coding session asynchronous startup", () => {
     expect(kv.get<any>("startup")).toMatchObject({ phase: "terminal", attempt: 1 });
   });
 
+  it("negotiates Workshop MCP initialize without claiming change notifications", async () => {
+    const { policy } = createPolicy();
+    const request = (protocolVersion: unknown) => policy.handleWorkshopMcpRequest(
+      new Request("https://workshop-mcp.internal/mcp", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion },
+        }),
+      }));
+
+    const initialized = await request("2025-03-26");
+    expect(initialized.headers.get("MCP-Protocol-Version")).toBeNull();
+    await expect(initialized.json()).resolves.toMatchObject({
+      result: { protocolVersion: "2025-03-26", capabilities: { tools: {}, resources: {} } },
+    });
+    const current = await request("2099-01-01");
+    expect(current.headers.get("MCP-Protocol-Version")).toBeNull();
+    await expect(current.json()).resolves.toMatchObject({
+      result: { protocolVersion: "2025-06-18" },
+    });
+    const invalid = await request(null);
+    expect(invalid.headers.get("MCP-Protocol-Version")).toBeNull();
+    await expect(invalid.json()).resolves.toMatchObject({ error: { code: -32602 } });
+  });
+
+  it("rejects an unsupported post-initialize MCP protocol version", async () => {
+    const { policy } = createPolicy();
+    const response = await policy.handleWorkshopMcpRequest(
+      new Request("https://workshop-mcp.internal/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "MCP-Protocol-Version": "2099-01-01",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      }));
+
+    expect(response.status).toBe(400);
+    await expect(response.text()).resolves.toBe("Unsupported MCP protocol version.");
+  });
+
+  it.each([
+    ["initialize", undefined, { protocolVersion: "2025-06-18" }],
+    ["tools/list", null, undefined],
+    ["resources/list", undefined, undefined],
+    ["resources/read", null, { uri: "ui://workshop/mcp-1/generation-a/ui%3A%2F%2Fapp" }],
+    ["tools/call", null, { name: "mcp-1__read", arguments: {} }],
+  ])("rejects request-only %s without a non-null id", async (method, id, params) => {
+    const { policy } = createPolicy();
+    const response = await policy.handleWorkshopMcpRequest(
+      new Request("https://workshop-mcp.internal/mcp", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      }));
+    await expect(response.json()).resolves.toMatchObject({
+      id: null,
+      error: { code: -32600 },
+    });
+  });
+
   it("passes the sandbox generation fence to Workshop MCP tool methods", async () => {
     const { policy, kv } = createPolicy();
     const tools = policy.env.WORKSHOP_TOOLS as {
       listTools: ReturnType<typeof vi.fn>;
+      listResources: ReturnType<typeof vi.fn>;
+      readResource: ReturnType<typeof vi.fn>;
       callTool: ReturnType<typeof vi.fn>;
       getActionResult: ReturnType<typeof vi.fn>;
     };
     tools.listTools = vi.fn(async () => []);
+    tools.listResources = vi.fn(async () => []);
+    tools.readResource = vi.fn(async () => ({ contents: [] }));
     tools.callTool = vi.fn(async () => ({ content: [] }));
     tools.getActionResult = vi.fn(async () => ({ content: [] }));
 
@@ -716,6 +780,15 @@ describe("coding session asynchronous startup", () => {
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "vendor__read", arguments: { a: 1 } } }),
     }));
     await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 4, method: "resources/list" }),
+    }));
+    await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "resources/read",
+        params: { uri: "ui://workshop/vendor-1/generation-a/ui%3A%2F%2Fapp" } }),
+    }));
+    await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "workshop_action_result", arguments: { tool: "vendor__write", actionId: 7 } } }),
@@ -723,6 +796,9 @@ describe("coding session asynchronous startup", () => {
 
     const owner = kv.get<any>("policy").owner;
     expect(tools.listTools).toHaveBeenCalledWith(owner, "session-1", "sandbox-1");
+    expect(tools.listResources).toHaveBeenCalledWith(owner, "session-1", "sandbox-1");
+    expect(tools.readResource).toHaveBeenCalledWith(
+      owner, "session-1", "ui://workshop/vendor-1/generation-a/ui%3A%2F%2Fapp", "sandbox-1");
     expect(tools.callTool).toHaveBeenCalledWith(owner, "session-1", "vendor__read", { a: 1 }, "sandbox-1");
     expect(tools.getActionResult).toHaveBeenCalledWith(owner, "session-1", "vendor__write", 7, "sandbox-1");
   });
