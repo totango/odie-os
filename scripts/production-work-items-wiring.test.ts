@@ -17,14 +17,13 @@ function serviceByBinding(config: Record<string, any>, binding: string): Record<
   return config.services?.find((service: Record<string, any>) => service.binding === binding);
 }
 
-test("production backend adds NativeBrowserFlow with a fresh migration tag", () => {
+test("production backend preserves the applied NativeBrowserFlow migration", () => {
   const backend = readJsonc("packages/workshop-backend/wrangler.odie-os-production.jsonc");
 
-  assert.deepEqual(backend.migrations.at(-2), { tag: "v3" });
-  assert.deepEqual(backend.migrations.at(-1), {
-    tag: "v4",
-    new_sqlite_classes: ["NativeBrowserFlow"],
-  });
+  assert.deepEqual(backend.migrations.find((migration: Record<string, any>) => migration.tag === "v3"), { tag: "v3" });
+  assert.equal(backend.migrations.some(
+    (migration: Record<string, any>) => migration.new_sqlite_classes?.includes("NativeBrowserFlow"),
+  ), false);
 });
 
 test("production Work Items workers are built, deployed, and routed coherently", () => {
