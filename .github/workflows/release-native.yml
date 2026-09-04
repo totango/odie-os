@@ -327,7 +327,8 @@ jobs:
           pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-team-pi --cache build:app
           pnpm --dir packages/gatekeeper-jarvis run build:app
           pnpm --dir packages/workshop-native sync:gatekeeper-csp
-          pnpm --dir packages/workshop-native tauri ios build --ci --archive-only --build-number "$NATIVE_IOS_BUILD_NUMBER"
+          ios_config="{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$NATIVE_IOS_BUILD_NUMBER\"}}}"
+          pnpm --dir packages/workshop-native tauri ios build --ci --archive-only --config "$ios_config"
           export_dir="packages/workshop-native/src-tauri/gen/apple/build/app-store-export"
           rm -rf "$export_dir"
           pnpm --dir packages/workshop-native ios:export:app-store
