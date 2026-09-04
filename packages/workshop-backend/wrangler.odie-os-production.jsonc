@@ -58,8 +58,7 @@
     { "tag": "v1", "new_sqlite_classes": ["AdminSettings"] },
     { "tag": "v2", "new_sqlite_classes": ["PendingLogin"] },
     // Preserve the tag applied by the production-native gateway rollout.
-    { "tag": "v3" },
-    { "tag": "v4", "new_sqlite_classes": ["NativeBrowserFlow"] }
+    { "tag": "v3" }
   ],
   "kv_namespaces": [
     { "binding": "BLUEPRINTS", "id": "882e6c6dfdf9466f999b8084ed3cd637" },
