@@ -26,7 +26,7 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import APP_HTML from "./generated/app.txt";
+import APP_HTML from "./app.txt";
 import TICKET_CONFIGURATOR_HTML from "./generated/ticket-configurator-ui.txt";
 import TYPES_CODE from "./types.txt";
 import { codingTools, toolOk, toolPending, zendeskActionResultToToolResult } from "./coding-session.js";

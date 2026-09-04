@@ -78,3 +78,11 @@ test("production Jira and Zendesk accept native OAuth returns from the native AP
   assert.equal(readJsonc("packages/gatekeeper-jira/wrangler.odie-os-production.jsonc").vars.PUBLIC_BASE_URL, nativeOrigin);
   assert.equal(readJsonc("packages/gatekeeper-zendesk/wrangler.odie-os-production.jsonc").vars.PUBLIC_BASE_URL, nativeOrigin);
 });
+
+test("Zendesk embeds its management app from tracked source", () => {
+  const zendeskSource = readFileSync("packages/gatekeeper-zendesk/src/zendesk.ts", "utf8");
+  const appHtml = readFileSync("packages/gatekeeper-zendesk/src/app.txt", "utf8");
+
+  assert.match(zendeskSource, /import APP_HTML from "\.\/app\.txt";/);
+  assert.match(appHtml, /<h1>Zendesk Work Items source<\/h1>/);
+});
