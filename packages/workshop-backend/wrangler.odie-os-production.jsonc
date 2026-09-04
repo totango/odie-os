@@ -32,7 +32,7 @@
     "DEPLOY_URL": "https://os.cloudflare.app/deploy/?instance=0b25cd3c-6772-4200-be89-353ceea1c63e",
     "PUBLIC_BASE_URL": "https://odie-os-native-api.odie-os.workers.dev",
     "DISABLE_PASSWORD_AUTH": "true",
-    "REQUIRED_HEALTHY_CONNECTIONS": "team_pi,odie_kg",
+    "REQUIRED_HEALTHY_CONNECTIONS": "odie_kg",
     "TEAM_PI_CODEX_ONLY": "true"
   },
   "browser": { "binding": "BROWSER" },
