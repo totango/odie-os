@@ -302,6 +302,9 @@ jobs:
           profile_plist="$RUNNER_TEMP/ios-profile.plist"
           security cms -D -i "$profile_path" > "$profile_plist"
           profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print UUID' "$profile_plist")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print Name' "$profile_plist")" = "Odie OS App Store"
+          test "$(/usr/libexec/PlistBuddy -c 'Print Entitlements:application-identifier' "$profile_plist")" = "66J7DJB93K.com.totango.odieos"
+          /usr/libexec/PlistBuddy -c 'Print Entitlements:com.apple.developer.associated-domains' "$profile_plist" >/dev/null
           cp "$profile_path" "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
           signing_identity="$(security find-identity -v -p codesigning "$keychain_path" | awk -F '"' '/Apple Distribution/ { print $2; exit }')"
           if [ -z "$signing_identity" ]; then
@@ -310,15 +313,10 @@ jobs:
           fi
           {
             printf 'NATIVE_IOS_PROFILE_PATH=%s\n' "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
-            printf 'APPLE_API_KEY_PATH=%s\n' "$api_key_path"
             printf 'APPLE_SIGNING_IDENTITY=%s\n' "$signing_identity"
           } >> "$GITHUB_ENV"
 
       - name: Build fresh App Store Connect IPA
-        env:
-          APPLE_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          APPLE_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER_ID }}
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --no-self-update
@@ -329,13 +327,16 @@ jobs:
           pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-team-pi --cache build:app
           pnpm --dir packages/gatekeeper-jarvis run build:app
           pnpm --dir packages/workshop-native sync:gatekeeper-csp
-          pnpm --dir packages/workshop-native tauri ios build --ci --export-method app-store-connect --build-number "$NATIVE_IOS_BUILD_NUMBER"
-          ipa_count="$(find packages/workshop-native/src-tauri/gen/apple/build -name '*.ipa' -type f | wc -l | tr -d ' ')"
+          pnpm --dir packages/workshop-native tauri ios build --ci --archive-only --build-number "$NATIVE_IOS_BUILD_NUMBER"
+          export_dir="packages/workshop-native/src-tauri/gen/apple/build/app-store-export"
+          rm -rf "$export_dir"
+          pnpm --dir packages/workshop-native ios:export:app-store
+          ipa_count="$(find "$export_dir" -maxdepth 1 -name '*.ipa' -type f | wc -l | tr -d ' ')"
           if [ "$ipa_count" != "1" ]; then
             printf '%s\n' "Expected exactly one IPA, found $ipa_count" >&2
             exit 1
           fi
-          ipa_path="$(find packages/workshop-native/src-tauri/gen/apple/build -name '*.ipa' -type f)"
+          ipa_path="$(find "$export_dir" -maxdepth 1 -name '*.ipa' -type f)"
           printf 'NATIVE_IOS_IPA_PATH=%s\n' "$ipa_path" >> "$GITHUB_ENV"
 
       - name: Verify iOS bundle, team and signing metadata
