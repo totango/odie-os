@@ -4,6 +4,7 @@ import { JiraApi, jqlLiteral, parseIssueKeyOrId, type AccessibleResource } from 
 import type { ConfiguratorOption, JiraConfiguratorRpc } from "./configurator/jira-configurator-types";
 
 const OPTION_LIMIT = 50;
+const QUERY_LIMIT = 256;
 type Context = { getSites: () => Promise<AccessibleResource[]>; getToken: () => Promise<string> };
 const contexts = new WeakMap<object, Context>();
 const ctx = (target: object): Context => {
@@ -27,23 +28,35 @@ export class JiraConfiguratorUI extends RpcTarget implements JiraConfiguratorRpc
 
   async listProjects(query: string): Promise<ConfiguratorOption[]> {
     const { getSites, getToken } = ctx(this);
-    const q = query.trim().toLowerCase();
-    const perSite = await Promise.all((await getSites()).map(async site => {
-      const page = await apiFor(site, getToken).listProjects(0, OPTION_LIMIT);
-      return (page.values ?? []).filter(project => !q || project.name.toLowerCase().includes(q) || project.key.toLowerCase().includes(q)).map(project => ({ value: `${site.url}/projects/${project.key}`, title: project.name, subtitle: `${project.key} · ${site.name}` }));
-    }));
-    return perSite.flat().slice(0, OPTION_LIMIT);
+    const search = query.trim().slice(0, QUERY_LIMIT);
+    const options: ConfiguratorOption[] = [];
+    for (const site of await getSites()) {
+      try {
+        const page = await apiFor(site, getToken).listProjects(0, OPTION_LIMIT - options.length, search);
+        options.push(...(page.values ?? []).map(project => ({ value: `${site.url}/projects/${project.key}`, title: project.name, subtitle: `${project.key} · ${site.name}` })));
+      } catch {
+        continue;
+      }
+      if (options.length >= OPTION_LIMIT) break;
+    }
+    return options;
   }
 
   async listIssues(query: string): Promise<ConfiguratorOption[]> {
     const { getSites, getToken } = ctx(this);
-    const q = query.trim();
-    const perSite = await Promise.all((await getSites()).map(async site => {
-      const api = apiFor(site, getToken);
-      const jql = /^[A-Z][A-Z0-9_]{1,31}-\d+$/i.test(q) ? `key = ${jqlLiteral(parseIssueKeyOrId(q))}` : (q ? `text ~ ${jqlLiteral(q)} ORDER BY updated DESC` : "ORDER BY updated DESC");
-      const page = await api.searchIssues(jql, 0, 20);
-      return page.issues.map(issue => ({ value: `${site.url}/browse/${issue.key}`, title: `${issue.key}: ${issue.fields.summary ?? "Untitled"}`, subtitle: site.name }));
-    }));
-    return perSite.flat().slice(0, OPTION_LIMIT);
+    const search = query.trim().slice(0, QUERY_LIMIT);
+    const options: ConfiguratorOption[] = [];
+    for (const site of await getSites()) {
+      try {
+        const api = apiFor(site, getToken);
+        const jql = /^[A-Z][A-Z0-9_]{1,31}-\d+$/i.test(search) ? `key = ${jqlLiteral(parseIssueKeyOrId(search))}` : (search ? `text ~ ${jqlLiteral(search)} ORDER BY updated DESC` : "ORDER BY updated DESC");
+        const page = await api.searchIssues(jql, 0, Math.min(20, OPTION_LIMIT - options.length));
+        options.push(...page.issues.map(issue => ({ value: `${site.url}/browse/${issue.key}`, title: `${issue.key}: ${issue.fields.summary ?? "Untitled"}`, subtitle: site.name })));
+      } catch {
+        continue;
+      }
+      if (options.length >= OPTION_LIMIT) break;
+    }
+    return options;
   }
 }

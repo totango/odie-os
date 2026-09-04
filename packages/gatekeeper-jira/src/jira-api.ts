@@ -173,7 +173,11 @@ export class JiraApi {
     return parsed as T;
   }
   getProject(keyOrId: string): Promise<RawProject> { return this.#request(`/project/${enc(keyOrId)}?expand=description,lead,issueTypes`); }
-  listProjects(startAt: number, maxResults: number): Promise<{ values?: RawProject[]; isLast?: boolean; startAt?: number; maxResults?: number; total?: number }> { return this.#request(`/project/search?startAt=${startAt}&maxResults=${maxResults}`); }
+  listProjects(startAt: number, maxResults: number, query?: string): Promise<{ values?: RawProject[]; isLast?: boolean; startAt?: number; maxResults?: number; total?: number }> {
+    const params = new URLSearchParams({ startAt: String(startAt), maxResults: String(maxResults) });
+    if (query) params.set("query", query);
+    return this.#request(`/project/search?${params}`);
+  }
   searchIssues(jql: string, startAt: number, maxResults: number): Promise<{ issues: RawIssue[]; total?: number; startAt?: number; maxResults?: number }> {
     return this.#request("/search", { method: "POST", body: JSON.stringify({ jql, startAt, maxResults, fields: ["summary", "description", "project", "issuetype", "status", "priority", "assignee", "reporter", "labels", "components", "fixVersions", "duedate", "parent", "attachment", "created", "updated"] }) });
   }

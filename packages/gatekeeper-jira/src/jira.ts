@@ -306,7 +306,11 @@ function updateFields(options: JiraIssueUpdate): Record<string, unknown> {
 }
 export const scopedJql = (projectKey: string | undefined, options?: JiraIssueSearchOptions): string => {
   if (projectKey && options?.jql) throw new Error("Raw JQL is not accepted on project-scoped Jira capabilities.");
-  const clauses = [projectKey ? `project = ${jqlLiteral(normalizeJiraProjectKey(projectKey))}` : undefined, options?.text ? `text ~ ${jqlLiteral(options.text)}` : undefined, options?.jql ? `(${options.jql})` : undefined].filter(Boolean);
+  if (options?.jql) {
+    if (options.text) throw new Error("Raw JQL cannot be combined with a plain-text Jira search.");
+    return options.jql;
+  }
+  const clauses = [projectKey ? `project = ${jqlLiteral(normalizeJiraProjectKey(projectKey))}` : undefined, options?.text ? `text ~ ${jqlLiteral(options.text)}` : undefined].filter(Boolean);
   return (clauses.length ? clauses.join(" AND ") : "ORDER BY updated DESC");
 };
 const parseWorkItemsJiraCursor = (cursor: string | undefined, sites: AccessibleResource[]): Record<string, number> => {

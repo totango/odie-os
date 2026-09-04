@@ -46,7 +46,8 @@ describe("Jira API action behavior", () => {
   });
 
   it("keeps raw JQL available for site-scoped searches", () => {
-    expect(scopedJql(undefined, { jql: "project = ENG ORDER BY updated DESC" })).toBe("(project = ENG ORDER BY updated DESC)");
+    expect(scopedJql(undefined, { jql: "project = ENG ORDER BY updated DESC" })).toBe("project = ENG ORDER BY updated DESC");
+    expect(() => scopedJql(undefined, { jql: "project = ENG", text: "open" })).toThrow(/cannot be combined/);
   });
 
   it("quotes generated JQL literals and rejects invalid project keys", () => {
