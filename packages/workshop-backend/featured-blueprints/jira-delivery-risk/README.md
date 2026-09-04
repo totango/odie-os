@@ -7,7 +7,7 @@ Optional connector bindings are detected defensively and never treated as author
 - `JIRA` or `LINEAR`
 - `GITHUB`
 - `GMAIL`
-- `TEAM_PI`
+- `JIRA_SITE`
 - `JARVIS`
 
 Live sync is safe by default: missing bindings are reported as unavailable, unknown connector APIs import nothing, and demo records are clearly marked as `demo`. The app never fabricates live source data.

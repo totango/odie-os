@@ -1,0 +1,19 @@
+[
+  {
+    "name": "CLIENT_ID",
+    "kind": "secret",
+    "label": "Zendesk OAuth client ID",
+    "consoleUrl": "https://support.zendesk.com/hc/en-us/articles/4408845965210",
+    "setupSteps": [
+      "Create an OAuth client in the Zendesk Support account that users will connect.",
+      "Add the redirect URI below to the OAuth client.",
+      "Copy the OAuth client's unique identifier and secret here."
+    ],
+    "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/zendesk/oauth"
+  },
+  {
+    "name": "CLIENT_SECRET",
+    "kind": "secret",
+    "label": "Zendesk OAuth client secret"
+  }
+]

@@ -533,6 +533,77 @@
         "JARVIS_TRUST_ANNOTATIONS": "true"
       }
     },
+    "gatekeeper-jira": {
+      "bindings": [
+        {
+          "name": "CLIENT_ID",
+          "text": "$SECRET(CLIENT_ID)",
+          "type": "secret_text"
+        },
+        {
+          "name": "CLIENT_SECRET",
+          "text": "$SECRET(CLIENT_SECRET)",
+          "type": "secret_text"
+        }
+      ],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage"
+      ],
+      "inputs": [
+        {
+          "consoleUrl": "https://developer.atlassian.com/console/myapps/",
+          "kind": "secret",
+          "label": "Atlassian OAuth client ID",
+          "name": "CLIENT_ID",
+          "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/jira/oauth",
+          "setupSteps": [
+            "Create an OAuth 2.0 (3LO) app in the Atlassian developer console.",
+            "Configure Jira API permissions and add the redirect URI below as the callback URL.",
+            "Copy the app client ID and secret here."
+          ]
+        },
+        {
+          "kind": "secret",
+          "label": "Atlassian OAuth client secret",
+          "name": "CLIENT_SECRET"
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "jira.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "UserAccount",
+            "JiraSiteGatekeeperImpl",
+            "JiraProjectGatekeeperImpl",
+            "JiraIssueGatekeeperImpl"
+          ],
+          "tag": "v0"
+        }
+      ],
+      "modules": [
+        {
+          "name": "jira.js",
+          "r2Key": "blobs/modules/2099fb8f913d9b182c4bb18ba30ec844a8bd9314ec22752e01fe96fc9398258b",
+          "sha256": "2099fb8f913d9b182c4bb18ba30ec844a8bd9314ec22752e01fe96fc9398258b",
+          "size": 57,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "jira",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/jira"
+      }
+    },
     "gatekeeper-linear": {
       "bindings": [
         {
@@ -1236,29 +1307,8 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/supabase"
       }
     },
-    "gatekeeper-team-pi": {
-      "bindings": [
-        {
-          "name": "TEAM_PI_AUTH0_DOMAIN",
-          "text": "$SECRET(TEAM_PI_AUTH0_DOMAIN)",
-          "type": "secret_text"
-        },
-        {
-          "name": "TEAM_PI_AUTH0_CLIENT_ID",
-          "text": "$SECRET(TEAM_PI_AUTH0_CLIENT_ID)",
-          "type": "secret_text"
-        },
-        {
-          "name": "TEAM_PI_AUTH0_AUDIENCE",
-          "text": "$SECRET(TEAM_PI_AUTH0_AUDIENCE)",
-          "type": "secret_text"
-        },
-        {
-          "name": "TEAM_PI_BASE_URL",
-          "text": "$SECRET(TEAM_PI_BASE_URL)",
-          "type": "secret_text"
-        }
-      ],
+    "gatekeeper-work-items": {
+      "bindings": [],
       "compatibilityDate": "2026-02-02",
       "compatibilityFlags": [
         "allow_irrevocable_stub_storage",
@@ -1266,57 +1316,96 @@
         "global_fetch_strictly_public",
         "nodejs_als"
       ],
-      "inputs": [
-        {
-          "kind": "secret",
-          "label": "Team PI Auth0 domain",
-          "name": "TEAM_PI_AUTH0_DOMAIN",
-          "setupSteps": [
-            "Enter the HTTPS Auth0 tenant domain used by Team PI device authorization."
-          ]
-        },
-        {
-          "kind": "secret",
-          "label": "Team PI Auth0 client ID",
-          "name": "TEAM_PI_AUTH0_CLIENT_ID",
-          "setupSteps": [
-            "Enter the public Auth0 device-flow client ID approved for Team PI."
-          ]
-        },
-        {
-          "kind": "secret",
-          "label": "Team PI Auth0 audience",
-          "name": "TEAM_PI_AUTH0_AUDIENCE",
-          "setupSteps": [
-            "Enter the Auth0 API audience expected by Team PI."
-          ]
-        },
-        {
-          "kind": "secret",
-          "label": "Team PI HTTPS endpoint",
-          "name": "TEAM_PI_BASE_URL",
-          "setupSteps": [
-            "Enter the deployment-approved Team PI HTTPS API origin."
-          ]
-        }
-      ],
+      "inputs": [],
       "installable": true,
       "kind": "gatekeeper",
-      "mainModule": "team-pi.js",
+      "mainModule": "work-items.js",
       "migrations": [
         {
           "new_sqlite_classes": [
-            "TeamPiAccount",
-            "TeamPiGatekeeper"
+            "WorkItemsAccount",
+            "WorkItemsGatekeeper"
           ],
           "tag": "v1"
         }
       ],
       "modules": [
         {
-          "name": "team-pi.js",
-          "r2Key": "blobs/modules/9be41349f34be0219e4cb93835b753922c9955abe5ab06ac1a8e1ca0990adb17",
-          "sha256": "9be41349f34be0219e4cb93835b753922c9955abe5ab06ac1a8e1ca0990adb17",
+          "name": "work-items.js",
+          "r2Key": "blobs/modules/cf99510b7a451d7ae2c87d05c29e37f8895683a6d43062cd3a79a96033719228",
+          "sha256": "cf99510b7a451d7ae2c87d05c29e37f8895683a6d43062cd3a79a96033719228",
+          "size": 63,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "preinstall": true,
+      "shortName": "work-items",
+      "singleton": true,
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/work-items"
+      }
+    },
+    "gatekeeper-zendesk": {
+      "bindings": [
+        {
+          "name": "CLIENT_ID",
+          "text": "$SECRET(CLIENT_ID)",
+          "type": "secret_text"
+        },
+        {
+          "name": "CLIENT_SECRET",
+          "text": "$SECRET(CLIENT_SECRET)",
+          "type": "secret_text"
+        }
+      ],
+      "compatibilityDate": "2026-02-02",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage",
+        "nodejs_als"
+      ],
+      "inputs": [
+        {
+          "consoleUrl": "https://support.zendesk.com/hc/en-us/articles/4408845965210",
+          "kind": "secret",
+          "label": "Zendesk OAuth client ID",
+          "name": "CLIENT_ID",
+          "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/zendesk/oauth",
+          "setupSteps": [
+            "Create an OAuth client in the Zendesk Support account that users will connect.",
+            "Add the redirect URI below to the OAuth client.",
+            "Copy the OAuth client's unique identifier and secret here."
+          ]
+        },
+        {
+          "kind": "secret",
+          "label": "Zendesk OAuth client secret",
+          "name": "CLIENT_SECRET"
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "zendesk.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "ZendeskAccount",
+            "ZendeskGatekeeper"
+          ],
+          "tag": "v0"
+        }
+      ],
+      "modules": [
+        {
+          "name": "zendesk.js",
+          "r2Key": "blobs/modules/13ccb4fabcee26aa3b1e6c4a7b398d4daf23633940528c60929538a573b27062",
+          "sha256": "13ccb4fabcee26aa3b1e6c4a7b398d4daf23633940528c60929538a573b27062",
           "size": 60,
           "type": "esm"
         }
@@ -1328,9 +1417,9 @@
           "invocation_logs": false
         }
       },
-      "shortName": "team-pi",
+      "shortName": "zendesk",
       "vars": {
-        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/team-pi"
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/zendesk"
       }
     },
     "gatekeeper-zoominfo": {

@@ -17,7 +17,7 @@ import {
 import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { refreshGatekeeperApps } from '../useGatekeeperApps'
-import { getWorkshopRuntime } from '../runtime'
+import { accountBrowserFlows } from '../accountBrowserFlow'
 import type {
   AiChatAuthorInfo,
   ConnectedAccountsSubscriber,
@@ -62,12 +62,12 @@ export function isJarvisAccount(account: AccountEntry): boolean {
   return !!account.accountDescription.singleton && /jarvis/i.test(haystack)
 }
 
-export function isTeamPiVendor(vendor: Pick<GatekeeperVendorInfo, 'id' | 'description'>): boolean {
-  return /team[-_\s]?pi/i.test(`${vendor.id} ${vendor.description.displayName}`)
+export function isWorkItemVendor(vendor: Pick<GatekeeperVendorInfo, 'id'>): boolean {
+  return vendor.id === 'jira' || vendor.id === 'zendesk'
 }
 
-export function isTeamPiAccount(account: AccountEntry): boolean {
-  return /team[-_\s]?pi/i.test(`${account.vendorId} ${account.vendorDescription.displayName}`)
+export function isWorkItemAccount(account: AccountEntry): boolean {
+  return account.vendorId === 'jira' || account.vendorId === 'zendesk'
 }
 
 function accountLabel(account: AccountEntry): string {
@@ -275,22 +275,21 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
   const [setupError, setSetupError] = useState<string>()
   const teamPiModels = readiness.models.filter(isTeamPiCodexModel)
   const singletonAccounts = readiness.accounts.filter((account) => account.accountDescription.singleton)
-  const teamPiAccounts = readiness.accounts.filter(isTeamPiAccount)
-  const expiredTeamPiAccount = teamPiAccounts.find((account) => !account.credentialsValid)
+  const workItemAccounts = readiness.accounts.filter(isWorkItemAccount)
+  const expiredWorkItemAccount = workItemAccounts.find((account) => !account.credentialsValid)
   const jarvisAccounts = readiness.accounts.filter((account) => isJarvisAccount(account) && account.credentialsValid)
   const connectableVendors = [...readiness.vendors, ...readiness.addableGatekeepers]
-  const teamPiVendors = connectableVendors.filter(isTeamPiVendor)
+  const workItemVendors = connectableVendors.filter(isWorkItemVendor)
   const accountsReady = readiness.accountsLoaded && readiness.accounts.length > 0
   const modelReady = readiness.modelsLoaded && teamPiModels.length > 0
-  const teamPiVendorReady = readiness.vendorsLoaded && teamPiVendors.length > 0
+  const workItemVendorsReady = readiness.vendorsLoaded && workItemVendors.length === 2
   const githubAccounts = readiness.accounts.filter((account) => account.vendorId === 'github' && account.credentialsValid)
-  const portalAccounts = readiness.accounts.filter((account) =>
-    account.vendorId === 'mcp-portal' && account.credentialsValid)
-  const teamPiReady = teamPiAccounts.some((account) => account.credentialsValid)
-  const approvedWorkAppRouteReady = teamPiReady || portalAccounts.length > 0
-  const portalVendorId = connectableVendors.find((candidate) => candidate.id === 'mcp-portal')?.id
-  const workAppVendorId = teamPiVendors[0]?.id ?? portalVendorId
-  const workAppAvailable = Boolean(expiredTeamPiAccount || workAppVendorId)
+  const healthyWorkItemVendors = new Set(workItemAccounts
+    .filter((account) => account.credentialsValid)
+    .map((account) => account.vendorId))
+  const approvedWorkAppRouteReady = healthyWorkItemVendors.has('jira') && healthyWorkItemVendors.has('zendesk')
+  const workAppVendorId = workItemVendors.find((candidate) => !healthyWorkItemVendors.has(candidate.id))?.id
+  const workAppAvailable = Boolean(expiredWorkItemAccount || workAppVendorId)
   const setupChecks = [githubAccounts.length > 0, jarvisAccounts.length > 0, approvedWorkAppRouteReady, modelReady]
   const completedSetupChecks = setupChecks.filter(Boolean).length
 
@@ -305,10 +304,7 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
         await authenticatedApi.provisionAmbientAccount(vendorId)
         refreshGatekeeperApps(authenticatedApi)
       } else {
-        const { url } = await authenticatedApi.connectAccount(vendorId)
-        const runtime = getWorkshopRuntime()
-        if (runtime.kind === 'tauri') await runtime.openExternal(url)
-        else window.open(url, '_blank', 'noopener,noreferrer')
+        await accountBrowserFlows.connect(authenticatedApi, vendorId)
       }
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : `Could not connect ${vendorId}.`)
@@ -318,24 +314,16 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
   }
 
   const connectWorkApps = async () => {
-    const runtime = getWorkshopRuntime()
-    const popup = runtime.kind === 'web' ? window.open('about:blank', '_blank') : null
-    setConnectingVendor(workAppVendorId ?? 'team-pi')
+    setConnectingVendor(expiredWorkItemAccount?.vendorId ?? workAppVendorId)
     setSetupError(undefined)
     try {
-      const result = expiredTeamPiAccount
-        ? await authenticatedApi.reconnectAccount(expiredTeamPiAccount.id)
-        : workAppVendorId
-          ? await authenticatedApi.connectAccount(workAppVendorId)
-          : null
-      if (result) {
-        if (runtime.kind === 'tauri') await runtime.openExternal(result.url)
-        else if (popup) popup.location.href = result.url
-        else window.location.assign(result.url)
+      if (expiredWorkItemAccount) {
+        await accountBrowserFlows.reconnect(authenticatedApi, expiredWorkItemAccount.id, { webPopup: 'preopen' })
+      } else if (workAppVendorId) {
+        await accountBrowserFlows.connect(authenticatedApi, workAppVendorId, undefined, { webPopup: 'preopen' })
       }
     } catch (error) {
-      popup?.close()
-      setSetupError(error instanceof Error ? error.message : 'Could not connect Team PI.')
+      setSetupError(error instanceof Error ? error.message : 'Could not connect the work item provider.')
     } finally {
       setConnectingVendor(undefined)
     }
@@ -351,11 +339,11 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
               First-party operating guide
             </div>
             <h1 className="text-3xl font-semibold leading-tight tracking-tight text-kumo-default sm:text-[38px]">
-              Getting started with Odie, JARVIS, and Team PI
+              Getting started with Odie, JARVIS, and Work Items
             </h1>
             <p className="mt-3 max-w-2xl text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
               Use the managed Codex model for code work, let JARVIS mediate production investigations,
-              and connect TEAM_PI only through approval-gated actions. This page keeps those paths
+              and connect native Jira and Zendesk capabilities with approval-gated writes. This page keeps those paths
               separate so prompts stay safe and auditable.
             </p>
           </div>
@@ -375,9 +363,9 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
                 </StatusPill>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <span className="text-[13px] text-kumo-default">TEAM_PI vendor</span>
-                <StatusPill state={teamPiVendorReady ? 'ready' : readiness.vendorsLoaded ? 'warning' : 'pending'}>
-                  {teamPiVendorReady ? 'Available' : readiness.vendorsLoaded ? 'Missing' : 'Loading'}
+                <span className="text-[13px] text-kumo-default">Jira and Zendesk vendors</span>
+                <StatusPill state={workItemVendorsReady ? 'ready' : readiness.vendorsLoaded ? 'warning' : 'pending'}>
+                  {workItemVendorsReady ? 'Available' : readiness.vendorsLoaded ? 'Missing' : 'Loading'}
                 </StatusPill>
               </div>
             </div>
@@ -449,19 +437,19 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
               <DeveloperSetupStep
                 icon={<Plugs size={17} />}
                 title="Route Jira and Zendesk"
-                description={teamPiReady
-                  ? 'Team PI reuses deployment-managed shared Jira and Zendesk connections; no separate provider authorization is required in Odie.'
-                  : portalAccounts.length > 0
-                    ? 'A deployment-managed MCP Portal route is connected for approved Jira and Zendesk access.'
-                  : expiredTeamPiAccount
-                    ? 'Reconnect your existing Team PI account. Odie will reuse Team PI’s shared Jira and Zendesk connections.'
-                    : teamPiVendors.length > 0
-                      ? 'Connect Team PI to reuse its deployment-managed shared Jira and Zendesk connections. User-pasted MCP endpoints do not count as an approved route.'
-                      : 'Connect the deployment-managed MCP Portal. User-pasted MCP endpoints do not count as an approved Jira or Zendesk route.'}
+                description={approvedWorkAppRouteReady
+                  ? 'Native Jira and Zendesk accounts are connected for Work Items reads and approval-backed writes.'
+                  : expiredWorkItemAccount
+                    ? `Reconnect the existing ${expiredWorkItemAccount.vendorDescription.displayName} account.`
+                    : workAppVendorId
+                      ? `Connect ${workAppVendorId === 'jira' ? 'Jira' : 'Zendesk'} directly. User-pasted MCP endpoints do not count as an approved route.`
+                      : 'Ask an administrator to install the native Jira and Zendesk providers.'}
                 ready={approvedWorkAppRouteReady}
                 available={workAppAvailable}
-                actionLabel={expiredTeamPiAccount ? 'Reconnect Team PI' : teamPiVendors.length > 0 ? 'Connect Team PI' : 'Connect MCP Portal'}
-                busy={connectingVendor === (workAppVendorId ?? 'team-pi')}
+                actionLabel={expiredWorkItemAccount
+                  ? `Reconnect ${expiredWorkItemAccount.vendorDescription.displayName}`
+                  : workAppVendorId ? `Connect ${workAppVendorId === 'jira' ? 'Jira' : 'Zendesk'}` : 'Admin required'}
+                busy={connectingVendor === (expiredWorkItemAccount?.vendorId ?? workAppVendorId)}
                 onAction={workAppAvailable ? () => void connectWorkApps() : undefined}
               />
               <div className="grid gap-3 sm:grid-cols-2">
@@ -554,25 +542,25 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
           <Card className="lg:col-span-2">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-lg font-semibold tracking-[-0.35px] text-kumo-default">4. Use TEAM_PI for skills, connections, and providers</h2>
+                <h2 className="text-lg font-semibold tracking-[-0.35px] text-kumo-default">4. Use native Jira and Zendesk bindings</h2>
                 <p className="mt-2 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-                  A user-connected TEAM_PI binding can read skills, connections, and provider metadata.
-                  Install or start-connection operations must remain approval-gated.
+                  Jira uses JIRA_SITE, JIRA_PROJECT, or JIRA_ISSUE. Zendesk uses ZENDESK or
+                  ZENDESK_TICKET. Provider writes remain approval-gated.
                 </p>
               </div>
               <Plugs size={24} className="shrink-0 text-kumo-brand" />
             </div>
             <div className="mt-4 rounded-xl bg-kumo-tint p-3 text-[13px] leading-[18px] text-kumo-subtle">
-              {teamPiAccounts.length > 0
-                ? `TEAM_PI-like account visible: ${teamPiAccounts.map(accountLabel).join(', ')}.`
-                : teamPiVendorReady
-                  ? 'If TEAM_PI is not connected, open Gatekeepers and connect it before asking for TEAM_PI reads.'
+              {workItemAccounts.length > 0
+                ? `Work item accounts visible: ${workItemAccounts.map(accountLabel).join(', ')}.`
+                : workItemVendorsReady
+                  ? 'Open Gatekeepers and connect Jira and Zendesk before asking for provider reads.'
                   : readiness.vendorsLoaded
-                    ? 'TEAM_PI is not listed as a connectable vendor for this account. Ask an admin to enable the approved vendor.'
-                    : 'Loading TEAM_PI vendor readiness…'}
+                    ? 'Native Jira or Zendesk is not listed. Ask an admin to enable both providers.'
+                    : 'Loading work item provider readiness…'}
             </div>
             <div className="mt-3">
-              <GatekeepersLink>Open Gatekeepers to connect TEAM_PI</GatekeepersLink>
+              <GatekeepersLink>Open Gatekeepers to connect Jira and Zendesk</GatekeepersLink>
             </div>
           </Card>
         </div>
@@ -652,7 +640,7 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
               <PromptLink prompt="Before sending, select Team PI Codex in the model picker. Then inspect this repo and propose a small, reviewable plan before making changes.">Prepare Codex prompt</PromptLink>
               <PromptLink prompt="Use ambient JARVIS repo knowledge to explain the architecture and point me to the files I should read first.">Ask JARVIS about the repo</PromptLink>
               <PromptLink prompt="Ask JARVIS to investigate the production issue through the approved mediated path. Do not use raw prod MCP. Return evidence and next actions only.">Investigate production safely</PromptLink>
-              <PromptLink prompt="Use TEAM_PI for skills, connections, and provider reads. If an install or start-connection action is needed, queue it for approval.">Read TEAM_PI capabilities</PromptLink>
+              <PromptLink prompt="Use native JIRA_SITE, JIRA_PROJECT, JIRA_ISSUE, ZENDESK, or ZENDESK_TICKET bindings for work item reads. Queue any provider write for approval.">Read Work Items capabilities</PromptLink>
               <GatekeepersLink>Manage Gatekeepers</GatekeepersLink>
             </div>
           </Card>
@@ -669,9 +657,9 @@ export function GettingStartedPageContent({ readiness }: { readiness: ReadinessS
                 then ask an admin for the approved JARVIS binding.
                 <span className="mt-3 block"><GatekeepersLink>Open Connections</GatekeepersLink></span>
               </FlowStep>
-              <FlowStep icon={<Plugs size={16} weight="bold" />} title="TEAM_PI action blocked">
-                Reads should work through the binding. Installs and start-connection actions are intentionally
-                approval-gated; approve only after reviewing the proposed scope.
+              <FlowStep icon={<Plugs size={16} weight="bold" />} title="Work item action blocked">
+                Confirm the native provider account and resource are connected. Jira and Zendesk writes are
+                intentionally approval-gated; approve only after reviewing the proposed change.
                 <span className="mt-3 block"><GatekeepersLink>Open Connections</GatekeepersLink></span>
               </FlowStep>
             </div>

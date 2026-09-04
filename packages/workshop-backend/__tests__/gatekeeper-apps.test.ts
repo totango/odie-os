@@ -47,7 +47,7 @@ describe("gatekeeper management app identity", () => {
   });
 
   it("hides admin-only apps from non-admins and rejects non-admin direct opens", async () => {
-    let adminApp = account(17, "team-pi", { title: "Team PI", adminOnly: true });
+    let adminApp = account(17, "admin-app", { title: "Admin app", adminOnly: true });
 
     expect(await listVisibleGatekeeperApps([adminApp], false)).toEqual([]);
     expect(await resolveGatekeeperAppAccount([adminApp], await gatekeeperAppInstanceId(adminApp), false))
@@ -87,5 +87,22 @@ describe("gatekeeper management app identity", () => {
       accountUniqueName: "account-17@example.test",
     });
     expect(await resolveGatekeeperAppAccount([appAccount], app.id, false)).toBe(appAccount);
+  });
+
+  it("exposes composite source metadata while preserving the existing admin gate", async () => {
+    let source = account(17, "jira", {
+      title: "Jira Work Items",
+      adminOnly: true,
+      composition: {kind: "work-items", role: "jira", embeddedOnly: true},
+    });
+
+    expect(await listVisibleGatekeeperApps([source], false)).toEqual([]);
+    expect(await listVisibleGatekeeperApps([source], true)).toEqual([expect.objectContaining({
+      id: await gatekeeperAppInstanceId(source),
+      vendorId: "jira",
+      composition: {kind: "work-items", role: "jira", embeddedOnly: true},
+    })]);
+    expect(await resolveGatekeeperAppAccount(
+        [source], await gatekeeperAppInstanceId(source), true)).toBe(source);
   });
 });

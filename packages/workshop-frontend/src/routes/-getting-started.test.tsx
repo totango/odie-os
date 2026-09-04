@@ -13,10 +13,11 @@ const testState = vi.hoisted(() => ({
     ]),
     listGatekeeperVendors: vi.fn<() => Promise<GatekeeperVendorInfo[]>>(async () => [
       {
-        id: 'team-pi',
-        description: { displayName: 'TEAM_PI', url: 'https://example.test' },
+        id: 'jira',
+        description: { displayName: 'Jira', url: 'https://example.test' },
         supportedResources: [],
       },
+      { id: 'zendesk', description: { displayName: 'Zendesk', url: 'https://example.test' }, supportedResources: [] },
     ]),
     listAddableGatekeepers: vi.fn<() => Promise<GatekeeperVendorInfo[]>>(async () => []),
     connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://connect.example.test' })),
@@ -44,7 +45,7 @@ import {
   GettingStartedPageContent,
   isJarvisAccount,
   isTeamPiCodexModel,
-  isTeamPiVendor,
+  isWorkItemVendor,
 } from './getting-started'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -69,7 +70,7 @@ describe('Getting started', () => {
     expect(isTeamPiCodexModel({ type: 'agent', id: 'openai/gpt-5', name: 'GPT-5' })).toBe(false)
   })
 
-  it('uses precise readiness predicates for JARVIS and TEAM_PI', () => {
+  it('uses precise readiness predicates for JARVIS and native work item providers', () => {
     expect(isJarvisAccount({
       id: 1,
       accountDescription: { displayName: 'Management UI only', avatar: { url: '' }, providesUi: { title: 'JARVIS UI' } },
@@ -102,11 +103,12 @@ describe('Getting started', () => {
       supportedResources: [],
       credentialsValid: true,
     })).toBe(false)
-    expect(isTeamPiVendor({ id: 'github', description: { displayName: 'GitHub', url: 'https://example.test' } })).toBe(false)
-    expect(isTeamPiVendor({ id: 'team-pi', description: { displayName: 'TEAM_PI', url: 'https://example.test' } })).toBe(true)
+    expect(isWorkItemVendor({ id: 'github' })).toBe(false)
+    expect(isWorkItemVendor({ id: 'jira' })).toBe(true)
+    expect(isWorkItemVendor({ id: 'zendesk' })).toBe(true)
   })
 
-  it('clearly distinguishes model, JARVIS, production investigation, and TEAM_PI paths', async () => {
+  it('clearly distinguishes model, JARVIS, production investigation, and Work Items paths', async () => {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -129,10 +131,11 @@ describe('Getting started', () => {
           }],
           vendors: [
             {
-              id: 'team-pi',
-              description: { displayName: 'TEAM_PI', url: 'https://example.test' },
+              id: 'jira',
+              description: { displayName: 'Jira', url: 'https://example.test' },
               supportedResources: [],
             },
+            { id: 'zendesk', description: { displayName: 'Zendesk', url: 'https://example.test' }, supportedResources: [] },
             {
               id: 'github',
               description: { displayName: 'GitHub', url: 'https://example.test' },
@@ -153,7 +156,7 @@ describe('Getting started', () => {
     expect(container.textContent).toContain('Prepare Codex prompt')
     expect(container.textContent).toContain('JARVIS is an ambient binding')
     expect(container.textContent).toContain('Never connect Odie directly to raw production MCP')
-    expect(container.textContent).toContain('Install or start-connection operations must remain approval-gated')
+    expect(container.textContent).toContain('Provider writes remain approval-gated')
     expect(container.textContent).toContain('Developer setup')
     expect(container.textContent).toContain('Connect GitHub')
     expect(container.textContent).toContain('Route Jira and Zendesk')
@@ -186,7 +189,7 @@ describe('Getting started', () => {
     ))
 
     expect(container.textContent).toContain('0 / 4')
-    expect(container.textContent).toContain('User-pasted MCP endpoints do not count')
+    expect(container.textContent).toContain('Ask an administrator to install the native Jira and Zendesk providers')
     expect(container.textContent).toContain('Admin required')
     expect(container.textContent).not.toContain('Ready to build')
   })
@@ -220,7 +223,7 @@ describe('Getting started', () => {
     expect(container.textContent).not.toContain('Ready to build')
   })
 
-  it('reconnects an expired Team PI account instead of creating a duplicate', async () => {
+  it('reconnects an expired native Jira account instead of creating a duplicate', async () => {
     const popup = { location: { href: 'about:blank' }, close: vi.fn<() => void>() } as unknown as Window
     const open = vi.spyOn(window, 'open').mockReturnValue(popup)
     container = document.createElement('div')
@@ -232,13 +235,16 @@ describe('Getting started', () => {
         models: [],
         accounts: [{
           id: 42,
-          accountDescription: { displayName: 'Team PI', avatar: { url: '' }, singleton: { tsType: 'TeamPiSession' } },
-          vendorDescription: { displayName: 'Team PI', url: 'https://team-pi.test' },
-          vendorId: 'team-pi',
+          accountDescription: { displayName: 'Jira', avatar: { url: '' } },
+          vendorDescription: { displayName: 'Jira', url: 'https://jira.test' },
+          vendorId: 'jira',
           supportedResources: [],
           credentialsValid: false,
         }],
-        vendors: [{ id: 'team-pi', description: { displayName: 'Team PI', url: 'https://team-pi.test' }, supportedResources: [] }],
+        vendors: [
+          { id: 'jira', description: { displayName: 'Jira', url: 'https://jira.test' }, supportedResources: [] },
+          { id: 'zendesk', description: { displayName: 'Zendesk', url: 'https://zendesk.test' }, supportedResources: [] },
+        ],
         addableGatekeepers: [],
         modelsLoaded: true,
         accountsLoaded: true,
@@ -247,7 +253,7 @@ describe('Getting started', () => {
       }} />,
     ))
 
-    const reconnect = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Reconnect Team PI'))
+    const reconnect = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Reconnect Jira'))
     expect(reconnect).toBeDefined()
     await act(async () => { reconnect!.click(); await Promise.resolve() })
 
@@ -257,7 +263,7 @@ describe('Getting started', () => {
     expect(popup.location.href).toBe('https://reconnect.example.test')
   })
 
-  it('does not treat an unrelated connectable vendor as TEAM_PI readiness', async () => {
+  it('does not treat an unrelated connectable vendor as Work Items readiness', async () => {
     container = document.createElement('div')
     document.body.append(container)
     root = createRoot(container)
@@ -281,8 +287,8 @@ describe('Getting started', () => {
       />,
     ))
 
-    expect(container.textContent).toContain('TEAM_PI is not listed as a connectable vendor')
-    expect(container.textContent).not.toContain('connect it before asking for TEAM_PI reads')
+    expect(container.textContent).toContain('Native Jira or Zendesk is not listed')
+    expect(container.textContent).not.toContain('connect Jira and Zendesk before asking for provider reads')
   })
 
   it('subscribes to forced accounts and disposes the live RPC subscription on unmount', async () => {

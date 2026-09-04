@@ -2,7 +2,7 @@
 import type { BundledContextCollection } from "../bundled-context.js";
 
 export const BUNDLED_CONTEXT_MANIFEST = {
-  "fingerprint": "2d5eae414f612df7b0993f3c1efc60db9be4644b021ee8f4df3c22ef3004c632"
+  "fingerprint": "950019dc9e5125a477bf22295ecdbad95bfe1e9875a452ac32aefe2fca198b42"
 } as const;
 
 export const BUNDLED_CONTEXT_COLLECTIONS = [
@@ -49,7 +49,7 @@ export const BUNDLED_CONTEXT_COLLECTIONS = [
     "documentCount": 2,
     "content": {
       "source": "bundled",
-      "fingerprint": "dee9017410e20b72d9b27d46d7b5f958bcd9aec6ec96ecfa8b2d24e375855852"
+      "fingerprint": "f4e0138883376624e2cfcc75bc962fd1d10f4ffd7970ad6e77a929fe077a9839"
     },
     "documents": [
       {
@@ -65,7 +65,7 @@ export const BUNDLED_CONTEXT_COLLECTIONS = [
         "name": "SKILL.md",
         "description": "Support triage",
         "contentType": "text/markdown",
-        "body": "---\nname: support-triage\ndescription: Triage a support request, identify next data to inspect, and produce a concise customer-safe plan.\n---\n# Support triage\n\nUse this skill when a support request needs structured first response and routing.\n\n1. Restate the user-visible symptom in neutral language.\n2. Classify impact: blocker, degraded workflow, question, or enhancement.\n3. Identify missing non-sensitive facts: environment, timeframe, affected feature, expected result, actual result, and reproduction steps.\n4. Search relevant Context collections for product-specific playbooks before proposing action.\n5. When the `TEAM_PI` binding is available, use `workItemsSearch()` to discover Jira and Zendesk work items. For a known brand/account/subdomain partition, `searchZendeskTicketMemory()` may provide stale ticket hints; always call `readZendeskTicket()` before relying on current status, description, comments, activity, or attachment metadata.\n6. Return a short plan with owner, next check, and customer-safe update text.\n\nNever copy ticket content into Context collections or include private customer identifiers, secrets, prompts, tokens, or internal paths in the response.\n",
+        "body": "---\nname: support-triage\ndescription: Triage a support request, identify next data to inspect, and produce a concise customer-safe plan.\n---\n# Support triage\n\nUse this skill when a support request needs structured first response and routing.\n\n1. Restate the user-visible symptom in neutral language.\n2. Classify impact: blocker, degraded workflow, question, or enhancement.\n3. Identify missing non-sensitive facts: environment, timeframe, affected feature, expected result, actual result, and reproduction steps.\n4. Search relevant Context collections for product-specific playbooks before proposing action.\n5. Use native Jira bindings (`JIRA_SITE`, `JIRA_PROJECT`, or `JIRA_ISSUE`) and Zendesk bindings (`ZENDESK` or `ZENDESK_TICKET`) to discover and read authoritative work items. Treat writes as approval-backed actions.\n6. Return a short plan with owner, next check, and customer-safe update text.\n\nNever copy ticket content into Context collections or include private customer identifiers, secrets, prompts, tokens, or internal paths in the response.\n",
         "lastUpdated": "2026-08-21T00:00:00.000Z"
       }
     ]

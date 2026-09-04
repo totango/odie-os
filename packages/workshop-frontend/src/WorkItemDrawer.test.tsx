@@ -27,7 +27,7 @@ describe("WorkItemDrawer", () => {
     root = createRoot(container);
     await act(async () => root.render(
       <WorkItemDrawer
-        appId="team-pi"
+        appId="work-items"
         target={{ source: "jira", id: "AI-3540", key: "AI-3540" }}
         onClose={onClose}
       />,
@@ -37,7 +37,7 @@ describe("WorkItemDrawer", () => {
     expect(pane.textContent).toContain("Work Item · AI-3540");
     expect(pane.classList).not.toContain("absolute");
     expect(gatekeeperAppPage).toHaveBeenCalledWith(expect.objectContaining({
-      appId: "team-pi",
+      appId: "work-items",
       routeState: "selected=jira%3AAI-3540%3AAI-3540",
     }), undefined);
 
@@ -58,7 +58,7 @@ describe("WorkItemDrawer", () => {
     root = createRoot(container);
     await act(async () => root.render(
       <WorkItemDrawer
-        appId="team-pi"
+        appId="work-items"
         target={{ source: "zendesk", id: "1234" }}
         onClose={onClose}
       />,

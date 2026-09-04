@@ -4505,7 +4505,8 @@ function ChatInterface({
   // Persistent cache that survives reconnects
   const toasts = useKumoToastManager();
   const { currentUser } = useAuthenticatedApi();
-  const workItemsApp = useGatekeeperApps().find((app) => app.vendorId === "team-pi");
+  const workItemsApp = useGatekeeperApps().find((app) =>
+    app.composition?.kind === "work-items" && app.composition.role === undefined);
   const [openWorkItem, setOpenWorkItem] = useState<WorkItemTarget | null>(null);
   const getOverseer = useCallback(() => overseer, [overseer]);
   const cacheRef = useRef<ChatCache>({
@@ -6988,14 +6989,15 @@ function ChatInterface({
               {/* Chat sub-header — hidden in sidebar mode (list is always visible) */}
               {!sidebarMode && (
                 <div className="flex h-12 flex-shrink-0 items-center justify-between gap-2 border-b border-kumo-line px-4">
-                  <WorkshopIconButton
+                  <button
+                    type="button"
                     onClick={() => onNavigateToChat(null)}
-                    className="!h-8 !w-8 flex-shrink-0"
+                    className="flex h-8 flex-shrink-0 cursor-pointer items-center gap-1 rounded-md px-2 text-[12px] font-medium text-kumo-subtle transition-colors hover:bg-kumo-tint hover:text-kumo-default focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-kumo-focus"
                     title="Back to conversations"
-                    aria-label="Back to conversations"
                   >
                     <CaretLeft size={14} />
-                  </WorkshopIconButton>
+                    Chats
+                  </button>
 
                   {isEditingTitle ? (
                     <div className="flex items-center gap-1 flex-1 min-w-0">

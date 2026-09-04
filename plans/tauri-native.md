@@ -96,11 +96,11 @@ Current connector inventory from `packages/gatekeeper-*` (S5 must verify and kee
 |---|---|---|
 | Google | Fixed-provider OAuth; advertises auth login | Required for login, connect, reconnect, and incremental grant |
 | GitHub, Cloudflare | Fixed-provider OAuth; advertise auth login | Required for connect/reconnect/grant; login remains web-compatible but is not native launch acceptance |
-| Confluence, Linear, Notion, Slack, Spotify, Supabase, ZoomInfo | Fixed-provider OAuth with self-closing browser completion | Required for every applicable connect/reconnect/grant flow |
-| Email, Home Assistant, Team PI | Browser-interactive custom/nonstandard flow with self-closing completion | Required; test each actual flow rather than treating it as OAuth |
+| Confluence, Jira, Linear, Notion, Slack, Spotify, Supabase, Zendesk, ZoomInfo | Fixed-provider OAuth with self-closing browser completion | Required for every applicable connect/reconnect/grant flow |
+| Email, Home Assistant | Browser-interactive custom/nonstandard flow with self-closing completion | Required; test each actual flow rather than treating it as OAuth |
 | ODIE KG | First-party external OAuth; may advertise auth when configured | Required for connect/reconnect and configured behavior; native login is not launch acceptance |
 | MCP, MCP Portal | Dynamic OAuth discovery from user/admin endpoint | Required; must retain SDK endpoint, redirect, and SSRF validation through branded launch trampoline |
-| Context, Jarvis, Scheduler, Sessions | Auto-provisioned, no browser initiation | No deep-link return; prove native behavior stays browser-free |
+| Context, Jarvis, Scheduler, Sessions, Work Items | Auto-provisioned, no browser initiation | No deep-link return; prove native behavior stays browser-free |
 
 A conformance test must fail when a new `packages/gatekeeper-*` package has no classification. S5 must
 also record which packages actually implement incremental grants rather than inferring that every row
@@ -499,7 +499,7 @@ an approved requirement.
 - **Likely files:** common gatekeeper flow helper plus only connector-specific changes that cannot be
   centralized; frontend connector call sites; connector tests/docs.
 - **Verification:** catalog-based conformance suite plus real staging flows for Google and each enabled
-  OAuth provider. Include fixed-provider OAuth, Email/Home Assistant/Team PI custom flows, ODIE KG,
+  OAuth provider. Include fixed-provider OAuth, Email/Home Assistant custom flows, ODIE KG,
   dynamic MCP/MCP Portal discovery, auto-provisioned no-browser behavior, deny/cancel/partial grant/
   expired credential, and a test that fails when a new gatekeeper package lacks a table row.
 - **Parallel:** provider validation can fan out by non-overlapping gatekeeper package after common

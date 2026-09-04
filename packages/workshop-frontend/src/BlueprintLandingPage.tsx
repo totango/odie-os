@@ -23,6 +23,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { useHub } from './HubContext'
 import { blueprintCreationOrigin } from './blueprintCreationOrigin'
+import { accountBrowserFlows } from './accountBrowserFlow'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -195,8 +196,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     if (!authenticatedApi) return
     setConnectingVendor(vendorId)
     try {
-      const result = await authenticatedApi.connectAccount(vendorId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      await accountBrowserFlows.connect(authenticatedApi, vendorId)
       toasts.add({ title: 'Complete the account connection in the new tab.', variant: 'success' })
     } catch (err) {
       console.error('Failed to initiate connection:', err)
@@ -210,8 +210,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
     if (!authenticatedApi) return
     setReconnectingAccountId(accountId)
     try {
-      const result = await authenticatedApi.reconnectAccount(accountId)
-      window.open(result.url, '_blank', 'noopener,noreferrer')
+      await accountBrowserFlows.reconnect(authenticatedApi, accountId)
       toasts.add({ title: 'Complete the account reconnect in the new tab.', variant: 'success' })
     } catch (err) {
       console.error('Failed to initiate reconnect:', err)

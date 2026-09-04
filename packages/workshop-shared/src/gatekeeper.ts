@@ -87,6 +87,18 @@ export type AppUiContext = {
   isAdmin: boolean;
 }
 
+/** Describes how a management app participates in a Workshop-hosted composite application. */
+export type GatekeeperUiComposition = {
+  /** Stable application family shared by a composite shell and its source capabilities. */
+  kind: string;
+
+  /** Source role supplied to the composite shell; omitted by the shell itself. */
+  role?: string;
+
+  /** When true, the app is discoverable by a composite shell but hidden from ordinary navigation. */
+  embeddedOnly?: boolean;
+};
+
 // The agent catalog is bounded discovery metadata a gatekeeper exposes via
 // Gatekeeper.getAgentCatalog() so the agent can see *what* is reachable through a session (e.g. the
 // titles of the Context Library collections it can search) without first reading everything. It is
@@ -201,6 +213,9 @@ export type AccountDescription = {
      * `isAdmin` app context for feature-level authorization inside the UI.
      */
     adminOnly?: boolean;
+
+    /** Optional metadata for composing this app with other caller-owned management capabilities. */
+    composition?: GatekeeperUiComposition;
   };
 
   /**
@@ -496,6 +511,18 @@ export type GatekeeperConnectOptions = {
   returnUrl?: string;
 };
 
+/** Options for GatekeeperUser.reconnect(). */
+export type GatekeeperReconnectOptions = {
+  /** Optional branded Workshop return URL used by native verified-link browser flows. */
+  returnUrl?: string;
+};
+
+/** Options for GatekeeperUser.ensureResources(). */
+export type GatekeeperEnsureResourcesOptions = {
+  /** Optional branded Workshop return URL used by native verified-link browser flows. */
+  returnUrl?: string;
+};
+
 function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, char => ({
     "&": "&amp;",
@@ -740,7 +767,7 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * SECURITY: As with connectAccount(), the returned URL must include a cryptographic nonce to
    * prevent replay attacks.
    */
-  reconnect(): Promise<{url: string}>;
+  reconnect(options?: GatekeeperReconnectOptions): Promise<{url: string}>;
 
   /**
    * For vendors that advertise `providesAuth`, returns the account's email address for use as the
@@ -763,7 +790,7 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    *
    * SECURITY: As with connectAccount(), any returned URL must include a cryptographic nonce.
    */
-  ensureResources(resourceUrlPatterns: string[]): Promise<{url?: string}>;
+  ensureResources(resourceUrlPatterns: string[], options?: GatekeeperEnsureResourcesOptions): Promise<{url?: string}>;
 
   /**
    * Checks whether this account is configured for deployments that mark the vendor as required.

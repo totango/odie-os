@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import { useAuthenticatedApi } from './AuthContext'
-import SandboxedGatekeeperApp from './SandboxedGatekeeperApp'
+import SandboxedGatekeeperApp, { type GatekeeperAppDependency } from './SandboxedGatekeeperApp'
 import { reportIssue } from './errorReporting'
-import { useGatekeeperApps } from './useGatekeeperApps'
+import { compositeSourceApps, useGatekeeperApps } from './useGatekeeperApps'
 import { useSessionsContext } from './components/sessions/SessionsContext'
 import { codingSessionInputForWorkItem, type WorkItemTarget } from './workItemNavigation'
 
@@ -29,32 +29,56 @@ export default function GatekeeperAppPage({
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
   const sessions = useSessionsContext()
-  const app = useGatekeeperApps().find((candidate) => candidate.id === appId)
+  const apps = useGatekeeperApps({includeEmbedded: true})
+  const app = apps.find((candidate) => candidate.id === appId)
   const gatekeeperVendorId = app?.vendorId ?? appId
   // Wrap the frame in an object: it holds a `ui` RPC stub, and we never want useState's setter to
   // treat a stored value as an updater function.
-  const [state, setState] = useState<{ frame: GatekeeperUiFrame } | null>(null)
+  const [state, setState] = useState<{
+    frame: GatekeeperUiFrame
+    dependencies: GatekeeperAppDependency[]
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    let acquired: GatekeeperUiFrame | null = null
+    const acquired: GatekeeperUiFrame[] = []
     setError(null)
     setState(null)
-    authenticatedApi
-      .getGatekeeperApp(appId)
-      .then((frame) => {
-        if (!frame) {
-          if (!cancelled) setError('This app is not available on this deployment.')
-          return
+    const load = async () => {
+      const frame = await authenticatedApi.getGatekeeperApp(appId)
+      if (!frame) {
+        if (!cancelled) setError('This app is not available on this deployment.')
+        return
+      }
+      if (cancelled) {
+        disposeFrame(frame)
+        return
+      }
+      acquired.push(frame)
+      const sourceApps = app ? compositeSourceApps(app, apps) : []
+      const dependencies = (await Promise.all(sourceApps.map(async (sourceApp) => {
+        try {
+          const sourceFrame = await authenticatedApi.getGatekeeperApp(sourceApp.id) as GatekeeperUiFrame | null
+          if (!sourceFrame) return null
+          if (cancelled) {
+            disposeFrame(sourceFrame)
+            return null
+          }
+          acquired.push(sourceFrame)
+          return {app: sourceApp, capability: sourceFrame.ui} satisfies GatekeeperAppDependency
+        } catch (err) {
+          console.error(`Failed to load composite gatekeeper app source ${sourceApp.vendorId}:`, err)
+          reportIssue('gatekeeper-app.composite-source.load', err, {
+            gatekeeperVendorId: sourceApp.vendorId,
+          })
+          return null
         }
-        if (cancelled) {
-          disposeFrame(frame)
-          return
-        }
-        acquired = frame
-        setState({ frame })
-      })
+      }))).filter((dependency): dependency is GatekeeperAppDependency => dependency !== null)
+      if (cancelled) return
+      setState({ frame, dependencies })
+    }
+    load()
       .catch((err) => {
         console.error('Failed to load gatekeeper app:', err)
         reportIssue('gatekeeper-app.load', err, {
@@ -64,9 +88,9 @@ export default function GatekeeperAppPage({
       })
     return () => {
       cancelled = true
-      disposeFrame(acquired)
+      for (const frame of acquired) disposeFrame(frame)
     }
-  }, [authenticatedApi, appId, gatekeeperVendorId])
+  }, [app, appId, apps, authenticatedApi, gatekeeperVendorId])
 
   const requestCodingSession = useCallback((target: WorkItemTarget, title: string) => {
     sessions.prepareSession(title, codingSessionInputForWorkItem(target))
@@ -88,9 +112,11 @@ export default function GatekeeperAppPage({
       <SandboxedGatekeeperApp
         frame={state.frame}
         gatekeeperVendorId={gatekeeperVendorId}
+        dependencies={state.dependencies}
         routeState={routeState}
         setRouteState={setRouteState}
         codingSessionAvailable={sessions.github.state === 'connected'}
+        workItemHandoffs={app?.composition?.kind === 'work-items' && app.composition.role === undefined}
         onRequestCodingSession={requestCodingSession}
       />
     </div>

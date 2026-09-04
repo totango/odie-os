@@ -266,6 +266,7 @@ const NO_DEFAULT_CRED_INPUTS = new Set([
   "gatekeeper-context",       // no third-party service; uses its own storage
   "gatekeeper-homeassistant", // users connect their own Home Assistant URL + token in-app
   "gatekeeper-scheduler",     // auto-provisioned; no third-party OAuth app
+  "gatekeeper-work-items",    // auto-provisioned shell; provider credentials stay in source gatekeepers
   "gatekeeper-mcp",           // MCP OAuth uses dynamic client registration, not a static app
   "gatekeeper-mcp-portal",    // same MCP OAuth chain as gatekeeper-mcp
 ]);
@@ -283,7 +284,9 @@ const INTERNAL_SERVICES = new Set(["gatekeeper-sessions"]);
 // Ambient gatekeepers the deploy service installs on every fresh core deploy, server-side with
 // no user interaction. Members must take no inputs of any kind (enforced below): a preinstall
 // has nobody to ask.
-const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
+const PREINSTALL = new Set([
+  "gatekeeper-context", "gatekeeper-scheduler", "gatekeeper-work-items",
+]);
 
 // Gatekeepers that may be installed at most once per instance; the deploy service enforces this
 // at install time. The giveaway is the account declaring an agent singleton
@@ -292,7 +295,9 @@ const PREINSTALL = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
 // ambient gatekeeper, so a second install would hand every user a duplicate ambient capsule.
 // Independent of PREINSTALL in principle; the two sets coincide today only because every ambient
 // gatekeeper we ship is also preinstalled.
-const SINGLETON = new Set(["gatekeeper-context", "gatekeeper-scheduler"]);
+const SINGLETON = new Set([
+  "gatekeeper-context", "gatekeeper-scheduler", "gatekeeper-work-items",
+]);
 
 /** Default wizard inputs for an installable gatekeeper that fronts a third-party OAuth app. */
 export const DEFAULT_CRED_INPUTS: DeployInput[] = [

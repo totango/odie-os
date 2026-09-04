@@ -13,6 +13,7 @@ import {
 import { newMessagePortRpcSession, RpcStub, RpcTarget } from "capnweb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import type { GatekeeperAppInfo } from "@gadgets/workshop-shared/api";
 import type {
   GatekeeperAppTheme,
   GatekeeperAppThemeReceiver,
@@ -37,7 +38,7 @@ const listGadgets = vi.fn<() => Promise<{ id: string; title: string }[]>>(async 
   { id: WORKSPACE_ID, title: "Daily Brief" },
 ]);
 const authenticatedApi = { listGadgets };
-const requestCodingSession = vi.fn<(target: { source: "jira" | "zendesk"; id: string; key?: string }, title: string) => void>();
+const requestCodingSession = vi.fn<(target: { source: "jira" | "zendesk"; id: string; key?: string; url?: string }, title: string) => void>();
 
 vi.mock("./AuthContext", () => ({
   useAuthenticatedApi: () => ({ authenticatedApi }),
@@ -47,17 +48,29 @@ vi.mock("./AuthContext", () => ({
 Object.defineProperty(window, "scrollTo", { value: vi.fn<() => void>(), configurable: true });
 
 interface TestHost extends RpcTarget {
+  listCapabilities(): Promise<GatekeeperAppInfo[]>;
+  getCapability(id: string): Promise<RpcStub<RpcTarget> | null>;
   subscribeTheme(receiver: GatekeeperAppThemeReceiver): Promise<GatekeeperAppTheme>;
   openWorkspace(workspaceId: string, gadgetId?: number): Promise<void>;
   resolveWorkspaceTitles(ids: string[]): Promise<(string | null)[]>;
   openPrompt(prompt: string): Promise<void>;
   codingSessionAvailable(): Promise<boolean>;
-  requestCodingSession(source: "jira" | "zendesk", id: string, key: string | undefined, title: string): Promise<void>;
+  requestCodingSession(source: "jira" | "zendesk", id: string, key: string | undefined, url: string | undefined, title: string): Promise<void>;
   getRouteState(): Promise<string>;
   setRouteState(value: string): Promise<void>;
 }
 
 class EmptyUi extends RpcTarget {}
+
+interface TestSource extends RpcTarget {
+  identify(): Promise<string>;
+}
+
+class SourceUi extends RpcTarget {
+  identify(): string {
+    return "jira";
+  }
+}
 
 class TestThemeReceiver extends RpcTarget implements GatekeeperAppThemeReceiver {
   setTheme(_theme: GatekeeperAppTheme): void {}
@@ -67,6 +80,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
   let container: HTMLDivElement | undefined;
   let root: Root | undefined;
   let host: RpcStub<TestHost> | undefined;
+  let dependencyCapability: RpcStub<RpcTarget> | undefined;
 
   beforeEach(() => {
     listGadgets.mockClear();
@@ -75,9 +89,11 @@ describe("SandboxedGatekeeperApp navigation", () => {
 
   afterEach(async () => {
     host?.[Symbol.dispose]();
+    dependencyCapability?.[Symbol.dispose]();
     await act(async () => root?.unmount());
     container?.remove();
     vi.restoreAllMocks();
+    dependencyCapability = undefined;
   });
 
   it("provides the deployment theme and routes bounded iframe requests", async () => {
@@ -85,11 +101,21 @@ describe("SandboxedGatekeeperApp navigation", () => {
       iframeHtml: "<!doctype html><title>Scheduler</title>",
       ui: new RpcStub(new EmptyUi()),
     } as unknown as GatekeeperUiFrame;
+    dependencyCapability = new RpcStub(new SourceUi());
+    const dependency: GatekeeperAppInfo = {
+      id: "opaque-jira-app-id",
+      vendorId: "jira",
+      title: "Jira",
+      composition: { kind: "work-items", role: "jira", embeddedOnly: true },
+    };
+    const dependencies = [{ app: dependency, capability: dependencyCapability }];
     const rootRoute = createRootRoute({
       component: () => <SandboxedGatekeeperApp
         frame={frame}
-        gatekeeperVendorId="team-pi"
+        gatekeeperVendorId="work-items"
+        dependencies={dependencies}
         codingSessionAvailable
+        workItemHandoffs
         onRequestCodingSession={requestCodingSession}
       />,
     });
@@ -127,6 +153,11 @@ describe("SandboxedGatekeeperApp navigation", () => {
       mode: "light",
       accentColor: "#7c3aed",
     });
+    await expect(host.listCapabilities()).resolves.toEqual([dependency]);
+    await expect(host.getCapability("missing")).resolves.toBeNull();
+    const source = await host.getCapability(dependency.id) as RpcStub<TestSource>;
+    await expect(source.identify()).resolves.toBe("jira");
+    source[Symbol.dispose]();
 
     await act(async () => {
       await host!.openWorkspace(WORKSPACE_ID, 2);
@@ -167,12 +198,12 @@ describe("SandboxedGatekeeperApp navigation", () => {
     expect(router.state.location.search).toEqual({ prompt: "Create a daily brief." });
 
     await expect(host.codingSessionAvailable()).resolves.toBe(true);
-    await host.requestCodingSession("jira", "1001", "ai-3540", "  Work on AI-3540  ");
+    await host.requestCodingSession("jira", "1001", "ai-3540", "https://example.atlassian.net/browse/AI-3540", "  Work on AI-3540  ");
     expect(requestCodingSession).toHaveBeenCalledWith(
-      { source: "jira", id: "1001", key: "AI-3540" },
+      { source: "jira", id: "1001", key: "AI-3540", url: "https://example.atlassian.net/browse/AI-3540" },
       "Work on AI-3540",
     );
-    await expect(host.requestCodingSession("jira", "1001", "AI-3540", "bad\ntitle")).rejects.toThrow(
+    await expect(host.requestCodingSession("jira", "1001", "AI-3540", undefined, "bad\ntitle")).rejects.toThrow(
       "Invalid coding session title",
     );
   });
@@ -207,7 +238,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     }));
 
     await expect(host.codingSessionAvailable()).resolves.toBe(false);
-    await expect(host.requestCodingSession("jira", "1001", "AI-3540", "Work on AI-3540"))
+    await expect(host.requestCodingSession("jira", "1001", "AI-3540", undefined, "Work on AI-3540"))
       .rejects.toThrow("not available to this app");
     expect(requestCodingSession).not.toHaveBeenCalled();
   });
@@ -240,7 +271,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
       },
     });
     const router = createRouter({
-      history: createMemoryHistory({ initialEntries: ["/gatekeepers/team-pi?state=source%3Djira%26q%3Dlogin"] }),
+      history: createMemoryHistory({ initialEntries: ["/gatekeepers/work-items?state=source%3Djira%26q%3Dlogin"] }),
       routeTree: rootRoute.addChildren([route]),
     });
 
@@ -262,30 +293,30 @@ describe("SandboxedGatekeeperApp navigation", () => {
 
     await expect(host.getRouteState()).resolves.toBe("source=jira&q=login");
     await expect(host.codingSessionAvailable()).resolves.toBe(false);
-    await expect(host.requestCodingSession("jira", "1001", "AI-3540", "Work on AI-3540"))
+    await expect(host.requestCodingSession("jira", "1001", "AI-3540", undefined, "Work on AI-3540"))
       .rejects.toThrow("not available to this app");
 
     await act(async () => {
       await host!.setRouteState("source=zendesk&q=refund");
       await vi.waitFor(() => expect(router.state.location.search).toEqual({ state: "source=zendesk&q=refund" }));
     });
-    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
+    expect(router.state.location.pathname).toBe("/gatekeepers/work-items");
 
     await act(async () => {
       await host!.setRouteState("");
       await vi.waitFor(() => expect(router.state.location.search).toEqual({}));
     });
-    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
+    expect(router.state.location.pathname).toBe("/gatekeepers/work-items");
 
     await expect(host.setRouteState("x".repeat(2049))).rejects.toThrow("Invalid gatekeeper app route state");
     await expect(host.setRouteState("q=bad\nvalue")).rejects.toThrow("Invalid gatekeeper app route state");
-    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
+    expect(router.state.location.pathname).toBe("/gatekeepers/work-items");
     expect(router.state.location.search).toEqual({});
 
     await act(async () => {
       await host!.setRouteState("appId=evil&path=/admin&selected=jira%3A1001");
       await vi.waitFor(() => expect(router.state.location.search).toEqual({ state: "appId=evil&path=/admin&selected=jira%3A1001" }));
     });
-    expect(router.state.location.pathname).toBe("/gatekeepers/team-pi");
+    expect(router.state.location.pathname).toBe("/gatekeepers/work-items");
   });
 });

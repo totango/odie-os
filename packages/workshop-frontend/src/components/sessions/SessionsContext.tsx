@@ -1,9 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import type { CodingSessionRepository, CodingSessionRepositoryOption, CodingSessionRuntime, CodingSessionSummary } from '@gadgets/workshop-shared/api'
+import type { AuthenticatedApi, CodingSessionRepository, CodingSessionRepositoryOption, CodingSessionRuntime, CodingSessionSummary } from '@gadgets/workshop-shared/api'
+import type { RpcStub } from 'capnweb'
 import type { CodingSessionActivity } from '@gadgets/workshop-shared/coding-sessions'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useGitHubConnection } from '../../hooks/useGitHubConnection'
 import { getWorkshopRuntime } from '../../runtime'
+import { accountBrowserFlows } from '../../accountBrowserFlow'
 import DeleteConfirmationDialog from '../DeleteConfirmationDialog'
 
 export const CODING_SESSION_PRESETS: Array<{
@@ -67,7 +69,7 @@ type SessionsContextValue = {
 }
 
 type GitHubAccountConnector = {
-  connectAccount: (vendorId: 'github') => Promise<{ url: string }>
+  connectAccount: (vendorId: string) => Promise<{ url: string }>
   reconnectAccount: (accountId: number) => Promise<{ url: string }>
 }
 
@@ -75,19 +77,11 @@ export async function openGitHubAccountPopup(
   authenticatedApi: GitHubAccountConnector,
   request: { kind: 'connect' } | { kind: 'reconnect'; accountId: number },
 ): Promise<void> {
-  const popup = window.open('', '_blank')
-  if (!popup) {
+  const result = request.kind === 'connect'
+    ? await accountBrowserFlows.connect(authenticatedApi as RpcStub<AuthenticatedApi>, 'github', undefined, { webPopup: 'preopen', webPreopenUrl: '', webNavigate: 'replace', webFallback: 'manual', requireWebPopup: true })
+    : await accountBrowserFlows.reconnect(authenticatedApi as RpcStub<AuthenticatedApi>, request.accountId, { webPopup: 'preopen', webPreopenUrl: '', webNavigate: 'replace', webFallback: 'manual', requireWebPopup: true })
+  if (result.popupBlocked) {
     throw new Error(`Allow pop-ups to ${request.kind === 'connect' ? 'connect' : 'reconnect'} GitHub, then try again.`)
-  }
-  popup.opener = null
-  try {
-    const { url } = request.kind === 'connect'
-      ? await authenticatedApi.connectAccount('github')
-      : await authenticatedApi.reconnectAccount(request.accountId)
-    popup.location.replace(url)
-  } catch (caught) {
-    popup.close()
-    throw caught
   }
 }
 

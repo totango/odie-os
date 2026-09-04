@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ESNext", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react",
+    "jsxFactory": "h",
+    "types": ["@cloudflare/workers-types", "./worker-configuration.d.ts"],
+    "paths": {
+      "@gadgets/configurator-ui": ["../configurator-ui/src/index.ts"],
+      "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"]
+    }
+  },
+  "include": ["src", "__tests__"],
+  "exclude": ["dist", "node_modules", ".wrangler"]
+}

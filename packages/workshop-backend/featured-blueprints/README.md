@@ -130,11 +130,12 @@ Common optional binding names are:
 - GitHub: `GITHUB_REPO`, `GITHUB_ISSUE`, `GITHUB_PULL_REQUEST`
 - Gmail: `GMAIL_INBOX`, `GMAIL_SEARCH`, `GMAIL_LABEL`
 - Linear: `LINEAR_WORKSPACE`, `LINEAR_TEAM`, `LINEAR_ISSUE`
-- deployment services: `TEAM_PI`, `JARVIS`
+- Jira: `JIRA_SITE`, `JIRA_PROJECT`, `JIRA_ISSUE`
+- Zendesk: `ZENDESK`, `ZENDESK_TICKET`
+- deployment services: `JARVIS`
 
-Jira and Zendesk do not imply native gatekeepers. Route them through Team PI or a vetted MCP
-connection, then store bounded normalized findings in the starter. Never fabricate live data when a
-source is missing or fails.
+Native Jira and Zendesk gatekeepers are available, but remain optional capabilities that a user or
+agent must wire explicitly. Never fabricate live data when a source is missing or fails.
 
 Skip is a capability/privacy decision, not just presentation state. Once a connector is skipped:
 

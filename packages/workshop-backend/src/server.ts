@@ -92,6 +92,7 @@ export async function listVisibleGatekeeperApps(accounts: ProvidedAccountInfo[],
         accountUniqueName: account.description.uniqueName,
         title: account.description.providesUi!.title,
         icon: account.description.providesUi!.icon,
+        composition: account.description.providesUi!.composition,
       })));
 }
 
@@ -756,16 +757,20 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.getRequiredConnectionStatuses();
   }
 
-  connectAccount(vendorId: string, resourceUrlPatterns?: string[], options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart> {
+  async connectAccount(vendorId: string, resourceUrlPatterns?: string[], options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart> {
     if (options?.flow?.returnMode === "native-verified-link") {
-      throw new Error("Native account browser flows require the NativeOAuthFlow durable object migration.");
+      const result = await this.#startNativeAccountFlow("connect", options.flow, flow =>
+        this.#user.connectAccount(vendorId, resourceUrlPatterns, flow));
+      if (!result.url) throw new Error("Native account connection did not return an authorization URL.");
+      return result as BrowserFlowStart;
     }
     return this.#user.connectAccount(vendorId, resourceUrlPatterns);
   }
 
   ensureAccountResources(accountId: number, resourceUrlPatterns: string[], options?: { flow?: BrowserFlowOptions }): Promise<Partial<BrowserFlowStart>> {
     if (options?.flow?.returnMode === "native-verified-link") {
-      throw new Error("Native account browser flows require the NativeOAuthFlow durable object migration.");
+      return this.#startNativeAccountFlow("grant", options.flow, flow =>
+        this.#user.ensureAccountResources(accountId, resourceUrlPatterns, flow));
     }
     return this.#user.ensureAccountResources(accountId, resourceUrlPatterns);
   }
@@ -788,11 +793,40 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.disconnectAccount(accountId);
   }
 
-  reconnectAccount(accountId: number, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart> {
+  async reconnectAccount(accountId: number, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart> {
     if (options?.flow?.returnMode === "native-verified-link") {
-      throw new Error("Native account browser flows require the NativeOAuthFlow durable object migration.");
+      const result = await this.#startNativeAccountFlow("reconnect", options.flow, flow =>
+        this.#user.reconnectAccount(accountId, flow));
+      if (!result.url) throw new Error("Native account reconnection did not return an authorization URL.");
+      return result as BrowserFlowStart;
     }
     return this.#user.reconnectAccount(accountId);
+  }
+
+  async #startNativeAccountFlow(
+      kind: "connect" | "reconnect" | "grant",
+      flow: BrowserFlowOptions,
+      start: (flow: { flowHandle: string; returnUrl: string }) => Promise<{ url?: string }>): Promise<Partial<BrowserFlowStart>> {
+    if (!flow.clientVerifierHash) throw new Error("Native account browser flow requires a client verifier hash.");
+    const flowHandle = randomOpaqueHandle();
+    const returnUrl = new URL(`/native/oauth-return/${encodeURIComponent(flowHandle)}`, publicBaseUrl(this.env)).toString();
+    const { url: providerInitiationUrl } = await start({ flowHandle, returnUrl });
+    if (!providerInitiationUrl) return {};
+    const record = createNativeBrowserFlowRecord({
+      kind,
+      flowHandle,
+      launchTicket: flowHandle,
+      clientVerifierHash: flow.clientVerifierHash,
+      providerInitiationUrl,
+      userId: this.#userId.toString(),
+    });
+    await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
+        .initialize(record);
+    return {
+      url: new URL(`/native/oauth-start/${encodeURIComponent(flowHandle)}`, publicBaseUrl(this.env)).toString(),
+      flowHandle,
+      expiresAt: new Date(record.expiresAt).toISOString(),
+    };
   }
 
   async getNativeAccountFlowStatus(flowHandle: string, clientVerifier: string): Promise<NativeLoginFlowStatus> {

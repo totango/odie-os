@@ -30,10 +30,10 @@ describe('Tauri Rust-owned Stronghold runtime storage', () => {
     const { createTauriRuntime } = await import('./tauriRuntime')
     const runtime = createTauriRuntime()
 
-    await runtime.openExternal('/gatekeeper/team-pi/connect?state=opaque')
+    await runtime.openExternal('/gatekeeper/jira/connect?state=opaque')
 
     expect(invoke).toHaveBeenCalledWith('open_external_link', {
-      url: 'https://odie-os-native-api.odie-os.workers.dev/gatekeeper/team-pi/connect?state=opaque',
+      url: 'https://odie-os-native-api.odie-os.workers.dev/gatekeeper/jira/connect?state=opaque',
     })
   })
 

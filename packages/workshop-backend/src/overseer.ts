@@ -30,7 +30,7 @@ import {
   type FinanceWorkspaceClaim,
 } from "./admin-settings.js";
 import { WebFetchEnv } from "./web-fetch";
-import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
+import { UserDurableObject, UserAiModelRecord, isRetiredGatekeeperVendor, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import { AgentSpawnerBinding } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/backend-utils/error-reporting";
@@ -352,7 +352,8 @@ function isGatekeeperDisabled(
     config: AdminConfig, record: GatekeeperRecord | undefined,
     vendorId = gatekeeperVendorId(record)): boolean {
   if (!vendorId) return false;
-  if (config.disabledGatekeepers.includes(vendorId) ||
+  if (isRetiredGatekeeperVendor(vendorId) ||
+      config.disabledGatekeepers.includes(vendorId) ||
       ambientGatekeeperMode(config, vendorId) === "disabled") return true;
   return record?.creationSpec?.type === "gatekeeper" &&
       isResourceDisabled(config, vendorId, record.creationSpec.typeUrlPattern);

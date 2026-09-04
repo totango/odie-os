@@ -17,6 +17,7 @@ import {
 import { WorkshopButton } from './components/WorkshopControls'
 import Avatar from './components/Avatar'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { accountBrowserFlows } from './accountBrowserFlow'
 
 // Shown when a non-owner opens a shared Gadget that reads data through one or more gatekeeper
 // bindings, and they haven't yet chosen which of their own connected accounts to use for each one.
@@ -211,11 +212,11 @@ export default function ObserverConfigModal({
         await authenticatedApi.provisionAmbientAccount(vendorId)
       } else {
         const required = requiredResourceUrlPatterns(need, vendor)
-        const { url } = await authenticatedApi.connectAccount(
+        await accountBrowserFlows.connect(
+          authenticatedApi,
           vendorId,
           required.length > 0 ? required : undefined,
         )
-        window.open(url, '_blank', 'noopener,noreferrer')
       }
     } catch (err) {
       console.error('Failed to initiate connection:', err)
@@ -228,8 +229,7 @@ export default function ObserverConfigModal({
   const handleReconnect = async (accountId: number) => {
     setReconnecting(accountId)
     try {
-      const { url } = await authenticatedApi.reconnectAccount(accountId)
-      window.open(url, '_blank', 'noopener,noreferrer')
+      await accountBrowserFlows.reconnect(authenticatedApi, accountId)
       // Subscription fires add() with credentialsValid:true on completion, clearing `reconnecting`.
     } catch (err) {
       console.error('Failed to initiate reconnection:', err)
@@ -248,9 +248,8 @@ export default function ObserverConfigModal({
     if (missing.length === 0) return
     setGranting(account.id)
     try {
-      const { url } = await authenticatedApi.ensureAccountResources(account.id, missing)
-      if (url) window.open(url, '_blank', 'noopener,noreferrer')
-      else {
+      const { url } = await accountBrowserFlows.grant(authenticatedApi, account.id, missing)
+      if (!url) {
         // The gatekeeper confirmed this account already has access. Update the modal so the user can
         // continue without an OAuth flow.
         setAccounts(prev => {

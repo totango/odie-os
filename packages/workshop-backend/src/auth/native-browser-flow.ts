@@ -93,6 +93,15 @@ export class NativeBrowserFlow extends DurableObject<Cloudflare.Env> {
     await this.#put(record);
   }
 
+  async completeAccount(): Promise<void> {
+    const record = await this.#record();
+    await this.#assertNotExpired(record);
+    if (record.kind === "login") throw new Error("Native browser flow is not an account flow.");
+    if (record.status !== "pending") return;
+    record.status = "completed";
+    await this.#put(record);
+  }
+
   async fail(message: string): Promise<void> {
     const record = await this.#record();
     if (record.status === "consumed") return;

@@ -510,7 +510,8 @@ describe("featured starter server runtime smoke tests", () => {
       GITHUB_REPO: {},
       GMAIL_INBOX: {},
       LINEAR_WORKSPACE: {},
-      TEAM_PI: {},
+      JIRA_SITE: {},
+      ZENDESK: {},
       JARVIS: {},
       GOOGLE_SHEET: {},
       GOOGLE_DOC: {},
@@ -817,7 +818,7 @@ describe("featured starter server runtime smoke tests", () => {
     }
   });
 
-  it("does not read connected snapshot sources after the user skips them", async () => {
+  it("does not read a connected snapshot source after the user skips it", async () => {
     for (let slug of ["developer-delivery-kit", "incident-investigation-board"] as const) {
       let calls = 0;
       let {gadget} = await loadStarter(slug, {
@@ -826,21 +827,16 @@ describe("featured starter server runtime smoke tests", () => {
           listPullRequests: async () => { calls++; throw new Error("Skipped GitHub was queried"); },
           listIssues: async () => { calls++; throw new Error("Skipped GitHub was queried"); },
         },
-        TEAM_PI: {
-          listConnections: async () => { calls++; throw new Error("Skipped Team PI was queried"); },
-        },
       });
       await gadget.setConnectorSkipped("GITHUB_REPO", true);
-      await gadget.setConnectorSkipped("TEAM_PI", true);
 
       let snapshot = await gadget.sourceSnapshot() as {
-        live: {repository: unknown, teamPiConnections: unknown[], notes: string[]};
+        live: {repository: unknown, notes: string[]};
       };
 
       expect(calls, slug).toBe(0);
       expect(snapshot.live.repository, slug).toBeNull();
-      expect(snapshot.live.teamPiConnections, slug).toEqual([]);
-      expect(snapshot.live.notes.join("\n"), slug).not.toMatch(/GITHUB_REPO|TEAM_PI/u);
+      expect(snapshot.live.notes.join("\n"), slug).not.toContain("GITHUB_REPO");
     }
   });
 
@@ -853,14 +849,18 @@ describe("featured starter server runtime smoke tests", () => {
       LINEAR_WORKSPACE: {listIssues: async () => fakeCursor([{
         id: "lin-1", title: "Linear escalation", team: {name: "Beta"},
       }]).cursor},
+      ZENDESK: {searchTickets: async () => ({items: [{
+        id: "zd-1", title: "Zendesk escalation", customer: "Acme",
+      }]})},
     });
     let supportSync = await support.gadget.syncSources() as {results: Array<{key: string, imported: number}>, state: {records: unknown[]}};
     expect(supportSync.results.find(result => result.key === "GMAIL_INBOX")?.imported).toBe(1);
     expect(supportSync.results.find(result => result.key === "LINEAR_WORKSPACE")?.imported).toBe(1);
+    expect(supportSync.results.find(result => result.key === "ZENDESK")?.imported).toBe(1);
     expect(supportSync.results.find(result => result.key === "JARVIS")?.imported).toBe(0);
-    expect(supportSync.state.records).toHaveLength(2);
+    expect(supportSync.state.records).toHaveLength(3);
     expect((await support.gadget.syncSources() as {state: {records: unknown[]}}).state.records)
-        .toHaveLength(2);
+        .toHaveLength(3);
 
     let jira = await loadStarter("jira-delivery-risk", {
       GITHUB_REPO: {

@@ -19,8 +19,7 @@ describe('support curation ranking', () => {
     ).map((item) => item.id)).toEqual(['analytics', 'zendesk', 'jira', 'notion'])
   })
 
-  it('includes Team PI without matching unrelated partial words', () => {
-    expect(isSupportCuratedAsset('connector', 'team-pi')).toBe(true)
+  it('matches support assets without matching unrelated partial words', () => {
     expect(isSupportCuratedAsset('featured', 'customer-success-board')).toBe(true)
     expect(isSupportCuratedAsset('featured', 'incidentally-useful')).toBe(false)
   })

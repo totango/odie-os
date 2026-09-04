@@ -11,7 +11,7 @@ import {
   PICKER_CAPTION, PICKER_EMPTY, PICKER_ROW, PICKER_ROW_ACTIVE, TabHint,
 } from './components/pickerRows'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
-import { getWorkshopRuntime } from './runtime'
+import { accountBrowserFlows } from './accountBrowserFlow'
 
 export interface VendorOption {
   id: string
@@ -399,12 +399,7 @@ export default function ResourcePicker({
   const handleConnectNew = async (vendorId: string, resourceUrlPatterns?: string[]) => {
     setConnectingVendor(vendorId)
     try {
-      const runtime = getWorkshopRuntime()
-      if (runtime.kind === 'tauri') {
-        throw new Error('Native account connection is not available until verified-link OAuth return is implemented.')
-      }
-      const result = await authenticatedApi.connectAccount(vendorId, resourceUrlPatterns)
-      await runtime.openExternal(result.url)
+      await accountBrowserFlows.connect(authenticatedApi, vendorId, resourceUrlPatterns)
     } catch (error) {
       console.error('Failed to initiate connection:', error)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
@@ -419,13 +414,8 @@ export default function ResourcePicker({
     if (resourceUrlPatterns.length === 0) return
     setGrantingAccount(accountId)
     try {
-      const runtime = getWorkshopRuntime()
-      if (runtime.kind === 'tauri') {
-        throw new Error('Native resource grants are not available until verified-link OAuth return is implemented.')
-      }
-      const result = await authenticatedApi.ensureAccountResources(accountId, resourceUrlPatterns)
+      const result = await accountBrowserFlows.grant(authenticatedApi, accountId, resourceUrlPatterns)
       if (result.url) {
-        await runtime.openExternal(result.url)
         toasts.add({ title: 'Grant the additional access in the new tab.', variant: 'success' })
       }
     } catch (error) {
@@ -441,12 +431,7 @@ export default function ResourcePicker({
   const handleReconnect = useCallback(async (accountId: number) => {
     setReconnectingAccount(accountId)
     try {
-      const runtime = getWorkshopRuntime()
-      if (runtime.kind === 'tauri') {
-        throw new Error('Native account reconnection is not available until verified-link OAuth return is implemented.')
-      }
-      const result = await authenticatedApi.reconnectAccount(accountId)
-      await runtime.openExternal(result.url)
+      await accountBrowserFlows.reconnect(authenticatedApi, accountId)
       // The subscription will fire add() with credentialsValid: true when reconnect completes.
       // The reconnectingAccount state is cleared at that point.
     } catch (error) {

@@ -13,13 +13,12 @@ const CONNECTORS = [
   { key: "GMAIL_INBOX", label: "Gmail inbox", kind: "gmail-list", purpose: "Recent mailbox threads that may contain customer escalations" },
   { key: "GMAIL_SEARCH", label: "Gmail search", kind: "gmail-search", purpose: "A scoped Gmail search resource for escalation mail" },
   { key: "GMAIL_LABEL", label: "Gmail label", kind: "gmail-list", purpose: "A scoped Gmail label such as Escalations or Exec Follow-up" },
-  { key: "TEAM_PI", label: "Team PI", kind: "team-pi", purpose: "Team PI searches for Gmail/Zendesk context and team signals" },
+  { key: "ZENDESK", label: "Zendesk", kind: "zendesk-list", purpose: "Native Zendesk ticket search for support escalations" },
   { key: "JARVIS", label: "JARVIS", kind: "presence", purpose: "Internal knowledge and runbook lookup; detected for future agent workflows" },
   { key: "LINEAR_WORKSPACE", label: "Linear workspace", kind: "linear-list", purpose: "Workspace-wide engineering delivery links" },
   { key: "LINEAR_TEAM", label: "Linear team", kind: "linear-list", purpose: "Team-scoped engineering delivery links" },
   { key: "LINEAR_ISSUE", label: "Linear issue", kind: "presence", purpose: "Single linked engineering issue; connected but not listable" },
-  { key: "ZENDESK_ROUTE", label: "Zendesk", kind: "route", purpose: "No native Zendesk binding is bundled. Use Team PI zendeskSearch or a vetted MCP resource from Connections." },
-  { key: "JIRA_ROUTE", label: "Jira", kind: "route", purpose: "No native Jira binding is bundled. Use a vetted MCP resource from Connections, or connect Linear for native issue lists." },
+  { key: "JIRA_SITE", label: "Jira", kind: "presence", purpose: "Native Jira site for linked engineering work" },
 ];
 
 const DEMO_RECORDS = [
@@ -325,10 +324,9 @@ export class Gadget extends DurableObject {
         } else if (connector.kind === "gmail-search") {
           let entries = await consumeCursor(this.env[connector.key].search("escalation OR urgent OR incident"), 20);
           try { records = entries.map((entry) => fromGmailEntry(entry, connector.key)); } finally { disposeGmailThreads(entries); }
-        } else if (connector.kind === "team-pi") {
-          let zendesk = knownList(await this.env.TEAM_PI.zendeskSearch({ query: "escalation OR priority", limit: 20 })).slice(0, 20).map((row) => fromUnknown(row, "TEAM_PI: zendeskSearch")).filter(Boolean);
-          let gmail = knownList(await this.env.TEAM_PI.gmailSearch({ query: "escalation OR urgent", limit: 20 })).slice(0, 20).map((row) => fromUnknown(row, "TEAM_PI: gmailSearch")).filter(Boolean);
-          records = [...zendesk, ...gmail].slice(0, 20);
+        } else if (connector.kind === "zendesk-list") {
+          records = knownList(await this.env.ZENDESK.searchTickets({ query: "escalation OR priority", limit: 20 }))
+              .slice(0, 20).map((row) => fromUnknown(row, "ZENDESK: searchTickets")).filter(Boolean);
         } else if (connector.kind === "linear-list") {
           records = (await consumeCursor(
               this.env[connector.key].listIssues({ resultsPerPage: 20 }), 20))

@@ -3,7 +3,7 @@ import { useEffect, useRef } from "react";
 import GatekeeperAppPage from "./GatekeeperAppPage";
 import { workItemRouteState, type WorkItemTarget } from "./workItemNavigation";
 
-/** Hosts Team PI Work Items beside the current chat without navigating away from the conversation. */
+/** Hosts Work Items beside the current chat without navigating away from the conversation. */
 export default function WorkItemDrawer({
   appId,
   target,

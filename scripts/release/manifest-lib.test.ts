@@ -117,6 +117,10 @@ test("worker entries carry the deploy contract", () => {
   // Full ordered migration history, verbatim from wrangler.jsonc.
   assert.equal(backend.migrations[0].tag, "v0");
   assert.ok(backend.migrations[0].new_sqlite_classes?.includes("UserDurableObject"));
+  assert.deepEqual(backend.migrations.at(-1), {
+    tag: "v3",
+    new_sqlite_classes: ["NativeBrowserFlow"],
+  });
 
   // Router: serves the access asset variant, binds the backend by templated worker name.
   const router = workers["router"];
@@ -173,23 +177,22 @@ test("worker entries carry the deploy contract", () => {
   assert.deepEqual(odieKg.inputs, []);
   assert.equal(odieKg.vars.ODIE_KG_MCP_URL, undefined);
 
-  // Team PI uses a public Auth0 device client and per-user authorization, not a client secret.
-  const teamPi = workers["gatekeeper-team-pi"];
-  assert.ok(teamPi.inputs);
-  assert.deepEqual(teamPi.inputs.map((i) => i.name), [
-    "TEAM_PI_AUTH0_DOMAIN",
-    "TEAM_PI_AUTH0_CLIENT_ID",
-    "TEAM_PI_AUTH0_AUDIENCE",
-    "TEAM_PI_BASE_URL",
-  ]);
-  assert.ok(teamPi.inputs.every((input) => input.kind === "secret"));
-  for (const input of teamPi.inputs) {
-    assert.deepEqual(teamPi.bindings.find((binding) => binding.name === input.name), {
-      type: "secret_text",
-      name: input.name,
-      text: `$SECRET(${input.name})`,
-    });
+  for (const packageName of ["gatekeeper-jira", "gatekeeper-zendesk"]) {
+    const provider = workers[packageName];
+    assert.ok(provider.installable);
+    assert.deepEqual(provider.inputs?.map((input) => input.name), ["CLIENT_ID", "CLIENT_SECRET"]);
+    assert.ok(provider.inputs?.every((input) => input.kind === "secret"));
+    assert.ok(provider.inputs?.[0]?.redirectUriTemplate?.includes(`/gatekeeper/${provider.shortName}/oauth`));
+    assert.deepEqual(provider.bindings.filter((binding) => binding.name === "CLIENT_ID" || binding.name === "CLIENT_SECRET"), [
+      { type: "secret_text", name: "CLIENT_ID", text: "$SECRET(CLIENT_ID)" },
+      { type: "secret_text", name: "CLIENT_SECRET", text: "$SECRET(CLIENT_SECRET)" },
+    ]);
   }
+
+  const workItems = workers["gatekeeper-work-items"];
+  assert.equal(workItems.preinstall, true);
+  assert.equal(workItems.singleton, true);
+  assert.deepEqual(workItems.inputs, []);
 
   const sessions = workers["gatekeeper-sessions"];
   assert.equal(sessions.installable, false);
