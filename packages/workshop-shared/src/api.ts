@@ -3908,6 +3908,12 @@ export type WorkpieceSummary = {
   filesRoot?: string;
 
   /**
+   * Monotonic workspace code version when this workpiece's rendered UI may need to refresh. Clients
+   * use this only as an invalidation signal; a visible gadget should prompt before reloading.
+   */
+  uiVersion?: number;
+
+  /**
    * If present, this workpiece exists only in the context of the given chat. The UI should display
    * it only while the given chat is open.
    *

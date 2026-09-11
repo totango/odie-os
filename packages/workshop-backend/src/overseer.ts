@@ -2229,6 +2229,7 @@ class OverseerImpl implements AgentHooks {
         type: "gadget",
         title: record.title,
         filesRoot: this.gadgetRootName(record.id),
+        uiVersion: this.storage.codeVersion.get(),
       };
       if (record.output) {
         summary.output = record.output;
@@ -3730,6 +3731,8 @@ class OverseerImpl implements AgentHooks {
     this.storage.codeVersion.put(codeVersion);
     let ids = affectedGadgetIds ?? [...this.storage.gadgets.list()].map(gadget => gadget.id);
     for (let id of ids) {
+      let record = this.storage.gadgets.get(id);
+      if (record) this.storage.gadgets.put({...record});
       this.ctx.facets.abort(this.gadgetFacetName(id),
           new Error("Gadget restarted due to code update."));
     }

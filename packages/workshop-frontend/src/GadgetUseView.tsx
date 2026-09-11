@@ -39,6 +39,7 @@ type Props = {
   metadata: GadgetMetadata
   authenticatedApi: RpcStub<AuthenticatedApi>
   currentUserId: string | null
+  reloadTrigger?: number
 }
 
 // Matches the top bar height used by the full editor (and the home page header).
@@ -53,6 +54,7 @@ export default function GadgetUseView({
   metadata,
   authenticatedApi,
   currentUserId,
+  reloadTrigger,
 }: Props) {
   return (
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
@@ -151,6 +153,7 @@ export default function GadgetUseView({
             key={selectedGadgetId}
             gadget={gadget}
             height="100%"
+            reloadTrigger={reloadTrigger}
             isVisible={true}
           />
         ) : (

@@ -244,7 +244,7 @@ describe('GadgetUI RPC recovery', () => {
     expect(container.querySelector('iframe')).toBe(iframe)
   })
 
-  it('abandons queued calls when a code reload replaces the iframe', async () => {
+  it('keeps visible gadget edits until a pending code reload is accepted', async () => {
     const first = fakeGadget('first', 'document.body.textContent = "first"')
     await act(async () => {
       root.render(<GadgetUI gadget={first.stub} height="100px" reloadTrigger={0} />)
@@ -269,10 +269,47 @@ describe('GadgetUI RPC recovery', () => {
     await act(async () => {
       root.render(<GadgetUI gadget={replacement.stub} height="100px" reloadTrigger={1} />)
     })
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(container.textContent).toContain('Reload when ready')
+
+    await act(async () => {
+      container.querySelector('button')!.click()
+    })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(iframe))
     const reloadedChild = connectIframe(container.querySelector('iframe')!)
     await expect(read).rejects.toBeDefined()
     await expect(reloadedChild.read()).resolves.toBe('reloaded')
+  })
+
+  it('keeps a hidden loaded iframe until a pending code reload is accepted', async () => {
+    const gadget = fakeGadget('first', 'document.body.textContent = "first"')
+    gadget.getUiBundle
+      .mockResolvedValueOnce({ jsCode: 'document.body.textContent = "first"' })
+      .mockResolvedValueOnce({ jsCode: 'document.body.textContent = "updated"' })
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={0} />)
+    })
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const iframe = container.querySelector('iframe')!
+    expect(iframe.srcdoc).toContain('first')
+
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={1} isVisible={false} />)
+    })
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(gadget.getUiBundle).toHaveBeenCalledOnce()
+
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={1} isVisible />)
+    })
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(container.textContent).toContain('Reload when ready')
+
+    await act(async () => {
+      container.querySelector('button')!.click()
+    })
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(iframe))
+    expect(container.querySelector('iframe')?.srcdoc).toContain('updated')
   })
 
   it('re-subscribes disposed callbacks without restoring an intentional unsubscribe', async () => {
@@ -487,6 +524,11 @@ describe('GadgetUI RPC recovery', () => {
 
     await act(async () => {
       root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={1} />)
+    })
+    expect(container.querySelector('iframe')).toBe(oldIframe)
+
+    await act(async () => {
+      container.querySelector('button')!.click()
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(oldIframe))
 
