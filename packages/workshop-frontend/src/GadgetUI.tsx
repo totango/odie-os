@@ -244,29 +244,35 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     void reconnect()
   }, [gadget, chatId])
 
-  // Effect to handle reloadTrigger changes (code changes)
+  // Effect to handle reloadTrigger changes (code changes). If the gadget UI is visible, never
+  // refresh the iframe automatically: the app may contain in-progress form edits that only exist in
+  // the frame's JS state. Instead, mark the view stale and let the user choose when to reload it.
   useEffect(() => {
     // Only react if reloadTrigger has actually changed from the previous value
     if (reloadTrigger !== undefined && reloadTrigger !== prevReloadTriggerRef.current && reloadTrigger > 0) {
-      // Mark as invalidated but don't reload unless visible
       setIsInvalidated(true)
-      if (!isVisible) {
-        // If not visible, just clear the current state
+      if (!isVisible && !hasLoaded) {
+        // If no frame has ever loaded, keep the empty state so the next visit fetches latest code.
         setSandboxedHtml(null)
-        setHasLoaded(false)
         setError(null)
       }
       // Update the ref to the current value
       prevReloadTriggerRef.current = reloadTrigger
     }
-  }, [reloadTrigger, isVisible])
+  }, [reloadTrigger, isVisible, hasLoaded])
 
-  // Effect to load UI bundle when component becomes visible for the first time or when invalidated
+  const loadPendingUiUpdate = () => {
+    reloadIframe(new Error('Gadget UI update requested.'))
+    setSandboxedHtml(null)
+    setHasLoaded(false)
+    setError(null)
+  }
+
+  // Effect to load UI bundle when component becomes visible for the first time, or after a pending
+  // update is explicitly accepted. Visible updates are not loaded automatically because replacing the
+  // iframe destroys unsaved gadget-local state.
   useEffect(() => {
-    // Only load if:
-    // 1. Component is visible AND
-    // 2. Either never loaded before OR invalidated due to code changes
-    if (!isVisible || (hasLoaded && !isInvalidated)) {
+    if (!isVisible || hasLoaded) {
       return
     }
 
@@ -489,9 +495,26 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   }
 
   return (
-    <div style={{ height, width: '100%' }}>
+    <div className="relative" style={{ height, width: '100%' }}>
+      {isInvalidated && (
+        <div className="absolute inset-x-3 top-3 z-10 flex justify-center pointer-events-none">
+          <div
+            role="status"
+            className="pointer-events-auto flex max-w-lg items-center gap-3 rounded-xl border border-kumo-line bg-kumo-base/95 px-3 py-2 text-sm text-kumo-default shadow-lg backdrop-blur"
+          >
+            <span>This gadget has an update ready.</span>
+            <button
+              type="button"
+              className="rounded-lg border border-kumo-line bg-kumo-elevated px-2.5 py-1 text-xs font-medium text-kumo-default hover:bg-kumo-hover"
+              onClick={loadPendingUiUpdate}
+            >
+              Reload when ready
+            </button>
+          </div>
+        </div>
+      )}
       <iframe
-        key={`${reloadTrigger}:${iframeGeneration}`}
+        key={iframeGeneration}
         ref={iframeRef}
         srcDoc={sandboxedHtml}
         style={{

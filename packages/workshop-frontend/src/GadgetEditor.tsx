@@ -1352,6 +1352,7 @@ export default function GadgetEditor() {
         metadata={metadata}
         authenticatedApi={authenticatedApi}
         currentUserId={userInfo?.id ?? null}
+        reloadTrigger={selectedGadgetSummary?.uiVersion}
       />
     )
   }
@@ -1835,7 +1836,7 @@ export default function GadgetEditor() {
                   key={selectedGadgetId}
                   gadget={selectedGadgetStub}
                   height="100%"
-                  reloadTrigger={uiReloadTrigger}
+                  reloadTrigger={uiReloadTrigger + (selectedGadgetSummary?.uiVersion ?? 0)}
                   isVisible={activeTab === 'app' && !previewMode}
                   chatId={previewChatId}
                   onConsoleLog={handleClientConsoleLog}
@@ -1926,7 +1927,7 @@ export default function GadgetEditor() {
               key={selectedGadgetId}
               gadget={selectedGadgetStub}
               height="100%"
-              reloadTrigger={uiReloadTrigger}
+              reloadTrigger={uiReloadTrigger + (selectedGadgetSummary?.uiVersion ?? 0)}
               isVisible={true}
               chatId={previewChatId}
               onConsoleLog={handleClientConsoleLog}
