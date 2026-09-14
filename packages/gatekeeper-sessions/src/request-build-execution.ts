@@ -28,7 +28,14 @@ export interface RequestBuildExecutionDependencies {
   arm(): Promise<void>;
 }
 
-const logger = createLogger<{ vendorId: string; dispatchKey?: string }>({ component: "gatekeeper.sessions.request-build", vendorId: "sessions" });
+type RequestBuildLogFields = {
+  vendorId: string;
+  dispatchKey?: string;
+  stage?: RequestBuildRecord["stage"];
+  error?: unknown;
+};
+
+const logger = createLogger<RequestBuildLogFields>({ component: "gatekeeper.sessions.request-build", vendorId: "sessions" });
 
 const terminal = new Set(["artifact_ready", "canceled", "failed", "needs_attention"]);
 
@@ -127,8 +134,13 @@ export class RequestBuildExecution {
       try {
         await this.deps.arm();
         await this.#advance(record);
-      } catch {
-        logger.warn("request build operation requires reconciliation", {event:"request.build.execution.reconcile",dispatchKey:record.dispatchKey});
+      } catch (error) {
+        logger.warn("request build operation requires reconciliation", {
+          event: "request.build.execution.reconcile",
+          dispatchKey: record.dispatchKey,
+          stage: this.get(record.owner, record.dispatchKey)?.stage ?? record.stage,
+          error,
+        });
         const current = this.get(record.owner, record.dispatchKey)!;
         // Keep ambiguous launches for attention; no remote error text persists or enters public receipts.
         if (!terminal.has(current.state) && current.state !== "cancel_requested") {
