@@ -48,6 +48,7 @@ import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import { loadBundledFinanceOperationsWorkbenchSource } from "./format-blueprints.js";
 import { isFinanceOperator } from "./finance-operators";
+import { indexAccountProfile } from "./account-directory";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -479,9 +480,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#communityRequests.moderate(claim, id, command);
   }
 
-  whoami(): Promise<AiChatAuthorInfo> {
+  async whoami(): Promise<AiChatAuthorInfo> {
     // Pure-read delegations retry once across a user-DO reset (see retryOnDoReset); writes never do.
-    return retryOnDoReset(() => this.#user.whoami());
+    const profile = await retryOnDoReset(() => this.#user.whoami());
+    this.ctx.waitUntil(indexAccountProfile(this.env.BLUEPRINTS, profile).catch(error =>
+      logger.warn("failed to refresh account discovery hint", {event: "account.directory.refresh.failed", error})));
+    return profile;
   }
   listAccountIdentities(): Promise<AiChatAuthorInfo[]> {
     // A token issued while aliasing was enabled still opens its original DO after opt-out,
@@ -498,8 +502,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return new AuthenticatedApiImpl(this.ctx, this.env, this.users.idFromName(identity),
         this.abortSession, this.verifiedEmail);
   }
-  setOwnDisplayName(name: string): Promise<void> {
-    return this.#user.setOwnDisplayName(name);
+  async setOwnDisplayName(name: string): Promise<void> {
+    await this.#user.setOwnDisplayName(name);
+    const profile = await this.#user.whoami();
+    this.ctx.waitUntil(indexAccountProfile(this.env.BLUEPRINTS, profile).catch(error =>
+      logger.warn("failed to refresh account discovery hint", {event: "account.directory.refresh.failed", error})));
   }
   changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
     return this.#user.changePassword(oldHash, newHash);

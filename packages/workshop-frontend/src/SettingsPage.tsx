@@ -114,6 +114,8 @@ export default function SettingsPage() {
 
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
+  const toastsRef = useRef(toasts)
+  useEffect(() => { toastsRef.current = toasts }, [toasts])
   const [userInfo, setUserInfo] = useState<AiChatAuthorInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [isEditingName, setIsEditingName] = useState(false)
@@ -176,7 +178,7 @@ export default function SettingsPage() {
         console.error('Failed to fetch agent response preference:', error)
         if (!cancelled) {
           setSimplifiedTechnicalEnglishEnabled(false)
-          toasts.add({ title: 'Failed to load agent response settings', variant: 'error' })
+          toastsRef.current.add({ title: 'Failed to load agent response settings', variant: 'error' })
         }
       } finally {
         if (!cancelled) setSimplifiedTechnicalEnglishLoading(false)
@@ -185,7 +187,7 @@ export default function SettingsPage() {
 
     fetchResponsePreference()
     return () => { cancelled = true }
-  }, [authenticatedApi, toasts])
+  }, [authenticatedApi])
 
   // Fetch account-scoped OpenCode customization.
   useEffect(() => {
@@ -208,7 +210,7 @@ export default function SettingsPage() {
         console.error('Failed to fetch OpenCode customization:', error)
         if (!cancelled) {
           setOpenCodeError('Failed to load OpenCode settings')
-          toasts.add({ title: 'Failed to load OpenCode settings', variant: 'error' })
+          toastsRef.current.add({ title: 'Failed to load OpenCode settings', variant: 'error' })
         }
       } finally {
         if (timeout !== undefined) window.clearTimeout(timeout)
@@ -218,7 +220,7 @@ export default function SettingsPage() {
 
     fetchOpenCodeCustomization()
     return () => { cancelled = true; if (timeout !== undefined) window.clearTimeout(timeout) }
-  }, [authenticatedApi, toasts, openCodeReload])
+  }, [authenticatedApi, openCodeReload])
 
   // Fetch user info
   useEffect(() => {
@@ -231,7 +233,7 @@ export default function SettingsPage() {
         setNameInput(info.name)
       } catch (error) {
         console.error('Failed to fetch user info:', error)
-        if (!cancelled) toasts.add({ title: 'Failed to load user information', variant: 'error' })
+        if (!cancelled) toastsRef.current.add({ title: 'Failed to load user information', variant: 'error' })
       } finally {
         if (!cancelled) setLoading(false)
       }

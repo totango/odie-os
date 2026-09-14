@@ -1,6 +1,6 @@
-import type { AdministratorList, AdministratorCandidate, AdministratorMutation, AdministratorBootstrapPreview, AdministratorAuditPage } from "./admin-authority.js";
+import type { AdministratorList, AdministratorCandidate, AdministratorCandidateSearchPage, AdministratorMutation, AdministratorBootstrapPreview, AdministratorAuditPage } from "./admin-authority.js";
 /** Administrator authority contracts, separate from soft deployment settings. */
-export type { AdminAuthorization, AdminAuthorityMode, AdministratorList, AdministratorCandidate, AdministratorGrant, AdministratorMutation, AdministratorBootstrapPreview, AdministratorAuditEvent, AdministratorAuditPage } from "./admin-authority.js";
+export type { AdminAuthorization, AdminAuthorityMode, AdministratorList, AdministratorCandidate, AdministratorCandidateSearchPage, AdministratorGrant, AdministratorMutation, AdministratorBootstrapPreview, AdministratorAuditEvent, AdministratorAuditPage } from "./admin-authority.js";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
 // The UI is a good old "fat client" SPA. Why not use SSR? Because:
@@ -1707,6 +1707,8 @@ export interface AdminApi {
   listAdministrators(cursor?: string): Promise<AdministratorList>;
   /** Resolve an exact existing account, without signup or alias inference. */
   resolveAdministratorCandidate(profileId: string): Promise<AdministratorCandidate | null>;
+  /** Search bounded derived account hints and revalidate every result against its exact User Durable Object. */
+  searchAdministratorCandidates(query: string): Promise<AdministratorCandidateSearchPage>;
   /** Preview every configured seed and unresolved existing-account prerequisite. */
   previewAdministratorBootstrap(): Promise<AdministratorBootstrapPreview>;
   /** Explicit one-time snapshot confirmation; static membership remains effective. */

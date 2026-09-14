@@ -164,7 +164,7 @@ function RequiredConnectionsScreen({
                 Connect required services to continue
               </h1>
               <p className="mt-2 max-w-2xl text-sm leading-6 text-kumo-subtle">
-                Chat, workspaces, and Code sessions are paused until these required connections are healthy. You can still open community requests, connectors, admin, outputs, profile providers, and getting started pages.
+                Chat, workspaces, and Code sessions are paused until these required connections are healthy. You can still open feature requests, connectors, admin, outputs, profile providers, and getting started pages.
               </p>
             </div>
           </div>
@@ -185,7 +185,7 @@ function RequiredConnectionsScreen({
 
           <div className="flex flex-col gap-3 border-t border-kumo-line pt-5 sm:flex-row sm:items-center sm:justify-between">
             <nav className="flex flex-wrap gap-2 text-sm" aria-label="Recovery pages">
-              <Link to="/requests" className="rounded-lg border border-kumo-line px-3 py-2 font-medium text-kumo-default hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">Community requests</Link>
+              <Link to="/requests" className="rounded-lg border border-kumo-line px-3 py-2 font-medium text-kumo-default hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">Feature requests</Link>
               <Link to="/gatekeepers" className="rounded-lg border border-kumo-line px-3 py-2 font-medium text-kumo-default hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">Connectors</Link>
               <Link to="/getting-started" className="rounded-lg border border-kumo-line px-3 py-2 font-medium text-kumo-default hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">Getting started</Link>
               <Link to="/providers" className="rounded-lg border border-kumo-line px-3 py-2 font-medium text-kumo-default hover:bg-kumo-tint focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">Profile providers</Link>

@@ -22,6 +22,11 @@ export type AdministratorCandidate = {
   /** Presentation only; never identity evidence. */
   displayName: string;
 };
+/** Bounded administrator-only account discovery results; each item was revalidated against its User Durable Object. */
+export type AdministratorCandidateSearchPage = {
+  /** Exact existing accounts matching the normalized prefix used only for discovery. */
+  items: AdministratorCandidate[];
+};
 /** Persisted grant; prepared rows confer no effective authority. */
 export type AdministratorGrant = AdministratorCandidate & {
   /** Monotonically increasing across revoke/regrant. */

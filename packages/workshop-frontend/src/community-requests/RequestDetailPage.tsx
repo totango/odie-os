@@ -7,7 +7,7 @@ import { useDocumentTitle } from '../useDocumentTitle'
 import { RequestBuildPanel } from './RequestBuildPanel'
 import { fieldClass, panelClass, publicNotice, RelatedRequests, RequestVote, useRequestLifetime, useRequestRetryKey } from './RequestShared'
 
-export default function RequestDetailPage({ requestId, moderate = false }: { requestId: string; moderate?: boolean }) {
+export default function RequestDetailPage({ requestId, moderate = false, onBack }: { requestId: string; moderate?: boolean; onBack?: () => void }) {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
   const navigate = useNavigate()
   const includeHidden = isAdmin && moderate
@@ -17,7 +17,7 @@ export default function RequestDetailPage({ requestId, moderate = false }: { req
   const [error, setError] = useState(false)
   const [busy, setBusy] = useState(true)
   const request = result?.scope === scope ? result.request : undefined
-  useDocumentTitle(request?.title ?? 'Community request')
+  useDocumentTitle(request?.title ?? 'Feature request')
   useEffect(() => {
     let cancelled = false
     setBusy(true)
@@ -27,9 +27,11 @@ export default function RequestDetailPage({ requestId, moderate = false }: { req
     }).catch(() => { if (!cancelled) { setResult(undefined); setError(true) } }).finally(() => { if (!cancelled) setBusy(false) })
     return () => { cancelled = true }
   }, [authenticatedApi, scope, requestId, includeHidden, revision])
-  return <main className="mx-auto w-full max-w-3xl space-y-6 p-4 text-kumo-default sm:p-8">
-    <Link to="/requests" search={{ moderate: includeHidden }} className="text-kumo-brand underline">All requests</Link>
-    {isAdmin && <p><Link to="/requests/$requestId" params={{ requestId }} search={{ moderate: !includeHidden }} className="text-sm text-kumo-brand underline">{includeHidden ? 'Leave moderation view' : 'Open moderation view'}</Link></p>}
+  return <div className="w-full space-y-6 p-4 text-kumo-default sm:p-6">
+    {onBack
+      ? <button type="button" onClick={onBack} className="text-kumo-brand underline">All feature requests</button>
+      : <Link to="/requests" search={{ moderate: includeHidden }} className="text-kumo-brand underline">All feature requests</Link>}
+    {isAdmin && <p><Link to="/requests/$requestId" params={{ requestId }} search={{ moderate: !includeHidden }} replace className="text-sm text-kumo-brand underline">{includeHidden ? 'Leave moderation view' : 'Open moderation view'}</Link></p>}
     {busy && <p role="status">Loading request…</p>}
     {error && <p role="alert">Could not load this request. Please retry in a moment.</p>}
     {request === null && <h1 className="text-xl font-semibold">Request unavailable or hidden</h1>}
@@ -39,9 +41,9 @@ export default function RequestDetailPage({ requestId, moderate = false }: { req
         <h1 className="break-words text-2xl font-semibold">{request.title}</h1>
         <p className="text-sm text-kumo-subtle">{request.kind === 'bug' ? 'Public bug summary' : 'Feature request'} · {request.status}{request.hidden ? ' · Hidden from the board' : ''}{request.isOwn ? ' · Your request' : ''}</p>
         <p className="whitespace-pre-wrap break-words">{request.body}</p>
-        {request.duplicateOf && <p>Duplicate of <Link to="/requests/$requestId" params={{ requestId: request.duplicateOf }} className="text-kumo-brand underline">canonical request</Link></p>}
+        {request.duplicateOf && <p>Duplicate of <Link to="/requests/$requestId" params={{ requestId: request.duplicateOf }} search={{ moderate: includeHidden }} replace className="text-kumo-brand underline">canonical request</Link></p>}
         <RequestVote request={request} onChange={value => setResult({ scope, request: value })} />
-        {request.isOwn && <DeleteOwnedRequest requestId={request.id} onDeleted={() => navigate({ to: '/requests' })} />}
+        {request.isOwn && <DeleteOwnedRequest requestId={request.id} onDeleted={() => { if (onBack) onBack(); else void navigate({ to: '/requests', replace: true }) }} />}
       </article>
       {includeHidden && <PrivateDiagnostics key={`diagnostics:${request.id}`} requestId={request.id} />}
       {includeHidden && <RequestModeration key={request.id} request={request} onChange={value => setResult({ scope, request: value })} />}
@@ -49,7 +51,7 @@ export default function RequestDetailPage({ requestId, moderate = false }: { req
       <RequestDetails key={`${request.id}:${includeHidden}:${request.hidden}`} requestId={request.id} includeHidden={includeHidden} hidden={request.hidden} />
       {!request.hidden && <RelatedRequests text={`${request.title}\n${request.body}`} excludeId={request.id} />}
     </>}
-  </main>
+  </div>
 }
 
 function DeleteOwnedRequest({ requestId, onDeleted }: { requestId: string; onDeleted: () => void }) {

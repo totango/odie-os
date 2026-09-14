@@ -1,8 +1,9 @@
-# Community requests UI
+# Feature Requests UI
 
 The board is enabled for every authenticated deployment account at `/requests`. `/requests/new`
-creates a feature or newly authored public bug; `/requests/$requestId` shows its public description,
-account vote, details and related requests. A quiet primary-style sidebar row replaces the old oversized
+creates a feature or newly authored public bug; `/requests/$requestId` opens a URL-backed desktop
+side sheet (mobile full-screen) over the board with its public description, account vote, details and
+related requests. Browser Back closes the sheet and direct links remain shareable. A quiet primary-style sidebar row replaces the old oversized
 feedback callout, including in Code mode and the collapsed rail. Current administrators also receive a
 persistent Admin row. The root still requires login,
 but board routes bypass onboarding, required connectors and the mandatory billing-account picker.
@@ -51,19 +52,17 @@ Auto-Build is request-bound and administrator-controlled, with authority, image,
 model and notification readiness checked independently. Publishing never invokes the legacy
 `submitProductFeedback` runner; attached diagnostics remain excluded from build specifications.
 
-“View my legacy private feedback status” is explicit, lazy and read-only. It calls the existing
-owner-scoped `listProductFeedbackStatuses` without conditioning the public board on legacy automation
-availability. Refresh is manual; older records are not imported/searchable as board requests. Only
-strict HTTPS `github.com/totango/odie-os/pull/<number>` legacy links are clickable. The old backend
-private feedback APIs remain unchanged for compatibility; this UI is not a legacy-capability cutover.
+The legacy private-feedback status button is no longer rendered on the Feature Requests board. Older
+records are not imported or searchable as Feature Requests. The backend private-feedback APIs remain
+unchanged for compatibility; removing the button is not a legacy-capability cutover.
 
 ## Local verification
 
 `CommunityRequests.test.tsx` uses jsdom, real React/Kumo controls and memory-router navigation with
 method-typed RPC doubles. It covers public submission/bug privacy and separate diagnostic consent,
-retry keys, bounded suggestions, list/search/filter/pagination, safe text/errors, stale responses/API
-replacement, votes/details, owner deletion, moderation, private diagnostic display and owner-private
-legacy status retrieval. Root integration tests verify signed-out
+retry keys, bounded suggestions, list/search/filter/pagination, URL-backed detail-sheet navigation,
+safe text/errors, stale responses/API replacement, votes/details, owner deletion, moderation, and
+private diagnostic display. Root integration tests verify signed-out
 login and board onboarding/billing/connector escape behavior; Sidebar and RequiredConnectionsGate tests
 cover availability without GitHub and no required-connector RPC reads. This is frontend interaction
 coverage, not a browser-to-live-backend end-to-end test.

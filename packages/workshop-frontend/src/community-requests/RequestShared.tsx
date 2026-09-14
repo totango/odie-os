@@ -37,7 +37,7 @@ export function useRequestRetryKey() {
 }
 
 export function RequestLinks({ items, moderate = false }: { items: CommunityRequest[]; moderate?: boolean }) {
-  return <ul className="grid gap-3 md:grid-cols-2">
+  return <ul className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
     {items.map(item => <li key={item.id}>
       <Link to="/requests/$requestId" params={{ requestId: item.id }} search={{ moderate }} className="group flex h-full min-h-40 flex-col rounded-2xl border border-kumo-line bg-kumo-base p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-kumo-brand/40 hover:shadow-md focus-visible:outline-2 focus-visible:outline-kumo-ring">
         <div className="flex items-start justify-between gap-3">

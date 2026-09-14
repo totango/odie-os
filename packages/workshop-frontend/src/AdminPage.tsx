@@ -500,7 +500,7 @@ export default function AdminPage() {
     <div className="mx-auto w-full max-w-[1040px] px-4 sm:px-8 py-8 space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-kumo-default">Admin</h1>
-          <Link to="/requests" search={{ moderate: true }} className="text-sm text-kumo-brand underline">Moderate community requests</Link>
+          <Link to="/requests" search={{ moderate: true }} className="text-sm text-kumo-brand underline">Moderate feature requests</Link>
         <p className="text-sm text-kumo-subtle mt-1">
           Deployment-wide settings. Changes apply to all users on their next connection.
         </p>

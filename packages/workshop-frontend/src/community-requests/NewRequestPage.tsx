@@ -9,7 +9,7 @@ import { fieldClass, panelClass, publicNotice, RelatedRequests, useRequestLifeti
 import { productFeedbackDiagnosticsSnapshot } from '../productFeedbackDiagnostics'
 
 export default function NewRequestPage() {
-  useDocumentTitle('Submit a community request')
+  useDocumentTitle('Submit a feature request')
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
   const lifetime = useRequestLifetime()
@@ -56,10 +56,10 @@ export default function NewRequestPage() {
   }
   const diagnosticCount = diagnostics.current?.length ?? productFeedbackDiagnosticsSnapshot().length
   return <main className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6 text-kumo-default sm:px-8 lg:py-10">
-    <Link to="/requests" className="text-sm font-medium text-kumo-brand hover:underline">← All requests</Link>
+    <Link to="/requests" className="text-sm font-medium text-kumo-brand hover:underline">← All feature requests</Link>
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
       <section className="space-y-5">
-        <div><h1 className="text-3xl font-semibold tracking-[-0.03em] text-kumo-strong">Submit a request</h1><p className="mt-2 text-sm leading-6 text-kumo-subtle">Describe one clear idea or problem. You’ll review exactly what becomes public before publishing.</p></div>
+        <div><h1 className="text-3xl font-semibold tracking-[-0.03em] text-kumo-strong">Submit to Feature Requests</h1><p className="mt-2 text-sm leading-6 text-kumo-subtle">Describe one clear idea or problem. You’ll review exactly what becomes public before publishing.</p></div>
         <form className="space-y-5" onSubmit={e => { e.preventDefault(); if (review) void publish(); else setReview(true) }}>
           {review ? <section aria-label="Public submission preview" className={panelClass}>
             <div className="flex items-center gap-2 text-sm font-medium text-kumo-brand">{kind === 'bug' ? <Bug size={17} weight="fill" /> : <Lightbulb size={17} weight="fill" />} Public preview</div>

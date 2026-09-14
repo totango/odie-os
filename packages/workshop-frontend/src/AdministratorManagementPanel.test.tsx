@@ -11,7 +11,7 @@ import AdministratorManagementPanel from './AdministratorManagementPanel'
 const seeds = ['jacob.beck@totango.com', 'keith@totango.com', 'nick.roberts@totango.com', 'stacy.kennedy@totango.com']
 const candidate: AdministratorCandidate = { profileId: 'Exact+Case@heyodie.ai', principalId: 'exact-account-2', displayName: 'Same display label' }
 // Local RPC fixture only. The authority-core workerd suite proves actual SQLite transactions.
-class ManagementFixture extends RpcTarget implements Pick<AdminApi, 'listAdministrators' | 'listAdministratorAudit' | 'resolveAdministratorCandidate' | 'grantAdministrator' | 'revokeAdministrator'> {
+class ManagementFixture extends RpcTarget implements Pick<AdminApi, 'listAdministrators' | 'listAdministratorAudit' | 'resolveAdministratorCandidate' | 'searchAdministratorCandidates' | 'previewAdministratorBootstrap' | 'prepareAdministratorBootstrap' | 'activateManagedAdministrators' | 'grantAdministrator' | 'revokeAdministrator'> {
   view: AdministratorList = { mode: 'managed', revision: 3, staticProfileIds: [], blockers: [], items: [
     { profileId: seeds[0], principalId: 'actor-account', displayName: 'Jacob', generation: 1, active: true },
     { ...candidate, generation: 1, active: true },
@@ -21,12 +21,20 @@ class ManagementFixture extends RpcTarget implements Pick<AdminApi, 'listAdminis
     listAdministrators: vi.fn<AdminApi['listAdministrators']>(async () => structuredClone(this.view)),
     listAdministratorAudit: vi.fn<AdminApi['listAdministratorAudit']>(async () => structuredClone(this.events)),
     resolveAdministratorCandidate: vi.fn<AdminApi['resolveAdministratorCandidate']>(async id => id === candidate.profileId ? candidate : null),
+    searchAdministratorCandidates: vi.fn<AdminApi['searchAdministratorCandidates']>(async query => ({items: candidate.profileId.toLowerCase().startsWith(query.trim().toLowerCase()) ? [candidate] : []})),
+    previewAdministratorBootstrap: vi.fn<AdminApi['previewAdministratorBootstrap']>(async () => ({ revision: this.view.revision, digest: 'a'.repeat(64), accounts: seeds.map((profileId, index) => ({ profileId, principalId: `seed-${index}`, displayName: profileId })), unresolvedProfileIds: [] })),
+    prepareAdministratorBootstrap: vi.fn<AdminApi['prepareAdministratorBootstrap']>(async input => { if (input.expectedRevision !== this.view.revision) throw new Error('REVISION_CONFLICT'); this.view.mode = 'prepared'; return ++this.view.revision }),
+    activateManagedAdministrators: vi.fn<AdminApi['activateManagedAdministrators']>(async input => { if (input.expectedRevision !== this.view.revision) throw new Error('REVISION_CONFLICT'); this.view.mode = 'managed'; this.view.blockers = []; this.view.staticProfileIds = []; return ++this.view.revision }),
     grantAdministrator: vi.fn<AdminApi['grantAdministrator']>(async input => this.change('grant', candidate.principalId, input.expectedRevision)),
     revokeAdministrator: vi.fn<AdminApi['revokeAdministrator']>(async input => this.change('revoke', input.principalId, input.expectedRevision)),
   };
   listAdministrators(...args: Parameters<AdminApi['listAdministrators']>) { return this.calls.listAdministrators(...args) }
   listAdministratorAudit(...args: Parameters<AdminApi['listAdministratorAudit']>) { return this.calls.listAdministratorAudit(...args) }
   resolveAdministratorCandidate(...args: Parameters<AdminApi['resolveAdministratorCandidate']>) { return this.calls.resolveAdministratorCandidate(...args) }
+  searchAdministratorCandidates(...args: Parameters<AdminApi['searchAdministratorCandidates']>) { return this.calls.searchAdministratorCandidates(...args) }
+  previewAdministratorBootstrap(...args: Parameters<AdminApi['previewAdministratorBootstrap']>) { return this.calls.previewAdministratorBootstrap(...args) }
+  prepareAdministratorBootstrap(...args: Parameters<AdminApi['prepareAdministratorBootstrap']>) { return this.calls.prepareAdministratorBootstrap(...args) }
+  activateManagedAdministrators(...args: Parameters<AdminApi['activateManagedAdministrators']>) { return this.calls.activateManagedAdministrators(...args) }
   grantAdministrator(...args: Parameters<AdminApi['grantAdministrator']>) { return this.calls.grantAdministrator(...args) }
   revokeAdministrator(...args: Parameters<AdminApi['revokeAdministrator']>) { return this.calls.revokeAdministrator(...args) }
   disposed = vi.fn<() => void>();
@@ -90,17 +98,31 @@ describe('AdministratorManagementPanel', () => {
     expect(container.textContent).toContain('Fresh Context collection-owner and JARVIS policy-owner enforcement evidence is pending')
     expect(container.textContent).toContain('LEGACY_CAPABILITIES_UNDRAINED')
     expect(container.textContent).not.toContain(`Revoke ${candidate.profileId}`)
-    await input(candidate.profileId); await click('Find exact account'); await confirm()
+    await input(candidate.profileId); await click('Look up account'); await confirm()
     expect(button('Confirm grant').disabled).toBe(true)
     await click('Confirm grant')
     expect(fixture.calls.grantAdministrator).not.toHaveBeenCalled()
     expect(fixture.calls.revokeAdministrator).not.toHaveBeenCalled()
     expect(container.textContent).not.toContain('committed at revision')
   })
+  it('requires explicit review and replay-safe confirmations for prepare and managed activation', async () => {
+    const fixture = new ManagementFixture()
+    fixture.view = {...fixture.view, mode: 'legacy', staticProfileIds: seeds, blockers: ['LEGACY_CAPABILITIES_UNDRAINED']}
+    await render(fixture)
+    await click('Review exact cutover accounts')
+    expect(fixture.calls.previewAdministratorBootstrap).toHaveBeenCalledOnce()
+    await click('Prepare managed membership'); await confirm(); await click('Confirm prepare')
+    expect(fixture.calls.prepareAdministratorBootstrap).toHaveBeenCalledWith({expectedRevision: 3, mutationKey: expect.any(String), digest: 'a'.repeat(64)})
+    expect(container.textContent).toContain('Authority modeprepared')
+    await click('Verify readiness and activate'); await confirm(); await click('Confirm activate')
+    expect(fixture.calls.activateManagedAdministrators).toHaveBeenCalledWith({expectedRevision: 4, mutationKey: expect.any(String)})
+    expect(container.textContent).toContain('Authority modemanaged')
+  })
+
   it('resolves exact case/plus spelling without alias merging; requires explicit identity confirmation and refreshes audit after grant', async () => {
     const fixture = new ManagementFixture(); fixture.view.items[1].active = false
     await render(fixture)
-    await input(candidate.profileId); await click('Find exact account')
+    await input(candidate.profileId); await click('Look up account')
     expect(fixture.calls.resolveAdministratorCandidate).toHaveBeenCalledWith(candidate.profileId)
     expect(container.querySelector('[aria-label="Confirm exact account"]')?.textContent).toContain(candidate.principalId)
     expect(button('Confirm grant').disabled).toBe(true)
@@ -111,9 +133,28 @@ describe('AdministratorManagementPanel', () => {
     expect(container.textContent).toContain('Actor: actor-account')
     expect(fixture.calls.listAdministratorAudit).toHaveBeenCalledTimes(2)
   })
+  it('offers bounded indexed suggestions but confirms and grants only the exact revalidated account', async () => {
+    const fixture = new ManagementFixture(); fixture.view.items[1].active = false
+    await render(fixture)
+    await input('Exact+')
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 300)) })
+    expect(fixture.calls.searchAdministratorCandidates).toHaveBeenCalledWith('Exact+')
+    const combobox = container.querySelector<HTMLInputElement>('[role="combobox"]')!
+    const option = container.querySelector<HTMLButtonElement>('[role="option"]')!
+    expect(combobox.getAttribute('aria-expanded')).toBe('true')
+    expect(option.textContent).toContain(candidate.profileId)
+    await act(async () => combobox.dispatchEvent(new KeyboardEvent('keydown', {key: 'ArrowDown', bubbles: true})))
+    await act(async () => combobox.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true})))
+    const confirmation = container.querySelector<HTMLElement>('[aria-label="Confirm exact account"]')!
+    expect(confirmation.textContent).toContain(candidate.principalId)
+    expect(document.activeElement).toBe(confirmation)
+    await confirm(); await click('Confirm grant')
+    expect(fixture.calls.grantAdministrator).toHaveBeenCalledWith({profileId: candidate.profileId, expectedRevision: 3, mutationKey: expect.any(String)})
+  })
+
   it('does not create unknown accounts or normalize alias identifiers', async () => {
     const fixture = await render()
-    await input(` ${candidate.profileId.toLowerCase()} `); await click('Find exact account')
+    await input(` ${candidate.profileId.toLowerCase()} `); await click('Look up account')
     expect(fixture.calls.resolveAdministratorCandidate).toHaveBeenCalledWith(` ${candidate.profileId.toLowerCase()} `)
     expect(container.textContent).toContain('No existing account')
     expect(fixture.calls.grantAdministrator).not.toHaveBeenCalled()

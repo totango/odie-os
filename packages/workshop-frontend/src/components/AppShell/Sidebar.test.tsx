@@ -90,9 +90,9 @@ describe('Sidebar Code navigation', () => {
     testState.pathname = pathname
     testState.authenticatedApi.productFeedbackAvailable.mockResolvedValue(false)
     let rendered = await renderSidebar()
-    const expandedFeedback = rendered.querySelector('a[aria-label="Community requests"]')
+    const expandedFeedback = rendered.querySelector('a[aria-label="Feature requests"]')
     expect(expandedFeedback?.getAttribute('href')).toBe('/requests')
-    expect(expandedFeedback?.textContent).toContain('Community requests')
+    expect(expandedFeedback?.textContent).toContain('Feature requests')
     expect(expandedFeedback?.className).toContain('hover:bg-kumo-tint')
     expect(expandedFeedback?.className).not.toContain('bg-kumo-brand')
 
@@ -100,7 +100,7 @@ describe('Sidebar Code navigation', () => {
     container?.remove()
     root = undefined
     rendered = await renderSidebar(true)
-    expect(rendered.querySelector('a[aria-label="Community requests"]')).toBeTruthy()
+    expect(rendered.querySelector('a[aria-label="Feature requests"]')).toBeTruthy()
     expect(testState.authenticatedApi.productFeedbackAvailable).not.toHaveBeenCalled()
     expect(testState.authenticatedApi.listProductFeedbackStatuses).not.toHaveBeenCalled()
   })

@@ -2,6 +2,7 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import type { AdminAuthorization, AdministratorAuditEvent, AdministratorAuditPage, AdministratorBootstrapPreview, AdministratorCandidate, AdministratorGrant, AdministratorList, AdministratorMutation, AdminAuthorityMode } from "@gadgets/workshop-shared/api";
 import type { UserDurableObject } from "./user";
 import { readAdminProviderEvidence, type AdminProviderBaseline } from "./admin-provider-evidence";
+import { accountProfileMatches, searchAccountProfileHints } from "./account-directory";
 
 /** Backend-owned purpose domains; providers cannot select or widen them. */
 export type AdminPurpose = import("@gadgets/workshop-shared/admin-authority").AdminAuthorizationPurpose;
@@ -216,6 +217,14 @@ export class AdminAuthority extends DurableObject<Cloudflare.Env> {
   assertCurrent(...args: Parameters<AdminAuthorityState["assertCurrent"]>) { return this.#state.assertCurrent(...args); }
   list(...args: Parameters<AdminAuthorityState["list"]>) { return this.#state.list(...args); }
   async resolve(...args: Parameters<AdminAuthorityState["resolve"]>) { return await this.#state.resolve(...args); }
+  /** Search derived account hints, then revalidate every result through the exact User DO. */
+  async search(claim: AdminClaim, query: string) {
+    this.#state.assertCurrent(claim, "administration");
+    const profileIds = await searchAccountProfileHints(this.env.BLUEPRINTS, query);
+    const candidates = await Promise.all(profileIds.map(profileId => this.#state.resolve(claim, profileId)));
+    this.#state.assertCurrent(claim, "administration");
+    return {items: candidates.filter((candidate): candidate is AdministratorCandidate => !!candidate && accountProfileMatches({id: candidate.profileId, name: candidate.displayName}, query))};
+  }
   async preview(...args: Parameters<AdminAuthorityState["preview"]>) { return await this.#state.preview(...args); }
   async prepare(...args: Parameters<AdminAuthorityState["prepare"]>) { return await this.#state.prepare(...args); }
   async activate(...args: Parameters<AdminAuthorityState["activate"]>) { return await this.#state.activate(...args); }
