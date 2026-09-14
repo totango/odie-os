@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, type ChangeEvent } from 'react'
+import { Link } from '@tanstack/react-router'
 import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
 import { Hexagon, ShieldWarning, SquaresFour, UserPlus } from '@phosphor-icons/react'
@@ -11,6 +12,7 @@ import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import { useServerConfigUpdater } from './ServerConfigContext'
 import { HUB_DETAILS } from './HubContext'
+import AdministratorManagementPanel from './AdministratorManagementPanel'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -105,14 +107,14 @@ export function FinanceHubAdminRow({ admin }: { admin: RpcStub<AdminApi> }) {
 }
 
 export default function AdminPage() {
-  const { authenticatedApi, isAdmin } = useAuthenticatedApi()
+  const { authenticatedApi, isAdmin, currentUser } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
   const updateServerConfig = useServerConfigUpdater()
   useDocumentTitle('Admin')
 
   // The admin capability (minted once via getAdminApi; null until loaded / for non-admins). Wrapped
   // in an object so useState doesn't treat the (callable) RPC stub as a state updater function.
-  const [admin, setAdmin] = useState<{ api: RpcStub<AdminApi> } | null>(null)
+  const [admin, setAdmin] = useState<{ api: RpcStub<AdminApi>; source: typeof authenticatedApi } | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState(false)
 
@@ -191,6 +193,9 @@ export default function AdminPage() {
 
   // Mint the admin capability once (the access check happens server-side) and load settings.
   useEffect(() => {
+    setAdmin(null)
+    setLoadError(false)
+    setLoading(true)
     if (!isAdmin) {
       setLoading(false)
       return
@@ -209,8 +214,9 @@ export default function AdminPage() {
           return
         }
         stub = api
-        setAdmin({ api })
-        applySettings(await api.getSettings())
+        setAdmin({ api, source: authenticatedApi })
+        const settings = await api.getSettings()
+        if (!cancelled) applySettings(settings)
       } catch (err) {
         if (!cancelled) {
           console.error('Failed to load admin settings:', err)
@@ -471,7 +477,7 @@ export default function AdminPage() {
     )
   }
 
-  if (loading) {
+  if (loading || (admin && admin.source !== authenticatedApi)) {
     return (
       <div className="flex-1 flex items-center justify-center min-h-[60vh]">
         <p className="text-kumo-subtle">Loading admin settings...</p>
@@ -494,6 +500,7 @@ export default function AdminPage() {
     <div className="mx-auto w-full max-w-[1040px] px-4 sm:px-8 py-8 space-y-6">
       <div>
         <h1 className="text-2xl font-semibold text-kumo-default">Admin</h1>
+          <Link to="/requests" search={{ moderate: true }} className="text-sm text-kumo-brand underline">Moderate community requests</Link>
         <p className="text-sm text-kumo-subtle mt-1">
           Deployment-wide settings. Changes apply to all users on their next connection.
         </p>
@@ -509,8 +516,13 @@ export default function AdminPage() {
           { value: 'gatekeepers', label: 'Gatekeepers' },
           { value: 'formats', label: 'Formats' },
           { value: 'access', label: 'Access' },
+          { value: 'administrators', label: 'Administrators' },
         ]}
       />
+
+      {activeTab === 'administrators' && (
+        <AdministratorManagementPanel admin={admin.api} currentProfileId={currentUser?.id} />
+      )}
 
       {activeTab === 'hubs' && (
         <div className="bg-kumo-elevated border border-kumo-line rounded-xl p-6">

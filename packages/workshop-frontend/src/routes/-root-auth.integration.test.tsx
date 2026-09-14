@@ -14,6 +14,7 @@ const runtime = vi.hoisted(() => ({
   clearSessionSecret: vi.fn<() => Promise<void>>(async () => {}),
 }))
 let publicApi: Parameters<typeof useAuth>[0]
+let pathname = '/sessions'
 vi.mock('../useAuth', async (importOriginal) => {
   const original = await importOriginal<typeof import('../useAuth')>()
   return { ...original, useAuth: vi.fn<typeof original.useAuth>(original.useAuth) }
@@ -21,7 +22,7 @@ vi.mock('../useAuth', async (importOriginal) => {
 vi.mock('../RpcContext', () => ({ useRpcStub: () => publicApi, useConnectionLost: () => true }))
 vi.mock('@tanstack/react-router', async (original) => ({
   ...await original<typeof import('@tanstack/react-router')>(),
-  useRouterState: () => '/sessions',
+  useRouterState: () => pathname,
   Outlet: () => <Probe />,
 }))
 vi.mock('@cloudflare/kumo', () => ({ TooltipProvider: PassThrough, Toasty: PassThrough }))
@@ -30,7 +31,7 @@ vi.mock('../HubContext', () => ({ HubProvider: PassThrough }))
 vi.mock('../ServerConfigContext', () => ({ useEnabledHubs: () => [] }))
 vi.mock('../components/AppShell/AppShell', () => ({ default: PassThrough }))
 vi.mock('../components/Header', () => ({ default: () => null }))
-vi.mock('../components/billing/AccountSelectionModal', () => ({ default: () => null }))
+vi.mock('../components/billing/AccountSelectionModal', () => ({ default: () => <div>Billing selection</div> }))
 vi.mock('../OnboardingWizard', () => ({ default: () => <div>Onboarding</div> }))
 vi.mock('../LoginPage', () => ({ default: () => <div>Login</div> }))
 vi.mock('../components/AppLoadingSkeleton', () => ({ AppLoadingSkeleton: ({ label }: { label: string }) => <output>{label}</output> }))
@@ -111,6 +112,7 @@ describe('root auth loading boundary (real AuthProvider, required gate and Sessi
   }
 
   beforeEach(() => {
+    pathname = '/sessions'
     vi.mocked(useAuth).mockReset()
     runtime.readSessionSecret.mockReset()
     vi.useFakeTimers()
@@ -128,6 +130,21 @@ describe('root auth loading boundary (real AuthProvider, required gate and Sessi
     container.remove()
     vi.useRealTimers()
     vi.clearAllMocks()
+  })
+
+  it.each(['/requests', '/requests/new', '/requests/request-1'])('keeps %s signed-in only but skips onboarding, billing and connector prerequisites', async route => {
+    pathname = route
+    await render({ isLoading: false, isAuthenticated: false })
+    expect(container.textContent).toContain('Login')
+    expect(container.querySelector('[data-probe]')).toBeNull()
+    const next = connection('external-account')
+    next.api.isOnboardingCompleted.mockResolvedValue(false)
+    await render({ isLoading: false, isAuthenticated: true, authenticatedApi: next.api as unknown as NonNullable<typeof auth.authenticatedApi> })
+    expect(container.querySelector('[data-probe]')).not.toBeNull()
+    expect(container.textContent).not.toContain('Onboarding')
+    expect(container.textContent).not.toContain('Billing selection')
+    expect(next.api.getRequiredConnectionStatuses).not.toHaveBeenCalled()
+    expect(next.api.subscribeConnectedAccounts).not.toHaveBeenCalled()
   })
 
   async function saveDraft() {

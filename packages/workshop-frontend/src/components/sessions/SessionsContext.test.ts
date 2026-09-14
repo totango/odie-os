@@ -88,13 +88,17 @@ function createApi() {
 type ProviderContext = ReturnType<typeof useSessionsContext>
 
 async function renderProvider({ loadRepositories = false, strictMode = false }: { loadRepositories?: boolean; strictMode?: boolean } = {}) {
-  let latestContext: ProviderContext | undefined
+  const latestContext = { current: undefined as ProviderContext | undefined }
   let root: Root | undefined
   const container = document.createElement('div')
   document.body.append(container)
 
+  function captureContext(value: ProviderContext) {
+    latestContext.current = value
+  }
+
   function Probe() {
-    latestContext = useSessionsContext()
+    captureContext(useSessionsContext())
     return null
   }
 
@@ -106,8 +110,8 @@ async function renderProvider({ loadRepositories = false, strictMode = false }: 
   })
   return {
     get context() {
-      if (!latestContext) throw new Error('context not rendered')
-      return latestContext
+      if (!latestContext.current) throw new Error('context not rendered')
+      return latestContext.current
     },
     container,
     async rerender(next: { loadRepositories?: boolean } = {}) {

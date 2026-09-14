@@ -242,7 +242,7 @@ export default function Sidebar({
 
       <div className={collapsed ? 'flex shrink-0 flex-col items-center gap-2 pb-2' : 'flex shrink-0 flex-col gap-2 px-3 pb-2'}>
         <NativeUpdateCard collapsed={collapsed} />
-        <ProductFeedbackButton pathname={pathname} placement="sidebar" collapsed={collapsed} />
+        <ProductFeedbackButton collapsed={collapsed} />
       </div>
       <SidebarUtilityStrip collapsed={collapsed} />
     </aside>

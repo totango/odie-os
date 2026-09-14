@@ -19,13 +19,17 @@ import { Route as GettingStartedRouteImport } from './routes/getting-started'
 import { Route as OutputsRouteImport } from './routes/outputs'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ProvidersRouteImport } from './routes/providers'
+import { Route as RequestsRouteImport } from './routes/requests'
 import { Route as SessionsRouteImport } from './routes/sessions'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
+import { Route as RequestsRequestIdRouteImport } from './routes/requests_.$requestId'
+import { Route as RequestsNewRouteImport } from './routes/requests_.new'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
+import { Route as RequestsRequestIdRunsRunIdRouteImport } from './routes/requests_.$requestId_.runs.$runId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -77,6 +81,11 @@ const ProvidersRoute = ProvidersRouteImport.update({
   path: '/providers',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RequestsRoute = RequestsRouteImport.update({
+  id: '/requests',
+  path: '/requests',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SessionsRoute = SessionsRouteImport.update({
   id: '/sessions',
   path: '/sessions',
@@ -107,11 +116,27 @@ const GatekeepersAppIdRoute = GatekeepersAppIdRouteImport.update({
   path: '/gatekeepers/$appId',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RequestsRequestIdRoute = RequestsRequestIdRouteImport.update({
+  id: '/requests_/$requestId',
+  path: '/requests/$requestId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RequestsNewRoute = RequestsNewRouteImport.update({
+  id: '/requests_/new',
+  path: '/requests/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const WorkspaceIdRoute = WorkspaceIdRouteImport.update({
   id: '/workspace/$id',
   path: '/workspace/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RequestsRequestIdRunsRunIdRoute =
+  RequestsRequestIdRunsRunIdRouteImport.update({
+    id: '/requests_/$requestId_/runs/$runId',
+    path: '/requests/$requestId/runs/$runId',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -124,13 +149,17 @@ export interface FileRoutesByFullPath {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/requests': typeof RequestsRoute
   '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
+  '/requests/$requestId': typeof RequestsRequestIdRoute
+  '/requests/new': typeof RequestsNewRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/requests/$requestId/runs/$runId': typeof RequestsRequestIdRunsRunIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -143,13 +172,17 @@ export interface FileRoutesByTo {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/requests': typeof RequestsRoute
   '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
+  '/requests/$requestId': typeof RequestsRequestIdRoute
+  '/requests/new': typeof RequestsNewRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/requests/$requestId/runs/$runId': typeof RequestsRequestIdRunsRunIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -163,13 +196,17 @@ export interface FileRoutesById {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
+  '/requests': typeof RequestsRoute
   '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
+  '/requests_/$requestId': typeof RequestsRequestIdRoute
+  '/requests_/new': typeof RequestsNewRoute
   '/workspace/$id': typeof WorkspaceIdRoute
+  '/requests_/$requestId_/runs/$runId': typeof RequestsRequestIdRunsRunIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -184,13 +221,17 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
+    | '/requests'
     | '/sessions'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
+    | '/requests/$requestId'
+    | '/requests/new'
     | '/workspace/$id'
+    | '/requests/$requestId/runs/$runId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -203,13 +244,17 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
+    | '/requests'
     | '/sessions'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
+    | '/requests/$requestId'
+    | '/requests/new'
     | '/workspace/$id'
+    | '/requests/$requestId/runs/$runId'
   id:
     | '__root__'
     | '/'
@@ -222,13 +267,17 @@ export interface FileRouteTypes {
     | '/outputs'
     | '/profile'
     | '/providers'
+    | '/requests'
     | '/sessions'
     | '/signup'
     | '/workspaces'
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
+    | '/requests_/$requestId'
+    | '/requests_/new'
     | '/workspace/$id'
+    | '/requests_/$requestId_/runs/$runId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -242,13 +291,17 @@ export interface RootRouteChildren {
   OutputsRoute: typeof OutputsRoute
   ProfileRoute: typeof ProfileRoute
   ProvidersRoute: typeof ProvidersRoute
+  RequestsRoute: typeof RequestsRoute
   SessionsRoute: typeof SessionsRoute
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
+  RequestsRequestIdRoute: typeof RequestsRequestIdRoute
+  RequestsNewRoute: typeof RequestsNewRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
+  RequestsRequestIdRunsRunIdRoute: typeof RequestsRequestIdRunsRunIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -323,6 +376,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ProvidersRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/requests': {
+      id: '/requests'
+      path: '/requests'
+      fullPath: '/requests'
+      preLoaderRoute: typeof RequestsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/sessions': {
       id: '/sessions'
       path: '/sessions'
@@ -365,11 +425,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GatekeepersAppIdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/requests_/$requestId': {
+      id: '/requests_/$requestId'
+      path: '/requests/$requestId'
+      fullPath: '/requests/$requestId'
+      preLoaderRoute: typeof RequestsRequestIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/requests_/new': {
+      id: '/requests_/new'
+      path: '/requests/new'
+      fullPath: '/requests/new'
+      preLoaderRoute: typeof RequestsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/workspace/$id': {
       id: '/workspace/$id'
       path: '/workspace/$id'
       fullPath: '/workspace/$id'
       preLoaderRoute: typeof WorkspaceIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/requests_/$requestId_/runs/$runId': {
+      id: '/requests_/$requestId_/runs/$runId'
+      path: '/requests/$requestId/runs/$runId'
+      fullPath: '/requests/$requestId/runs/$runId'
+      preLoaderRoute: typeof RequestsRequestIdRunsRunIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -386,13 +467,17 @@ const rootRouteChildren: RootRouteChildren = {
   OutputsRoute: OutputsRoute,
   ProfileRoute: ProfileRoute,
   ProvidersRoute: ProvidersRoute,
+  RequestsRoute: RequestsRoute,
   SessionsRoute: SessionsRoute,
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
+  RequestsRequestIdRoute: RequestsRequestIdRoute,
+  RequestsNewRoute: RequestsNewRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
+  RequestsRequestIdRunsRunIdRoute: RequestsRequestIdRunsRunIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

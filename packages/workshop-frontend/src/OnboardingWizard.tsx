@@ -1,5 +1,6 @@
 import { logRpcFailure } from './rpcErrors'
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { Link } from '@tanstack/react-router'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { useAuthenticatedApi } from './AuthContext'
 import {
@@ -363,6 +364,9 @@ export default function OnboardingWizard({
           >
             Just a few things before you start building
           </p>
+          <Link to="/requests" className="mt-3 inline-block text-sm text-kumo-brand underline focus-visible:outline-2 focus-visible:outline-kumo-ring">
+            Open community requests without completing setup
+          </Link>
         </div>
 
         {/* Step indicator */}

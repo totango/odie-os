@@ -84,10 +84,13 @@ describe('Sidebar Code navigation', () => {
     expect(codeLink?.getAttribute('href')).toBe('/sessions')
   })
 
-  it('keeps feedback permanently visible in both sidebar states', async () => {
+  it.each(['/', '/sessions'])('keeps the board visible at %s in both sidebar states without GitHub or automation availability', async pathname => {
+    testState.pathname = pathname
+    testState.authenticatedApi.productFeedbackAvailable.mockResolvedValue(false)
     let rendered = await renderSidebar()
-    const expandedFeedback = rendered.querySelector('button[aria-label="Share feedback"]')
-    expect(expandedFeedback?.textContent).toContain('Help improve Odie')
+    const expandedFeedback = rendered.querySelector('a[aria-label="Community requests"]')
+    expect(expandedFeedback?.getAttribute('href')).toBe('/requests')
+    expect(expandedFeedback?.textContent).toContain('Suggest a feature or report a bug')
     expect(expandedFeedback?.className).toContain('w-full')
     expect(expandedFeedback?.className).toContain('bg-kumo-brand')
 
@@ -95,7 +98,9 @@ describe('Sidebar Code navigation', () => {
     container?.remove()
     root = undefined
     rendered = await renderSidebar(true)
-    expect(rendered.querySelector('button[aria-label="Share feedback"]')).toBeTruthy()
+    expect(rendered.querySelector('a[aria-label="Community requests"]')).toBeTruthy()
+    expect(testState.authenticatedApi.productFeedbackAvailable).not.toHaveBeenCalled()
+    expect(testState.authenticatedApi.listProductFeedbackStatuses).not.toHaveBeenCalled()
   })
 
   it.each(['/outputs', '/explore', '/blueprints', '/blueprint/example'])('keeps Library active at %s', async (pathname) => {
