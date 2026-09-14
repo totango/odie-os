@@ -45,6 +45,7 @@ describe("native canary workflow cleanup", () => {
     expect(publish).toContain("\"$WRANGLER_BIN\" containers push");
     expect(workflow).toContain('run: |\n          "$WRANGLER_BIN" deploy --config "$CANARY_CONFIG"');
     expect(canary).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
+    expect(canary).toContain("pnpm install --frozen-lockfile --ignore-scripts");
     expect(canary).toContain("npm install --prefix \"$tooling\" --ignore-scripts");
     expect(canary).toContain("wrangler@4.131.1");
     expect(canary).toContain("printf 'WRANGLER_BIN=%s\\n'");
