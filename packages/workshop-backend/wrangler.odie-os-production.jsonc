@@ -20,7 +20,7 @@
     // operators, independently of managed administrator grant/revoke. Set an explicit array
     // (including [] for none) here only when deployment operators intend to separate the roles.
     "ADMINS": [
-      "jacob.beck@totango.com",
+      "jacob.beck@heyodie.ai",
       "keith@totango.com",
       "nick.roberts@totango.com",
       "stacy.kennedy@totango.com"

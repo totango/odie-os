@@ -12,6 +12,7 @@ const testState = vi.hoisted(() => ({
     | { state: 'connected'; accountId: number; label: string },
   activity: [] as Array<{ state: string }>,
   pathname: '/',
+  isAdmin: false,
   authenticatedApi: {
     listCodingSessionActivity: vi.fn<() => Promise<never[]>>(async () => []),
     productFeedbackAvailable: vi.fn<() => Promise<boolean>>(async () => true),
@@ -29,7 +30,7 @@ vi.mock('@tanstack/react-router', async (importOriginal) => ({
 
 vi.mock('../../ServerConfigContext', () => ({ useSiteName: () => 'Gadgets' }))
 vi.mock('../../useGatekeeperApps', () => ({ useGatekeeperApps: () => [] }))
-vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: testState.authenticatedApi }) }))
+vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: testState.authenticatedApi, isAdmin: testState.isAdmin }) }))
 vi.mock('../../ThemeContext', () => ({ useTheme: () => ({ themeMode: 'system', resolvedThemeMode: 'light', setThemeMode: vi.fn<(mode: string) => void>() }) }))
 vi.mock('../sessions/SessionsContext', () => ({ useSessionsContext: () => ({ github: testState.github, activity: testState.activity }) }))
 vi.mock('../SiteLogo', () => ({ default: ({ children }: { children: ReactNode }) => <>{children}</> }))
@@ -57,6 +58,7 @@ describe('Sidebar Code navigation', () => {
     testState.github = { state: 'missing' }
     testState.activity = []
     testState.pathname = '/'
+    testState.isAdmin = false
     vi.clearAllMocks()
   })
 
@@ -90,9 +92,9 @@ describe('Sidebar Code navigation', () => {
     let rendered = await renderSidebar()
     const expandedFeedback = rendered.querySelector('a[aria-label="Community requests"]')
     expect(expandedFeedback?.getAttribute('href')).toBe('/requests')
-    expect(expandedFeedback?.textContent).toContain('Suggest a feature or report a bug')
-    expect(expandedFeedback?.className).toContain('w-full')
-    expect(expandedFeedback?.className).toContain('bg-kumo-brand')
+    expect(expandedFeedback?.textContent).toContain('Community requests')
+    expect(expandedFeedback?.className).toContain('hover:bg-kumo-tint')
+    expect(expandedFeedback?.className).not.toContain('bg-kumo-brand')
 
     await act(async () => root?.unmount())
     container?.remove()
@@ -101,6 +103,17 @@ describe('Sidebar Code navigation', () => {
     expect(rendered.querySelector('a[aria-label="Community requests"]')).toBeTruthy()
     expect(testState.authenticatedApi.productFeedbackAvailable).not.toHaveBeenCalled()
     expect(testState.authenticatedApi.listProductFeedbackStatuses).not.toHaveBeenCalled()
+  })
+
+  it('shows a persistent Admin navigation row only for authorized administrators', async () => {
+    testState.isAdmin = true
+    let rendered = await renderSidebar()
+    expect(rendered.querySelector('a[aria-label="Admin"]')?.getAttribute('href')).toBe('/admin')
+    await act(async () => root?.unmount())
+    container?.remove(); root = undefined
+    testState.isAdmin = false
+    rendered = await renderSidebar()
+    expect(rendered.querySelector('a[aria-label="Admin"]')).toBeNull()
   })
 
   it.each(['/outputs', '/explore', '/blueprints', '/blueprint/example'])('keeps Library active at %s', async (pathname) => {

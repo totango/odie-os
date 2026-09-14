@@ -25,13 +25,9 @@ const INPUT =
 const TEXTAREA =
   'w-full rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-[16px] leading-5 tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:text-[14px]'
 
-const EMPTY_OPENCODE_CUSTOMIZATION: OpenCodeUserCustomization = {
-  plugins: [],
-  skills: [],
-}
-
 const NPM_PACKAGE_NAME_REGEX = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:@\S+)?$/
 const MACOS_DOWNLOAD_URL = 'https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-latest.dmg'
+const OPENCODE_SETTINGS_TIMEOUT_MS = 12_000
 
 function normalizeOpenCodeCustomization(pluginPackageLines: string, skills: OpenCodeSkillDefinition[]): OpenCodeUserCustomization {
   return {
@@ -155,6 +151,7 @@ export default function SettingsPage() {
   const [openCodeLoading, setOpenCodeLoading] = useState(true)
   const [openCodeSaving, setOpenCodeSaving] = useState(false)
   const [openCodeError, setOpenCodeError] = useState<string | null>(null)
+  const [openCodeReload, setOpenCodeReload] = useState(0)
 
   const avatarUrl = useAvatar(authenticatedApi, userInfo?.id)
 
@@ -193,11 +190,17 @@ export default function SettingsPage() {
   // Fetch account-scoped OpenCode customization.
   useEffect(() => {
     let cancelled = false
+    let timeout: number | undefined
     const fetchOpenCodeCustomization = async () => {
       setOpenCodeLoading(true)
       setOpenCodeError(null)
       try {
-        const customization = await authenticatedApi.getOpenCodeCustomization()
+        const customization = await Promise.race([
+          authenticatedApi.getOpenCodeCustomization(),
+          new Promise<never>((_resolve, reject) => {
+            timeout = window.setTimeout(() => reject(new Error('OpenCode settings request timed out')), OPENCODE_SETTINGS_TIMEOUT_MS)
+          }),
+        ])
         if (cancelled) return
         setOpenCodePlugins((customization.plugins ?? []).join('\n'))
         setOpenCodeSkills(customization.skills ?? [])
@@ -205,18 +208,17 @@ export default function SettingsPage() {
         console.error('Failed to fetch OpenCode customization:', error)
         if (!cancelled) {
           setOpenCodeError('Failed to load OpenCode settings')
-          setOpenCodePlugins(EMPTY_OPENCODE_CUSTOMIZATION.plugins.join('\n'))
-          setOpenCodeSkills(EMPTY_OPENCODE_CUSTOMIZATION.skills)
           toasts.add({ title: 'Failed to load OpenCode settings', variant: 'error' })
         }
       } finally {
+        if (timeout !== undefined) window.clearTimeout(timeout)
         if (!cancelled) setOpenCodeLoading(false)
       }
     }
 
     fetchOpenCodeCustomization()
-    return () => { cancelled = true }
-  }, [authenticatedApi, toasts])
+    return () => { cancelled = true; if (timeout !== undefined) window.clearTimeout(timeout) }
+  }, [authenticatedApi, toasts, openCodeReload])
 
   // Fetch user info
   useEffect(() => {
@@ -614,8 +616,9 @@ export default function SettingsPage() {
               ) : (
                 <>
                   {openCodeError && (
-                    <div className="rounded-lg border border-kumo-danger bg-kumo-danger-tint px-3 py-2 text-[13px] text-kumo-danger">
-                      {openCodeError}
+                    <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-kumo-danger bg-kumo-danger-tint px-3 py-2 text-[13px] text-kumo-danger">
+                      <span>{openCodeError}</span>
+                      <button type="button" className="font-medium underline" onClick={() => setOpenCodeReload(value => value + 1)}>Retry</button>
                     </div>
                   )}
 
@@ -628,6 +631,7 @@ export default function SettingsPage() {
                       rows={4}
                       className={`mt-1.5 font-mono ${TEXTAREA}`}
                       aria-describedby="opencode-plugin-help"
+                      disabled={!!openCodeError}
                     />
                     <p id="opencode-plugin-help" className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
                       Enter one npm package name per line. Plugins are trusted executable code with access to repositories in your sessions. Install only packages you trust.
@@ -639,7 +643,7 @@ export default function SettingsPage() {
                       <FieldLabel>Skills</FieldLabel>
                       <p className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">Reusable OpenCode guidance available to future sessions.</p>
                     </div>
-                    <button type="button" onClick={addOpenCodeSkill} className={`${PRIMARY_BTN} h-8 px-3`}>
+                    <button type="button" onClick={addOpenCodeSkill} disabled={!!openCodeError} className={`${PRIMARY_BTN} h-8 px-3`}>
                       <Plus size={14} weight="bold" /> Add skill
                     </button>
                   </div>
@@ -649,7 +653,7 @@ export default function SettingsPage() {
                       No custom skills yet.
                     </div>
                   ) : (
-                    <div className="flex flex-col gap-3">
+                    <fieldset disabled={!!openCodeError} className="flex flex-col gap-3">
                       {openCodeSkills.map((skill, index) => (
                         <div key={index} className="rounded-lg border border-kumo-line bg-kumo-tint/20 p-4">
                           <div className="flex items-start gap-3">
@@ -673,11 +677,11 @@ export default function SettingsPage() {
                           </label>
                         </div>
                       ))}
-                    </div>
+                    </fieldset>
                   )}
 
                   <div className="flex justify-end pt-1">
-                    <button type="button" onClick={handleSaveOpenCodeCustomization} disabled={openCodeSaving} className={PRIMARY_BTN}>
+                    <button type="button" onClick={handleSaveOpenCodeCustomization} disabled={openCodeSaving || !!openCodeError} className={PRIMARY_BTN}>
                       <Check size={15} weight="bold" />
                       {openCodeSaving ? 'Saving…' : 'Save OpenCode settings'}
                     </button>

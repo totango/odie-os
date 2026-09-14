@@ -18,7 +18,7 @@ test("Odie deploys capability-aware providers before the authority consumer", ()
 test("all four configured administrator seeds and authentication policy remain deployment-owned", () => {
   const config = read("packages/workshop-backend/wrangler.odie-os-production.jsonc");
   const admins = JSON.parse(config.match(/"ADMINS"\s*:\s*(\[[\s\S]*?\])/)![1]);
-  assert.deepEqual(admins, ["jacob.beck@totango.com", "keith@totango.com", "nick.roberts@totango.com", "stacy.kennedy@totango.com"]);
+  assert.deepEqual(admins, ["jacob.beck@heyodie.ai", "keith@totango.com", "nick.roberts@totango.com", "stacy.kennedy@totango.com"]);
   const authority = read("packages/workshop-backend/src/admin-authority.ts");
   for (const authenticationVariable of ["AUTH_GATEKEEPERS", "DISABLE_PASSWORD_AUTH", "AUTH_EMAIL_DOMAIN_ALIASES"]) {
     assert.equal(authority.includes(authenticationVariable), false);

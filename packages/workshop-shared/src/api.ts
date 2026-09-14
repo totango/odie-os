@@ -31,7 +31,7 @@ import { AccountDescription, ActionKind, ActionDescription, AvatarImage, Gatekee
 import type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicRequestBuildReadiness } from "./request-build-publication.js";
 /** Public request-build control and safe projection contracts. */
 export type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicRequestBuildReadiness } from "./request-build-publication.js";
-import type { CreateCommunityRequest, CommunityRequest, CommunityRequestQuery, CommunityRequestPage, CommunityRequestPageOptions, CommunityRequestDetail, CommunityRequestDetailPage, AddCommunityRequestDetail, ModerateCommunityRequest } from "./community-requests.js";
+import type { CreateCommunityRequest, CommunityRequest, CommunityRequestQuery, CommunityRequestPage, CommunityRequestPageOptions, CommunityRequestDetail, CommunityRequestDetailPage, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, CommunityRequestPrivateDiagnostics, ModerateCommunityRequest } from "./community-requests.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
@@ -799,6 +799,12 @@ export const getAuthErrorCode = authErrors.getCode;
 export interface AuthenticatedApi extends RpcTarget {
   /** Publish authored public text to the signed-in deployment board; never starts legacy automation. */
   createCommunityRequest(request: CreateCommunityRequest): Promise<CommunityRequest>;
+  /** Attach explicit-consent private browser diagnostics to an owned bug; never affects public projections or builds. */
+  attachCommunityRequestDiagnostics(id: string, attachment: AttachCommunityRequestDiagnostics): Promise<void>;
+  /** Remove an owned request from public view and scrub its authored public text and private diagnostics. */
+  deleteCommunityRequest(id: string): Promise<void>;
+  /** Read unexpired private bug diagnostics with current board-moderation authority. */
+  getCommunityRequestPrivateDiagnostics(id: string): Promise<CommunityRequestPrivateDiagnostics | null>;
   /** List/search visible public requests. Hidden inclusion requires current board-moderation authority. */
   listCommunityRequests(query?: CommunityRequestQuery): Promise<CommunityRequestPage>;
   /** Visible safe run status for any signed-in user; never grants session or publication control. */

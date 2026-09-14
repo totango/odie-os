@@ -5,6 +5,7 @@ import {
   Hexagon,
   House,
   MagnifyingGlass,
+  ShieldCheck,
   SidebarSimple,
   SquaresFour,
   TerminalWindow,
@@ -25,6 +26,7 @@ import SessionsSidebar from '../sessions/SessionsSidebar'
 import ProductFeedbackButton from '../../ProductFeedbackButton'
 import NativeUpdateCard from './NativeUpdateCard'
 import { useSessionsContext } from '../sessions/SessionsContext'
+import { useAuthenticatedApi } from '../../AuthContext'
 
 /**
  * The persistent left rail. Three pinned regions sandwich a single scrolling region of lists, so
@@ -52,6 +54,7 @@ export default function Sidebar({
   // they simply don't appear. The set is fully dynamic — no gatekeeper is hardcoded.
   const gatekeeperApps = useGatekeeperApps()
   const { github, activity } = useSessionsContext()
+  const { isAdmin } = useAuthenticatedApi()
   const showSessions = github.state === 'connected'
   const codeNeedsSetup = github.state === 'missing' || github.state === 'expired'
   const pendingSessionActions = showSessions ? activity.filter((entry) => entry.state === 'pending').length : 0
@@ -240,9 +243,16 @@ export default function Sidebar({
       </SidebarWorkspacesProvider>
       )}
 
-      <div className={collapsed ? 'flex shrink-0 flex-col items-center gap-2 pb-2' : 'flex shrink-0 flex-col gap-2 px-3 pb-2'}>
-        <NativeUpdateCard collapsed={collapsed} />
+      <div className={collapsed ? 'flex shrink-0 flex-col items-center gap-1 pb-2' : 'flex shrink-0 flex-col gap-1 px-2 pb-2'}>
         <ProductFeedbackButton collapsed={collapsed} />
+        {isAdmin && <SidebarItem
+          to="/admin"
+          label="Admin"
+          icon={<ShieldCheck size={14} weight="regular" />}
+          matchPrefix
+          collapsed={collapsed}
+        />}
+        <NativeUpdateCard collapsed={collapsed} />
       </div>
       <SidebarUtilityStrip collapsed={collapsed} />
     </aside>

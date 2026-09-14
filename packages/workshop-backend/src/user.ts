@@ -1810,13 +1810,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.openCodeCustomization.get();
   }
 
-  /** Reads the OpenCode customization persisted for this account. */
-  getOpenCodeCustomization(): OpenCodeUserCustomization {
+  /** Reads the OpenCode customization persisted for this account over Worker RPC. */
+  async getOpenCodeCustomization(): Promise<OpenCodeUserCustomization> {
     return this.storage.openCodeCustomization.get();
   }
 
   /** Replaces this account's OpenCode customization after validating bounded plugin and skill data. */
-  setOpenCodeCustomization(customization: OpenCodeUserCustomization): void {
+  async setOpenCodeCustomization(customization: OpenCodeUserCustomization): Promise<void> {
     this.storage.openCodeCustomization.put(validateOpenCodeCustomization(customization));
   }
 
