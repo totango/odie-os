@@ -7,10 +7,10 @@ LABEL org.opencontainers.image.source="https://github.com/totango/odie-os"
 ARG NODE_VERSION=24.14.0
 ARG PNPM_PACKAGE_MANAGER=pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c
 ARG REPOSITORY_PNPM_PACKAGE_MANAGER=pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72
-ARG OPENCODE_VERSION=1.18.15
-ARG PI_VERSION=0.84.2
-ARG PI_MCP_ADAPTER_VERSION=2.26.0
-ARG PRIME_AGENT_VERSION=0.8.0
+ARG OPENCODE_VERSION=1.18.30
+ARG PI_VERSION=0.85.1
+ARG PI_MCP_ADAPTER_VERSION=2.33.0
+ARG PRIME_AGENT_VERSION=0.9.4
 ARG VALHALLA_VERSION=0.3.0
 ARG CODE_SERVER_VERSION=4.133.0
 
@@ -52,7 +52,7 @@ ADD --checksum=sha256:207c80dd995e103c271fae8c8ffb8528d86c15ab0c4eef1be23ba1792e
 
 COPY --from=uv /uv /uvx /bin/
 COPY pi-image/package.json pi-image/package-lock.json pi-image/build-valhalla-opencode.mjs \
-    pi-image/verify-mcp-app-fail-closed.mjs /opt/odie-pi/
+    pi-image/verify-mcp-app-fail-closed.mjs pi-image/prime-runtime-smoke.py /opt/odie-pi/
 COPY pi-image/prime-kernel-requirements.txt /opt/odie-prime-agent/requirements.txt
 
 ENV PATH="/opt/node/bin:${PATH}" \
@@ -94,8 +94,9 @@ RUN mkdir -p /opt/node \
       /root/.local/share/code-server \
       /tmp/odie-code-server-user-data
 
-# Package lifecycle scripts stay disabled. ZeroMQ runs its pinned native installer explicitly. The
-# Prime kernel uses a pinned uv image, exact Python version, and hash-locked Python dependencies.
+# Package lifecycle scripts stay disabled. Prime 0.9.4 no longer declares ZeroMQ, so no legacy
+# native installer is run. The Prime kernel uses a pinned uv image, exact Python version, and
+# hash-locked Python dependencies.
 RUN test "$(node --version)" = "v${NODE_VERSION}" \
     && test "pnpm@$(pnpm --version)" = "${PNPM_PACKAGE_MANAGER%%+*}" \
     && test "$(env PATH=/usr/local/bin:/bin:/usr/bin node --version)" = "v${NODE_VERSION}" \
@@ -104,18 +105,19 @@ RUN test "$(node --version)" = "v${NODE_VERSION}" \
     && test "$(uname -m)" = "x86_64" \
     && for command in ps pgrep pkill setsid stdbuf timeout tail tee flock du df truncate jq curl git bash tini; do command -v "$command" >/dev/null; done \
     && npm ci --prefix /opt/odie-pi --ignore-scripts \
-    && node /opt/odie-pi/node_modules/zeromq/script/install.js \
-    && node -e 'require("/opt/odie-pi/node_modules/zeromq")' \
+    && test ! -e /opt/odie-pi/node_modules/zeromq/script/install.js \
     && UV_PYTHON_INSTALL_DIR=/opt/odie-prime-agent/python uv python install 3.11.14 \
     && UV_PYTHON_INSTALL_DIR=/opt/odie-prime-agent/python uv venv --python 3.11.14 /opt/odie-prime-agent/kernel-venv \
     && uv pip install --python /opt/odie-prime-agent/kernel-venv/bin/python --require-hashes --no-deps -r /opt/odie-prime-agent/requirements.txt \
     && uv pip install --python /opt/odie-prime-agent/kernel-venv/bin/python --no-deps --no-build-isolation /opt/odie-pi/node_modules/prime-agent/dist/prime-agent-runtime \
     && /opt/odie-prime-agent/kernel-venv/bin/python -m IPython -c 'import ipykernel, rlm, rlm.mcp; assert 6 * 7 == 42' \
+    && /opt/odie-prime-agent/kernel-venv/bin/python /opt/odie-pi/prime-runtime-smoke.py \
     && node /opt/odie-pi/build-valhalla-opencode.mjs \
     && ln -s /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js /usr/local/bin/pi \
     && ln -s /opt/odie-pi/node_modules/prime-agent/dist/bundle/cli.js /usr/local/bin/prime-agent \
+    && ln -sf /opt/odie-pi/node_modules/opencode-linux-x64/bin/opencode /usr/local/bin/opencode \
     && opencode --version \
-    && test "$(node -p "require('/usr/local/lib/node_modules/opencode-ai/package.json').version")" = "$OPENCODE_VERSION" \
+    && test "$(node -p "require('/opt/odie-pi/node_modules/opencode-ai/package.json').version")" = "$OPENCODE_VERSION" \
     && pi --version \
     && prime-agent --version \
     && rg --version \
@@ -132,10 +134,10 @@ RUN test "$(node --version)" = "v${NODE_VERSION}" \
     && test "$(find /opt/odie-valhalla/opencode/command -name '*.md' -type f | wc -l)" = "8" \
     && test -f /opt/odie-valhalla/opencode/skills/vegvisir/SKILL.md \
     && node \
-      --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
+      --import /opt/odie-pi/node_modules/jiti/lib/jiti-register.mjs \
       --eval 'const assert = require("node:assert/strict"); import("/opt/odie-pi/node_modules/pi-mcp-adapter/index.ts").then((module) => assert.equal(typeof (module.createMcpAdapter ?? module.default?.createMcpAdapter), "function"))' \
     && node \
-      --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
+      --import /opt/odie-pi/node_modules/jiti/lib/jiti-register.mjs \
       /opt/odie-pi/verify-mcp-app-fail-closed.mjs \
     && rm -rf \
       /root/.npm \

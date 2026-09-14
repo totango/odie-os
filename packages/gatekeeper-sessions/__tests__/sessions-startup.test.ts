@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { RequestBuildIntent, RequestBuildPolicy } from "@gadgets/workshop-shared/coding-sessions";
+import { buildHash, canonicalBuildJson } from "../src/request-build-policy.js";
+import type { RequestBuildRecord } from "../src/request-build-execution.js";
 import type { CodingSessionSummary, OpenCodeUserCustomization } from "@gadgets/workshop-shared/api";
 import { zstdCompressSync } from "node:zlib";
 
@@ -30,6 +33,7 @@ const OPENCODE_ATTACH_COMMAND = ["opencode", "attach", "http://127.0.0.1:40913",
 
 type StoredRecord = Omit<CodingSessionSummary, "runtime"> & {
   runtime?: CodingSessionSummary["runtime"];
+  requestBuild?: string;
   primeAgent?: true;
   sandboxId: string;
   terminalId?: string;
@@ -37,6 +41,15 @@ type StoredRecord = Omit<CodingSessionSummary, "runtime"> & {
   opencodeServerProcessId?: string;
   opencodeServerVersion?: number;
 };
+
+function createAlarmStorage() {
+  let alarm: number | null = null;
+  return {
+    getAlarm: vi.fn(async () => alarm),
+    setAlarm: vi.fn(async (when: number | Date) => { alarm = Number(when); }),
+    deleteAlarm: vi.fn(async () => { alarm = null; }),
+  };
+}
 
 function createKv() {
   const values = new Map<string, unknown>();
@@ -66,8 +79,7 @@ function startupRecord(overrides: Record<string, unknown> = {}) {
 
 function createPolicy() {
   const kv = createKv();
-  const setAlarm = vi.fn(async () => undefined);
-  const deleteAlarm = vi.fn(async () => undefined);
+  const { setAlarm, deleteAlarm, getAlarm } = createAlarmStorage();
   const registry = { prestartOpenCodeServer: vi.fn(async (..._args: unknown[]) => undefined), startupSucceeded: vi.fn(async () => true), startupFailed: vi.fn(() => true), startupProgressed: vi.fn(async () => true) };
   const namespace = { idFromName: vi.fn((name: string) => name), get: vi.fn(() => registry) };
   const tools = {
@@ -75,7 +87,7 @@ function createPolicy() {
   };
   const policy = new CodingSessionPolicy() as InstanceType<typeof CodingSessionPolicy> & {
     env: Record<string, unknown>;
-    ctx: { storage: { kv: typeof kv; setAlarm: typeof setAlarm; deleteAlarm: typeof deleteAlarm }; id: { toString(): string }; exports: { CodingSessionRegistry: typeof namespace } };
+    ctx: { storage: { kv: typeof kv; setAlarm: typeof setAlarm; deleteAlarm: typeof deleteAlarm; getAlarm: typeof getAlarm }; id: { toString(): string }; exports: { CodingSessionRegistry: typeof namespace } };
   };
   policy.env = {
       CODING_SESSION_DURABLE_LIFECYCLE_ENABLED: "true",
@@ -85,7 +97,7 @@ function createPolicy() {
     GITHUB_APP_PRIVATE_KEY: "key",
     GITHUB_APP_INSTALLATION_ID: "2",
   };
-  policy.ctx = { storage: { kv, setAlarm, deleteAlarm }, id: { toString: () => "policy-1" }, exports: { CodingSessionRegistry: namespace } };
+  policy.ctx = { storage: { kv, setAlarm, deleteAlarm, getAlarm }, id: { toString: () => "policy-1" }, exports: { CodingSessionRegistry: namespace } };
   kv.put("policy", {
     sessionId: "session-1",
     sandboxId: "sandbox-1",
@@ -93,13 +105,12 @@ function createPolicy() {
     owner: { userId: "user-1", email: "user@example.com" },
     repositories: ["jarvis"],
   });
-  return { policy, kv, setAlarm, deleteAlarm, registry, tools };
+  return { policy, kv, setAlarm, deleteAlarm, getAlarm, registry, tools };
 }
 
 function createRegistryWith(record: StoredRecord) {
   const kv = createKv();
-  const setAlarm = vi.fn(async () => undefined);
-  const deleteAlarm = vi.fn(async () => undefined);
+  const { setAlarm, deleteAlarm, getAlarm } = createAlarmStorage();
   const transactionSync = vi.fn(<T,>(callback: () => T): T => {
     const snapshot = new Map(kv.values);
     try {
@@ -113,12 +124,12 @@ function createRegistryWith(record: StoredRecord) {
   kv.put(`session:${record.id}`, record);
   const registry = new CodingSessionRegistry() as InstanceType<typeof CodingSessionRegistry> & {
     ctx: { storage: {
-      kv: typeof kv; setAlarm: typeof setAlarm; deleteAlarm: typeof deleteAlarm;
+      kv: typeof kv; setAlarm: typeof setAlarm; deleteAlarm: typeof deleteAlarm; getAlarm: typeof getAlarm;
       transactionSync: typeof transactionSync;
     } };
   };
-  registry.ctx = { storage: { kv, setAlarm, deleteAlarm, transactionSync } };
-  return { registry, kv, setAlarm, deleteAlarm, transactionSync };
+  registry.ctx = { storage: { kv, setAlarm, deleteAlarm, getAlarm, transactionSync } };
+  return { registry, kv, setAlarm, deleteAlarm, getAlarm, transactionSync };
 }
 
 function startingRecord(overrides: Partial<StoredRecord> = {}): StoredRecord {
@@ -298,8 +309,7 @@ describe("coding session asynchronous startup", () => {
     };
     registry.ctx = { storage: {
       kv,
-      setAlarm: vi.fn(async () => undefined),
-      deleteAlarm: vi.fn(async () => undefined),
+      ...createAlarmStorage(),
       transactionSync: (callback: () => unknown) => callback(),
     } };
     (registry as typeof registry & { env: Record<string, unknown> }).env = {
@@ -370,7 +380,7 @@ describe("coding session asynchronous startup", () => {
       WORKSHOP_TOOLS: tools,
     };
     registry.ctx = { storage: {
-      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      kv, ...createAlarmStorage(),
       transactionSync: (callback: () => unknown) => callback(),
     } };
 
@@ -434,7 +444,7 @@ describe("coding session asynchronous startup", () => {
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => ({ configure, startSessionStartup }) },
     };
     registry.ctx = { storage: {
-      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      kv, ...createAlarmStorage(),
       transactionSync: (callback: () => unknown) => callback(),
     } };
 
@@ -470,7 +480,7 @@ describe("coding session asynchronous startup", () => {
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
     };
     registry.ctx = { storage: {
-      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      kv, ...createAlarmStorage(),
       transactionSync: (callback: () => unknown) => callback(),
     } };
 
@@ -502,7 +512,7 @@ describe("coding session asynchronous startup", () => {
       TEAM_PI_CODEX_HMAC_SECRET: "worker-secret",
     };
     registry.ctx = { storage: {
-      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      kv, ...createAlarmStorage(),
       transactionSync: (callback: () => unknown) => callback(),
     } };
 
@@ -546,8 +556,7 @@ describe("coding session asynchronous startup", () => {
     };
     registry.ctx = { storage: {
       kv,
-      setAlarm: vi.fn(async () => undefined),
-      deleteAlarm: vi.fn(async () => undefined),
+      ...createAlarmStorage(),
       transactionSync: (callback: () => unknown) => callback(),
     } };
 
@@ -1250,7 +1259,7 @@ describe("coding session asynchronous startup", () => {
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
     };
     registry.ctx = { storage: {
-      kv, setAlarm: vi.fn(async () => undefined), deleteAlarm: vi.fn(async () => undefined),
+      kv, ...createAlarmStorage(),
       transactionSync: (callback: () => unknown) => callback(),
     } };
 
@@ -1750,8 +1759,7 @@ describe("coding session asynchronous startup", () => {
     kv.put.mockClear();
     setAlarm.mockClear();
     const restarting = registry.restartSession("session-1", { userId: "user-1", email: "user@example.com" });
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(destroy).toHaveBeenCalled());
     expect(setAlarm).toHaveBeenCalled();
     expect(kv.put).toHaveBeenCalledWith("session:session-1", expect.objectContaining({ status: "stopping" }));
     expect(kv.put).toHaveBeenCalledWith("restart:session-1", expect.anything());
@@ -1892,8 +1900,7 @@ describe("coding session asynchronous startup", () => {
 
   it("recovers initial standard-1 schedule and destroy failure from durable stop alarm", async () => {
     const kv = createKv();
-    const setAlarm = vi.fn(async () => undefined);
-    const deleteAlarm = vi.fn(async () => undefined);
+    const { setAlarm, deleteAlarm, getAlarm } = createAlarmStorage();
     const firstDestroy = vi.fn(async () => { throw new Error("destroy unavailable"); });
     vi.mocked(getSandbox).mockReturnValueOnce({ destroy: firstDestroy } as any);
     const policy = {
@@ -1908,7 +1915,7 @@ describe("coding session asynchronous startup", () => {
       SESSION_SANDBOX: { idFromName: (id: string) => ({ toString: () => id }) },
       SESSION_POLICIES: { idFromName: (id: string) => id, get: () => policy },
     };
-    registry.ctx = { storage: { kv, setAlarm, deleteAlarm, transactionSync: (callback: () => unknown) => callback() } };
+    registry.ctx = { storage: { kv, setAlarm, deleteAlarm, getAlarm, transactionSync: (callback: () => unknown) => callback() } };
     const summary = await registry.createSession(
       { userId: "user-1", email: "user@example.com" },
       { title: "Terminal", repositories: ["jarvis"] },
@@ -3038,4 +3045,85 @@ describe("coding session asynchronous startup", () => {
     now.mockRestore();
   });
 
+});
+
+const restrictedPolicy: RequestBuildPolicy = {
+  version: "fixture", runtimeVersion: "0.85.1", model: "fixture-model", wallTimeMs: 60000,
+  modelCalls: 1, spendMicros: 1000, callChargeMicros: 1000, modelInputBytes: 8192,
+  modelOutputTokens: 200, outputBytes: 8192, diffBytes: 4096, diffFiles: 2, concurrency: 1, dependencyHosts: [],
+};
+async function restrictedRecord(): Promise<RequestBuildRecord> {
+  const intent: RequestBuildIntent = {
+    dispatchKey: "dispatch_fixture_123", runId: "run_fixture_123456", attempt: 1,
+    specification: "fixture", specificationHash: await buildHash("fixture"), repository: "totango/odie-os",
+    baseBranch: "main", baseSha: "a".repeat(40), policy: restrictedPolicy,
+    policyHash: await buildHash(canonicalBuildJson(restrictedPolicy)),
+  };
+  return { owner: {userId:"user-1",email:"fixture@example.invalid"}, intent,
+    dispatchKey:intent.dispatchKey, intentHash:await buildHash(canonicalBuildJson(intent)),
+    sessionId:"session-1",sandboxId:"sandbox-1",generation:1,sequence:1,state:"running",stage:"runner_wait",
+    createdAt:Date.now(),updatedAt:Date.now(),deadline:Date.now()+60000,cancelRevision:0,cleanup:"pending" };
+}
+
+const restrictedModelRequest=()=>new Request("https://team-pi-proxy.unison.totango.com/api/odie/codex/responses",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({model:"fixture-model",input:[],max_output_tokens:999999})});
+
+describe("restricted Code Session policy and ordinary API isolation", () => {
+  it("does not list, attach, restart, stop or authorize catalogs for restricted records", async () => {
+    const build = await restrictedRecord();
+    const {registry,kv:registryKv} = createRegistryWith({...startingRecord({status:"running"}),requestBuild:build.dispatchKey});
+    expect(await registry.listSessions()).toEqual([]);
+    expect(registry.getSessionMetadata("session-1")).toBeUndefined();
+    expect(await registry.getSession("session-1")).toBeUndefined();
+    expect(registry.isCurrentSessionGeneration("session-1","sandbox-1")).toBe(false);
+    await expect(registry.stopSession("session-1")).resolves.toBeUndefined();
+    expect(registryKv.get("session:session-1")).toMatchObject({status:"running",requestBuild:build.dispatchKey});
+    await expect(registry.restartSession("session-1",build.owner)).rejects.toThrow();
+    const {policy,kv}=createPolicy();kv.put("policy",{requestBuild:build});
+    expect((await policy.handleWorkshopMcpRequest(new Request("https://workshop-mcp.internal/mcp"))).status).toBe(403);
+    await expect(policy.getInstallationToken()).rejects.toThrow("do not expose credentials");
+  });
+  it.each([Date.now()+1000,Date.now()-1000])("does not push out an existing registry alarm (%i)", async deadline => {
+    const {registry,kv,setAlarm,getAlarm}=createRegistryWith(startingRecord());
+    await setAlarm(deadline);setAlarm.mockClear();
+    await registry.submitProductFeedback({id:"fixture-evidence",kind:"feedback",title:"fixture",description:"fixture",submitterEmail:"fixture@example.invalid",owner:{userId:"fixture",email:"fixture@example.invalid"},pathname:"/",expiresAt:new Date(Date.now()+60000)});
+    expect(await getAlarm()).toBe(deadline);expect(setAlarm).not.toHaveBeenCalled();
+    expect(kv.get("feedback:fixture-evidence")).toBeDefined();
+  });
+  it.each([{modelCalls:1,spendMicros:1000},{modelCalls:4,spendMicros:1000}])("charges concurrent model calls durably before forwarding (%j)", async limits => {
+    const build=await restrictedRecord();
+    build.intent.policy={...build.intent.policy,...limits};const {policy,kv,registry,tools}=createPolicy();
+    Object.assign(registry,{isCurrentRequestBuild:vi.fn(async()=>true)});
+    Object.assign(tools,{authorizeRequestBuild:vi.fn(async()=>({allowed:true,intentHash:build.intentHash,sessionId:build.sessionId,generation:build.generation}))});
+    policy.env.TEAM_PI_CODEX_BASE_URL="https://team-pi-proxy.unison.totango.com/api/odie/";
+    policy.env.TEAM_PI_CODEX_HMAC_SECRET="fixture-not-a-credential";
+    kv.put("policy",{sessionId:build.sessionId,owner:build.owner,requestBuild:build});
+    const fetcher=vi.fn(async()=>new Response("data: fixture\n\n",{headers:{"content-type":"text/event-stream"}}));
+    const original=globalThis.fetch;globalThis.fetch=fetcher;
+    try {
+      const responses=await Promise.all([policy.forwardRequestBuildEgress(restrictedModelRequest()),policy.forwardRequestBuildEgress(restrictedModelRequest())]);
+      expect(responses.map(r=>r.status).toSorted()).toEqual([200,403]);expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(kv.get("build-model-usage")).toEqual({calls:1,spend:1000});
+      for(const url of ["https://github.com/totango/odie-os.git/git-receive-pack","https://github.com/other/repo.git/info/refs?service=git-upload-pack","https://workshop-mcp.internal/mcp","https://registry.npmjs.org/anything"]) {
+        expect((await policy.forwardRequestBuildEgress(new Request(url,{method:"POST"}))).status).toBe(403);
+      }
+      policy.disableRequestBuild(build.intentHash);
+      expect((await policy.forwardRequestBuildEgress(restrictedModelRequest())).status).toBe(403);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    } finally {globalThis.fetch=original;}
+  });
+  it("scope-checks GitHub smart-HTTP reads and never forwards caller headers or follows redirects", async () => {
+    const build=await restrictedRecord();const {policy,kv,registry}=createPolicy();
+    Object.assign(registry,{isCurrentRequestBuild:vi.fn(async()=>true)});
+    kv.put("policy",{sessionId:build.sessionId,owner:build.owner,requestBuild:build});
+    kv.put("build-read-token",{token:"fixture-readonly",expiresAt:Date.now()+120000});
+    const fetcher=vi.fn(async (_url: URL | RequestInfo, _init?: RequestInit)=>new Response(null,{status:302,headers:{location:"https://evil.invalid"}}));
+    const original=globalThis.fetch;globalThis.fetch=fetcher;
+    try {
+      const response=await policy.forwardRequestBuildEgress(new Request("https://github.com/totango/odie-os.git/info/refs?service=git-upload-pack",{headers:{authorization:"caller-untrusted",cookie:"caller-cookie"}}));
+      expect(response.status).toBe(403);expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(fetcher.mock.calls[0]).toEqual([expect.any(URL),expect.objectContaining({redirect:"manual",headers:expect.any(Headers)})]);
+      const headers=fetcher.mock.calls[0]![1]!.headers as Headers;
+      expect(headers.has("cookie")).toBe(false);expect(headers.get("authorization")).not.toBe("caller-untrusted");
+    } finally {globalThis.fetch=original;}
+  });
 });

@@ -1,9 +1,14 @@
+import { AdminAuthority, AdminAuthorizationEntrypoint, type AdminPurpose } from "./admin-authority";
+export { AdminAuthority, AdminAuthorizationEntrypoint };
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
+import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestDetail, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
+import { COMMUNITY_REQUESTS_SINGLETON_NAME, CommunityRequests } from "./community-requests.js";
+export { CommunityRequests };
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist, accountEmailIdentities } from "./auth/config.js";
@@ -42,6 +47,7 @@ import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import { loadBundledFinanceOperationsWorkbenchSource } from "./format-blueprints.js";
+import { isFinanceOperator } from "./finance-operators";
 
 const logger = createWorkshopLogger("workshop.server");
 
@@ -129,13 +135,13 @@ function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata
 
 /** Resolve the fail-closed Finance entitlement returned by the authenticated API. */
 export function resolveFinanceHubStatus(
-    workspaceId: string | null, liveAuthorized: boolean, isAdmin: boolean): FinanceHubStatus {
+    workspaceId: string | null, liveAuthorized: boolean, financeOperator: boolean): FinanceHubStatus {
   if (workspaceId) {
     return liveAuthorized
       ? {authorized: true, workspaceId, canCreate: false}
       : {authorized: false, canCreate: false};
   }
-  if (isAdmin) return {authorized: true, canCreate: true};
+  if (financeOperator) return {authorized: true, canCreate: true};
   return {authorized: false, canCreate: false};
 }
 
@@ -143,7 +149,7 @@ export function resolveFinanceHubStatus(
 export async function readFinanceHubStatus(
     adminSettings: DurableObjectNamespace<AdminSettings>,
     overseers: DurableObjectNamespace<OverseerDurableObject>,
-    userId: string, profileId: string, isAdmin: boolean): Promise<FinanceHubStatus> {
+    userId: string, profileId: string, financeOperator: boolean): Promise<FinanceHubStatus> {
   let claim: FinanceWorkspaceClaim | null;
   try {
     claim = await retryOnDoReset(() => adminSettings
@@ -154,13 +160,13 @@ export async function readFinanceHubStatus(
     });
     return {authorized: false, canCreate: false};
   }
-  if (!claim) return resolveFinanceHubStatus(null, false, isAdmin);
+  if (!claim) return resolveFinanceHubStatus(null, false, financeOperator);
 
   try {
     let workspace = overseers.get(overseers.idFromString(claim.workspaceId));
     let authorized = await retryOnDoReset(
-        () => workspace.hasFinanceHubAccess(claim, userId, profileId, isAdmin));
-    return resolveFinanceHubStatus(claim.workspaceId, authorized, isAdmin);
+        () => workspace.hasFinanceHubAccess(claim, userId, profileId, financeOperator));
+    return resolveFinanceHubStatus(claim.workspaceId, authorized, financeOperator);
   } catch (error) {
     logger.warn("failed to validate Finance workspace access", {
       event: "finance.access.validate.failed", error,
@@ -241,10 +247,10 @@ export async function runBlueprintWorkspaceCreation<T extends {[Symbol.dispose](
 
 /** Enforce the protected Finance bootstrap pairing and return whether it is that bootstrap. */
 export function assertBlueprintOriginAllowed(
-    blueprintId: string, originHubId: DeploymentHubId | undefined, isAdmin: boolean): boolean {
+    blueprintId: string, originHubId: DeploymentHubId | undefined, financeOperator: boolean): boolean {
   let isFinanceBlueprint = isFinanceOperationsWorkbenchBlueprintId(blueprintId);
   if (isFinanceBlueprint) {
-    if (originHubId !== "finance" || !isAdmin) throw new Error("Blueprint not found.");
+    if (originHubId !== "finance" || !financeOperator) throw new Error("Blueprint not found.");
   } else if (originHubId === "finance") {
     throw new Error("Only the Finance Operations Workbench may use the Finance hub origin.");
   }
@@ -279,6 +285,16 @@ export class CodingSessionToolHostImpl
   #user(owner: CodingSessionOwner): DurableObjectStub<UserDurableObject> {
     const users = this.ctx.exports.UserDurableObject;
     return wrapDoStubForTelemetry(users.get(users.idFromString(owner.userId)));
+  }
+
+  /** Binding-only admission reconstructed from persisted approval, current authority and Sessions identity. */
+  async authorizeRequestBuild(
+    owner: CodingSessionOwner,
+    request: Parameters<CodingSessionToolHost["authorizeRequestBuild"]>[1],
+  ): ReturnType<CodingSessionToolHost["authorizeRequestBuild"]> {
+    try {
+      return await this.ctx.exports.CommunityRequests.getByName(COMMUNITY_REQUESTS_SINGLETON_NAME).authorizeRequestBuild(owner, request);
+    } catch { return {allowed: false, reasons: ["BUILD_AUTHORITY_UNAVAILABLE"]}; }
   }
 
   async prepareSessionStartup(
@@ -371,23 +387,84 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return wrapDoStubForTelemetry(this.users.get(this.#userId));
   }
 
-  #isAdmin(): boolean {
-    let name = this.#userId.name;
-    let admins = this.env.ADMINS;
+  // Finance operator admission is deployment-configured, never a managed-admin descendant.
+  // Config changes govern fresh opens, not capabilities that have already escaped.
+  #isFinanceOperator(): boolean {
+    return isFinanceOperator(this.env, this.#userId.name);
+  }
 
-    if (!name || !admins) return false;
+  get #authority(): DurableObjectStub<AdminAuthority> {
+    return this.ctx.exports.AdminAuthority.getByName("");
+  }
 
-    if (typeof admins === "string") {
-      // Admins should be a JSON binding of array type, but `.env` doesn't actually let you
-      // specify JSON bindings, so we also support a string that parses as JSON array.
-      admins = JSON.parse(admins);
+  async #adminClaim(purpose: AdminPurpose) {
+    return this.#authority.issue(this.#userId.toString(), this.#userId.name ?? "", purpose);
+  }
+
+  async #currentAdmin(): Promise<boolean> {
+    return !!await this.#adminClaim("administration");
+  }
+
+  // An authority outage removes privileged app features, not the owner's private management UI.
+  async #appAdminClaim(purpose: AdminPurpose) {
+    try { return await this.#adminClaim(purpose); }
+    catch (error) {
+      logger.warn("admin authority unavailable for app privileges", {event: "admin.authority.app.denied", error});
+      return null;
     }
+  }
 
-    if (!Array.isArray(admins)) {
-      throw new TypeError("ADMINS must be configured as an array of usernames.");
-    }
+  // Only this authenticated facade can supply account identity or authorize hidden/admin access.
+  get #communityRequests(): DurableObjectStub<CommunityRequests> {
+    return this.ctx.exports.CommunityRequests.getByName(COMMUNITY_REQUESTS_SINGLETON_NAME);
+  }
 
-    return admins.includes(name);
+  async #checkCommunityHiddenAccess(includeHidden?: boolean): Promise<void> {
+    if (includeHidden !== undefined && typeof includeHidden !== "boolean") throw new Error("Invalid board visibility.");
+    if (includeHidden && !await this.#adminClaim("board-moderation")) throw new Error("Board moderation requires an administrator.");
+  }
+
+  /** Signed-in, hidden-filtered public run discovery; no connector eligibility required. */
+  async listRequestBuilds(requestId: string) {
+    return this.#communityRequests.listRequestBuilds(this.#userId.toString(), requestId);
+  }
+  async getRequestBuild(requestId: string, runId: string) {
+    return this.#communityRequests.getRequestBuild(this.#userId.toString(), requestId, runId);
+  }
+
+  async createCommunityRequest(request: CreateCommunityRequest) {
+    return this.#communityRequests.create(this.#userId.toString(), request);
+  }
+  async listCommunityRequests(query: CommunityRequestQuery = {}) {
+    await this.#checkCommunityHiddenAccess(query?.includeHidden);
+    return this.#communityRequests.list(this.#userId.toString(), query);
+  }
+  async searchCommunityRequests(query: CommunityRequestQuery) {
+    return this.listCommunityRequests(query);
+  }
+  async getCommunityRequest(id: string, includeHidden = false) {
+    await this.#checkCommunityHiddenAccess(includeHidden);
+    return this.#communityRequests.get(this.#userId.toString(), id, includeHidden);
+  }
+  async suggestRelatedCommunityRequests(text: string, excludeId?: string) {
+    return this.#communityRequests.related(this.#userId.toString(), text, excludeId);
+  }
+  async voteCommunityRequest(id: string) {
+    return this.#communityRequests.vote(this.#userId.toString(), id, true);
+  }
+  async unvoteCommunityRequest(id: string) {
+    return this.#communityRequests.vote(this.#userId.toString(), id, false);
+  }
+  async addCommunityRequestDetail(id: string, detail: AddCommunityRequestDetail) {
+    return this.#communityRequests.addDetail(this.#userId.toString(), id, detail);
+  }
+  async listCommunityRequestDetails(id: string, options: CommunityRequestPageOptions = {}) {
+    await this.#checkCommunityHiddenAccess(options?.includeHidden);
+    return this.#communityRequests.details(this.#userId.toString(), id, options);
+  }
+  async moderateCommunityRequest(id: string, command: ModerateCommunityRequest) {
+    if (!await this.#adminClaim("board-moderation")) throw new Error("Board moderation requires an administrator.");
+    return this.#communityRequests.moderate(this.#userId.toString(), id, command);
   }
 
   whoami(): Promise<AiChatAuthorInfo> {
@@ -568,7 +645,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   async restartCodingSession(sessionId: string): Promise<CodingSessionSummary> {
     await this.#assertRequiredConnectionsHealthy();
-    const session = (await this.#user.listCodingSessions()).find(({ id }) => id === sessionId);
+    const sessions: Awaited<ReturnType<UserDurableObject["listCodingSessions"]>> = await this.#user.listCodingSessions();
+    const session = sessions.find(({ id }) => id === sessionId);
     if (session?.runtime && session.runtime !== "opencode") await this.#assertCodingSessionRuntimeEnabled(session.runtime);
     return this.#user.restartCodingSession(sessionId);
   }
@@ -693,7 +771,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     let result;
     try {
       result = await overseer.open(
-          userId, profileId, notifyClosed, shareKey, configureObservers, this.#isAdmin());
+          userId, profileId, notifyClosed, shareKey, configureObservers, this.#isFinanceOperator());
     } catch (err) {
       // A denial proves this user's listing for the workspace is stale: revocation tries to drop it
       // (refreshAffectedCollaboratorListings), but that push is best-effort. Only catches entries
@@ -762,7 +840,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async getFinanceHubStatus(): Promise<FinanceHubStatus> {
     return readFinanceHubStatus(
         this.adminSettings, this.overseers, this.#userId.toString(), this.#userId.name!,
-        this.#isAdmin());
+        this.#isFinanceOperator());
   }
 
   async updateProvisionalWorkspaceOrigin(
@@ -895,8 +973,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {
-    return (await retryOnDoReset(() => this.#user.listLibraryBlueprints()))
-        .filter(({id}) => !isFinanceOperationsWorkbenchBlueprintId(id));
+    const blueprints = await retryOnDoReset(async (): ReturnType<UserDurableObject["listLibraryBlueprints"]> => this.#user.listLibraryBlueprints());
+    return blueprints.filter(({id}) => !isFinanceOperationsWorkbenchBlueprintId(id));
   }
 
   async setBlueprintPinned(blueprintId: string, pinned: boolean): Promise<void> {
@@ -981,7 +1059,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       throw new Error("Invalid deployment hub id.");
     }
     let isFinanceBlueprint = assertBlueprintOriginAllowed(
-        blueprintId, originHubId, this.#isAdmin());
+        blueprintId, originHubId, this.#isFinanceOperator());
     // Protected Finance creation and recovery always use the immutable source bundled into this
     // Worker. Ordinary blueprints use their installed KV metadata and R2 code snapshot.
     let kvRecord: BlueprintKvRecord;
@@ -1138,7 +1216,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // listProvidedAccounts provisions auto-provisioned accounts first (idempotent), so their apps
     // appear in the nav even before the user opens a gadget — in a single round trip.
     let accounts = await this.#user.listProvidedAccounts();
-    return await listVisibleGatekeeperApps(accounts, this.#isAdmin());
+    return await listVisibleGatekeeperApps(accounts, !!await this.#appAdminClaim("administration"));
   }
 
   async getGatekeeperApp(id: string): Promise<GatekeeperUiFrame | null> {
@@ -1146,27 +1224,31 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // so a direct URL load of /gatekeepers/$id works without racing the Header's listGatekeeperApps.
     let user = this.#user;  // one stub for both calls
     let accounts = await user.listProvidedAccounts();
-    let app = await resolveGatekeeperAppAccount(accounts, id, this.#isAdmin());
+    let app = await resolveGatekeeperAppAccount(accounts, id, !!await this.#appAdminClaim("administration"));
     if (!app) return null;
-    // isAdmin is supplied fresh per open so admin-gated features reflect the user's current status.
-    return user.startAccountAppUi(app.accountId, { isAdmin: this.#isAdmin() });
+    // Only known privileged consumers receive a purpose-limited capability.
+    const purpose = app.vendorId === "context" ? "context-public" : app.vendorId === "jarvis" ? "jarvis-policy" : undefined;
+    const claim = purpose ? await this.#appAdminClaim(purpose) : null;
+    const authorization = claim ? this.ctx.exports.AdminAuthorizationEntrypoint({props: {claim}}) : undefined;
+    return user.startAccountAppUiAuthorized(app.accountId, {protocol: "admin-authorization-v1", authorization});
   }
 
   // --- Deployment admin ---
 
   async amIAdmin(): Promise<boolean> {
-    return this.#isAdmin();
+    return this.#currentAdmin();
   }
 
   async getAdminApi(): Promise<RpcStub<AdminApi> | null> {
-    if (!this.#isAdmin()) return null;
-    // #isAdmin() guarantees a non-empty user id name. Forwarded to gatekeepers when listing the
+    const claim = await this.#adminClaim("administration");
+    if (!claim) return null;
+    // The exact authority claim guarantees a non-empty user id name. Forwarded to gatekeepers when listing the
     // resource catalog so RBAC-gated ones still surface for this admin.
     let adminUserId = this.#userId.name!;
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
     return new AdminApiImpl(
-        this.adminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME), adminUserId);
+        this.adminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME), adminUserId, this.#authority, claim, this.#communityRequests);
   }
 }
 

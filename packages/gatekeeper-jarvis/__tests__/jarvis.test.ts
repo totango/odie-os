@@ -163,6 +163,7 @@ describe("JarvisAccount", () => {
 
     const description = await account.describe();
     expect(description.providesUi).toBeUndefined();
+    expect(description.adminAuthorizationProtocol).toBe("admin-authorization-v1");
     expect(description.singleton?.tsType).toContain("Jarvis");
     expect(description.singleton?.revisionedAuthority).toBe(true);
     expect(description.avatar?.url).toMatch(/^data:image\/svg\+xml,/);
@@ -282,7 +283,7 @@ describe("Jarvis policy administration", () => {
     let updated = false;
     const policy = {
       get: () => ({ revision: 1, chat: { tools: [] }, code: { tools: [] }, syncCode: true }),
-      update: () => { updated = true; return policy.get(); },
+      update: async () => { updated = true; return policy.get(); },
     };
     const api = new JarvisPolicyApi(policy, false);
     await expect(api.get()).rejects.toThrow(/administrator/);
@@ -290,13 +291,13 @@ describe("Jarvis policy administration", () => {
     expect(updated).toBe(false);
   });
 
-  it("allows admin updates", async () => {
+  it("does not treat a legacy admin boolean as mutation authority", async () => {
     const api = new JarvisPolicyApi({
       get: () => ({ revision: 1, chat: { tools: [] }, code: { tools: [] }, syncCode: true }),
-      update: () => ({ revision: 2, chat: { tools: ["query_knowledge"] },
-        code: { tools: ["query_knowledge"] }, syncCode: true }),
+      update: async () => { throw new Error("UNEXPECTED_MUTATION"); },
     }, true);
-    await expect(api.update(input)).resolves.toMatchObject({ revision: 2 });
+    await expect(api.get()).resolves.toMatchObject({revision: 1, syncCode: true});
+    await expect(api.update(input)).rejects.toThrow(/administrator/);
   });
 });
 

@@ -1,0 +1,156 @@
+diff --git a/dist/index-bun.cjs b/dist/index-bun.cjs
+index 134326d4e8b4b83ad17118e7cc9e867e91814f51..0555cc7c37bafe525966b75097da46df077b42bc 100644
+--- a/dist/index-bun.cjs
++++ b/dist/index-bun.cjs
+@@ -132,7 +132,11 @@ var ErrorStubHook = class extends StubHook {
+ 		return this;
+ 	}
+ 	pull() {
+-		return Promise.reject(this.error);
++		// Own this synthetic intermediate: workerd may report it before async forwarding observes it.
++		// Return the same rejected promise, not the observer; caller-owned rejections still propagate.
++		let promise = Promise.reject(this.error);
++		promise.catch(() => {});
++		return promise;
+ 	}
+ 	ignoreUnhandledRejections() {}
+ 	dispose() {}
+@@ -1598,7 +1602,7 @@ var Evaluator = class Evaluator {
+ 							return promise;
+ 						} else {
+ 							this.hooks.push(hook);
+-							return new RpcPromise$1(hook, []);
++							return new RpcStub$1(hook);
+ 						}
+ 					};
+ 					if (value.length == 2) if (isPromise) return addStub(hook.get([]));
+diff --git a/dist/index-bun.js b/dist/index-bun.js
+index 7ce9eb437b5b0daf355c03cc1baa63400b97cc07..074998f7d590b0d67f7784ee48cdb8a6920e4f49 100644
+--- a/dist/index-bun.js
++++ b/dist/index-bun.js
+@@ -130,7 +130,11 @@ var ErrorStubHook = class extends StubHook {
+ 		return this;
+ 	}
+ 	pull() {
+-		return Promise.reject(this.error);
++		// Own this synthetic intermediate: workerd may report it before async forwarding observes it.
++		// Return the same rejected promise, not the observer; caller-owned rejections still propagate.
++		let promise = Promise.reject(this.error);
++		promise.catch(() => {});
++		return promise;
+ 	}
+ 	ignoreUnhandledRejections() {}
+ 	dispose() {}
+@@ -1596,7 +1600,7 @@ var Evaluator = class Evaluator {
+ 							return promise;
+ 						} else {
+ 							this.hooks.push(hook);
+-							return new RpcPromise$1(hook, []);
++							return new RpcStub$1(hook);
+ 						}
+ 					};
+ 					if (value.length == 2) if (isPromise) return addStub(hook.get([]));
+diff --git a/dist/index-workers.cjs b/dist/index-workers.cjs
+index 11e7aa8718685416e6f9dfbd04494c0b2350d3be..8a29fa34ce998bbadad970941c96ad470940095d 100644
+--- a/dist/index-workers.cjs
++++ b/dist/index-workers.cjs
+@@ -165,7 +165,11 @@ var ErrorStubHook = class extends StubHook {
+ 		return this;
+ 	}
+ 	pull() {
+-		return Promise.reject(this.error);
++		// Own this synthetic intermediate: workerd may report it before async forwarding observes it.
++		// Return the same rejected promise, not the observer; caller-owned rejections still propagate.
++		let promise = Promise.reject(this.error);
++		promise.catch(() => {});
++		return promise;
+ 	}
+ 	ignoreUnhandledRejections() {}
+ 	dispose() {}
+@@ -1631,7 +1635,7 @@ var Evaluator = class Evaluator {
+ 							return promise;
+ 						} else {
+ 							this.hooks.push(hook);
+-							return new RpcPromise$1(hook, []);
++							return new RpcStub$1(hook);
+ 						}
+ 					};
+ 					if (value.length == 2) if (isPromise) return addStub(hook.get([]));
+diff --git a/dist/index-workers.js b/dist/index-workers.js
+index 408ad065a52f174928e1d193ae05a545442760de..bf28755070a6634334e2585226cd9c114d2cfb28 100644
+--- a/dist/index-workers.js
++++ b/dist/index-workers.js
+@@ -136,7 +136,11 @@ var ErrorStubHook = class extends StubHook {
+ 		return this;
+ 	}
+ 	pull() {
+-		return Promise.reject(this.error);
++		// Own this synthetic intermediate: workerd may report it before async forwarding observes it.
++		// Return the same rejected promise, not the observer; caller-owned rejections still propagate.
++		let promise = Promise.reject(this.error);
++		promise.catch(() => {});
++		return promise;
+ 	}
+ 	ignoreUnhandledRejections() {}
+ 	dispose() {}
+@@ -1602,7 +1606,7 @@ var Evaluator = class Evaluator {
+ 							return promise;
+ 						} else {
+ 							this.hooks.push(hook);
+-							return new RpcPromise$1(hook, []);
++							return new RpcStub$1(hook);
+ 						}
+ 					};
+ 					if (value.length == 2) if (isPromise) return addStub(hook.get([]));
+diff --git a/dist/index.cjs b/dist/index.cjs
+index fbbb5da56c64a51f42337a01fc27a3f839bee94d..b3bdaa5a2552195f5cfee8191a90d9f78fecb7bf 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -132,7 +132,11 @@ var ErrorStubHook = class extends StubHook {
+ 		return this;
+ 	}
+ 	pull() {
+-		return Promise.reject(this.error);
++		// Own this synthetic intermediate: workerd may report it before async forwarding observes it.
++		// Return the same rejected promise, not the observer; caller-owned rejections still propagate.
++		let promise = Promise.reject(this.error);
++		promise.catch(() => {});
++		return promise;
+ 	}
+ 	ignoreUnhandledRejections() {}
+ 	dispose() {}
+@@ -1598,7 +1602,7 @@ var Evaluator = class Evaluator {
+ 							return promise;
+ 						} else {
+ 							this.hooks.push(hook);
+-							return new RpcPromise$1(hook, []);
++							return new RpcStub$1(hook);
+ 						}
+ 					};
+ 					if (value.length == 2) if (isPromise) return addStub(hook.get([]));
+diff --git a/dist/index.js b/dist/index.js
+index 11e374816778ee2cc6856d95c72eb554e8461c9c..8fef3badffdaeee256d52b49fc5022e5a98b3429 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -130,7 +130,11 @@ var ErrorStubHook = class extends StubHook {
+ 		return this;
+ 	}
+ 	pull() {
+-		return Promise.reject(this.error);
++		// Own this synthetic intermediate: workerd may report it before async forwarding observes it.
++		// Return the same rejected promise, not the observer; caller-owned rejections still propagate.
++		let promise = Promise.reject(this.error);
++		promise.catch(() => {});
++		return promise;
+ 	}
+ 	ignoreUnhandledRejections() {}
+ 	dispose() {}
+@@ -1596,7 +1600,7 @@ var Evaluator = class Evaluator {
+ 							return promise;
+ 						} else {
+ 							this.hooks.push(hook);
+-							return new RpcPromise$1(hook, []);
++							return new RpcStub$1(hook);
+ 						}
+ 					};
+ 					if (value.length == 2) if (isPromise) return addStub(hook.get([]));

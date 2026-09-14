@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src", "__tests__/admin-fence.worker.test.ts"],
+  "exclude": ["dist", "node_modules"]
+}

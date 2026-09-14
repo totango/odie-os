@@ -19,7 +19,7 @@ describe("native canary workflow cleanup", () => {
     expect(cleanup).not.toContain("pnpm exec wrangler delete");
   });
 
-  it("uses stable run-and-tier names and least privilege", () => {
+  it("uses stable run-and-tier names, least privilege, and lockfile-selected Wrangler", () => {
     expect(workflow).toContain("attempt-${{ github.run_attempt }}");
     expect(workflow).toContain('worker="odie-coding-canary-${GITHUB_RUN_ID}-${INSTANCE_TIER}"');
     expect(workflow).toContain("instanceTier: [standard-1, standard-2, standard-3, standard-4]");
@@ -32,6 +32,14 @@ describe("native canary workflow cleanup", () => {
     const cleanup = workflow.slice(workflow.indexOf("  cleanup:"));
     expect(cleanup).toContain("permissions:\n      contents: read");
     expect(cleanup).not.toContain("packages: write");
+    const publish = workflow.slice(workflow.indexOf("  publish:"), workflow.indexOf("  canary:"));
+    expect(publish).toContain("- name: Check out exact candidate source");
+    expect(publish).toContain("ref: ${{ github.sha }}");
+    expect(publish).toContain("persist-credentials: false");
+    expect(publish).toContain("voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca");
+    expect(publish).toContain("run-install: true");
+    expect(publish).toContain("pnpm exec wrangler containers push");
+    expect(publish).not.toContain("npm install --global wrangler");
   });
 
   it("preflights the runtime idempotently before the one-shot invocation", () => {

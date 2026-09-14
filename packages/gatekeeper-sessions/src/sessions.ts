@@ -38,6 +38,7 @@ import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult } from "@ga
 import type { ProductFeedbackNotifier } from "@gadgets/workshop-shared/product-feedback";
 import type { VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
 import {
+  hasGitHubAppConfiguration,
   mintGitHubCodingSessionToken,
   mintGitHubProductFeedbackReadToken,
   type GitHubAppEnv,
@@ -51,6 +52,7 @@ import {
   WORKSHOP_MCP_HOST,
   validateWorkshopMcpRequestTarget,
 } from "./mcp-policy.js";
+import { readRequestBuildGitHub, writeRequestBuildGitHub } from "./request-build-github.js";
 import { DEVELOPMENT_CATALOG, publicDevelopmentCatalog } from "./development-catalog.js";
 import {
   cloneDevelopmentGenerationIntent,
@@ -107,6 +109,10 @@ import {
   validateSafeDiff,
   type ProductFeedbackJob,
 } from "./product-feedback.js";
+
+import { RequestBuildExecution, type RequestBuildRecord } from "./request-build-execution.js";
+import { boundedBuildModelPayload, canonicalBuildJson, parseRequestBuildPolicy, REQUEST_BUILD_DEPENDENCY_HOSTS, REQUEST_BUILD_MODEL_URL } from "./request-build-policy.js";
+import type { RequestBuildIntent, RequestBuildExecutionReceipt, RequestBuildArtifact, RequestBuildReadiness } from "@gadgets/workshop-shared/coding-sessions";
 
 export { ContainerProxy, CodingSessionApplicationPreview };
 
@@ -193,10 +199,14 @@ interface Env extends GitHubAppEnv, ApplicationPreviewEnv {
   CODING_SESSION_DURABLE_LIFECYCLE_ENABLED?: string;
   PRODUCT_FEEDBACK_NOTIFIER?: Service<ProductFeedbackNotifier>;
   PRODUCT_FEEDBACK_SANDBOX: DurableObjectNamespace<ProductFeedbackSandbox>;
+  REQUEST_BUILD_SANDBOX: DurableObjectNamespace<RequestBuildSandbox>;
+  REQUEST_BUILD_POLICY?: string;
 }
 
 type SessionRecord = Omit<CodingSessionSummary, "runtime"> & {
   runtime?: CodingSessionRuntime;
+  /** Restricted jobs cannot be attached to or restarted through personal-session APIs. */
+  requestBuild?: string;
   /** Keeps old deployments able to read Prime records as Pi during the rollout rollback window. */
   primeAgent?: true;
   /** Client opt-in retained across generations so older native clients keep their Pi terminal. */
@@ -258,6 +268,8 @@ type SessionPolicy = {
   repositories: CodingSessionRepository[];
   /** Complete server-authored execution authority for this generation, when selected. */
   developmentIntent?: DevelopmentGenerationIntent;
+  /** Complete immutable restricted intent; never contains a publication credential. */
+  requestBuild?: RequestBuildRecord;
 };
 
 type StartupPhase = NonNullable<CodingSessionSummary["startupPhase"]>;
@@ -376,6 +388,12 @@ export class ProductFeedbackSandbox extends CodingSessionSandbox {
   override allowedHosts = ["github.com", "team-pi-proxy.unison.totango.com"];
 }
 
+/** Dedicated restricted class on the existing pinned Sandbox SDK; no ordinary-session handlers are changed. */
+export class RequestBuildSandbox extends CodingSessionSandbox {
+  override enableInternet = false;
+  override allowedHosts = ["github.com", "team-pi-proxy.unison.totango.com", ...REQUEST_BUILD_DEPENDENCY_HOSTS];
+}
+
 // Assignment must invoke Container's inherited static setter, which installs these handlers in the
 // registry used by ContainerProxy. A static class field would shadow the setter without registering.
 const codingSessionOutboundHandlers = {
@@ -397,6 +415,10 @@ CodingSessionSandboxStandard3.outboundByHost = codingSessionOutboundHandlers;
 CodingSessionSandboxStandard4.outboundByHost = codingSessionOutboundHandlers;
 // The SDK registry is shared across subclasses; ProductFeedbackSandbox.allowedHosts is its narrower authority.
 ProductFeedbackSandbox.outboundByHost = codingSessionOutboundHandlers;
+RequestBuildSandbox.outboundByHost = {
+  "*": (request: Request, env: Env, ctx: OutboundHandlerContext) =>
+    policyFor(env, ctx.containerId).forwardRequestBuildEgress(request),
+};
 
 /** Durable repository and model egress policy for one sandbox instance. */
 export class CodingSessionPolicy extends DurableObject<Env> {
@@ -406,6 +428,9 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   configure(policy: SessionPolicy): void {
     const existing = this.ctx.storage.kv.get<SessionPolicy>("policy");
     if (existing) {
+      if (canonicalBuildJson(existing.requestBuild ?? null) !== canonicalBuildJson(policy.requestBuild ?? null)) {
+        throw new Error("Coding session policy is immutable.");
+      }
       if (JSON.stringify({ sessionId: existing.sessionId, generation: existing.generation ?? 0,
             instanceTier: existing.instanceTier ?? "standard-1", owner: existing.owner,
             repositories: existing.repositories, piWorkbench: existing.piWorkbench, developmentIntent: existing.developmentIntent }) !==
@@ -431,6 +456,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   async startSessionStartup(record: StartupRecord): Promise<void> {
     await this.#withLifecycleLock(async () => {
       const policy = this.#policy();
+      if (policy.requestBuild) throw new Error("Restricted sessions use the private build lifecycle.");
       const sandboxId = required(policy.sandboxId, "startup sandboxId");
       if (this.ctx.storage.kv.get<boolean>(startupCancellationKey(policy.sessionId, record.generation ?? 0, sandboxId))) {
         throw new Error("Coding session startup was cancelled.");
@@ -626,12 +652,67 @@ export class CodingSessionPolicy extends DurableObject<Env> {
   /** Mints or reuses a GitHub token scoped to this session's repositories. */
   async getInstallationToken(): Promise<string> {
     const policy = this.#policy();
+    if (policy.requestBuild) throw new Error("Restricted sessions do not expose credentials.");
     return this.#installationToken(policy.repositories);
+  }
+
+  /** Disables all restricted egress before destruction, without rechecking a revoked initiator. */
+  disableRequestBuild(intentHash: string): void {
+    const policy = this.ctx.storage.kv.get<SessionPolicy>("policy");
+    if (policy && policy.requestBuild?.intentHash !== intentHash) throw new Error("BUILD_POLICY_MISMATCH");
+    this.ctx.storage.kv.put("build-disabled", true);
+    this.ctx.storage.kv.delete("build-read-token");
+  }
+
+  async #assertRequestBuildCurrent(build: RequestBuildRecord): Promise<void> {
+    if (this.ctx.storage.kv.get<boolean>("build-disabled") || build.deadline <= Date.now() ||
+        !await this.#registry().isCurrentRequestBuild(build.owner, build.dispatchKey, build.sessionId, build.generation)) {
+      throw new Error("BUILD_EGRESS_DENIED");
+    }
+    // Re-check after RPC yields to cleanup.
+    if (this.ctx.storage.kv.get<boolean>("build-disabled") || build.deadline <= Date.now()) throw new Error("BUILD_EGRESS_DENIED");
+  }
+
+  /** Exact-repository smart-HTTP read proxy and vetted dependency/model egress; no ambient credentials. */
+  async forwardRequestBuildEgress(request: Request): Promise<Response> {
+    const build = this.#policy().requestBuild;
+    if (!build) return new Response("Build policy required.", { status: 403 });
+    try { await this.#assertRequestBuildCurrent(build); } catch { return new Response("Build egress denied.", { status: 403 }); }
+    const url = new URL(request.url);
+    if (url.protocol !== "https:" || url.username || url.password || url.port || url.hash) return new Response("Build egress denied.", { status: 403 });
+    if (url.href === REQUEST_BUILD_MODEL_URL) return this.forwardTeamPiCodexRequest(request);
+    if (url.hostname === "github.com") {
+      const allowed = request.method === "GET" && url.pathname === "/totango/odie-os.git/info/refs" && url.search === "?service=git-upload-pack" ||
+        request.method === "POST" && url.pathname === "/totango/odie-os.git/git-upload-pack" && !url.search;
+      if (!allowed) return new Response("Repository writes are forbidden.", { status: 403 });
+      let token = this.ctx.storage.kv.get<GitHubInstallationToken>("build-read-token");
+      if (!token || token.expiresAt <= Date.now() + 60_000) {
+        token = await mintGitHubProductFeedbackReadToken(this.env);
+        await this.#assertRequestBuildCurrent(build);
+        this.ctx.storage.kv.put("build-read-token", token);
+      }
+      await this.#assertRequestBuildCurrent(build);
+      const headers = new Headers({ authorization: `Basic ${btoa(`x-access-token:${token.token}`)}` });
+      if (request.method === "POST") headers.set("content-type", "application/x-git-upload-pack-request");
+      const response = await fetch(url, { method: request.method, headers, body: request.body, redirect: "manual",
+        signal: AbortSignal.timeout(Math.max(1, build.deadline - Date.now())) });
+      if (response.status >= 300 && response.status < 400) return new Response("Repository redirect denied.", { status: 403 });
+      return new Response(response.body, { status: response.status, headers: { "content-type": response.headers.get("content-type") ?? "application/octet-stream" } });
+    }
+    if (build.intent.policy.dependencyHosts.includes(url.hostname) && ["GET", "HEAD"].includes(request.method)) {
+      // Never forward sandbox-selected authentication headers, cookies, or redirects.
+      const response = await fetch(url, { method: request.method, redirect: "manual", signal: AbortSignal.timeout(Math.max(1, build.deadline - Date.now())) });
+      if (response.status >= 300 && response.status < 400) return new Response("Dependency redirect denied.", { status: 403 });
+      return new Response(response.body, { status: response.status, headers: { "content-type": response.headers.get("content-type") ?? "application/octet-stream" } });
+    }
+    return new Response("Build egress denied.", { status: 403 });
   }
 
   /** Signs and proxies one Team PI Codex Responses request for the authenticated owner. */
   async forwardTeamPiCodexRequest(request: Request): Promise<Response> {
     const policy = this.#policy();
+    const build = policy.requestBuild;
+    if (build) await this.#assertRequestBuildCurrent(build);
     const baseUrl = required(this.env.TEAM_PI_CODEX_BASE_URL, "TEAM_PI_CODEX_BASE_URL");
     const secret = required(this.env.TEAM_PI_CODEX_HMAC_SECRET, "TEAM_PI_CODEX_HMAC_SECRET");
     const expected = new URL("codex/responses", ensureTrailingSlash(baseUrl));
@@ -666,6 +747,22 @@ export class CodingSessionPolicy extends DurableObject<Env> {
         return new Response("Codex request compression is invalid.", { status: 400 });
       }
     }
+    if (build) {
+      if (expected.href !== REQUEST_BUILD_MODEL_URL) return new Response("Build relay is not configured.", { status: 503 });
+      try {
+        body = new TextEncoder().encode(boundedBuildModelPayload(body, build.intent.policy));
+        const decision = await this.env.WORKSHOP_TOOLS.authorizeRequestBuild(build.owner, {
+          dispatchKey: build.dispatchKey, phase: "model", sessionId: build.sessionId,
+          generation: build.generation, intentHash: build.intentHash,
+        });
+        if (!decision.allowed || decision.intentHash !== build.intentHash || decision.sessionId !== build.sessionId || decision.generation !== build.generation) throw new Error("BUILD_AUTHORIZATION_DENIED");
+        await this.#assertRequestBuildCurrent(build);
+        // Synchronous reservation precedes fetch; no refunds after timeout, crash or provider rejection.
+        const usage = this.ctx.storage.kv.get<{ calls: number; spend: number }>("build-model-usage") ?? { calls: 0, spend: 0 };
+        if (usage.calls >= build.intent.policy.modelCalls || usage.spend + build.intent.policy.callChargeMicros > build.intent.policy.spendMicros) throw new Error("BUILD_MODEL_BUDGET_EXHAUSTED");
+        this.ctx.storage.kv.put("build-model-usage", { calls: usage.calls + 1, spend: usage.spend + build.intent.policy.callChargeMicros });
+      } catch { return new Response("Build model request denied.", { status: 403 }); }
+    }
     const timestamp = Date.now().toString();
     const clientRequestId = crypto.randomUUID();
     const sessionId = this.ctx.id.toString();
@@ -694,7 +791,14 @@ export class CodingSessionPolicy extends DurableObject<Env> {
     headers.set("x-team-pi-odie-timestamp", timestamp);
     headers.set("x-team-pi-odie-user", user);
     headers.set("x-team-pi-odie-signature", `v1=${await hmacBase64Url(secret, canonical)}`);
-    const response = await fetch(expected, { method: "POST", headers, body, redirect: "manual" });
+    const response = await fetch(expected, { method: "POST", headers, body, redirect: "manual",
+      ...(build ? { signal: AbortSignal.timeout(Math.max(1, build.deadline - Date.now())) } : {}),
+    });
+    if (build) {
+      const bytes = await readBoundedBody(response.body, build.intent.policy.outputBytes);
+      if (!bytes || response.status >= 300 && response.status < 400) return new Response("Build model response rejected.", { status: 502 });
+      return new Response(bytes, { status: response.status, headers: { "content-type": response.headers.get("content-type") ?? "application/octet-stream" } });
+    }
     if (!response.ok) {
       logger.warn("Team PI Codex request rejected", {
         event: "coding.session.codex.rejected",
@@ -707,6 +811,7 @@ export class CodingSessionPolicy extends DurableObject<Env> {
 
   /** Terminates the session-scoped Workshop MCP protocol without exposing account credentials. */
   async handleWorkshopMcpRequest(request: Request): Promise<Response> {
+    if (this.#policy().requestBuild) return new Response("Restricted sessions have no catalog.", { status: 403 });
     const rejectedTarget = validateWorkshopMcpRequestTarget(request);
     if (rejectedTarget) return rejectedTarget;
     if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
@@ -1189,9 +1294,90 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   readonly #editorProcessCreations = new Map<string, Promise<string>>();
   readonly #opencodeServerProcessCreations = new Map<string, Promise<string>>();
 
+  #buildExecution?: RequestBuildExecution;
+
+  #requestBuilds(): RequestBuildExecution {
+    return this.#buildExecution ??= new RequestBuildExecution(this.ctx.storage, {
+      readiness: () => requestBuildReadiness(this.env),
+      authorize: (owner, request) => this.env.WORKSHOP_TOOLS.authorizeRequestBuild(owner, request),
+      sandbox: record => getSandbox(this.env.REQUEST_BUILD_SANDBOX, record.sandboxId),
+      configure: record => this.#requestBuildPolicy(record).configure({
+        sessionId: record.sessionId, sandboxId: record.sandboxId, generation: record.generation,
+        owner: record.owner, repositories: ["odie-os"], runtime: "pi", requestBuild: record,
+      }),
+      disable: record => this.#requestBuildPolicy(record).disableRequestBuild(record.intentHash),
+      acquire: record => this.env.SESSION_REGISTRIES.getByName(".request-build-capacity").acquireRequestBuildSlot(record.owner.userId, record.dispatchKey),
+      release: record => this.env.SESSION_REGISTRIES.getByName(".request-build-capacity").releaseRequestBuildSlot(record.owner.userId, record.dispatchKey),
+      reserveSession: record => this.#put({
+        id: record.sessionId, requestBuild: record.dispatchKey, sandboxId: record.sandboxId,
+        generation: record.generation, title: "Community request build", repositories: ["odie-os"], runtime: "pi",
+        status: "starting", createdAt: new Date(record.createdAt), lastActiveAt: new Date(record.updatedAt),
+      }),
+      updateSession: record => {
+        const session = this.ctx.storage.kv.get<SessionRecord>(`session:${record.sessionId}`);
+        if (session?.sandboxId !== record.sandboxId || session.generation !== record.generation) return;
+        this.#put({ ...session, lastActiveAt: new Date(record.updatedAt),
+          status: record.cleanup === "complete" ? "stopped" : record.state === "running" ? "running" : "starting" });
+      },
+      current: record => {
+        const session = this.ctx.storage.kv.get<SessionRecord>(`session:${record.sessionId}`);
+        return session?.requestBuild === record.dispatchKey && session.sandboxId === record.sandboxId && session.generation === record.generation;
+      },
+      arm: () => this.#requireRegistryRetryAlarm(),
+    });
+  }
+
+  #requestBuildPolicy(record: RequestBuildRecord): DurableObjectStub<CodingSessionPolicy> {
+    return policyFor(this.env, this.env.REQUEST_BUILD_SANDBOX.idFromName(record.sandboxId).toString());
+  }
+
+  /** Deployment slot persists until exact-attempt destruction is confirmed; it never expires into overlap. */
+  acquireRequestBuildSlot(ownerId: string, dispatchKey: string): boolean {
+    const key = `${ownerId}:${dispatchKey}`;
+    const held = this.ctx.storage.kv.get<string>("request-build-slot");
+    if (held && held !== key) return false;
+    this.ctx.storage.kv.put("request-build-slot", key); return true;
+  }
+
+  /** Cleanup can release only its own deployment slot. */
+  releaseRequestBuildSlot(ownerId: string, dispatchKey: string): void {
+    if (this.ctx.storage.kv.get<string>("request-build-slot") === `${ownerId}:${dispatchKey}`) this.ctx.storage.kv.delete("request-build-slot");
+  }
+
+  /** Private idempotent reservation in this existing Code Session registry. */
+  ensureRequestBuild(owner: CodingSessionOwner, intent: RequestBuildIntent): Promise<RequestBuildExecutionReceipt> {
+    return this.#requestBuilds().ensure(owner, intent);
+  }
+
+  /** Private persisted receipt read, without container entry. */
+  getRequestBuildReceipt(owner: CodingSessionOwner, key: string): RequestBuildExecutionReceipt | null {
+    const builds = this.#requestBuilds(); const record = builds.get(owner, key);
+    return record ? builds.receipt(record) : null;
+  }
+
+  /** Private monotonic service-owned cancellation; null acknowledges a persisted pre-reservation fence. */
+  cancelRequestBuildExecution(owner: CodingSessionOwner, key: string, revision: number): Promise<RequestBuildExecutionReceipt | null> {
+    return this.#requestBuilds().cancel(owner, key, revision);
+  }
+
+  /** Frozen untrusted patch is readable only through the private control plane. */
+  getRequestBuildArtifact(owner: CodingSessionOwner, key: string): RequestBuildArtifact | null {
+    return this.#requestBuilds().artifact(owner, key);
+  }
+
+  /** Egress authority uses persisted exact identity and deadline, never sandbox-reported readiness. */
+  isCurrentRequestBuild(owner: CodingSessionOwner, key: string, sessionId: string, generation: number): boolean {
+    const record = this.#requestBuilds().get(owner, key);
+    const session = this.ctx.storage.kv.get<SessionRecord>(`session:${sessionId}`);
+    return !!record && record.sessionId === sessionId && record.generation === generation &&
+      session?.requestBuild === key && session.sandboxId === record.sandboxId && session.generation === generation &&
+      ["starting", "running", "collecting"].includes(record.state) && record.cancelRevision === 0 && record.deadline > Date.now();
+  }
+
   /** Retries durable restart work and capacity releases after pre-arming the next wakeup. */
   async alarm(): Promise<void> {
     if (this.#hasRegistryWork()) await this.#requireRegistryRetryAlarm();
+    await this.#requestBuilds().alarm();
     for (const [storageKey, evidence] of this.ctx.storage.kv.list<ProductFeedbackEvidenceBundle>({ prefix: "feedback-evidence:" })) {
       if (evidence.expiresAt.valueOf() > Date.now()) continue;
       const id = storageKey.slice("feedback-evidence:".length);
@@ -2304,11 +2490,14 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   }
 
   *#records(): Generator<SessionRecord> {
-    for (const [, record] of this.ctx.storage.kv.list<SessionRecord>({ prefix: "session:" })) yield record;
+    for (const [, record] of this.ctx.storage.kv.list<SessionRecord>({ prefix: "session:" })) {
+      if (!record.requestBuild) yield record;
+    }
   }
 
   #get(id: string): SessionRecord | undefined {
-    return this.ctx.storage.kv.get<SessionRecord>(`session:${id}`);
+    const record = this.ctx.storage.kv.get<SessionRecord>(`session:${id}`);
+    return record?.requestBuild ? undefined : record;
   }
 
   #put(record: SessionRecord): void {
@@ -2600,6 +2789,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
   }
 
   #hasRegistryWork(): boolean {
+    if (this.#requestBuilds().hasWork()) return true;
     for (const _entry of this.ctx.storage.kv.list({ prefix: "start:" })) return true;
     for (const _entry of this.ctx.storage.kv.list({ prefix: "restart:" })) return true;
     for (const _entry of this.ctx.storage.kv.list({ prefix: "stop:" })) return true;
@@ -2619,8 +2809,12 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return next;
   }
 
-  #requireRegistryRetryAlarm(): Promise<void> {
-    return this.ctx.storage.setAlarm(Date.now() + 30_000);
+  async #requireRegistryRetryAlarm(): Promise<void> {
+    const deadlines = [...this.ctx.storage.kv.list<RequestBuildRecord>({ prefix: "request-build:" })].map(([, record]) => record)
+      .filter(r => ["reserved", "starting", "running", "collecting"].includes(r.state)).map(r => r.deadline);
+    const desired = Math.max(Date.now() + 1, Math.min(Date.now() + 30_000, ...deadlines));
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || existing > desired) await this.ctx.storage.setAlarm(desired);
   }
 
   async #scheduleRegistryRetry(): Promise<void> {
@@ -2923,6 +3117,39 @@ export class CodingSessionRegistry extends DurableObject<Env> {
 /** Private control-plane entrypoint called by the authenticated Workshop backend. */
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements CodingSessionsService {
+  /** Private setup check; never launches a container or mints a credential. */
+  async requestBuildReadiness(): Promise<RequestBuildReadiness> { return requestBuildReadiness(this.env); }
+
+  /** Private Worker-owned credential transport; no sandbox or public route exposes these methods. */
+  readRequestBuildGitHub(operation: Parameters<CodingSessionsService["readRequestBuildGitHub"]>[0]) {
+    return readRequestBuildGitHub(this.env, operation);
+  }
+
+  /** The backend authorizer admits the exact persisted operation digest, not merely a publish phase. */
+  writeRequestBuildGitHub(owner: CodingSessionOwner, authorization: Parameters<CodingSessionsService["writeRequestBuildGitHub"]>[1], operation: Parameters<CodingSessionsService["writeRequestBuildGitHub"]>[2]) {
+    if (!this.env.WORKSHOP_TOOLS) throw new Error("BUILD_AUTHORIZATION_BINDING_MISSING");
+    return writeRequestBuildGitHub(this.env, this.env.WORKSHOP_TOOLS, owner, authorization, operation);
+  }
+
+  /** Private reservation/start protocol; no HTTP route or sandbox catalog method exposes it. */
+  ensureRequestBuild(owner: CodingSessionOwner, intent: RequestBuildIntent): Promise<RequestBuildExecutionReceipt> {
+    return registryFor(this.ctx, owner.userId).ensureRequestBuild(owner, intent);
+  }
+
+  /** Private persisted receipt lookup. */
+  getRequestBuildReceipt(owner: CodingSessionOwner, key: string): Promise<RequestBuildExecutionReceipt | null> {
+    return registryFor(this.ctx, owner.userId).getRequestBuildReceipt(owner, key);
+  }
+
+  /** Private service-authorized cancellation, independent of initiator eligibility. */
+  cancelRequestBuildExecution(owner: CodingSessionOwner, key: string, revision: number): Promise<RequestBuildExecutionReceipt | null> {
+    return registryFor(this.ctx, owner.userId).cancelRequestBuildExecution(owner, key, revision);
+  }
+
+  /** Private frozen patch retrieval for independent validation by the publisher. */
+  getRequestBuildArtifact(owner: CodingSessionOwner, key: string): Promise<RequestBuildArtifact | null> {
+    return registryFor(this.ctx, owner.userId).getRequestBuildArtifact(owner, key);
+  }
   /** Deliberately fails connector discovery because Sessions is a Workshop feature, not a connector. */
   async describe(): Promise<VendorDescription> {
     throw new Error("Coding Sessions is an internal Workshop service, not a connector.");
@@ -3307,6 +3534,20 @@ async function handleEditorHttp(
 }
 
 export default { fetch: handleHttp };
+
+/** Component setup only; backend run authorization additionally enforces live readiness and authority gates. */
+export function requestBuildReadiness(env: Env): RequestBuildReadiness {
+  const parsed = parseRequestBuildPolicy(env.REQUEST_BUILD_POLICY);
+  const reasons = [...parsed.reasons];
+  if (!env.REQUEST_BUILD_SANDBOX) reasons.push("BUILD_SANDBOX_BINDING_MISSING");
+  if (!env.WORKSHOP_TOOLS) reasons.push("BUILD_AUTHORIZATION_BINDING_MISSING");
+  if (!hasGitHubAppConfiguration(env)) reasons.push("BUILD_REPOSITORY_CREDENTIALS_MISSING");
+  if (!env.TEAM_PI_CODEX_HMAC_SECRET) reasons.push("BUILD_MODEL_CREDENTIALS_MISSING");
+  try {
+    if (new URL("codex/responses", ensureTrailingSlash(env.TEAM_PI_CODEX_BASE_URL ?? "")).href !== REQUEST_BUILD_MODEL_URL) reasons.push("BUILD_MODEL_RELAY_UNCONFIGURED");
+  } catch { reasons.push("BUILD_MODEL_RELAY_UNCONFIGURED"); }
+  return { ...parsed, protocolVersion: "request-build-git-data-v1", ready: reasons.length === 0, reasons };
+}
 
 function registryFor(ctx: ExecutionContext, userId: string): DurableObjectStub<CodingSessionRegistry> {
   const namespace = (ctx as ExecutionContext & {

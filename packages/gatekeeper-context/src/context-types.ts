@@ -135,6 +135,9 @@ export type ContextGitTokenList = {
   tokens: ContextGitTokenInfo[];
 };
 
+/** Secret independent write credential: remains valid until expiry/explicit token revocation,
+ * not the issuer's administrator removal. Public collection visibility grants reads only.
+ */
 export type ContextGitTokenCreateResult = {
   id: string;
   plaintext: string;
@@ -323,8 +326,10 @@ export interface ContextApi extends RpcTarget {
     title?: string; description?: string; icon?: string; branch?: string;
   }): Promise<void>;
   syncContextCollectionArtifactSource(collectionId: string): Promise<void>;
+  /** Issues an independent write credential; public issuance requires current admin authority. */
   createContextCollectionGitToken(collectionId: string): Promise<ContextGitTokenCreateResult>;
   listContextCollectionGitTokens(collectionId: string): Promise<ContextGitTokenList>;
+  /** Explicit credential revocation. Removing an administrator does not perform this operation. */
   revokeContextCollectionGitToken(collectionId: string, tokenId: string): Promise<boolean>;
   deleteContextCollection(collectionId: string): Promise<void>;
   getContextCollectionMetadata(collectionId: string): Promise<ContextCollectionMetadata | null>;

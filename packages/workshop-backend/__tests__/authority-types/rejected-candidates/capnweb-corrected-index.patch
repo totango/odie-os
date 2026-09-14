@@ -1,0 +1,56 @@
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -38,6 +38,8 @@
+   dup(): this;
+   onRpcBroken(callback: (error: any) => void): void;
+ }
++// Native stubs share the ownership brand but do not expose onRpcBroken.
++type OwnedStub<T = unknown> = Pick<StubBase<T>, "__RPC_STUB_BRAND" | typeof Symbol.dispose>;
+ type Stub<T extends RpcCompatible<T>> = T extends object ? Provider<T> & StubBase<T> : StubBase<T>;
+ type TypedArray = Uint8Array | Uint8ClampedArray | Uint16Array | Uint32Array | Int8Array | Int16Array | Int32Array | BigUint64Array | BigInt64Array | Float32Array | Float64Array; // This represents all the types that can be sent as-is over an RPC boundary
+ type BaseType = void | undefined | null | boolean | number | bigint | string | TypedArray | ArrayBuffer | DataView | Date | Error | RegExp | Blob | ReadableStream<any> // Chunk type can be any RPC-compatible type
+@@ -50,7 +52,7 @@
+ //   it matches `Stubable`. Checking `StubBase` first keeps existing stubs as-is instead of
+ //   double-wrapping them as `Stub<Stub<T>>`.
+ // prettier-ignore
+-type Stubify<T> = T extends Promise<infer U> ? Stubify<U> : T extends StubBase<any> ? T : T extends Stubable ? Stub<T> : T extends Map<infer K, infer V> ? Map<Stubify<K>, Stubify<V>> : T extends Set<infer V> ? Set<Stubify<V>> : T extends [] ? [] : T extends [infer Head, ...infer Tail] ? [Stubify<Head>, ...Stubify<Tail>] : T extends readonly [] ? readonly [] : T extends readonly [infer Head, ...infer Tail] ? readonly [Stubify<Head>, ...Stubify<Tail>] : T extends Array<infer V> ? Array<Stubify<V>> : T extends ReadonlyArray<infer V> ? ReadonlyArray<Stubify<V>> : T extends BaseType ? T // When using "unknown" instead of "any", interfaces are not stubified.
++type Stubify<T> = T extends Promise<infer U> ? Stubify<U> : T extends StubBase<any> ? T : T extends OwnedStub<infer U> ? Stub<Extract<U, Stubable>> : T extends Stubable ? Stub<T> : T extends Map<infer K, infer V> ? Map<Stubify<K>, Stubify<V>> : T extends Set<infer V> ? Set<Stubify<V>> : T extends [] ? [] : T extends [infer Head, ...infer Tail] ? [Stubify<Head>, ...Stubify<Tail>] : T extends readonly [] ? readonly [] : T extends readonly [infer Head, ...infer Tail] ? readonly [Stubify<Head>, ...Stubify<Tail>] : T extends Array<infer V> ? Array<Stubify<V>> : T extends ReadonlyArray<infer V> ? ReadonlyArray<Stubify<V>> : T extends BaseType ? T // When using "unknown" instead of "any", interfaces are not stubified.
+ : T extends {
+   [key: string | number]: any;
+ } ? { [K in keyof T as K extends string | number ? K : never]: Stubify<T[K]> } : T;
+@@ -60,7 +62,7 @@
+ // prettier-ignore
+ type UnstubifyInner<T> = // Preserve local RpcTarget acceptance, but avoid needless `Stub | Value` unions when the stub
+ // is already assignable to the value type (important for callback contextual typing).
+-T extends StubBase<infer V> ? (T extends V ? UnstubifyInner<V> : (T | UnstubifyInner<V>)) : T extends Promise<infer U> ? UnstubifyInner<U> : T extends Map<infer K, infer V> ? Map<Unstubify<K>, Unstubify<V>> : T extends Set<infer V> ? Set<Unstubify<V>> : T extends [] ? [] : T extends [infer Head, ...infer Tail] ? [Unstubify<Head>, ...Unstubify<Tail>] : T extends readonly [] ? readonly [] : T extends readonly [infer Head, ...infer Tail] ? readonly [Unstubify<Head>, ...Unstubify<Tail>] : T extends Array<infer V> ? Array<Unstubify<V>> : T extends ReadonlyArray<infer V> ? ReadonlyArray<Unstubify<V>> : T extends BaseType ? T : T extends {
++T extends StubBase<infer V> ? (T extends V ? UnstubifyInner<V> : (T | UnstubifyInner<V>)) : T extends OwnedStub<infer V> ? T | Stub<Extract<V, Stubable>> | UnstubifyInner<V> : T extends Promise<infer U> ? UnstubifyInner<U> : T extends Map<infer K, infer V> ? Map<Unstubify<K>, Unstubify<V>> : T extends Set<infer V> ? Set<Unstubify<V>> : T extends [] ? [] : T extends [infer Head, ...infer Tail] ? [Unstubify<Head>, ...Unstubify<Tail>] : T extends readonly [] ? readonly [] : T extends readonly [infer Head, ...infer Tail] ? readonly [Unstubify<Head>, ...Unstubify<Tail>] : T extends Array<infer V> ? Array<Unstubify<V>> : T extends ReadonlyArray<infer V> ? ReadonlyArray<Unstubify<V>> : T extends BaseType ? T : T extends {
+   [key: string | number]: unknown;
+ } ? { [K in keyof T as K extends string | number ? K : never]: Unstubify<T[K]> } : T; // You can put promises anywhere in the params and they'll be resolved before delivery.
+ // (This also covers RpcPromise, because it's defined as being a Promise.)
+@@ -75,7 +77,7 @@
+ interface MapValuePlaceholder<T> {
+   [__RPC_MAP_VALUE_BRAND]: T;
+ }
+-type NonStubMembers<T> = Exclude<T, StubBase<any>>; // Utility type for adding `Disposable`s to `object` types only.
++type NonStubMembers<T> = Exclude<T, OwnedStub<any>>; // Utility type for adding `Disposable`s to `object` types only.
+ // Note `unknown & T` is equivalent to `T`.
+ type MaybeDisposable<T> = T extends object ? Disposable : unknown; // The type behind the public `RpcPromise` (re-exported with its `RpcCompatible` constraint from
+ // index.ts). Defined here so that `Result`'s arms below resolve to the exact same alias
+@@ -93,7 +95,7 @@
+ // guard an `any`-payload stub would lose its stub surface.
+ // Also used by the `RpcPromise` constructor signature (index.ts), which applies exactly this
+ // transformation so constructing from a promised stub matches the method-return type.
+-type ElideStub<T> = T extends StubBase<infer U> ? (IsAny<U> extends true ? T : [U] extends [Stubable] ? U : T) : T;
++type ElideStub<T> = T extends OwnedStub<infer U> ? (IsAny<U> extends true ? T : [U] extends [Stubable] ? U : T) : T;
+ // What the promise given to `new RpcPromise<T>(...)` may resolve to: the payload itself, or —
+ // for stubable payloads — a stub of it. `NoInfer` keeps the stub arm out of inference, so an
+ // inferred `T` is always the promise's own resolution type; the arm only matters when `T` is
+@@ -116,7 +118,7 @@
+ // the constraint, and re-evaluating `RpcCompatible<R>` in this arm recurses through its
+ // `Stub<Stubable>` member back into `Result`, tripping TS2615 circularity errors in mapped
+ // types.
+-: R extends StubBase<any> ? RpcPromise$1<ElideStub<R>> : R extends RpcCompatible<R> ? RpcPromise$1<R> : never;
++: R extends OwnedStub<any> ? RpcPromise$1<ElideStub<R>> : R extends RpcCompatible<R> ? RpcPromise$1<R> : never;
+ type IsAny<T> = 0 extends (1 & T) ? true : false; // Type for method or property on an RPC interface.
+ // For methods, unwrap `Stub`s in parameters, and rewrite returns to be `Result`s.
+ // Unwrapping `Stub`s allows calling with `Stubable` arguments.

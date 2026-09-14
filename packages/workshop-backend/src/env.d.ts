@@ -6,9 +6,13 @@ import type { ProductAnalyticsRecord } from "./analytics";
 declare global {
   namespace Cloudflare {
     interface Env {
-      // Deployment-wide admin usernames: a JSON binding, or the same array as a JSON string
-      // (which is what a secret binding, can carry).
+      // Static Workshop administrators / managed bootstrap seeds, and default Finance operators:
+      // a JSON array binding or the same array encoded as a JSON string.
       ADMINS?: string[] | string;
+
+      // Exact Finance operator profile IDs (array or JSON string). Omitted falls back to ADMINS;
+      // [] grants no operator access. Independent of managed administrator grant/revoke.
+      FINANCE_OPERATORS?: string[] | string;
 
       // Comma-separated vendor ids explicitly authorized by the deployment to default to enabled.
       // A persisted administrator mode remains authoritative over this deployment default.
@@ -38,6 +42,15 @@ declare global {
       TEAM_PI_CODEX_MODELS?: string;
       TEAM_PI_CODEX_ONLY?: string;
       CODING_SESSION_PI_RUNTIME_ENABLED?: string;
+
+      // Private internal Sessions control plane (not a discoverable user connector).
+      GATEKEEPER_SESSIONS?: Service<import("@gadgets/workshop-shared/coding-sessions").CodingSessionsService>;
+      REQUEST_BUILD_NOTIFIER?: Service<import("@gadgets/workshop-shared/coding-sessions").RequestBuildNotifier>;
+      // Explicit publisher path/line/text bounds. Missing policy never enables publication.
+      REQUEST_BUILD_PUBLICATION_POLICY?: string;
+      // Exact release evidence for image/pricing/repository/model admission. Missing or stale JSON
+      // keeps request builds fail-closed; boolean flags are intentionally not accepted.
+      REQUEST_BUILD_DEPLOYMENT_EVIDENCE?: string;
 
       // Blueprint storage bindings.
       BLUEPRINTS: KVNamespace;             // Workers KV for blueprint metadata lookup
@@ -92,8 +105,14 @@ declare global {
       // Enables the Cloudflare free-tier limits + top-up flow when set to "true".
       ENABLE_CLOUDFLARE_LIMITS?: string;
 
-      // Public base URL of the deployment.
+      // Public API base URL of the deployment; may be a native API-only origin.
       PUBLIC_BASE_URL?: string;
+
+      // Trusted HTTPS browser origin serving /requests/*; must match the private JARVIS receiver.
+      // No PUBLIC_BASE_URL fallback: native API-only origins cannot serve notification UI links.
+      REQUEST_BUILD_WORKSHOP_ORIGIN?: string;
+    /** Expected private notifier deployment/credential configuration label, not an attestation. */
+    REQUEST_BUILD_NOTIFIER_GENERATION?: string;
 
       // Comma-separated gatekeeper vendor ids that must be connected and healthy for this deployment.
       // Generic deployments leave this unset; hosted Odie production sets its first-party required

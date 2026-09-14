@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const require = createRequire(import.meta.url);
 const rpcValidation = require("capnweb-validate/esbuild");
 const tooling = createRequire(require.resolve("wrangler/package.json"));
-const { Miniflare } = tooling("miniflare");
+const { Miniflare, convertV4MiniflareOptions } = tooling("miniflare");
 const { build } = tooling("esbuild");
 
 const worker = `
@@ -76,14 +76,14 @@ describe("GitHub organization singleton catalog over workerd facets", () => {
       loader: { ".txt": "text" },
       plugins: [rpcValidation()],
     });
-    mf = new Miniflare({
+    mf = new Miniflare(convertV4MiniflareOptions({
       modules: true,
       script: bundle.outputFiles[0].text,
       compatibilityDate: "2026-02-02",
       compatibilityFlags: ["nodejs_compat", "allow_irrevocable_stub_storage", "global_fetch_strictly_public"],
       durableObjects: { HOST: { className: "TestHost", useSQLite: true } },
       outboundService: () => { throw new Error("Catalog must not fetch GitHub or mint a token"); },
-    });
+    }));
   }, 60_000);
 
   afterAll(async () => { await mf?.dispose(); });

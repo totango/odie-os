@@ -6,11 +6,11 @@ import { createHarnessRpc } from "../pi-image/harness-rpc.mjs";
 // Wire fixtures from the pinned Pi docs/rpc.md and Prime dist/modes/rpc
 // implementation. These are protocol replays, not live model/CLI invocations.
 const updates = {
-  "pi@0.84.2": {
+  "pi@0.85.1": {
     type: "message_update", usage: { input: 100, output: 1 },
     assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hello 🌍\u2028world\u2029!" },
   },
-  "prime@0.8.0": {
+  "prime@0.9.4": {
     type: "message_update",
     message: { role: "assistant", content: [{ type: "text", text: "Hello 🌍\u2028world\u2029!" }] },
     assistantMessageEvent: {
@@ -21,7 +21,7 @@ const updates = {
 };
 const cleanup: (() => void)[] = [];
 afterEach(() => { cleanup.splice(0).forEach((fn) => fn()); vi.useRealTimers(); });
-function setup(runtime = "pi@0.84.2", options = {}) {
+function setup(runtime = "pi@0.85.1", options = {}) {
   const readable = new PassThrough();
   const sent: any[] = [];
   const writable = new Writable({ write(chunk, _encoding, done) { sent.push(JSON.parse(chunk.toString())); done(); } });
@@ -36,7 +36,7 @@ function setup(runtime = "pi@0.84.2", options = {}) {
   return { rpc, readable, writable, sent, onEvent, onClose, emit, reply };
 }
 
-describe.each(["pi@0.84.2", "prime@0.8.0"] as const)("%s stdio", (runtime) => {
+describe.each(["pi@0.85.1", "prime@0.9.4"] as const)("%s stdio", (runtime) => {
   it("accepts zero-timeout dialogs while retaining the bounded local reply window", () => {
     vi.useFakeTimers();
     const h = setup(runtime, { timeoutMs: 100 });
@@ -141,7 +141,7 @@ it("gates Pi entry/tree queries and requires an owner export allocation", async 
     const result = pi.rpc.request(command, fields); pi.reply(pi.sent.length - 1, { data: { leafId: null } }); await result;
   }
   expect(pi.sent[1].since).toBe("abc123");
-  const prime = setup("prime@0.8.0");
+  const prime = setup("prime@0.9.4");
   await expect(prime.rpc.request("get_entries")).rejects.toThrow("Unsupported");
   await expect(prime.rpc.request("get_tree")).rejects.toThrow("Unsupported");
   await expect(pi.rpc.request("export_html")).rejects.toThrow("Owner export path");
@@ -169,7 +169,7 @@ it.each([
 });
 
 it("bounds frame bytes, request count and outbound bytes", async () => {
-  const h = setup("pi@0.84.2", { maxFrameBytes: 128, maxWriteBytes: 128, maxOutstanding: 1 });
+  const h = setup("pi@0.85.1", { maxFrameBytes: 128, maxWriteBytes: 128, maxOutstanding: 1 });
   await expect(h.rpc.request("prompt", { message: "🌍".repeat(100) })).rejects.toThrow("byte limit");
   const rejected = expect(h.rpc.request("get_state")).rejects.toThrow("frame byte limit");
   await expect(h.rpc.request("abort")).rejects.toThrow("outstanding");
@@ -198,7 +198,7 @@ it.each(["eof", "truncated", "exit", "read-error", "write-error", "finish", "clo
 
 it("times out all outstanding requests and clears timers/dialogs", async () => {
   vi.useFakeTimers();
-  const h = setup("pi@0.84.2", { timeoutMs: 20 });
+  const h = setup("pi@0.85.1", { timeoutMs: 20 });
   h.emit({ type: "extension_ui_request", id: "pending", method: "input" });
   const first = expect(h.rpc.request("get_state")).rejects.toThrow("timeout");
   const second = expect(h.rpc.request("abort")).rejects.toThrow("timeout");
@@ -210,7 +210,7 @@ it("times out all outstanding requests and clears timers/dialogs", async () => {
 
 it("expires dialogs locally and bounds/validates pending UI", async () => {
   vi.useFakeTimers();
-  const h = setup("pi@0.84.2", { maxDialogs: 1 });
+  const h = setup("pi@0.85.1", { maxDialogs: 1 });
   h.emit({ type: "extension_ui_request", id: "expiring", method: "confirm", timeout: 5 });
   await vi.advanceTimersByTimeAsync(5);
   expect(() => h.rpc.respondToDialog("expiring", { confirmed: true })).toThrow("expired");
@@ -224,7 +224,7 @@ it("expires dialogs locally and bounds/validates pending UI", async () => {
 
 it("honors backpressure and bounds unflushed writes independently of replies", async () => {
   const writable = Object.assign(new EventEmitter(), { write: vi.fn((_bytes: Buffer, _done: (error?: Error) => void) => false) });
-  const h = setup("pi@0.84.2", { writable, maxWriteBytes: 70 });
+  const h = setup("pi@0.85.1", { writable, maxWriteBytes: 70 });
   const first = h.rpc.request("get_state");
   const wire = JSON.parse(writable.write.mock.calls[0][0].toString());
   h.emit({ type: "response", id: wire.id, command: "get_state", success: true });
@@ -260,7 +260,7 @@ it("rejects duplicate pending UI ids and duplicate command responses", async () 
 
 it("accepts exact frame bounds and many frames in one larger chunk", () => {
   const line = JSON.stringify({ type: "agent_start" });
-  const h = setup("pi@0.84.2", { maxFrameBytes: Buffer.byteLength(line) });
+  const h = setup("pi@0.85.1", { maxFrameBytes: Buffer.byteLength(line) });
   h.readable.write(Buffer.from((line + "\n").repeat(100)));
   expect(h.onEvent).toHaveBeenCalledTimes(100);
   expect(h.onClose).not.toHaveBeenCalled();
@@ -273,7 +273,7 @@ it.each(["throw", "callback"])("cleans up on synchronous %s write failure", asyn
       done(new Error("fixture")); return true;
     },
   });
-  const h = setup("prime@0.8.0", { writable });
+  const h = setup("prime@0.9.4", { writable });
   await expect(h.rpc.request("abort")).rejects.toThrow("write failed");
   expect(h.onClose).toHaveBeenCalledTimes(1);
 });
@@ -282,7 +282,7 @@ it("resumes after drain and write acknowledgement", async () => {
   const writable = Object.assign(new EventEmitter(), {
     write: vi.fn((_bytes: Buffer, _done: (error?: Error) => void) => false),
   });
-  const h = setup("pi@0.84.2", { writable });
+  const h = setup("pi@0.85.1", { writable });
   const first = h.rpc.request("get_state");
   await expect(h.rpc.request("abort")).rejects.toThrow("backpressure");
   writable.write.mock.calls[0][1](); writable.emit("drain");

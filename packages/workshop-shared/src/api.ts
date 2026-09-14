@@ -1,3 +1,6 @@
+import type { AdministratorList, AdministratorCandidate, AdministratorMutation, AdministratorBootstrapPreview, AdministratorAuditPage } from "./admin-authority.js";
+/** Administrator authority contracts, separate from soft deployment settings. */
+export type { AdminAuthorization, AdminAuthorityMode, AdministratorList, AdministratorCandidate, AdministratorGrant, AdministratorMutation, AdministratorBootstrapPreview, AdministratorAuditEvent, AdministratorAuditPage } from "./admin-authority.js";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
 // The UI is a good old "fat client" SPA. Why not use SSR? Because:
@@ -25,6 +28,10 @@
 
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, type ConnectionHealthState, type GatekeeperUiComposition, type ObservationDomainSharingPolicy } from "./gatekeeper.js";
+import type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicRequestBuildReadiness } from "./request-build-publication.js";
+/** Public request-build control and safe projection contracts. */
+export type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicRequestBuildReadiness } from "./request-build-publication.js";
+import type { CreateCommunityRequest, CommunityRequest, CommunityRequestQuery, CommunityRequestPage, CommunityRequestPageOptions, CommunityRequestDetail, CommunityRequestDetailPage, AddCommunityRequestDetail, ModerateCommunityRequest } from "./community-requests.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
@@ -790,6 +797,31 @@ export const getAuthErrorCode = authErrors.getCode;
 
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
+  /** Publish authored public text to the signed-in deployment board; never starts legacy automation. */
+  createCommunityRequest(request: CreateCommunityRequest): Promise<CommunityRequest>;
+  /** List/search visible public requests. Hidden inclusion requires current board-moderation authority. */
+  listCommunityRequests(query?: CommunityRequestQuery): Promise<CommunityRequestPage>;
+  /** Visible safe run status for any signed-in user; never grants session or publication control. */
+  getRequestBuild(requestId: string, runId: string): Promise<PublicRequestBuild | null>;
+  /** Latest twenty safe run projections for a visible request; no execution capabilities or private identities. */
+  listRequestBuilds(requestId: string): Promise<PublicRequestBuild[]>;
+  /** Get one public request, or null for missing/hidden. Explicit hidden access is moderator-only. */
+  getCommunityRequest(id: string, includeHidden?: boolean): Promise<CommunityRequest | null>;
+  /** Search public text with the same bounded literal matching and pagination as list. */
+  searchCommunityRequests(query: CommunityRequestQuery): Promise<CommunityRequestPage>;
+  /** Suggest up to ten visible requests by lexical overlap of public text; never searches private evidence. */
+  suggestRelatedCommunityRequests(text: string, excludeId?: string): Promise<CommunityRequest[]>;
+  /** Set this account's vote (not a toggle); repeated votes do not add another vote or consume write quota. */
+  voteCommunityRequest(id: string): Promise<CommunityRequest>;
+  /** Remove this account's vote idempotently; other accounts' votes are unaffected. */
+  unvoteCommunityRequest(id: string): Promise<CommunityRequest>;
+  /** Append authored public details idempotently. Never accepts diagnostics or private attachments. */
+  addCommunityRequestDetail(id: string, detail: AddCommunityRequestDetail): Promise<CommunityRequestDetail>;
+  /** Read a bounded public detail page; hidden requests are unavailable unless explicitly authorized. */
+  listCommunityRequestDetails(id: string, options?: CommunityRequestPageOptions): Promise<CommunityRequestDetailPage>;
+  /** Moderate with current purpose-bound administrator authority on each call. */
+  moderateCommunityRequest(id: string, command: ModerateCommunityRequest): Promise<CommunityRequest>;
+
   /** List existing same-local-part migration accounts authorized by this session's verified SSO.
    * Legacy/password sessions return no identities; sign in again through SSO to enable switching. */
   listAccountIdentities(): Promise<AiChatAuthorInfo[]>;
@@ -1032,7 +1064,8 @@ export interface AuthenticatedApi extends RpcTarget {
   /**
    * Return the current user's entitlement to the invite-only Finance hub. Existing access is
    * validated against the deployment's authoritative workspace and its live permission graph;
-   * only when no deployment workspace has been claimed may an admin bootstrap it.
+   * only when no deployment workspace has been claimed may a configured Finance operator bootstrap
+   * it. Managed administrator membership neither grants nor revokes Finance operator access.
    */
   getFinanceHubStatus(): Promise<FinanceHubStatus>;
 
@@ -1274,8 +1307,8 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /**
    * Returns a capability for managing deployment-wide admin settings, or null when the caller is not
-   * an admin. The access check happens once here, so the returned stub's methods need no per-call
-   * checks. (Authentication config — sign-in providers, password login — is intentionally not
+   * an admin. Every privileged admission rechecks current authority; retained stubs cannot outlive
+   * their grant generation. Already-admitted work may finish. (Authentication config — sign-in providers, password login — is intentionally not
    * managed here; it stays env-var driven.)
    */
   getAdminApi(): Promise<RpcStub<AdminApi> | null>;
@@ -1488,8 +1521,9 @@ export function isFinanceOperationsWorkbenchBlueprintId(value: unknown): boolean
 
 /**
  * Entitlement state for the invite-only Finance hub. A deployment singleton identifies its one
- * workspace, whose live permission graph grants owner or use-collaborator access; only a deployment
- * admin may bootstrap the workspace before that singleton is claimed.
+ * workspace, whose live permission graph grants owner or direct use-collaborator access. Configured
+ * Finance operators may open it or bootstrap it before the singleton is claimed, independently of
+ * managed administrator membership. Operator configuration governs fresh opens, not escaped stubs.
  */
 export type FinanceHubStatus =
   | {
@@ -1509,7 +1543,7 @@ export type FinanceHubStatus =
   | {
       /** Whether the current user may select and render the Finance hub. */
       authorized: true;
-      /** A deployment admin may create the first Finance workspace. */
+      /** A deployment-configured Finance operator may create the first Finance workspace. */
       canCreate: true;
     };
 
@@ -1646,12 +1680,45 @@ export type AdminFormat = {
 
 /**
  * Capability for managing deployment-wide admin settings, obtained via
- * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
- * capability is minted, so these methods don't re-check. Covers branding, agent instructions, and
+ * AuthenticatedApi.getAdminApi() (which is null for non-admins). Every method checks current
+ * authority and issuance generation, including retained capabilities. Covers branding, agent instructions, and
  * which gatekeeper connectors/resources are offered — NOT authentication config (that's env-var
  * driven). Each setter throws on invalid input.
  */
 export interface AdminApi {
+  /** Explicitly approve the exact public specification revision; server derives actor, repository and policy. */
+  startRequestBuild(input: StartRequestBuild): Promise<PublicRequestBuild>;
+  /** Any current administrator may request cancellation; admitted writes are reconciled, not undone. */
+  cancelRequestBuild(input: CancelRequestBuild): Promise<PublicRequestBuild>;
+  /** Safe setup diagnostics and approvable request revision; no caller-provided readiness evidence. */
+  getRequestBuildReadiness(requestId: string): Promise<PublicRequestBuildReadiness & {
+    /** Current public specification revision, atomically paired with the approval text. */
+    requestRevision?: number;
+    /** Exact server-built public specification being approved. */
+    specification?: string;
+  }>;
+  /** Private bounded membership list; prepared grants are not effective. */
+  listAdministrators(cursor?: string): Promise<AdministratorList>;
+  /** Resolve an exact existing account, without signup or alias inference. */
+  resolveAdministratorCandidate(profileId: string): Promise<AdministratorCandidate | null>;
+  /** Preview every configured seed and unresolved existing-account prerequisite. */
+  previewAdministratorBootstrap(): Promise<AdministratorBootstrapPreview>;
+  /** Explicit one-time snapshot confirmation; static membership remains effective. */
+  prepareAdministratorBootstrap(input: AdministratorMutation & {digest: string}): Promise<number>;
+  /** Request private evidence-checked cutover; undrained legacy Context/JARVIS privileges deny.
+   * Finance operator configuration is independent and is not a transition prerequisite.
+   */
+  activateManagedAdministrators(input: AdministratorMutation): Promise<number>;
+  /** Grant an exact existing account in managed mode only; revision is returned.
+   * Does not confer deployment-configured Finance operator access.
+   */
+  grantAdministrator(input: AdministratorMutation & {profileId: string}): Promise<number>;
+  /** Revoke in managed mode only; self-revoke is forbidden. In-flight work is not undone.
+   * Does not revoke deployment-configured Finance operator or owner/direct-share access.
+   */
+  revokeAdministrator(input: AdministratorMutation & {principalId: string}): Promise<number>;
+  /** Private paged immutable audit events. */
+  listAdministratorAudit(cursor?: number): Promise<AdministratorAuditPage>;
   /** Read all admin-managed settings for the admin UI in one call. */
   getSettings(): Promise<AdminSettingsView>;
 

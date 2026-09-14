@@ -63,6 +63,8 @@ export async function mintGitHubInstallationToken(
   options: {
     repositories?: string[];
     permissions: Record<string, "read" | "write">;
+    /** Restricted build transport additionally verifies the token's returned repository and exact grants. */
+    verifyRepositoryScope?: boolean;
   },
 ): Promise<GitHubInstallationToken> {
   const appId = required(env.GITHUB_APP_ID, "GITHUB_APP_ID");
@@ -78,14 +80,45 @@ export async function mintGitHubInstallationToken(
       method: "POST",
       headers: githubHeaders(`Bearer ${jwt}`, "odie-os-github-app"),
       body: JSON.stringify(body),
+      redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
     },
   );
   if (!response.ok) throw new Error(`GitHub installation token failed (${response.status}).`);
-  const result = await response.json() as { token?: string; expires_at?: string };
-  if (!result.token || !result.expires_at) {
+  const result: unknown = options.verifyRepositoryScope
+    ? JSON.parse(await readGitHubResponseText(response, 65536)) : await response.json();
+  if (!result || typeof result !== "object" || !("token" in result) || typeof result.token !== "string" || !result.token ||
+      !("expires_at" in result) || typeof result.expires_at !== "string" || !Number.isFinite(Date.parse(result.expires_at))) {
     throw new Error("GitHub returned an invalid installation token.");
   }
-  return { token: result.token, expiresAt: new Date(result.expires_at).valueOf() };
+  if (options.verifyRepositoryScope) {
+    if (!("repositories" in result) || !Array.isArray(result.repositories) || result.repositories.length !== 1 ||
+        result.repositories[0]?.full_name !== "totango/odie-os" || !("permissions" in result) ||
+        !result.permissions || typeof result.permissions !== "object" ||
+        Object.entries(result.permissions).some(([name, value]) => options.permissions[name] !== value) ||
+        Object.entries(options.permissions).some(([name, value]) => Reflect.get(result.permissions!, name) !== value)) {
+      throw new Error("BUILD_GITHUB_TOKEN_SCOPE_INVALID");
+    }
+  }
+  return { token: result.token, expiresAt: Date.parse(result.expires_at) };
+}
+
+/** Bounded strict UTF-8 response text for private build credential and repository transports. */
+export async function readGitHubResponseText(response: Response, maximum: number): Promise<string> {
+  if (!response.body) throw new Error("BUILD_GITHUB_RESPONSE_INVALID");
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read(); if (next.done) break;
+      size += next.value.byteLength;
+      if (size > maximum) throw new Error("BUILD_GITHUB_RESPONSE_LIMIT");
+      chunks.push(next.value);
+    }
+  } finally { await reader.cancel(); reader.releaseLock(); }
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  return new TextDecoder("utf-8", {fatal: true, ignoreBOM: false}).decode(bytes);
 }
 
 /** Standard headers for GitHub REST requests. */

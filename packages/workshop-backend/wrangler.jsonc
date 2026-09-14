@@ -61,10 +61,15 @@
       // Durable, resumable native browser flows for verified-link OAuth returns.
       "tag": "v3",
       "new_sqlite_classes": [ "NativeBrowserFlow" ]
-    }
+    },
+    {
+      "tag": "v4-community-requests",
+      "new_sqlite_classes": [ "CommunityRequests" ]
+    },
+    { "tag": "v5-admin-authority", "new_sqlite_classes": ["AdminAuthority"] }
   ],
 
-  // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, NativeBrowserFlow, ...) are
+  // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, NativeBrowserFlow, CommunityRequests, ...) are
   // reached via ctx.exports and need no explicit durable_objects binding.
   "kv_namespaces": [
     {

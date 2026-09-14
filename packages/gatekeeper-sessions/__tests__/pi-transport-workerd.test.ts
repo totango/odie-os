@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 // package's Node-based Vitest config (whose cloudflare:workers alias is a mock).
 const require = createRequire(import.meta.url);
 const tooling = createRequire(require.resolve("wrangler/package.json"));
-const { Miniflare } = tooling("miniflare");
+const { Miniflare, convertV4MiniflareOptions } = tooling("miniflare");
 const { build } = tooling("esbuild");
 
 const url = "http://localhost:4097/pi/command?transport=rpc";
@@ -91,7 +91,7 @@ describe("Pi transport through installed Sandbox SDK and workerd RPC", () => {
       mainFields: ["module", "main"],
       external: ["cloudflare:*", "node:*"],
     });
-    mf = new Miniflare({
+    mf = new Miniflare(convertV4MiniflareOptions({
       modules: true,
       script: bundle.outputFiles[0].text,
       compatibilityDate: "2026-02-02",
@@ -99,7 +99,7 @@ describe("Pi transport through installed Sandbox SDK and workerd RPC", () => {
       // compatibility behavior under which the production call shape failed.
       compatibilityFlags: ["nodejs_compat", "allow_irrevocable_stub_storage", "global_fetch_strictly_public"],
       durableObjects: { RECEIVER: "TransportReceiver" },
-    });
+    }));
     await mf.ready;
   }, 30_000);
 

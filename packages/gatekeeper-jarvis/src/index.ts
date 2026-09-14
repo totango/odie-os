@@ -2,10 +2,12 @@
 // endpoint. It deliberately exposes only a fixed read/support allowlist and relies on
 // @gadgets/mcp-shared for MCP cataloging, tool classification, sessions, and action handling.
 
+export { RequestBuildNotifierEntrypoint } from "./request-build-notifier";
 import { RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc, skipRpcValidation } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
-import { boundAgentCatalog, type AccountDescription, type ActionDescription, type AgentCatalog, type AppUiContext, type ApprovalQueue, type AvatarImage, type Gatekeeper, type GatekeeperConnectCallback, type GatekeeperConnectOptions, type GatekeeperUiFrame, type GatekeeperUser, type GatekeeperUserVerifier, type GatekeeperVendor as GatekeeperVendorIface, type HookController, type HookDescription, type ObservationAuthorizer, type ObservationDescription, type ObservationDomainSharingPolicy, type ResourceDescription, type SupportedResource, type VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import { boundAgentCatalog, type AccountDescription, type ActionDescription, type AgentCatalog, type AppUiContext, type AuthorizedAppUiContext, type ApprovalQueue, type AvatarImage, type Gatekeeper, type GatekeeperConnectCallback, type GatekeeperConnectOptions, type GatekeeperUiFrame, type GatekeeperUser, type GatekeeperUserVerifier, type GatekeeperVendor as GatekeeperVendorIface, type HookController, type HookDescription, type ObservationAuthorizer, type ObservationDescription, type ObservationDomainSharingPolicy, type ResourceDescription, type SupportedResource, type VendorDescription } from "@gadgets/workshop-shared/gatekeeper";
+import type { AdminFenceChallenge, AdminFenceEvidence } from "@gadgets/workshop-shared/gatekeeper";
 import { MCP_BASE_TYPES } from "@gadgets/mcp-shared/base-types";
 import { McpFacetBase } from "@gadgets/mcp-shared/facet";
 import type { McpLogFields } from "@gadgets/mcp-shared/log";
@@ -238,6 +240,7 @@ export class JarvisAccount
     const config = readJarvisConfig(this.env);
     const description: AccountDescription = {
       displayName: JARVIS_DISPLAY_NAME,
+      adminAuthorizationProtocol: "admin-authorization-v1",
       avatar: JARVIS_ICON,
     };
     if (config && jarvisTokenFor(this.env, config.endpoint)) {
@@ -295,6 +298,13 @@ export class JarvisAccount
     const api = new JarvisPolicyApi(
       policyObject(this.ctx as ExportContext<unknown>), context.isAdmin);
     return { iframeHtml: APP_HTML, ui: new RpcStub(api) };
+  }
+
+  /** Capability-aware policy UI; retained reads and writes recheck the issuer. */
+  async startAppUiAuthorized(context: AuthorizedAppUiContext): Promise<GatekeeperUiFrame> {
+    if (context.protocol !== "admin-authorization-v1") throw new Error("PROVIDER_PROTOCOL_UNAVAILABLE");
+    const api = new JarvisPolicyApi(policyObject(this.ctx as ExportContext<unknown>), false, context.authorization);
+    return {iframeHtml: APP_HTML, ui: new RpcStub(api)};
   }
 
   /** JARVIS exposes no user-grantable URL resources. */
@@ -540,6 +550,11 @@ export class JarvisSession extends McpSessionBase {}
 /** Vendor entrypoint for the auto-provisioned JARVIS connector. */
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
+  /** Private provider-first evidence from the actual policy owner; no MCP/credential reads. */
+  async adminFenceReadiness(challenge: AdminFenceChallenge): Promise<AdminFenceEvidence> {
+    return policyObject(this.ctx as ExportContext<unknown>).adminFenceReadiness(challenge);
+  }
+
   /** Describes the JARVIS connector. */
   async describe(): Promise<VendorDescription> {
     const config = readJarvisConfig(this.env);

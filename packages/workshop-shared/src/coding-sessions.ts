@@ -1,4 +1,9 @@
 import type { WorkerEntrypoint } from "cloudflare:workers";
+import type { RequestBuildArtifact, RequestBuildAuthorization, RequestBuildAuthorizationRequest, RequestBuildExecutionReceipt, RequestBuildIntent, RequestBuildReadiness } from "./request-build.js";
+export type * from "./request-build.js";
+export * from "./request-build-publication.js";
+export * from "./request-build-notification.js";
+import type { RequestBuildGitHubRead, RequestBuildGitHubWrite, RequestBuildGitHubAuthorization } from "./request-build-publication.js";
 import type { ActionDescription, ObservationDescription } from "./gatekeeper.js";
 import type {
   CodingSessionApplicationCapability,
@@ -138,6 +143,8 @@ export interface CodingSessionActivity {
 
 /** Narrow owner-bound capability used by the Sessions worker to serve Workshop MCP. */
 export interface CodingSessionToolHost extends WorkerEntrypoint {
+  /** Reconstructs current attempt/owner/admin authority privately; never available through Workshop MCP. */
+  authorizeRequestBuild(owner: CodingSessionOwner, request: RequestBuildAuthorizationRequest): Promise<RequestBuildAuthorization>;
   /**
    * Revalidates startup authority for the current user and returns ephemeral OpenCode
    * customization for immediate materialization. This private control-plane call is made only by
@@ -234,6 +241,21 @@ export interface ProductFeedbackEvidenceBundle {
 
 /** Private control-plane RPC implemented by the Sessions service. */
 export interface CodingSessionsService extends WorkerEntrypoint {
+  /** Reports restricted-runner prerequisites without minting credentials or launching a container. */
+  requestBuildReadiness(): Promise<RequestBuildReadiness>;
+  /** Fixed-repository bounded JSON read; remains service-owned for reconciliation after revocation. */
+  readRequestBuildGitHub(operation: RequestBuildGitHubRead): Promise<string | null>;
+  /** Worker-only credential transport for one exact persisted, freshly authorized publication operation. */
+  writeRequestBuildGitHub(owner: CodingSessionOwner, authorization: RequestBuildGitHubAuthorization, operation: RequestBuildGitHubWrite): Promise<string>;
+  /** Atomically reserves an immutable attempt before asynchronous startup; retries return the same receipt. */
+  ensureRequestBuild(owner: CodingSessionOwner, intent: RequestBuildIntent): Promise<RequestBuildExecutionReceipt>;
+  /** Reads private persisted execution metadata without entering the sandbox. */
+  getRequestBuildReceipt(owner: CodingSessionOwner, dispatchKey: string): Promise<RequestBuildExecutionReceipt | null>;
+  /** Service-owned cleanup, independent of revoked initiator eligibility. Resolved null proves a durable
+   * canceled-before-reservation tombstone fencing every delayed ensure; errors never mean cleanup success. */
+  cancelRequestBuildExecution(owner: CodingSessionOwner, dispatchKey: string, cancelRevision: number): Promise<RequestBuildExecutionReceipt | null>;
+  /** Retrieves frozen untrusted patch bytes for independent publisher validation, never via public fetch. */
+  getRequestBuildArtifact(owner: CodingSessionOwner, dispatchKey: string): Promise<RequestBuildArtifact | null>;
   /** Reports whether a separate-origin browser VS Code runtime is configured. */
   editorAvailable(): Promise<boolean>;
 

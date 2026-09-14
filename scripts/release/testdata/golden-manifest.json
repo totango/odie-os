@@ -936,6 +936,11 @@
           "type": "durable_object_namespace"
         },
         {
+          "class_name": "RequestBuildSandbox",
+          "name": "REQUEST_BUILD_SANDBOX",
+          "type": "durable_object_namespace"
+        },
+        {
           "class_name": "ProductFeedbackSandbox",
           "name": "PRODUCT_FEEDBACK_SANDBOX",
           "type": "durable_object_namespace"
@@ -1018,6 +1023,12 @@
           "max_instances": 2
         },
         {
+          "class_name": "RequestBuildSandbox",
+          "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
+          "instance_type": "standard-1",
+          "max_instances": 1
+        },
+        {
           "class_name": "ProductFeedbackSandbox",
           "image": "docker.io/cloudflare/sandbox@sha256:6c8e082085d0861ad3b359041abd4cdc750f5b0e29e7aa82bb87a9b557dbdc60",
           "instance_type": "standard-1",
@@ -1090,6 +1101,12 @@
             "ProductFeedbackSandbox"
           ],
           "tag": "v5"
+        },
+        {
+          "new_sqlite_classes": [
+            "RequestBuildSandbox"
+          ],
+          "tag": "v6-request-build"
         }
       ],
       "modules": [
@@ -1630,6 +1647,18 @@
             "NativeBrowserFlow"
           ],
           "tag": "v3"
+        },
+        {
+          "new_sqlite_classes": [
+            "CommunityRequests"
+          ],
+          "tag": "v4-community-requests"
+        },
+        {
+          "new_sqlite_classes": [
+            "AdminAuthority"
+          ],
+          "tag": "v5-admin-authority"
         }
       ],
       "modules": [

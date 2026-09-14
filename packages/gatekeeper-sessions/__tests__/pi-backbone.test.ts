@@ -1,15 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request, type ClientRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { piBridgeSource, validatePiCommand } from "../src/pi-backbone.js";
 
 // A real local subprocess with only a mocked JSONL child. No runtime, model, or production connection.
-async function makeBridge(runtime: "pi" | "prime-agent", options: { largeHistory?: boolean; dialogTimeout?: number; drainTimeout?: number; ignoreTerm?: boolean } = {}) {
+async function makeBridge(runtime: "pi" | "prime-agent", options: { version?: string; largeHistory?: boolean; dialogTimeout?: number; drainTimeout?: number; ignoreTerm?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "pi-bridge-test-"));
   const ledger = join(dir, "spawns");
+  const packagePath = join(dir, "package.json");
+  await writeFile(packagePath, JSON.stringify({version:options.version ?? (runtime === "pi" ? "0.85.1" : "0.8.0")}));
   const beforeExit = join(dir, "before-exit");
   const mock = `const largeHistory = ${options.largeHistory === true}, prime = ${runtime === "prime-agent"};
     require('node:fs').appendFileSync(${JSON.stringify(ledger)}, process.pid+'\\n');
@@ -82,7 +84,7 @@ async function makeBridge(runtime: "pi" | "prime-agent", options: { largeHistory
       process.stderr.write('not protocol\n');
     });`;
   const source = piBridgeSource(runtime).replace(/^const argv = .*;\n/, `const argv = ${JSON.stringify([process.execPath, "-e", mock])};\n`)
-    .replace(/^if \(JSON.parse\(readFileSync.*\n/m, "") // The only executable here is the local mock above.
+    .replace(/^const packagePath = .*;\n/m, `const packagePath = ${JSON.stringify(packagePath)};\n`)
     .replace("/workspace/.odie-pi/owner-bridge.lock", join(dir, "lock"))
     .replace("/workspace/.odie-prime-agent/owner-bridge.lock", join(dir, "lock"))
     .replace("const DIALOG_TIMEOUT = 30000;", `const DIALOG_TIMEOUT = ${options.dialogTimeout ?? 30000};`)
@@ -98,7 +100,7 @@ async function makeBridge(runtime: "pi" | "prime-agent", options: { largeHistory
     child.once("error", reject);
     child.once("exit", code => {clearTimeout(timer); reject(new Error(`Bridge exited ${code}`));});
     child.stdout.once("data", data => {clearTimeout(timer); resolve(Number(data.toString().trim()));});
-  });
+  }).catch(async error => { child.kill("SIGKILL"); await rm(dir,{recursive:true,force:true}); throw error; });
   return {
     child, port,
     async spawnPids() { return (await readFile(ledger, "utf8")).trim().split("\n").map(Number); },
@@ -139,18 +141,27 @@ async function makeBridge(runtime: "pi" | "prime-agent", options: { largeHistory
   };
 }
 
-describe.each(["pi", "prime-agent"] as const)("%s owner bridge subprocess", runtime => {
-  const bridge = (options?: Parameters<typeof makeBridge>[1]) => makeBridge(runtime, options);
+describe.each([["pi","0.84.2"],["pi","0.85.1"],["prime-agent","0.9.4"]] as const)("%s %s owner bridge subprocess", (runtime,version) => {
+  const bridge = (options?: Parameters<typeof makeBridge>[1]) => makeBridge(runtime, {version,...options});
   it("pins the published runtime and retains generation-owned session storage without resume-on-attach", () => {
     const source = piBridgeSource(runtime);
     const argv = JSON.parse(source.split("\n")[0]!.slice("const argv = ".length, -1)) as string[];
     expect(argv).toContain("--mode");
     expect(argv).toContain("rpc");
     expect(argv).not.toContain("--resume");
-    expect(source).toContain('const version = ' + JSON.stringify(runtime === "pi" ? "0.84.2" : "0.8.0"));
+    expect(source).toContain('const version = ' + JSON.stringify(runtime === "pi" ? "0.85.1" : "0.9.4"));
     if (runtime === "prime-agent") {
       expect(argv.slice(-2)).toEqual(["--session-dir","/workspace/.odie-prime-agent/owner/sessions"]);
+      expect(argv).toContain("--offline");
+      expect(argv).toContain("--provider");
+      expect(argv).toContain("odie-team-pi");
+      expect(argv).toContain("--model");
+      expect(argv).toContain("gpt-6-astra");
+      expect(argv).toContain("--models");
+      expect(argv).toContain("odie-team-pi/gpt-6-astra,odie-team-pi/gpt-5.6-sol");
       expect(argv).toContain("/workspace/.odie-prime-agent/odie-runtime.ts");
+      expect(argv).not.toContain("--daemon");
+      expect(argv).not.toContain("--acp");
       expect(source).toContain("/opt/odie-pi/node_modules/prime-agent/package.json");
     } else expect(argv.slice(-2)).toEqual(["--session","/workspace/.odie-pi/owner-session.jsonl"]);
   });
@@ -363,4 +374,8 @@ describe.each(["pi", "prime-agent"] as const)("%s owner bridge subprocess", runt
     }
     expect(validatePiCommand({type:"abort"})).toEqual({type:"abort"});
   });
+});
+
+it("rejects unsupported ordinary Pi runtime before launching its child", async () => {
+  await expect(makeBridge("pi", {version:"0.86.0"})).rejects.toThrow("Bridge exited 1");
 });

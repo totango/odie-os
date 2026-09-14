@@ -7,8 +7,8 @@ const common = {
   abort: [], get_state: [], get_messages: [], get_session_stats: [], export_html: [],
 };
 const commands = {
-  "pi@0.84.2": { ...common, get_entries: ["since"], get_tree: [] },
-  "prime@0.8.0": common,
+  "pi@0.85.1": { ...common, get_entries: ["since"], get_tree: [] },
+  "prime@0.9.4": common,
 };
 const dialogs = new Set(["confirm", "select", "input", "editor"]);
 const notices = new Set(["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"]);
@@ -19,7 +19,7 @@ const positive = (value) => Number.isSafeInteger(value) && value > 0;
  * Internal, version-pinned stdio transport, NOT a session/authority API. The owner
  * injects binary Node readable/writable streams, handles process exit via close(),
  * and owns their shutdown/error handling after detachment. No process is launched.
- * Sources: Pi 0.84.2 docs/rpc.md; Prime 0.8.0 dist/modes/rpc/{rpc-mode,
+ * Sources: Pi 0.85.1 docs/rpc.md; Prime 0.9.4 dist/modes/rpc/{rpc-mode,
  * rpc-extension-ui-context}.js. Responses and events retain their wire shapes:
  * Pi message_update is delta-only; Prime includes cumulative message/partial.
  * agent_end never settles a request or implies owner-level session completion.

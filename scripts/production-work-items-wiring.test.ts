@@ -55,6 +55,18 @@ test("production Work Items workers are built, deployed, and routed coherently",
   }
 });
 
+test("production deploy uses exact checked-out source and lockfile-selected Wrangler", () => {
+  const deployWorkflow = readFileSync(".github/workflows/deploy-production.yml", "utf8");
+  const deploy = deployWorkflow.slice(deployWorkflow.indexOf("  deploy:"));
+
+  assert.match(deploy, /- name: Check out exact tested source[\s\S]*ref: \$\{\{ env\.DEPLOY_SHA \}\}[\s\S]*persist-credentials: false/);
+  assert.match(deploy, /- name: Enable Corepack[\s\S]*corepack enable/);
+  assert.match(deploy, /voidzero-dev\/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca[\s\S]*run-install: true/);
+  assert.doesNotMatch(deploy, /npm install --global wrangler/);
+  assert.match(deploy, /pnpm exec wrangler deploy --no-bundle --config workshop-backend\/wrangler\.json/);
+  assert.match(deploy, /pnpm exec wrangler secret put TEAM_PI_CODEX_MODELS --name odie-os-backend/);
+});
+
 test("production deployment fails before secret sync when Jira or Zendesk OAuth secrets are absent", () => {
   const deployWorkflow = readFileSync(".github/workflows/deploy-production.yml", "utf8");
 

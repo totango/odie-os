@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse } from "jsonc-parser";
 import { collectAssets, collectModules, stableStringify } from "./hash-lib.ts";
 import {
   findDeployablePackages, generateManifest, readDeployInputs, readWranglerConfig,
@@ -67,6 +68,22 @@ test("manifest generated from real configs matches the golden file", () => {
       "scripts/release/manifest-lib.test.ts");
 });
 
+test("board and authority migrations are additive across the distinct base and production histories", () => {
+  const backend = join(ROOT, "packages", "workshop-backend");
+  const history = [
+    { tag: "v0", new_sqlite_classes: ["UserDurableObject", "OverseerDurableObject"] },
+    { tag: "v1", new_sqlite_classes: ["AdminSettings"] },
+    { tag: "v2", new_sqlite_classes: ["PendingLogin"] },
+  ];
+  const authority = { tag: "v5-admin-authority", new_sqlite_classes: ["AdminAuthority"] };
+  const board = { tag: "v4-community-requests", new_sqlite_classes: ["CommunityRequests"] };
+  assert.deepEqual(readWranglerConfig(backend).migrations, [
+    ...history, { tag: "v3", new_sqlite_classes: ["NativeBrowserFlow"] }, board, authority,
+  ]);
+  const production = parse(readFileSync(join(backend, "wrangler.odie-os-production.jsonc"), "utf8"));
+  assert.deepEqual(production.migrations, [...history, { tag: "v3" }, board, authority]);
+});
+
 test("every $-token in binding templates and vars uses known placeholder syntax", () => {
   const manifest = buildTestManifest();
   const check = (value: unknown, where: string): void => {
@@ -117,9 +134,17 @@ test("worker entries carry the deploy contract", () => {
   // Full ordered migration history, verbatim from wrangler.jsonc.
   assert.equal(backend.migrations[0].tag, "v0");
   assert.ok(backend.migrations[0].new_sqlite_classes?.includes("UserDurableObject"));
-  assert.deepEqual(backend.migrations.at(-1), {
+  assert.deepEqual(backend.migrations.at(-3), {
     tag: "v3",
     new_sqlite_classes: ["NativeBrowserFlow"],
+  });
+  assert.deepEqual(backend.migrations.at(-2), {
+    tag: "v4-community-requests",
+    new_sqlite_classes: ["CommunityRequests"],
+  });
+
+  assert.deepEqual(backend.migrations.at(-1), {
+    tag: "v5-admin-authority", new_sqlite_classes: ["AdminAuthority"],
   });
 
   // Router: serves the access asset variant, binds the backend by templated worker name.
@@ -230,6 +255,11 @@ test("worker entries carry the deploy contract", () => {
     },
     {
       type: "durable_object_namespace",
+      name: "REQUEST_BUILD_SANDBOX",
+      class_name: "RequestBuildSandbox",
+    },
+    {
+      type: "durable_object_namespace",
       name: "PRODUCT_FEEDBACK_SANDBOX",
       class_name: "ProductFeedbackSandbox",
     },
@@ -288,13 +318,19 @@ test("worker entries carry the deploy contract", () => {
       max_instances: 2,
     },
     {
+      class_name: "RequestBuildSandbox",
+      image: sessionImage,
+      instance_type: "standard-1",
+      max_instances: 1,
+    },
+    {
       class_name: "ProductFeedbackSandbox",
       image: sessionImage,
       instance_type: "standard-1",
       max_instances: 4,
     },
   ]);
-  assert.deepEqual(sessions.migrations.at(-3), {
+  assert.deepEqual(sessions.migrations.at(-4), {
     tag: "v3",
     new_sqlite_classes: [
       "CodingSessionSandboxStandard2",
@@ -303,13 +339,17 @@ test("worker entries carry the deploy contract", () => {
       "CodingSessionCapacity",
     ],
   });
-  assert.deepEqual(sessions.migrations.at(-2), {
+  assert.deepEqual(sessions.migrations.at(-3), {
     tag: "v4",
     new_sqlite_classes: ["CodingSessionApplicationPreview"],
   });
-  assert.deepEqual(sessions.migrations.at(-1), {
+  assert.deepEqual(sessions.migrations.at(-2), {
     tag: "v5",
     new_sqlite_classes: ["ProductFeedbackSandbox"],
+  });
+  assert.deepEqual(sessions.migrations.at(-1), {
+    tag: "v6-request-build",
+    new_sqlite_classes: ["RequestBuildSandbox"],
   });
 
   // Ambient gatekeepers are preinstalled on every core deploy; preinstalls must take no

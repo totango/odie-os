@@ -34,6 +34,7 @@ import {
 import { loadBundledFinanceOperationsWorkbenchSource } from "../src/format-blueprints.js";
 import type { AdminSettings, FinanceWorkspaceClaim } from "../src/admin-settings.js";
 import { retryOnDoReset } from "../src/do-retry.js";
+import { configuredFinanceOperators, isFinanceOperator } from "../src/finance-operators";
 import type { UserDurableObject } from "../src/user.js";
 
 declare module "cloudflare:workers" {
@@ -152,7 +153,24 @@ function blueprintSummary(id: string): BlueprintUserSummary {
 describe("Finance hub access policy", () => {
   beforeEach(clearFinanceClaim);
 
-  it("fails closed and grants bootstrap only before an admin claim", () => {
+  it("uses exact deployment operator identities with omitted-only ADMINS fallback", () => {
+    const seeds = ["jacob.beck@totango.com", "keith@totango.com", "nick.roberts@totango.com", "stacy.kennedy@totango.com"];
+    for (const ADMINS of [seeds, JSON.stringify(seeds)]) {
+      expect(configuredFinanceOperators({ADMINS})).toEqual(seeds);
+      for (const profile of seeds) expect(isFinanceOperator({ADMINS}, profile)).toBe(true);
+      expect(isFinanceOperator({ADMINS}, "jacob.beck@heyodie.ai")).toBe(false);
+      expect(isFinanceOperator({ADMINS}, "Jacob.Beck@totango.com")).toBe(false);
+      expect(isFinanceOperator({ADMINS}, undefined)).toBe(false);
+      for (const FINANCE_OPERATORS of [[], "[]"]) expect(configuredFinanceOperators({ADMINS, FINANCE_OPERATORS})).toEqual([]);
+      expect(configuredFinanceOperators({ADMINS, FINANCE_OPERATORS: '["separate@totango.com"]'})).toEqual(["separate@totango.com"]);
+    }
+    expect(configuredFinanceOperators({})).toEqual([]);
+    for (const FINANCE_OPERATORS of ["", "null", "{}", '[1]', '"admin"']) {
+      expect(() => configuredFinanceOperators({ADMINS: seeds, FINANCE_OPERATORS})).toThrow();
+    }
+  });
+
+  it("fails closed and grants operator bootstrap only before a workspace claim", () => {
     expect(resolveFinanceHubStatus(null, false, false)).toEqual({
       authorized: false,
       canCreate: false,
@@ -172,7 +190,7 @@ describe("Finance hub access policy", () => {
     });
   });
 
-  it("offers bootstrap through live status only to an admin when no singleton exists", async () => {
+  it("offers bootstrap through live status only to a Finance operator when no singleton exists", async () => {
     expect(await readFinanceHubStatus(
         env.TEST_ADMIN, env.TEST_OVERSEER, "user-id", "user@example.com", false)).toEqual({
       authorized: false,
@@ -1063,7 +1081,7 @@ describe("Finance hub access policy", () => {
     expect(await env.TEST_ADMIN.getByName("").getFinanceWorkspaceClaim()).toBeNull();
   });
 
-  it("allows only an admin Finance bootstrap with the protected blueprint-origin pair", () => {
+  it("allows only a configured Finance operator bootstrap with the protected blueprint-origin pair", () => {
     expect(assertBlueprintOriginAllowed(
       FINANCE_OPERATIONS_WORKBENCH_BLUEPRINT_ID,
       "finance",

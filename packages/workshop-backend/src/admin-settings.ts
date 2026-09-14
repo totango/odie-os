@@ -1,3 +1,6 @@
+import type { AdminAuthority, AdminClaim } from "./admin-authority";
+import type { CommunityRequests } from "./community-requests";
+import type { StartRequestBuild, CancelRequestBuild } from "@gadgets/workshop-shared/coding-sessions";
 import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, ConfigurableDeploymentHubId, FinanceHubDiagnostic, FinanceHubRepairResult, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isConfigurableDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
@@ -778,10 +781,10 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     for (let [id, vendor] of this.vendors) {
       promises.push((async () => {
         try {
-          let [description, supportedResources] = await Promise.all([
-            vendor.describe(),
-            vendor.getSupportedResources({ userId: adminUserId }),
-          ]);
+          const [description, supportedResources]: [
+            Awaited<ReturnType<GatekeeperVendor["describe"]>>,
+            Awaited<ReturnType<GatekeeperVendor["getSupportedResources"]>>,
+          ] = await Promise.all([vendor.describe(), vendor.getSupportedResources({ userId: adminUserId })]);
           if (description.autoProvisionsAccount) {
             // Auto-provisioning ("ambient") gatekeeper: a three-state mode, no resources to toggle.
             let mode = ambientGatekeeperMode(config, id);
@@ -842,8 +845,8 @@ function financeRegistrationDiagnostic(
 }
 
 // Capability for managing deployment-wide admin settings, obtained via
-// AuthenticatedApi.getAdminApi() (which is null for non-admins). The admin access check happens once
-// when the capability is minted in server.ts, so these methods don't re-check. This is a thin
+// AuthenticatedApi.getAdminApi() (which is null for non-admins). An initial authority claim is minted
+// in server.ts; every method rechecks its current authority and generation. This is a thin
 // validation+forwarding facade over the AdminSettings DO — fully user-independent — so a disabled
 // gatekeeper/resource can't be re-enabled via a crafted request, and the client never receives a
 // stub to the DO's internal methods. Covers branding, agent instructions, signups, and gatekeeper
@@ -854,27 +857,60 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
    * `adminUserId` is the requesting admin's identity, forwarded to gatekeepers when listing the
    * resource catalog (some are RBAC-gated per user). It's plain data — not a user-DO dependency.
    */
-  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string) {
+  constructor(private admin: DurableObjectStub<AdminSettings>, private adminUserId: string,
+      private authority: DurableObjectStub<AdminAuthority>, private claim: AdminClaim,
+      private requests?: DurableObjectStub<CommunityRequests>) {
     super();
   }
 
-  getSettings(): Promise<AdminSettingsView> {
+  async #buildClaim(): Promise<AdminClaim> {
+    await this.authority.assertCurrent(this.claim, "administration");
+    const claim = await this.authority.issue(this.claim.principalId, this.claim.profileId, "request-build");
+    await this.authority.assertCurrent(this.claim, "administration");
+    if (!claim || claim.epoch !== this.claim.epoch || claim.generation !== this.claim.generation || claim.mode !== this.claim.mode) throw new Error("ADMIN_REVOKED");
+    return claim;
+  }
+
+  async startRequestBuild(input: StartRequestBuild) {
+    const claim = await this.#buildClaim();
+    if (!this.requests) throw new Error("BUILD_CONTROL_UNAVAILABLE");
+    return this.requests.startRequestBuild(claim, input);
+  }
+
+  async cancelRequestBuild(input: CancelRequestBuild) {
+    const claim = await this.#buildClaim();
+    if (!this.requests) throw new Error("BUILD_CONTROL_UNAVAILABLE");
+    return this.requests.cancelRequestBuild(claim, input);
+  }
+
+  async getRequestBuildReadiness(requestId: string) {
+    const claim = await this.#buildClaim();
+    if (!this.requests) throw new Error("BUILD_CONTROL_UNAVAILABLE");
+    return this.requests.requestBuildReadiness(claim, requestId);
+  }
+
+  async getSettings(): Promise<AdminSettingsView> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.getSettings(this.adminUserId);
   }
 
-  diagnoseFinanceHub(): Promise<FinanceHubDiagnostic> {
+  async diagnoseFinanceHub(): Promise<FinanceHubDiagnostic> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.diagnoseFinanceHub();
   }
 
-  repairFinanceHub(): Promise<FinanceHubRepairResult> {
+  async repairFinanceHub(): Promise<FinanceHubRepairResult> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.repairFinanceHub();
   }
 
   async setSignupsEnabled(enabled: boolean): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     await this.admin.updateAdminConfig({ signupsEnabled: enabled });
   }
 
   async setSiteName(name: string): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (name.length > MAX_SITE_NAME_LENGTH) {
       throw new Error(`Site name too long (max ${MAX_SITE_NAME_LENGTH} characters).`);
     }
@@ -882,22 +918,26 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   }
 
   async setSiteLogo(data: Uint8Array | null): Promise<AdminSettingsView['siteLogo']> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (data !== null) validateSiteLogo(data);
     return siteLogoImage(await this.admin.setSiteLogo(data));
   }
 
   async setInstanceInstructions(text: string): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (text.length > MAX_INSTANCE_INSTRUCTIONS_LENGTH) {
       throw new Error(`Instructions too long (max ${MAX_INSTANCE_INSTRUCTIONS_LENGTH} characters).`);
     }
     await this.admin.updateAdminConfig({ instanceInstructions: text });
   }
 
-  setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
+  async setResourceEnabled(vendorId: string, urlPattern: string, enabled: boolean): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.setResourceEnabled(vendorId, urlPattern, enabled);
   }
 
-  setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
+  async setGatekeeperMode(vendorId: string, mode: AmbientGatekeeperMode): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (!isAmbientGatekeeperMode(mode)) {
       throw new Error(`Invalid gatekeeper mode: ${mode}`);
     }
@@ -905,6 +945,7 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   }
 
   async setAnnouncement(text: string): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
       throw new Error(`Announcement too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
     }
@@ -912,6 +953,7 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   }
 
   async setBanner(text: string, color: BannerColor): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (text.length > MAX_ANNOUNCEMENT_LENGTH) {
       throw new Error(`Banner too long (max ${MAX_ANNOUNCEMENT_LENGTH} characters).`);
     }
@@ -922,40 +964,57 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   }
 
   async setAccentColor(color: string): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (color !== "" && !isHexColor(color)) {
       throw new Error(`Invalid accent color: ${color}`);
     }
     await this.admin.updateAdminConfig({ accentColor: color });
   }
 
-  setHubEnabled(hubId: ConfigurableDeploymentHubId, enabled: boolean): Promise<void> {
+  async setHubEnabled(hubId: ConfigurableDeploymentHubId, enabled: boolean): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     if (!isConfigurableDeploymentHubId(hubId)) {
       throw new Error(`Invalid hub id: ${hubId}`);
     }
     return this.admin.setHubEnabled(hubId, enabled);
   }
 
-  isBlueprintFeatured(blueprintId: string): Promise<boolean | null> {
+  async isBlueprintFeatured(blueprintId: string): Promise<boolean | null> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.isBlueprintFeatured(blueprintId);
   }
 
-  setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
+  async setBlueprintFeatured(blueprintId: string, featured: boolean): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.setBlueprintFeatured(blueprintId, featured);
   }
 
-  promoteFormat(blueprintId: string): Promise<void> {
+  async promoteFormat(blueprintId: string): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.promoteFormat(blueprintId);
   }
 
-  removeFormat(blueprintId: string): Promise<void> {
+  async removeFormat(blueprintId: string): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.removeFormat(blueprintId);
   }
 
-  updateFormat(blueprintId: string, patch: AdminFormatPatch): Promise<void> {
+  async updateFormat(blueprintId: string, patch: AdminFormatPatch): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.updateFormat(blueprintId, patch);
   }
 
-  setFormatOrder(blueprintIds: string[]): Promise<void> {
+  async setFormatOrder(blueprintIds: string[]): Promise<void> {
+    await this.authority.assertCurrent(this.claim, "administration");
     return this.admin.setFormatOrder(blueprintIds);
   }
+
+  async listAdministrators(cursor?: string) { return this.authority.list(this.claim, cursor); }
+  async resolveAdministratorCandidate(profileId: string) { return this.authority.resolve(this.claim, profileId); }
+  async previewAdministratorBootstrap() { return this.authority.preview(this.claim); }
+  async prepareAdministratorBootstrap(input: Parameters<AdminApi["prepareAdministratorBootstrap"]>[0]) { return this.authority.prepare(this.claim, input); }
+  async activateManagedAdministrators(input: Parameters<AdminApi["activateManagedAdministrators"]>[0]) { return this.authority.activate(this.claim, input); }
+  async grantAdministrator(input: Parameters<AdminApi["grantAdministrator"]>[0]) { return this.authority.grant(this.claim, input); }
+  async revokeAdministrator(input: Parameters<AdminApi["revokeAdministrator"]>[0]) { return this.authority.revoke(this.claim, input); }
+  async listAdministratorAudit(cursor?: number) { return this.authority.audit(this.claim, cursor); }
 }

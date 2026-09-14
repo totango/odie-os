@@ -1,3 +1,4 @@
+import type { AuthorizedAppUiContext } from "@gadgets/workshop-shared/gatekeeper";
 import { RpcStub, RpcTarget } from "capnweb";
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, EMPTY_OPENCODE_USER_CUSTOMIZATION, PROVISIONAL_WORKSPACE_ORIGIN_ERROR_CODES, createProvisionalWorkspaceOriginError, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type OpenCodeUserCustomization, type RequiredConnectionStatus } from '@gadgets/workshop-shared/api';
 import { validateCodingSessionFileUploadRequest, validateCodingSessionRepositories, validateOpenCodeCustomization, type CodingSessionOwner, type CodingSessionsService, type ProductFeedbackEvidenceBundle } from "@gadgets/workshop-shared/coding-sessions";
@@ -1676,6 +1677,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return false;
   }
 
+  /** Private build admission rechecks the exact account's canonical repository and configured relay model. */
+  async requestBuildEligibility(model: string): Promise<CodingSessionOwner> {
+    if (!this.#canUseTeamPiCodex() || !resolveTeamPiCodexModel(this.env, `team-pi-codex/${model}`)) {
+      throw new Error("MODEL_AUTHORIZATION_UNAVAILABLE");
+    }
+    await this.assertRequiredConnectionsHealthy();
+    const {owner} = await this.#codingSessionsAccess(["odie-os"]);
+    return owner;
+  }
+
   async #codingSessionsAccess(repositories?: readonly string[]): Promise<{
     owner: CodingSessionOwner;
     service: Service<CodingSessionsService>;
@@ -2537,6 +2548,27 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!record?.description.providesUi) throw new Error("No such app.");
     if (isRetiredGatekeeperVendor(record.vendorId)) throw new Error("No such app.");
     return (record.account as unknown as SingletonAccountStub).startAppUi(context);
+  }
+
+  /** New provider-first protocol. A denial or outage is never retried with a boolean grant. */
+  async startAccountAppUiAuthorized(accountId: number, context: AuthorizedAppUiContext): Promise<GatekeeperUiFrame> {
+    const record = this.storage.connectedAccounts.get(accountId);
+    if (!record?.description.providesUi || isRetiredGatekeeperVendor(record.vendorId) || !areCredentialsValid(record)) throw new Error("No such app.");
+    const config = await readAdminConfig(this.env);
+    if (config.disabledGatekeepers.includes(record.vendorId) || record.autoProvisioned && ambientGatekeeperMode(config, record.vendorId) === "disabled") throw new Error("No such app.");
+    if (record.description.adminAuthorizationProtocol !== "admin-authorization-v1") {
+      if (record.description.providesUi.adminOnly || record.vendorId === "context" || record.vendorId === "jarvis") throw new Error("PROVIDER_PROTOCOL_UNAVAILABLE");
+      // Ordinary providers receive no elevated authority through their legacy UI protocol.
+      return (record.account as Service<GatekeeperUser & Required<Pick<GatekeeperUser, "startAppUi">>>).startAppUi({isAdmin: false});
+    }
+    if (context.protocol !== "admin-authorization-v1") throw new Error("PROVIDER_PROTOCOL_UNAVAILABLE");
+    const purpose = record.vendorId === "context" ? "context-public" : record.vendorId === "jarvis" ? "jarvis-policy" : undefined;
+    const authorization = purpose ? context.authorization : undefined;
+    if (record.description.providesUi.adminOnly) {
+      if (!authorization || !purpose) throw new Error("ADMIN_REQUIRED");
+      await authorization.assertCurrent(purpose);
+    }
+    return (record.account as Service<GatekeeperUser & Required<Pick<GatekeeperUser, "startAppUiAuthorized">>>).startAppUiAuthorized({protocol: context.protocol, authorization});
   }
 
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[], nativeFlow?: NativeAccountBrowserFlowOptions): Promise<{url?: string}> {
