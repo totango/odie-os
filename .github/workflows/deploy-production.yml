@@ -115,12 +115,15 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install pinned Wrangler outside candidate workspace
-        env:
-          NPM_CONFIG_USERCONFIG: /dev/null
-          NPM_CONFIG_GLOBALCONFIG: /dev/null
-          NPM_CONFIG_IGNORE_SCRIPTS: "true"
         run: |
           tooling="$RUNNER_TEMP/wrangler-cli"
+          user_npmrc="$RUNNER_TEMP/npm-userrc"
+          global_npmrc="$RUNNER_TEMP/npm-globalrc"
+          : > "$user_npmrc"
+          : > "$global_npmrc"
+          export NPM_CONFIG_USERCONFIG="$user_npmrc"
+          export NPM_CONFIG_GLOBALCONFIG="$global_npmrc"
+          export NPM_CONFIG_IGNORE_SCRIPTS=true
           mkdir -p "$tooling"
           cd "$RUNNER_TEMP"
           npm install --prefix "$tooling" --ignore-scripts --no-audit --no-fund --no-package-lock --no-save wrangler@4.131.1
