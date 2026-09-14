@@ -44,9 +44,13 @@ describe("native canary workflow cleanup", () => {
     expect(publish).toContain("wrangler@4.131.1");
     expect(publish).toContain("\"$WRANGLER_BIN\" containers push");
     expect(workflow).toContain('run: |\n          "$WRANGLER_BIN" deploy --config "$CANARY_CONFIG"');
-    expect(publish).not.toContain("run-install: true");
-    expect(publish).not.toContain("pnpm exec wrangler");
-    expect(publish).not.toContain("npm install --global wrangler");
+    expect(canary).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
+    expect(canary).toContain("npm install --prefix \"$tooling\" --ignore-scripts");
+    expect(canary).toContain("wrangler@4.131.1");
+    expect(canary).toContain("printf 'WRANGLER_BIN=%s\\n'");
+    expect(workflow).not.toContain("run-install: true");
+    expect(workflow).not.toContain("pnpm exec wrangler");
+    expect(workflow).not.toContain("npm install --global wrangler");
   });
 
   it("preflights the runtime idempotently before the one-shot invocation", () => {
