@@ -217,6 +217,11 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      - name: Install frozen canary dependencies without lifecycle scripts
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile --ignore-scripts
+
       - name: Install pinned Wrangler outside candidate workspace
         run: |
           tooling="$RUNNER_TEMP/wrangler-cli"
