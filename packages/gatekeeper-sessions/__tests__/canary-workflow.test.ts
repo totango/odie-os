@@ -36,9 +36,12 @@ describe("native canary workflow cleanup", () => {
     expect(publish).toContain("- name: Check out exact candidate source");
     expect(publish).toContain("ref: ${{ github.sha }}");
     expect(publish).toContain("persist-credentials: false");
-    expect(publish).toContain("voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca");
-    expect(publish).toContain("run-install: true");
-    expect(publish).toContain("pnpm exec wrangler containers push");
+    expect(publish).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
+    expect(publish).toContain("npm install --prefix \"$tooling\" --ignore-scripts");
+    expect(publish).toContain("wrangler@4.131.1");
+    expect(publish).toContain("\"$WRANGLER_BIN\" containers push");
+    expect(publish).not.toContain("run-install: true");
+    expect(publish).not.toContain("pnpm exec wrangler");
     expect(publish).not.toContain("npm install --global wrangler");
   });
 

@@ -115,15 +115,24 @@ jobs:
           timeout --signal=TERM --kill-after=15s 8m \
             packages/gatekeeper-sessions/pi-image/test-image-network-none.sh "$source_ref"
 
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Set up Vite+, Node.js and dependencies
-        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+      - name: Set up trusted Node.js runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: true
-          run-install: true
+
+      - name: Install pinned Wrangler outside candidate workspace
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+          NPM_CONFIG_GLOBALCONFIG: /dev/null
+          NPM_CONFIG_IGNORE_SCRIPTS: "true"
+        run: |
+          tooling="$RUNNER_TEMP/wrangler-cli"
+          mkdir -p "$tooling"
+          cd "$RUNNER_TEMP"
+          npm install --prefix "$tooling" --ignore-scripts --no-audit --no-fund --no-package-lock --no-save wrangler@4.131.1
+          wrangler_bin="$tooling/node_modules/.bin/wrangler"
+          test "$("$wrangler_bin" --version)" = "4.131.1"
+          printf 'WRANGLER_BIN=%s\n' "$wrangler_bin" >> "$GITHUB_ENV"
 
       - name: Mirror image to Cloudflare registry
         env:
@@ -146,7 +155,7 @@ jobs:
           local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
           test "$source_id" = "$local_id"
 
-          pnpm exec wrangler containers push "$local_ref"
+          "$WRANGLER_BIN" containers push "$local_ref"
           cloudflare_ref="$(docker image inspect --format '{{json .RepoDigests}}' "$cloudflare_tag" \
             | jq --raw-output --arg repo "$cloudflare_repo" '[.[] | select(startswith($repo + "@"))][0] // empty')"
           test -n "$cloudflare_ref"
@@ -240,7 +249,7 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm exec wrangler deploy --config "$CANARY_CONFIG"
+        run: "$WRANGLER_BIN" deploy --config "$CANARY_CONFIG"
 
       - name: Install one-shot invocation secret
         env:
@@ -249,7 +258,7 @@ jobs:
         run: |
           token="$(openssl rand -hex 32)"
           printf '::add-mask::%s\n' "$token"
-          printf '%s' "$token" | pnpm exec wrangler secret put CANARY_TOKEN --config "$CANARY_CONFIG"
+          printf '%s' "$token" | "$WRANGLER_BIN" secret put CANARY_TOKEN --config "$CANARY_CONFIG"
           printf 'CANARY_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
 
       - name: Preflight isolated tier runtime before one-shot claim
