@@ -61,7 +61,8 @@ test("production deploy uses exact checked-out source and an isolated pinned Wra
 
   assert.match(deploy, /- name: Check out exact tested source[\s\S]*ref: \$\{\{ env\.DEPLOY_SHA \}\}[\s\S]*persist-credentials: false/);
   assert.match(deploy, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/);
-  assert.match(deploy, /npm install --prefix "\$tooling" --ignore-scripts[\s\S]*wrangler@4\.131\.1/);
+  assert.match(deploy, /user_npmrc="\$RUNNER_TEMP\/npm-userrc"[\s\S]*global_npmrc="\$RUNNER_TEMP\/npm-globalrc"[\s\S]*npm install --prefix "\$tooling" --ignore-scripts[\s\S]*wrangler@4\.131\.1/);
+  assert.doesNotMatch(deploy, /NPM_CONFIG_(?:USER|GLOBAL)CONFIG: \/dev\/null/);
   assert.match(deploy, /WRANGLER_BIN=%s/);
   assert.doesNotMatch(deploy, /run-install: true|pnpm exec wrangler|npm install --global wrangler/);
   assert.match(deploy, /"\$WRANGLER_BIN" deploy --no-bundle --config workshop-backend\/wrangler\.json/);
