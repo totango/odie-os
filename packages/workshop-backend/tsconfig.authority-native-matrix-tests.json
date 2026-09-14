@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.authority-prototype-tests.json",
+  "include": ["src", "__tests__/authority-native-matrix/*.ts"]
+}

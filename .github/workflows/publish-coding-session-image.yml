@@ -12,10 +12,10 @@ env:
   NODE_VERSION: "24.14.0"
   PNPM_PACKAGE_MANAGER: "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c"
   REPOSITORY_PNPM_PACKAGE_MANAGER: "pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72"
-  OPENCODE_VERSION: "1.18.15"
-  PI_VERSION: "0.84.2"
-  PI_MCP_ADAPTER_VERSION: "2.26.0"
-  PRIME_AGENT_VERSION: "0.8.0"
+  OPENCODE_VERSION: "1.18.30"
+  PI_VERSION: "0.85.1"
+  PI_MCP_ADAPTER_VERSION: "2.33.0"
+  PRIME_AGENT_VERSION: "0.9.4"
   VALHALLA_VERSION: "0.3.0"
   CODE_SERVER_VERSION: "4.133.0"
 
@@ -30,8 +30,11 @@ jobs:
     timeout-minutes: 30
     environment: production
     steps:
-      - name: Check out repository
+      - name: Check out exact candidate source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -112,8 +115,24 @@ jobs:
           timeout --signal=TERM --kill-after=15s 8m \
             packages/gatekeeper-sessions/pi-image/test-image-network-none.sh "$source_ref"
 
-      - name: Install Wrangler
-        run: npm install --global wrangler@4.120.0
+      - name: Set up trusted Node.js runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pinned Wrangler outside candidate workspace
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+          NPM_CONFIG_GLOBALCONFIG: /dev/null
+          NPM_CONFIG_IGNORE_SCRIPTS: "true"
+        run: |
+          tooling="$RUNNER_TEMP/wrangler-cli"
+          mkdir -p "$tooling"
+          cd "$RUNNER_TEMP"
+          npm install --prefix "$tooling" --ignore-scripts --no-audit --no-fund --no-package-lock --no-save wrangler@4.131.1
+          wrangler_bin="$tooling/node_modules/.bin/wrangler"
+          test "$("$wrangler_bin" --version)" = "4.131.1"
+          printf 'WRANGLER_BIN=%s\n' "$wrangler_bin" >> "$GITHUB_ENV"
 
       - name: Mirror image to Cloudflare registry
         env:
@@ -136,7 +155,7 @@ jobs:
           local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
           test "$source_id" = "$local_id"
 
-          wrangler containers push "$local_ref"
+          "$WRANGLER_BIN" containers push "$local_ref"
           cloudflare_ref="$(docker image inspect --format '{{json .RepoDigests}}' "$cloudflare_tag" \
             | jq --raw-output --arg repo "$cloudflare_repo" '[.[] | select(startswith($repo + "@"))][0] // empty')"
           test -n "$cloudflare_ref"
@@ -230,7 +249,7 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: pnpm exec wrangler deploy --config "$CANARY_CONFIG"
+        run: "$WRANGLER_BIN" deploy --config "$CANARY_CONFIG"
 
       - name: Install one-shot invocation secret
         env:
@@ -239,7 +258,7 @@ jobs:
         run: |
           token="$(openssl rand -hex 32)"
           printf '::add-mask::%s\n' "$token"
-          printf '%s' "$token" | pnpm exec wrangler secret put CANARY_TOKEN --config "$CANARY_CONFIG"
+          printf '%s' "$token" | "$WRANGLER_BIN" secret put CANARY_TOKEN --config "$CANARY_CONFIG"
           printf 'CANARY_TOKEN=%s\n' "$token" >> "$GITHUB_ENV"
 
       - name: Preflight isolated tier runtime before one-shot claim

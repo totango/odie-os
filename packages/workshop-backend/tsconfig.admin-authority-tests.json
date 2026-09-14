@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {"types": ["./__tests__/admin-authority-configuration.d.ts", "@cloudflare/vitest-pool-workers/types"]},
+  "include": ["src/**/*", "__tests__/admin-authority-configuration.d.ts", "__tests__/admin-authority-worker.ts", "__tests__/admin-authority-fixture.ts", "__tests__/admin-authority.test.ts", "__tests__/admin-provider-evidence.test.ts"],
+  "exclude": []
+}

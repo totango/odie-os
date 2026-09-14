@@ -5,6 +5,7 @@ import router, { type Env } from '../src/index';
 import wranglerConfigText from '../wrangler.jsonc?raw';
 import productionWranglerConfigText from '../wrangler.odie-os-production.jsonc?raw';
 import nativeProductionWranglerConfigText from '../wrangler.odie-os-native-production.jsonc?raw';
+import jarvisProductionWranglerConfigText from '../../gatekeeper-jarvis/wrangler.odie-os-production.jsonc?raw';
 
 function stubFetcher(label: string): Fetcher {
   return {
@@ -53,6 +54,29 @@ describe('router fetch', () => {
     expect(await route(env, '/native/oauth-return/flow')).toBe('backend');
     expect(await route(env, '/blueprint-screenshot')).toBe('backend');
     expect(await route(env, '/blueprint-screenshot/abc')).toBe('backend');
+  });
+
+  it('routes production Slack request/run links through the browser SPA, never the native API gateway', async () => {
+    const browser = parse(productionWranglerConfigText);
+    const native = parse(nativeProductionWranglerConfigText);
+    const jarvis = parse(jarvisProductionWranglerConfigText);
+    const origin = jarvis.vars.REQUEST_BUILD_WORKSHOP_ORIGIN;
+    expect(origin).toBe(`https://${browser.name}.odie-os.workers.dev`);
+    expect(origin).not.toBe(`https://${native.name}.odie-os.workers.dev`);
+    expect(browser.vars?.NATIVE_API_ONLY).not.toBe('true');
+    expect(browser.assets.binding).toBe('ASSETS');
+    expect(browser.assets.not_found_handling).toBe('single-page-application');
+    const env = makeEnv({ ...browser.vars, ASSETS: stubFetcher('request-run SPA') });
+    const requestPath = '/requests/00000000-0000-4000-8000-000000000001';
+    const runPath = `${requestPath}/runs/00000000-0000-4000-8000-000000000002`;
+    for (const path of [requestPath, runPath]) {
+      const response = await router.fetch!(new Request(`${origin}${path}`), env, {} as ExecutionContext);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe('request-run SPA');
+      const nativeResponse = await router.fetch!(new Request(`https://${native.name}.odie-os.workers.dev${path}`),
+        makeEnv({ ...native.vars, ASSETS: stubFetcher('must not serve') }), {} as ExecutionContext);
+      expect(nativeResponse.status).toBe(404);
+    }
   });
 
   it('does not treat /api-lookalike paths as backend routes', async () => {

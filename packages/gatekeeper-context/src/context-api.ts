@@ -1,3 +1,4 @@
+import type { AdminAuthorization } from "@gadgets/workshop-shared/gatekeeper";
 // Per-account management API exposed to the library iframe. Users manage their own private
 // collections; admins also manage public collections. Everything is sharing-domain scoped.
 
@@ -60,10 +61,11 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     private env: Cloudflare.Env,
     private domain: string,
     private accountId: string,
-    private isAdmin: boolean,
+    _isAdmin: boolean,
     private collections: DurableObjectNamespace<ContextCollectionDurableObject>,
     private userLibraries: DurableObjectNamespace<UserLibraryDurableObject>,
     private registries: DurableObjectNamespace<LibraryRegistryDurableObject>,
+    private readonly authorization?: Service<AdminAuthorization>,
   ) {
     super();
   }
@@ -103,7 +105,7 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
       this.#registry().isPublic(collectionId),
     ]);
     if (owns) return;
-    if (isPublic && this.isAdmin) return;
+    if (isPublic) { await this.#assertAdmin(); return; }
     throw new Error("Collection not found or you don't have access.");
   }
 
@@ -120,12 +122,14 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     }
   }
 
-  #assertAdmin(): void {
-    if (!this.isAdmin) throw new Error("Admin access required.");
+  async #assertAdmin(): Promise<void> {
+    if (this.authorization) return this.authorization.assertCurrent("context-public");
+    throw new Error("Admin access required.");
   }
 
   async getViewerInfo(): Promise<{ isAdmin: boolean; supportsGitCollections: boolean }> {
-    return { isAdmin: this.isAdmin, supportsGitCollections: !!this.env.ARTIFACTS };
+    if (this.authorization) await this.authorization.assertCurrent("context-public");
+    return { isAdmin: !!this.authorization, supportsGitCollections: !!this.env.ARTIFACTS };
   }
 
   // --- Collection management ---
@@ -137,7 +141,7 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     icon?: string,
     source: ContextCollectionContent["source"] = "web",
   ): Promise<ContextCollectionMetadata> {
-    if (visibility === "public") this.#assertAdmin();
+    if (visibility === "public") await this.#assertAdmin();
     if (source !== "web" && source !== "git") {
       throw new Error(`Unsupported collection source: ${source}`);
     }
@@ -161,18 +165,18 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     };
 
     // Initialize before indexing; if this fails, nothing is reachable yet.
-    metadata = await this.#collection(id).initialize(metadata, this.domain, visibility === "private" ? this.accountId : "");
+    metadata = await this.#collection(id).initialize(metadata, this.domain, visibility === "private" ? this.accountId : "", this.authorization);
 
     // Private collections live in the owner's library; public ones live in the domain registry.
     try {
       if (visibility === "public") {
-        await this.#registry().addPublic(this.domain, metadataToSummary(metadata));
+        await this.#registry().addPublic(this.domain, metadataToSummary(metadata), this.authorization);
       } else {
         await this.#userLib().createOwnedCollection(id, title, description, icon);
       }
     } catch (err) {
       // Indexing failed; delete the now-unreachable collection.
-      await this.#collection(id).deleteSelf().catch(() => {});
+      await this.#collection(id).deleteSelf(this.authorization).catch(() => {});
       throw err;
     }
     return metadata;
@@ -184,7 +188,7 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
     if (options.branch !== undefined) this.#assertArtifactsAvailable();
-    await this.#collection(collectionId).updateMetadata(options);
+    await this.#collection(collectionId).updateMetadata(options, this.authorization);
   }
 
   async syncContextCollectionArtifactSource(collectionId: string): Promise<void> {
@@ -195,34 +199,34 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
-    await this.#collection(collectionId).syncArtifactSource();
+    await this.#collection(collectionId).syncArtifactSource(this.authorization);
   }
 
   async createContextCollectionGitToken(collectionId: string): Promise<ContextGitTokenCreateResult> {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
-    return this.#collection(collectionId).createGitToken();
+    return this.#collection(collectionId).createGitToken(this.authorization);
   }
 
   async listContextCollectionGitTokens(collectionId: string): Promise<ContextGitTokenList> {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
-    return this.#collection(collectionId).listGitTokens();
+    return this.#collection(collectionId).listGitTokens(this.authorization);
   }
 
   async revokeContextCollectionGitToken(collectionId: string, tokenId: string): Promise<boolean> {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
     this.#assertArtifactsAvailable();
-    return this.#collection(collectionId).revokeGitToken(tokenId);
+    return this.#collection(collectionId).revokeGitToken(tokenId, this.authorization);
   }
 
   async deleteContextCollection(collectionId: string): Promise<void> {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
-    await this.#collection(collectionId).deleteSelf();
+    await this.#collection(collectionId).deleteSelf(this.authorization);
   }
 
   async getContextCollectionMetadata(collectionId: string): Promise<ContextCollectionMetadata | null> {
@@ -256,19 +260,19 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
   }): Promise<void> {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
-    await this.#collection(collectionId).putContextDocument(path, doc);
+    await this.#collection(collectionId).putContextDocument(path, doc, this.authorization);
   }
 
   async deleteContextDocument(collectionId: string, path: string): Promise<void> {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
-    await this.#collection(collectionId).deleteContextDocument(path);
+    await this.#collection(collectionId).deleteContextDocument(path, this.authorization);
   }
 
   async moveContextDocument(collectionId: string, fromPath: string, toPath: string): Promise<void> {
     await this.#assertCanWrite(collectionId);
     await this.#assertNotBundled(collectionId);
-    await this.#collection(collectionId).moveContextDocument(fromPath, toPath);
+    await this.#collection(collectionId).moveContextDocument(fromPath, toPath, this.authorization);
   }
 
   // --- Listing & access ---
@@ -284,6 +288,8 @@ export class ContextApiImpl extends RpcTarget implements ContextApi {
       this.#collection(collectionId).getMetadata().catch(() => null),
     ]);
     if (meta?.content.source === "bundled") return false;
-    return owns || (isPublic && this.isAdmin);
+    if (owns) return true;
+    if (isPublic && this.authorization) { await this.authorization.assertCurrent("context-public"); return true; }
+    return false;
   }
 }

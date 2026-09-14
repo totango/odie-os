@@ -11,7 +11,7 @@ vi.mock('./errorReporting', () => ({ setReportedUserId: vi.fn<(id?: string) => v
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 let root: Root
 let container: HTMLDivElement
-let auth: ReturnType<typeof useAuth>
+const auth = { current: undefined as ReturnType<typeof useAuth> | undefined }
 
 function identity(id: string) {
   return { whoami: async () => ({ id, name: id, type: 'user' as const }),
@@ -22,8 +22,12 @@ function apiFor(source: ReturnType<typeof identity>) {
   return { authenticate: () => source, authenticateFromCfAccess: () => source } as unknown as RpcStub<PublicApi>
 }
 
+function captureAuth(value: ReturnType<typeof useAuth>) {
+  auth.current = value
+}
+
 function Consumer({ api }: { api: RpcStub<PublicApi> }) {
-  auth = useAuth(api)
+  captureAuth(useAuth(api))
   return null
 }
 
@@ -46,9 +50,9 @@ it('disposes the previous capability, resets the identity boundary, and restores
   const collision = identity('a@heyodie.ai')
   old.switchAccountIdentity.mockResolvedValue(collision)
   await mount(apiFor(old))
-  await act(async () => auth.switchIdentity('a@heyodie.ai'))
-  expect(auth.authenticatedApi).toBe(collision)
-  expect(auth.identityRevision).toBe(1)
+  await act(async () => auth.current!.switchIdentity('a@heyodie.ai'))
+  expect(auth.current!.authenticatedApi).toBe(collision)
+  expect(auth.current!.identityRevision).toBe(1)
   expect(old[Symbol.dispose]).toHaveBeenCalled()
   const reconnected = identity('a@totango.com')
   const restored = identity('a@heyodie.ai')
@@ -56,19 +60,19 @@ it('disposes the previous capability, resets the identity boundary, and restores
   await act(async () => root.render(<Consumer api={apiFor(reconnected)} />))
   expect(reconnected.switchAccountIdentity).toHaveBeenCalledWith('a@heyodie.ai')
   expect(reconnected[Symbol.dispose]).toHaveBeenCalled()
-  expect(auth.authenticatedApi).toBe(restored)
-  expect(auth.identityRevision).toBe(1)
+  expect(auth.current!.authenticatedApi).toBe(restored)
+  expect(auth.current!.identityRevision).toBe(1)
 })
 
 it('does not carry a choice into a new login', async () => {
   const old = identity('a@totango.com')
   old.switchAccountIdentity.mockResolvedValue(identity('a@heyodie.ai'))
   await mount(apiFor(old))
-  await act(async () => auth.switchIdentity('a@heyodie.ai'))
-  await act(async () => auth.login('login-two'))
-  expect(auth.authenticatedApi).toBe(old)
+  await act(async () => auth.current!.switchIdentity('a@heyodie.ai'))
+  await act(async () => auth.current!.login('login-two'))
+  expect(auth.current!.authenticatedApi).toBe(old)
   expect(old.switchAccountIdentity).toHaveBeenCalledTimes(1)
-  expect(auth.identityRevision).toBe(2)
+  expect(auth.current!.identityRevision).toBe(2)
 })
 
 it('disposes a late switch result after logout instead of restoring account access', async () => {
@@ -78,13 +82,13 @@ it('disposes a late switch result after logout instead of restoring account acce
   old.switchAccountIdentity.mockReturnValue(new Promise(resolve => { finish = resolve }))
   await mount(apiFor(old))
   let switching!: Promise<void>
-  await act(async () => { switching = auth.switchIdentity('a@heyodie.ai') })
-  act(() => auth.logout())
+  await act(async () => { switching = auth.current!.switchIdentity('a@heyodie.ai') })
+  act(() => auth.current!.logout())
   await act(async () => {
     finish(collision)
     await expect(switching).rejects.toThrow('login changed')
   })
-  expect(auth.authenticatedApi).toBeNull()
+  expect(auth.current!.authenticatedApi).toBeNull()
   expect(collision[Symbol.dispose]).toHaveBeenCalledOnce()
 })
 
@@ -93,8 +97,8 @@ it('keeps the current capability when the server denies switching', async () => 
   old.switchAccountIdentity.mockRejectedValue(new Error('fresh SSO required'))
   await mount(apiFor(old))
   await act(async () => {
-    await expect(auth.switchIdentity('a@heyodie.ai')).rejects.toThrow('fresh SSO')
+    await expect(auth.current!.switchIdentity('a@heyodie.ai')).rejects.toThrow('fresh SSO')
   })
-  expect(auth.authenticatedApi).toBe(old)
-  expect(auth.identityRevision).toBeUndefined()
+  expect(auth.current!.authenticatedApi).toBe(old)
+  expect(auth.current!.identityRevision).toBeUndefined()
 })

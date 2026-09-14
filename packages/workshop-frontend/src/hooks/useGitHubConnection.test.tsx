@@ -44,20 +44,23 @@ function createApi() {
 }
 
 async function renderHook() {
-  let latest: GitHubConnectionState | undefined
+  const latest = { current: undefined as GitHubConnectionState | undefined }
   let root: Root | undefined
   const container = document.createElement('div')
   document.body.append(container)
+  function capture(value: GitHubConnectionState) {
+    latest.current = value
+  }
   function Probe() {
-    latest = useGitHubConnection()
+    capture(useGitHubConnection())
     return null
   }
   root = createRoot(container)
   await act(async () => root!.render(<Probe />))
   return {
     get value() {
-      if (!latest) throw new Error('hook not rendered')
-      return latest
+      if (!latest.current) throw new Error('hook not rendered')
+      return latest.current
     },
     rerender: async () => act(async () => root!.render(<Probe />)),
     unmount: async () => {

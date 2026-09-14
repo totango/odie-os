@@ -1,0 +1,87 @@
+// Test-only combined Worker namespace for declaration generation; never deployed.
+{
+  "name": "admin-authority-tests",
+  "main": "admin-authority-worker.ts",
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": [
+    "experimental",
+    "nodejs_compat",
+    "allow_irrevocable_stub_storage"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "TEST_OVERSEER",
+        "class_name": "OverseerDurableObject"
+      },
+      {
+        "name": "TEST_USER",
+        "class_name": "UserDurableObject"
+      },
+      {
+        "name": "TEST_ADMIN",
+        "class_name": "AdminSettings"
+      },
+      {
+        "name": "TEST_AUTHORITY",
+        "class_name": "AdminAuthority"
+      },
+      {
+        "name": "TEST_ADMIN_PROVIDERS",
+        "class_name": "AdminProviderTestHooks"
+      },
+      {
+        "name": "TEST_CONTEXT_COLLECTIONS",
+        "class_name": "ContextCollectionDurableObject"
+      },
+      {
+        "name": "TEST_USER_LIBRARIES",
+        "class_name": "UserLibraryDurableObject"
+      },
+      {
+        "name": "TEST_LIBRARY_REGISTRIES",
+        "class_name": "LibraryRegistryDurableObject"
+      },
+      {
+        "name": "TEST_JARVIS_POLICY",
+        "class_name": "JarvisPolicy"
+      },
+      {
+        "name": "TEST_COMMUNITY_REQUESTS",
+        "class_name": "CommunityRequests"
+      },
+      {
+        "name": "TEST_PENDING_LOGIN",
+        "class_name": "PendingLogin"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "fixture-v1",
+      "new_sqlite_classes": [
+        "OverseerDurableObject",
+        "UserDurableObject",
+        "AdminSettings",
+        "AdminAuthority",
+        "AdminProviderTestHooks",
+        "ContextCollectionDurableObject",
+        "UserLibraryDurableObject",
+        "LibraryRegistryDurableObject",
+        "JarvisPolicy",
+        "CommunityRequests",
+        "PendingLogin"
+      ]
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "BLUEPRINTS",
+      "id": "fixture-blueprints"
+    },
+    {
+      "binding": "CONTEXT_COLLECTIONS",
+      "id": "fixture-context"
+    }
+  ]
+}

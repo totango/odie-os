@@ -1,0 +1,13 @@
+{
+  "name": "authority-native-matrix",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{"name": "MATRIX_AUTHORITY", "class_name": "MatrixAuthority"}]
+  },
+  "migrations": [{"tag": "matrix-only", "new_sqlite_classes": ["MatrixAuthority"]}],
+  "services": [
+    {"binding": "MATRIX_SERVICE", "service": "authority-native-matrix", "entrypoint": "MatrixService"}
+  ]
+}

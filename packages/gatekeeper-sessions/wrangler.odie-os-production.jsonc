@@ -45,6 +45,12 @@
       "max_instances": 2
     },
     {
+      "class_name": "RequestBuildSandbox",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    },
+    {
       "class_name": "ProductFeedbackSandbox",
       "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
       "instance_type": "standard-1",
@@ -57,6 +63,7 @@
       { "name": "SESSION_SANDBOX_STANDARD_2", "class_name": "CodingSessionSandboxStandard2" },
       { "name": "SESSION_SANDBOX_STANDARD_3", "class_name": "CodingSessionSandboxStandard3" },
       { "name": "SESSION_SANDBOX_STANDARD_4", "class_name": "CodingSessionSandboxStandard4" },
+      { "name": "REQUEST_BUILD_SANDBOX", "class_name": "RequestBuildSandbox" },
       { "name": "PRODUCT_FEEDBACK_SANDBOX", "class_name": "ProductFeedbackSandbox" },
       { "name": "SESSION_CAPACITY", "class_name": "CodingSessionCapacity" },
       { "name": "SESSION_POLICIES", "class_name": "CodingSessionPolicy" },
@@ -101,6 +108,10 @@
     {
       "tag": "v5",
       "new_sqlite_classes": ["ProductFeedbackSandbox"]
+    },
+    {
+      "tag": "v6-request-build",
+      "new_sqlite_classes": ["RequestBuildSandbox"]
     }
   ],
   "observability": {

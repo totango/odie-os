@@ -983,7 +983,7 @@ export default function ContextLibraryPage() {
             c.title.toLowerCase().includes(searchLower) ||
             c.description.toLowerCase().includes(searchLower),
         )
-        .sort((a, b) => {
+        .toSorted((a, b) => {
           if (a.source !== b.source) return a.source === "public" ? -1 : 1;
           return a.title.localeCompare(b.title);
         }),
@@ -1637,7 +1637,9 @@ function GitTokenManagementModal({
         <div className="space-y-3 px-4 py-5 sm:px-6">
           <div className="flex items-center justify-between gap-3">
             <p className="max-w-sm text-[12px] leading-4 text-kumo-subtle">
-              Create a token to mirror content from an external git repository.
+              Create a secret write credential to mirror content from an external git repository.
+              Public collections are public to read, not to write. Issued tokens remain valid until expiry
+              or explicit revocation here; removing their issuer as an administrator does not revoke them.
             </p>
             <WorkshopButton
               tone="secondary"

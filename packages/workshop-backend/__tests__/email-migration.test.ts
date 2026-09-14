@@ -24,7 +24,7 @@ function publicApi(verifiedEmail?: string, enabled = true, admins: string[] = []
   Object.defineProperty(ctx, "exports", { value: {
     UserDurableObject: env.TEST_USER,
     OverseerDurableObject: env.TEST_OVERSEER,
-    AdminSettings: env.TEST_ADMIN,
+    AdminSettings: env.TEST_ADMIN, AdminAuthority: env.TEST_AUTHORITY,
   } });
   const config = { ...env, AUTH_EMAIL_DOMAIN_ALIASES: enabled ? migration.AUTH_EMAIL_DOMAIN_ALIASES : undefined,
     ADMINS: admins } as Cloudflare.Env;
@@ -110,6 +110,7 @@ describe("real user DO migration and capability boundaries", () => {
     await next.setOwnDisplayName("Collision data");
     await old.setSimplifiedTechnicalEnglishEnabled(true);
     await next.setSimplifiedTechnicalEnglishEnabled(false);
+    await runInDurableObject(env.TEST_AUTHORITY.getByName(""), instance => { Reflect.get(instance, "env").ADMINS = [n.old]; });
     const api = publicApi(n.next, true, [n.old]);
     const original = await api.authenticate(`${n.old}:${oldSecret}`);
     const collisionToken = await api.authenticate(`${n.next}:${nextSecret}`);

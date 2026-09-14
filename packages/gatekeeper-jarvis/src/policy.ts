@@ -1,3 +1,4 @@
+import { validateAdminFenceChallenge, type AdminAuthorization, type AdminFenceChallenge, type AdminFenceEvidence } from "@gadgets/workshop-shared/gatekeeper";
 import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import {
@@ -121,7 +122,17 @@ function sameTools(actual: readonly string[] | undefined, expected: readonly str
 
 /** Deployment-global Durable Object storing the current JARVIS policy. */
 export class JarvisPolicy extends DurableObject<Env> {
-  /** Reads the policy, initializing defaults and enforcing reserved Chat boundaries. */
+  /** Private attestation from the policy mutation owner, not an old account/UI wrapper. */
+  adminFenceReadiness(challenge: AdminFenceChallenge): AdminFenceEvidence {
+    validateAdminFenceChallenge(challenge);
+    return {...challenge, provider: "jarvis", domain: "global", fenceVersion: 1,
+      registryRevision: 0, ownerCount: 1, inventory: "global-policy"};
+  }
+  /**
+   * Ordinary provider read: tool scopes/revision already appear in singleton authority keys;
+   * syncCode is nonsensitive UI metadata. This value-only read conveys no mutation authority.
+   * Keep the old wire shape for ordinary retained account wrappers.
+   */
   get(): JarvisToolPolicy {
     const stored = this.ctx.storage.kv.get<JarvisToolPolicy>("policy");
     const policy = stored ? upgradeDefaultJarvisToolPolicy(stored) : defaultJarvisToolPolicy();
@@ -131,7 +142,10 @@ export class JarvisPolicy extends DurableObject<Env> {
   }
 
   /** Replaces the policy and rotates its immutable authority revision. */
-  update(input: JarvisToolPolicyInput): JarvisToolPolicy {
+  async update(input: JarvisToolPolicyInput, authorization?: Service<AdminAuthorization>): Promise<JarvisToolPolicy> {
+    // An old boolean UI child sends only input. It must fail here, even on old wrapper code.
+    if (!authorization) throw new Error("Admin access required.");
+    await authorization.assertCurrent("jarvis-policy");
     const policy = normalizeJarvisToolPolicy(input, this.get().revision + 1);
     this.ctx.storage.kv.put("policy", policy);
     return policy;
@@ -142,24 +156,24 @@ export class JarvisPolicy extends DurableObject<Env> {
 @validateRpc()
 export class JarvisPolicyApi extends RpcTarget {
   constructor(
-    private readonly policy: {
-      get(): JarvisToolPolicy | Promise<JarvisToolPolicy>;
-      update(input: JarvisToolPolicyInput): JarvisToolPolicy | Promise<JarvisToolPolicy>;
-    },
+    private readonly policy: Pick<JarvisPolicy, "get" | "update"> | DurableObjectStub<JarvisPolicy>,
     private readonly isAdmin: boolean,
+    private readonly authorization?: Service<AdminAuthorization>,
   ) {
     super();
   }
 
   /** Reads the deployment-global policy for display. */
   async get(): Promise<JarvisToolPolicy> {
-    if (!this.isAdmin) throw new Error("Only a deployment administrator can view JARVIS policy.");
+    if (this.authorization) await this.authorization.assertCurrent("jarvis-policy");
+    else if (!this.isAdmin) throw new Error("Only a deployment administrator can view JARVIS policy.");
     return this.policy.get();
   }
 
   /** Updates policy only for a deployment administrator. */
   async update(input: JarvisToolPolicyInput): Promise<JarvisToolPolicy> {
-    if (!this.isAdmin) throw new Error("Only a deployment administrator can update JARVIS policy.");
-    return this.policy.update(input);
+    if (this.authorization) await this.authorization.assertCurrent("jarvis-policy");
+    else throw new Error("Only a deployment administrator can update JARVIS policy.");
+    return this.policy.update(input, this.authorization);
   }
 }

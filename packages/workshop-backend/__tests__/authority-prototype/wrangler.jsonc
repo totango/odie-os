@@ -1,0 +1,13 @@
+{
+  "name": "authority-prototype",
+  "main": "./worker.ts",
+  "compatibility_date": "2026-02-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{"name": "PROTOTYPE_AUTHORITY", "class_name": "PrototypeAuthority"}]
+  },
+  "migrations": [{"tag": "prototype-only", "new_sqlite_classes": ["PrototypeAuthority"]}],
+  "services": [
+    {"binding": "PROTOTYPE_SERVICE", "service": "authority-prototype", "entrypoint": "PrototypeService"}
+  ]
+}

@@ -19,7 +19,7 @@ describe("native canary workflow cleanup", () => {
     expect(cleanup).not.toContain("pnpm exec wrangler delete");
   });
 
-  it("uses stable run-and-tier names and least privilege", () => {
+  it("uses stable run-and-tier names, least privilege, and lockfile-selected Wrangler", () => {
     expect(workflow).toContain("attempt-${{ github.run_attempt }}");
     expect(workflow).toContain('worker="odie-coding-canary-${GITHUB_RUN_ID}-${INSTANCE_TIER}"');
     expect(workflow).toContain("instanceTier: [standard-1, standard-2, standard-3, standard-4]");
@@ -32,6 +32,17 @@ describe("native canary workflow cleanup", () => {
     const cleanup = workflow.slice(workflow.indexOf("  cleanup:"));
     expect(cleanup).toContain("permissions:\n      contents: read");
     expect(cleanup).not.toContain("packages: write");
+    const publish = workflow.slice(workflow.indexOf("  publish:"), workflow.indexOf("  canary:"));
+    expect(publish).toContain("- name: Check out exact candidate source");
+    expect(publish).toContain("ref: ${{ github.sha }}");
+    expect(publish).toContain("persist-credentials: false");
+    expect(publish).toContain("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020");
+    expect(publish).toContain("npm install --prefix \"$tooling\" --ignore-scripts");
+    expect(publish).toContain("wrangler@4.131.1");
+    expect(publish).toContain("\"$WRANGLER_BIN\" containers push");
+    expect(publish).not.toContain("run-install: true");
+    expect(publish).not.toContain("pnpm exec wrangler");
+    expect(publish).not.toContain("npm install --global wrangler");
   });
 
   it("preflights the runtime idempotently before the one-shot invocation", () => {

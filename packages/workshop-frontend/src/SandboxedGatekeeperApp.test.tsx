@@ -34,6 +34,10 @@ vi.mock("./errorReporting", () => ({
 
 const WORKSPACE_ID = "a".repeat(64);
 
+function capture<T>(target: { current: T | undefined }, value: T) {
+  target.current = value;
+}
+
 const listGadgets = vi.fn<() => Promise<{ id: string; title: string }[]>>(async () => [
   { id: WORKSPACE_ID, title: "Daily Brief" },
 ]);
@@ -268,10 +272,10 @@ describe("SandboxedGatekeeperApp navigation", () => {
       title: "Jira",
       composition: { kind: "work-items", role: "jira", embeddedOnly: true },
     };
-    let setDependencies: ((dependencies: { app: GatekeeperAppInfo; capability: RpcStub<RpcTarget> }[]) => void) | undefined;
+    const setDependencies = { current: undefined as ((dependencies: { app: GatekeeperAppInfo; capability: RpcStub<RpcTarget> }[]) => void) | undefined };
     const App = () => {
       const [dependencies, updateDependencies] = useState<{ app: GatekeeperAppInfo; capability: RpcStub<RpcTarget> }[]>([]);
-      setDependencies = updateDependencies;
+      capture(setDependencies, updateDependencies);
       return <SandboxedGatekeeperApp
         frame={frame}
         gatekeeperVendorId="work-items"
@@ -298,7 +302,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     }));
     await expect(host.listCapabilities()).resolves.toEqual([]);
 
-    await act(async () => setDependencies!([{ app: dependency, capability: dependencyCapability! }]));
+    await act(async () => setDependencies.current!([{ app: dependency, capability: dependencyCapability! }]));
     const secondIframe = container.querySelector("iframe");
     expect(secondIframe).not.toBe(firstIframe);
 
@@ -325,10 +329,10 @@ describe("SandboxedGatekeeperApp navigation", () => {
       title: "Jira",
       composition: { kind: "work-items", role: "jira", embeddedOnly: true },
     };
-    let setCapability: ((capability: RpcStub<RpcTarget>) => void) | undefined;
+    const setCapability = { current: undefined as ((capability: RpcStub<RpcTarget>) => void) | undefined };
     const App = () => {
       const [capability, updateCapability] = useState<{ value: RpcStub<RpcTarget> }>({ value: firstCapability });
-      setCapability = (value) => updateCapability({ value });
+      capture(setCapability, (value) => updateCapability({ value }));
       return <SandboxedGatekeeperApp
         frame={frame}
         gatekeeperVendorId="work-items"
@@ -355,7 +359,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await expect(source.identify()).resolves.toBe("old-jira");
     source[Symbol.dispose]();
 
-    await act(async () => setCapability!(dependencyCapability!));
+    await act(async () => setCapability.current!(dependencyCapability!));
     const secondIframe = container.querySelector("iframe")!;
     expect(secondIframe).not.toBe(firstIframe);
 
@@ -394,10 +398,10 @@ describe("SandboxedGatekeeperApp navigation", () => {
       title: "Jira",
       composition: { kind: "work-items", role: "jira", embeddedOnly: true },
     };
-    let setCapability: ((capability: RpcStub<RpcTarget>) => void) | undefined;
+    const setCapability = { current: undefined as ((capability: RpcStub<RpcTarget>) => void) | undefined };
     const App = () => {
       const [capability, updateCapability] = useState<{ value: RpcStub<RpcTarget> }>({ value: firstCapability });
-      setCapability = (value) => updateCapability({ value });
+      capture(setCapability, (value) => updateCapability({ value }));
       return <SandboxedGatekeeperApp
         frame={frame}
         gatekeeperVendorId="work-items"
@@ -425,7 +429,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await expect(source.identify()).resolves.toBe("old-jira");
     source[Symbol.dispose]();
 
-    await act(async () => setCapability!(dependencyCapability!));
+    await act(async () => setCapability.current!(dependencyCapability!));
     const secondIframe = container.querySelector("iframe")!;
     expect(secondIframe).not.toBe(firstIframe);
     expect(messageHandlers).toHaveLength(2);
@@ -470,13 +474,13 @@ describe("SandboxedGatekeeperApp navigation", () => {
       title: "Zendesk",
       composition: { kind: "work-items", role: "zendesk", embeddedOnly: true },
     };
-    let setDependencies: ((dependencies: { app: GatekeeperAppInfo; capability: RpcStub<RpcTarget> }[]) => void) | undefined;
+    const setDependencies = { current: undefined as ((dependencies: { app: GatekeeperAppInfo; capability: RpcStub<RpcTarget> }[]) => void) | undefined };
     const App = () => {
       const [dependencies, updateDependencies] = useState([
         { app: jira, capability: dependencyCapability! },
         { app: zendesk, capability: zendeskCapability },
       ]);
-      setDependencies = updateDependencies;
+      capture(setDependencies, updateDependencies);
       return <SandboxedGatekeeperApp frame={frame} gatekeeperVendorId="work-items" dependencies={dependencies} />;
     };
     const rootRoute = createRootRoute({ component: App });
@@ -497,7 +501,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     }));
     await expect(host.listCapabilities()).resolves.toEqual([jira, zendesk]);
 
-    await act(async () => setDependencies!([
+    await act(async () => setDependencies.current!([
       { app: zendesk, capability: zendeskCapability },
       { app: jira, capability: dependencyCapability! },
     ]));

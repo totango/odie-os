@@ -2,6 +2,7 @@
 // sessions when building their enabled collection set.
 
 import { DurableObject } from "cloudflare:workers";
+import { validateAdminFenceChallenge, type AdminAuthorization, type AdminFenceChallenge, type AdminFenceEvidence } from "@gadgets/workshop-shared/gatekeeper";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import {
   bundledCollectionSummary, diffBundledRegistryPlan, validateSharingDomain,
@@ -25,6 +26,7 @@ function makeRegistryStorage(storage: DurableObjectStorage) {
     singletons: {
       sharingDomain: "",
       bundledManifestFingerprint: "",
+      registryRevision: 0,
     },
   });
 }
@@ -38,6 +40,7 @@ export class LibraryRegistryDurableObject extends DurableObject<Cloudflare.Env> 
   }
 
   async #writeSnapshot(domain: string): Promise<void> {
+    this.storage.registryRevision.put(this.storage.registryRevision.get() + 1);
     let collections = [...this.storage.publicCollections.list()];
     await this.env.CONTEXT_COLLECTIONS.put(
       publicCollectionsKvKey(domain), JSON.stringify(collections));
@@ -56,11 +59,37 @@ export class LibraryRegistryDurableObject extends DurableObject<Cloudflare.Env> 
     return ns.get(ns.idFromName(domainName(this.storage.sharingDomain.get(), id)));
   }
 
+  /** Complete bounded scan of the indexed public inventory, checking each actual durable owner. */
+  async adminFenceReadiness(domain: string, challenge: AdminFenceChallenge): Promise<AdminFenceEvidence> {
+    validateAdminFenceChallenge(challenge);
+    domain = this.#domain(domain);
+    const revision = this.storage.registryRevision.get();
+    const ids: string[] = [];
+    for (const summary of this.storage.publicCollections.list()) {
+      if (ids.length >= 1000 || summary.visibility !== "public" || ids.includes(summary.id)) {
+        throw new Error("ADMIN_FENCE_INVENTORY_INCOMPLETE");
+      }
+      ids.push(summary.id);
+    }
+    for (const id of ids) {
+      const owner = await this.#collection(id).adminFenceReadiness(domain, id);
+      if (owner.domain !== domain || owner.collectionId !== id || owner.fenceVersion !== 1) {
+        throw new Error("ADMIN_FENCE_OWNER_MISMATCH");
+      }
+    }
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(ids.toSorted())));
+    if (revision !== this.storage.registryRevision.get()) throw new Error("ADMIN_FENCE_INVENTORY_CHANGED");
+    return {...challenge, provider: "context", domain, fenceVersion: 1, registryRevision: revision,
+      ownerCount: ids.length, inventory: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("")};
+  }
+
   isPublic(collectionId: string): boolean {
     return !!this.storage.publicCollections.get(collectionId);
   }
 
-  async addPublic(domain: string, summary: ContextCollectionSummary): Promise<void> {
+  async addPublic(domain: string, summary: ContextCollectionSummary, authorization?: Service<AdminAuthorization>): Promise<void> {
+    if (!authorization) throw new Error("Admin access required.");
+    await authorization.assertCurrent("context-public");
     domain = this.#domain(domain);
     let record = this.storage.bundledRecords.get(summary.id);
     if (record?.source === "bundled") {
@@ -77,7 +106,9 @@ export class LibraryRegistryDurableObject extends DurableObject<Cloudflare.Env> 
     await this.#writeSnapshot(domain);
   }
 
-  async removePublic(domain: string, collectionId: string): Promise<void> {
+  async removePublic(domain: string, collectionId: string, authorization?: Service<AdminAuthorization>): Promise<void> {
+    if (!authorization) throw new Error("Admin access required.");
+    await authorization.assertCurrent("context-public");
     domain = this.#domain(domain);
     if (this.storage.publicCollections.get(collectionId)) {
       this.storage.publicCollections.delete(collectionId);

@@ -68,6 +68,14 @@ describe('RequiredConnectionsGate', () => {
     return container
   }
 
+  it.each(['/requests', '/requests/new', '/requests/request-1'])('leaves %s available without connector reads or subscriptions', async pathname => {
+    const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
+    const rendered = await renderGate(api, pathname)
+    expect(rendered.textContent).toContain('Unlocked app')
+    expect(api.getRequiredConnectionStatuses).not.toHaveBeenCalled()
+    expect(api.subscribeConnectedAccounts).not.toHaveBeenCalled()
+  })
+
   it('blocks gated routes until all required connections are healthy', async () => {
     const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'missing' }])
 
@@ -76,6 +84,7 @@ describe('RequiredConnectionsGate', () => {
     expect(rendered.textContent).toContain('Connect required services to continue')
     expect(rendered.textContent).toContain('GitHub')
     expect(rendered.textContent).not.toContain('Unlocked app')
+    expect(rendered.querySelector('nav[aria-label="Recovery pages"] a[href="/requests"]')?.textContent).toBe('Community requests')
   })
 
   it('starts a missing connection and shows a popup-blocked fallback', async () => {
@@ -125,6 +134,7 @@ describe('RequiredConnectionsGate', () => {
 
     expect(rendered.textContent).toContain('We could not check required connections')
     expect(rendered.textContent).not.toContain('Unlocked app')
+    expect(rendered.querySelector('a[href="/requests"]')).not.toBeNull()
   })
 
   it('locks a previously healthy route when a live recheck fails', async () => {

@@ -11,7 +11,7 @@ assert.ok(script);
 
 test("model synchronization runs only after the backend metadata is deployed", () => {
   assert.ok(workflow.indexOf("- name: Sync Team PI Codex models") >
-    workflow.indexOf("wrangler deploy --no-bundle --config workshop-backend/wrangler.json"));
+    workflow.indexOf('"$WRANGLER_BIN" deploy --no-bundle --config workshop-backend/wrangler.json'));
 });
 
 test("production model sync puts Astra first without removing configured profiles", () => {
@@ -21,7 +21,7 @@ test("production model sync puts Astra first without removing configured profile
   });
   assert.equal(result.status, 0);
   assert.equal(result.stdout, "gpt-6-astra,gpt-5.6-sol,custom-model");
-  assert.match(step, /wrangler secret put TEAM_PI_CODEX_MODELS --name odie-os-backend/);
+  assert.match(step, /"\$WRANGLER_BIN" secret put TEAM_PI_CODEX_MODELS --name odie-os-backend/);
   assert.match(step, /TEAM_PI_CODEX_MODELS: \$\{\{ secrets\.TEAM_PI_CODEX_MODELS \}\}/);
 });
 

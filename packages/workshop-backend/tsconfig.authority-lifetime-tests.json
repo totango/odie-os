@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.authority-prototype-tests.json",
+  "include": [
+    "src",
+    "__tests__/authority-prototype/env.d.ts",
+    "__tests__/authority-prototype/lifetime.test.ts"
+  ]
+}

@@ -2,6 +2,7 @@
 // public domain registry.
 
 import { DurableObject } from "cloudflare:workers";
+import type { AdminAuthorization } from "@gadgets/workshop-shared/gatekeeper";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import {
   ContextCollectionContent, ContextCollectionMetadata, ContextCollectionVisibility,
@@ -163,6 +164,19 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     return artifacts;
   }
 
+  // Old UI children omit authorization. Fence at the durable resource owner, not the wrapper.
+  // Private access is carried by the account's collection capability and never depends on admin.
+  async #assertCanWrite(authorization?: Service<AdminAuthorization>): Promise<void> {
+    // Bundled content is immutable regardless of administrator status.
+    this.#assertNotBundled();
+    const meta = this.getMetadata();
+    if (!meta.id) throw new Error("Collection not found.");
+    if (meta.visibility === "public") {
+      if (!authorization) throw new Error("Admin access required.");
+      await authorization.assertCurrent("context-public");
+    }
+  }
+
   #assertNotBundled(): void {
     if (this.getMetadata().content.source === "bundled") {
       throw new Error("Bundled Context collections are read-only.");
@@ -193,7 +207,11 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
    * Initialize a new collection. Private collections pass an owner; public collections pass "".
    * Rejects re-initialization so a (vanishingly unlikely) id reuse can't clobber existing content.
    */
-  async initialize(metadata: ContextCollectionMetadata, sharingDomain: string, ownerAccountId: string): Promise<ContextCollectionMetadata> {
+  async initialize(metadata: ContextCollectionMetadata, sharingDomain: string, ownerAccountId: string, authorization?: Service<AdminAuthorization>): Promise<ContextCollectionMetadata> {
+    if (metadata.visibility === "public") {
+      if (!authorization) throw new Error("Admin access required.");
+      await authorization.assertCurrent("context-public");
+    }
     if (this.getMetadata().id) {
       throw new Error("Collection already exists.");
     }
@@ -252,6 +270,15 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
       this.storage.skillIndexVersion.put(SKILL_INDEX_VERSION);
     });
     return this.getMetadata();
+  }
+
+  /** Owner-code attestation for a public registry scan; never consults or changes Git credentials. */
+  adminFenceReadiness(domain: string, collectionId: string): {domain: string; collectionId: string; fenceVersion: 1} {
+    const meta = this.getMetadata();
+    if (domain !== this.#domain() || collectionId !== meta.id || meta.visibility !== "public") {
+      throw new Error("ADMIN_FENCE_OWNER_MISMATCH");
+    }
+    return {domain: this.#domain(), collectionId: meta.id, fenceVersion: 1};
   }
 
   getMetadata(): ContextCollectionMetadata {
@@ -345,7 +372,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     description?: string;
     icon?: string;
     branch?: string;
-  }): Promise<void> {
+  }, authorization?: Service<AdminAuthorization>): Promise<void> {
+    await this.#assertCanWrite(authorization);
     this.#assertNotBundled();
     let meta = this.getMetadata();
     let changed = false;
@@ -421,7 +449,9 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   async putContextDocument(
       path: string,
-      doc: { description: string; body: string; contentType?: string }): Promise<void> {
+      doc: { description: string; body: string; contentType?: string },
+      authorization?: Service<AdminAuthorization>): Promise<void> {
+    await this.#assertCanWrite(authorization);
     this.#assertWebWritable();
     validateDocumentPath(path);
     let contentType = doc.contentType || contentTypeFromPath(path);
@@ -447,7 +477,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     await this.#propagate();
   }
 
-  async deleteContextDocument(path: string): Promise<void> {
+  async deleteContextDocument(path: string, authorization?: Service<AdminAuthorization>): Promise<void> {
+    await this.#assertCanWrite(authorization);
     this.#assertWebWritable();
     // Mutations reject invalid paths; reads stay lenient.
     validateDocumentPath(path);
@@ -465,7 +496,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     await this.#propagate();
   }
 
-  async moveContextDocument(from: string, to: string): Promise<void> {
+  async moveContextDocument(from: string, to: string, authorization?: Service<AdminAuthorization>): Promise<void> {
+    await this.#assertCanWrite(authorization);
     this.#assertWebWritable();
     validateDocumentPath(from);
     validateDocumentPath(to);
@@ -525,12 +557,14 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   // --- Artifact-backed projection ---
 
-  async syncArtifactSource(): Promise<void> {
+  async syncArtifactSource(authorization?: Service<AdminAuthorization>): Promise<void> {
+    await this.#assertCanWrite(authorization);
     if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
     await this.#refreshArtifactSource();
   }
 
-  async createGitToken(): Promise<ContextGitTokenCreateResult> {
+  async createGitToken(authorization?: Service<AdminAuthorization>): Promise<ContextGitTokenCreateResult> {
+    await this.#assertCanWrite(authorization);
     let meta = this.getMetadata();
     if (meta.content.source !== "git") throw new Error("Collection is not git-based.");
     let repo = await this.#artifacts().get(meta.id);
@@ -542,7 +576,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     };
   }
 
-  async listGitTokens(): Promise<ContextGitTokenList> {
+  async listGitTokens(authorization?: Service<AdminAuthorization>): Promise<ContextGitTokenList> {
+    await this.#assertCanWrite(authorization);
     if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
     let meta = this.getMetadata();
     let repo = await this.#artifacts().get(meta.id);
@@ -560,7 +595,8 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
     };
   }
 
-  async revokeGitToken(tokenId: string): Promise<boolean> {
+  async revokeGitToken(tokenId: string, authorization?: Service<AdminAuthorization>): Promise<boolean> {
+    await this.#assertCanWrite(authorization);
     if (!this.#isGitBased()) throw new Error("Collection is not git-based.");
     let meta = this.getMetadata();
     let repo = await this.#artifacts().get(meta.id);
@@ -707,14 +743,15 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
 
   // --- Deletion ---
 
-  async deleteSelf(): Promise<void> {
+  async deleteSelf(authorization?: Service<AdminAuthorization>): Promise<void> {
+    await this.#assertCanWrite(authorization);
     let meta = this.getMetadata();
     this.#assertNotBundled();
     let id = meta.id;
 
     if (id) {
       if (meta.visibility === "public") {
-        await this.#registry().removePublic(this.#domain(), id);
+        await this.#registry().removePublic(this.#domain(), id, authorization);
       } else {
         await this.#ownerLibrary().removeOwnedCollection(id);
       }
@@ -736,6 +773,7 @@ export class ContextCollectionDurableObject extends DurableObject<Cloudflare.Env
   /** Account revocation clears the whole user-library index separately; don't update it per item. */
   async deleteForRevokedOwner(): Promise<void> {
     let meta = this.getMetadata();
+    if (meta.visibility !== "private") throw new Error("Private collection required.");
     this.#assertNotBundled();
     if (meta.content.source === "git" && meta.id && this.env.ARTIFACTS) {
       await this.env.ARTIFACTS.delete(meta.id).catch((err) => {

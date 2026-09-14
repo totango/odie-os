@@ -45,14 +45,18 @@ describe("FeatureFlagsProvider", () => {
     const first = deferred<UiFeatureFlags>();
     const second = deferred<UiFeatureFlags>();
     let currentApi = api(() => first.promise);
-    let current: ReturnType<typeof useUiFeatureFlags> | undefined;
+    const current = { value: undefined as ReturnType<typeof useUiFeatureFlags> | undefined };
 
     vi.mocked(useAuthenticatedApi).mockImplementation(
       () => ({ authenticatedApi: currentApi }) as ReturnType<typeof useAuthenticatedApi>,
     );
 
+    function capture(value: ReturnType<typeof useUiFeatureFlags>) {
+      current.value = value;
+    }
+
     function Probe() {
-      current = useUiFeatureFlags();
+      capture(useUiFeatureFlags());
       return null;
     }
 
@@ -61,17 +65,17 @@ describe("FeatureFlagsProvider", () => {
     root = createRoot(container);
 
     await act(async () => root!.render(<FeatureFlagsProvider><Probe /></FeatureFlagsProvider>));
-    expect(current).toEqual({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: true });
+    expect(current.value).toEqual({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: true });
 
     currentApi = api(() => second.promise);
     await act(async () => root!.render(<FeatureFlagsProvider><Probe /></FeatureFlagsProvider>));
-    expect(current).toEqual({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: true });
+    expect(current.value).toEqual({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: true });
 
     await act(async () => { first.resolve(RESOLVED_FLAGS); });
-    expect(current).toEqual({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: true });
+    expect(current.value).toEqual({ flags: DEFAULT_UI_FEATURE_FLAGS, loading: true });
 
     await act(async () => { second.resolve(RESOLVED_FLAGS); });
-    expect(current).toEqual({
+    expect(current.value).toEqual({
       flags: { ...DEFAULT_UI_FEATURE_FLAGS, ...RESOLVED_FLAGS },
       loading: false,
     });

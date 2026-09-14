@@ -42,6 +42,7 @@ export default {
           'node build-browser-runtime.mjs',
           'vitest run',
           'vitest run --config vitest.integration.config.ts',
+          'vitest run --config vitest.request-build.config.ts',
         ]),
         dependsOn: ['build:format-blueprints'],
       },

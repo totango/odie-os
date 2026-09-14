@@ -21,16 +21,19 @@ current deterministic coverage is:
 - **Pi**: runs the shipped `pi` binary help path, verifies the Odie Pi runtime extension can be loaded by
   the same Jiti loader baked into the image, verifies the `pi-mcp-adapter` import path, and runs a direct
   MCP lifecycle probe against the fake Workshop endpoint. The probe does not exercise Pi's MCP client.
-  The pinned Pi 0.84.2 does expose `--mode rpc` (stdio JSONL). This smoke has not yet
+  The pinned Pi 0.85.1 does expose `--mode rpc` (stdio JSONL). This smoke has not yet
   been extended to drive that protocol and does not prove a prompt-driven Pi tool loop.
-- **Prime Agent**: runs the shipped `prime-agent` binary version check and the shipped Prime kernel's
-  IPython entrypoint. The kernel-environment smoke imports `rlm.mcp`, reads and edits a fixture file,
-  runs a local shell assertion/marker command, and makes a direct HTTP `tools/list` request to the fake
-  Workshop MCP endpoint. This does not exercise Prime Agent's own tool bridge or a prompt-driven loop.
+- **Prime Agent**: runs the shipped `prime-agent` binary version check, the shipped Prime kernel's
+  IPython compatibility entrypoint, and `python -m rlm.repl` protocol 3. The REPL smoke imports
+  `rlm`, `rlm.mcp`, `rlm.bash`, and `McpIntegration`; a separate MCP2 regression uses a fake tool
+  object with `input_schema` and requires a non-empty normalized `inputSchema`. The kernel-environment
+  smoke imports `rlm.mcp`, reads and edits a fixture file, runs a local shell assertion/marker command,
+  and makes a direct HTTP `tools/list` request to the fake Workshop MCP endpoint. This does not
+  exercise Prime Agent's own prompt-driven tool loop.
 
 ## Internal machine adapter
 
-`harness-rpc.mjs` implements the verified Pi 0.84.2 and Prime 0.8.0 stdio RPC
+`harness-rpc.mjs` implements the verified Pi 0.85.1 and Prime 0.9.4 stdio RPC
 subset. It is a Node stream helper, not an HTTP endpoint, process launcher, or
 owner capability. It is not yet copied into the image or imported by the Worker
 bridge. Its eventual consumer must either package it or materialize it through
@@ -38,7 +41,7 @@ the existing owner-authorized sandbox path. Do not start a second agent against
 the same persisted conversation to provide an additional UI.
 
 The owner injects binary `readable`/`writable` streams and a version selector
-(`pi@0.84.2` or `prime@0.8.0`). It must check the executable's package version,
+(`pi@0.85.1` or `prime@0.9.4`). It must check the executable's package version,
 keep stderr separate, deliver process death to `close()`, and terminate the peer
 on `onClose`. `request(type, fields)` returns the unmodified native response;
 events arrive through `onEvent`. This intentionally does not manufacture OpenCode
@@ -105,3 +108,16 @@ failed run never promoted the recorded digest and that no checked-in Wrangler co
 to it, then delete that exact unpromoted package version through the GHCR package administration
 UI or API. Only then may the same immutable commit be rerun. Never delete a prior production digest
 or a version referenced by another tag.
+
+## Harness source update and restricted request builds
+
+Image source targets Pi0.85.1/OpenCode1.18.30/Prime0.9.4, with an explicitly selected locked OpenCode
+amd64 overlay. The existing deployed image digest is unchanged. Ordinary Pi bridges retain an
+exact0.84.2/0.85.1 compatibility window; restricted request-build SDK programs require0.85.1. Do not
+infer image promotion from these source pins. Prime0.9.4 uses the official R2 release tarball and the
+hash-locked Python kernel/MCP2 migration; promotion remains blocked on image build/smoke/canary gates
+and any documented residual dependency risk.
+
+See [restricted component evidence](../../../docs/plans/hugin-community-requests/restricted-sessions-implementation.md)
+for source/integrity provenance, protected image-lock-only regeneration, limited local SDK smoke and
+remaining image/egress/pricing/managed-authorization activation gates. No image publication occurred.

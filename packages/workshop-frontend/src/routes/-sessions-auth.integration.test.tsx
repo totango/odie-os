@@ -89,13 +89,17 @@ function createApi(runtime: CodingSessionSummary['runtime'] = 'opencode') {
 describe('authenticated session workbench transitions', () => {
   let root: Root
   let container: HTMLDivElement
-  let context: ReturnType<typeof useSessionsContext>
-  let identity: AiChatAuthorInfo | null
+  const context = {} as ReturnType<typeof useSessionsContext>
+  const identity = { current: null as AiChatAuthorInfo | null }
   let calls: Array<{ path: string; body?: unknown; signal?: AbortSignal | null }>
 
+  function captureProbe(value: ReturnType<typeof useSessionsContext>, currentUser: AiChatAuthorInfo | null) {
+    Object.assign(context, value)
+    identity.current = currentUser
+  }
+
   function Probe() {
-    context = useSessionsContext()
-    identity = useAuthenticatedApi().currentUser
+    captureProbe(useSessionsContext(), useAuthenticatedApi().currentUser)
     return null
   }
 
@@ -297,7 +301,7 @@ describe('authenticated session workbench transitions', () => {
     await render(next)
     await next.github(state === 'missing' ? 'missing' : false)
     await act(async () => next.identity.resolve(owner()))
-    expect(identity!).toEqual(owner())
+    expect(identity.current).toEqual(owner())
     expect(context.github.state).toBe(state)
     expect(container.textContent).toContain('Set up Code')
     expect(container.querySelector('[aria-label="Workbench tools"]')).toBeNull()
@@ -375,7 +379,7 @@ describe('authenticated session workbench transitions', () => {
     await render(next)
     await assertRequiredPaused(first.api, next.api)
     await act(async () => required.resolve([]))
-    expect(identity!).toBeNull()
+    expect(identity.current).toBeNull()
     expect(first.disposals.every((dispose) => dispose.mock.calls.length === 1)).toBe(true)
     expect(context.activeId).toBe(session.id)
     await assertPaused(next.api)
@@ -385,7 +389,7 @@ describe('authenticated session workbench transitions', () => {
     if (order === 'identity-first') await next.github()
     else await act(async () => next.identity.resolve(owner()))
 
-    expect(identity!).toEqual(owner())
+    expect(identity.current).toEqual(owner())
     expect(context.github.state).toBe('connected')
     expect(context.activeId).toBe(session.id)
     expect(context.title).toBe('Private title')
@@ -428,7 +432,7 @@ describe('authenticated session workbench transitions', () => {
       failed.identity.reject(new Error('Unavailable'))
       first.identity.resolve(owner())
     })
-    expect(identity!).toBeNull()
+    expect(identity.current).toBeNull()
     expect(context.github.state).toBe('loading')
     expect(failed.api.listCodingSessions).not.toHaveBeenCalled()
     expect(failed.api.codingSessionEditorAvailable).not.toHaveBeenCalled()

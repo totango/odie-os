@@ -43,7 +43,7 @@ export function piBridgeSource(runtime: "pi" | "prime-agent" = "pi"): string {
     : ["--session-dir", "/workspace/.odie-prime-agent/owner/sessions"]));
   const prime = runtime === "prime-agent";
   const packageName = prime ? "prime-agent" : "@earendil-works/pi-coding-agent";
-  const version = prime ? "0.8.0" : "0.84.2";
+  const version = prime ? "0.9.4" : "0.85.1";
   return `const argv = ${JSON.stringify(argv)};\nconst prime = ${prime};\n` +
     `const packagePath = ${JSON.stringify(`/opt/odie-pi/node_modules/${packageName}/package.json`)};\nconst version = ${JSON.stringify(version)};\n` + String.raw`
 import { spawn } from 'node:child_process';
@@ -55,7 +55,7 @@ const LIMIT = 2 * 1024 * 1024;
 const REQUEST_LIMIT = 6 * 32768 + 4096;
 const DIALOG_TIMEOUT = 30000;
 const DRAIN_TIMEOUT = 5000;
-if (JSON.parse(readFileSync(packagePath, 'utf8')).version !== version) throw new Error('Unsupported owner runtime version; expected ' + version);
+if (!(prime ? [version] : ['0.84.2', version]).includes(JSON.parse(readFileSync(packagePath, 'utf8')).version)) throw new Error('Unsupported owner runtime version; expected ' + version);
 // A crashed bridge must not silently spawn another brain against the same history.
 // The lock is intentionally retained until explicit sandbox destruction/restart.
 closeSync(openSync(prime ? '/workspace/.odie-prime-agent/owner-bridge.lock' : '/workspace/.odie-pi/owner-bridge.lock', 'wx', 0o600));

@@ -79,12 +79,15 @@ describe('ServerConfigContext updater', () => {
   })
 
   it('has a safe no-op default updater outside the provider', () => {
-    let updateConfig: ReturnType<typeof useServerConfigUpdater> | undefined
+    const updateConfig = { current: undefined as ReturnType<typeof useServerConfigUpdater> | undefined }
+    function capture(value: ReturnType<typeof useServerConfigUpdater>) {
+      updateConfig.current = value
+    }
     function Probe() {
-      updateConfig = useServerConfigUpdater()
+      capture(useServerConfigUpdater())
       return null
     }
     render(<Probe />)
-    expect(() => updateConfig?.({ siteName: 'ignored' })).not.toThrow()
+    expect(() => updateConfig.current?.({ siteName: 'ignored' })).not.toThrow()
   })
 })

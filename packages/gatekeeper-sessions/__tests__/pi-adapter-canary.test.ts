@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 const root = join(import.meta.dirname, "..");
 
 describe("pinned pi-mcp-adapter iframe fail-closed canary", () => {
-  it("runs against the exact 2.26 package source during image build", () => {
+  it("runs against the exact 2.33 package source during image build", () => {
     const lock = JSON.parse(readFileSync(join(root, "pi-image/package-lock.json"), "utf8"));
-    expect(lock.packages["node_modules/pi-mcp-adapter"].version).toBe("2.26.0");
+    expect(lock.packages["node_modules/pi-mcp-adapter"].version).toBe("2.33.0");
 
     const canary = readFileSync(
       join(root, "pi-image/verify-mcp-app-fail-closed.mjs"), "utf8");

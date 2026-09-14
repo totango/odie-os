@@ -48,7 +48,8 @@ done
 login_shell_contract="[[ \"\$(command -v node)\" == \"/opt/node/bin/node\" ]] && [[ \"\$(command -v opencode)\" == \"/usr/local/bin/opencode\" ]] && [[ \"\$(node --version)\" == \"v\${NODE_VERSION}\" ]] && opencode --version >/dev/null"
 bash -lc "$login_shell_contract" || fail "bash -lc tool resolution failed"
 bash --login -c "$login_shell_contract" || fail "login-shell tool resolution failed"
-[[ "$(package_version /usr/local/lib/node_modules/opencode-ai)" == "${OPENCODE_VERSION}" ]] || fail "unexpected OpenCode version"
+[[ "$(readlink -f /usr/local/bin/opencode)" == "/opt/odie-pi/node_modules/opencode-linux-x64/bin/opencode" ]] || fail "OpenCode overlay is not selected"
+[[ "$(package_version /opt/odie-pi/node_modules/opencode-ai)" == "${OPENCODE_VERSION}" ]] || fail "unexpected OpenCode version"
 [[ "$(package_version /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent)" == "${PI_VERSION}" ]] || fail "unexpected Pi version"
 [[ "$(package_version /opt/odie-pi/node_modules/pi-mcp-adapter)" == "${PI_MCP_ADAPTER_VERSION}" ]] || fail "unexpected Pi MCP adapter version"
 [[ "$(package_version /opt/odie-pi/node_modules/prime-agent)" == "${PRIME_AGENT_VERSION}" ]] || fail "unexpected Prime Agent version"
@@ -90,6 +91,7 @@ timeout 30s opencode --version >/dev/null
 timeout 30s pi --version >/dev/null
 timeout 30s prime-agent --version >/dev/null
 /opt/odie-prime-agent/kernel-venv/bin/python -m IPython -c 'import ipykernel, rlm, rlm.mcp; assert 6 * 7 == 42' >/dev/null
+/opt/odie-prime-agent/kernel-venv/bin/python /opt/odie-pi/prime-runtime-smoke.py >/dev/null
 [[ "$(code-server --config "$temporary_root/code-server-config.yaml" --user-data-dir "$temporary_root/editor-data" --extensions-dir /opt/odie-code-server/extensions --list-extensions --show-versions | sha256sum | cut -d ' ' -f1)" == "$EXPECTED_EXTENSION_HASH" ]] || fail "unexpected editor extensions"
 
 cat > "$temporary_root/fake-local-endpoints.mjs" <<'NODE'
@@ -447,7 +449,7 @@ export default function odieSmokeRuntime(pi) {
 TS
 
 timeout 30s node \
-  --import /opt/odie-pi/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-register.mjs \
+  --import /opt/odie-pi/node_modules/jiti/lib/jiti-register.mjs \
   --eval "import('$temporary_root/pi-config/odie-runtime.ts').then((module) => { const extension = module.default?.default ?? module.default; if (typeof extension !== 'function') throw new Error('missing Pi extension default'); })" \
   >/dev/null
 run_workshop_mcp_probe "pi"

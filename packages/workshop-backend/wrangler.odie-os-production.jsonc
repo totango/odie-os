@@ -16,6 +16,9 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
+    // FINANCE_OPERATORS is deliberately omitted: these four exact ADMINS are also Finance
+    // operators, independently of managed administrator grant/revoke. Set an explicit array
+    // (including [] for none) here only when deployment operators intend to separate the roles.
     "ADMINS": [
       "jacob.beck@totango.com",
       "keith@totango.com",
@@ -32,6 +35,7 @@
     "DEFAULT_ENABLED_AMBIENT_GATEKEEPERS": "context,work-items",
     "DEPLOY_URL": "https://os.cloudflare.app/deploy/?instance=0b25cd3c-6772-4200-be89-353ceea1c63e",
     "PUBLIC_BASE_URL": "https://odie-os-native-api.odie-os.workers.dev",
+    "REQUEST_BUILD_WORKSHOP_ORIGIN": "https://odie-os.odie-os.workers.dev",
     "DISABLE_PASSWORD_AUTH": "true",
     "REQUIRED_HEALTHY_CONNECTIONS": "odie_kg",
     "TEAM_PI_CODEX_ONLY": "true"
@@ -39,6 +43,7 @@
   "browser": { "binding": "BROWSER" },
   "ai": { "binding": "WORKERS_AI" },
   "services": [
+    { "binding": "REQUEST_BUILD_NOTIFIER", "service": "odie-os-gk-jarvis", "entrypoint": "RequestBuildNotifierEntrypoint" },
     { "binding": "GATEKEEPER_CONTEXT", "service": "odie-os-gk-context", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_GITHUB", "service": "odie-os-gk-github", "entrypoint": "GatekeeperVendor" },
     { "binding": "GATEKEEPER_GOOGLE", "service": "odie-os-gk-google", "entrypoint": "GatekeeperVendor" },
@@ -59,7 +64,9 @@
     { "tag": "v1", "new_sqlite_classes": ["AdminSettings"] },
     { "tag": "v2", "new_sqlite_classes": ["PendingLogin"] },
     // Preserve the tag applied by the production-native gateway rollout.
-    { "tag": "v3" }
+    { "tag": "v3" },
+    { "tag": "v4-community-requests", "new_sqlite_classes": ["CommunityRequests"] },
+    { "tag": "v5-admin-authority", "new_sqlite_classes": ["AdminAuthority"] }
   ],
   "kv_namespaces": [
     { "binding": "BLUEPRINTS", "id": "882e6c6dfdf9466f999b8084ed3cd637" },

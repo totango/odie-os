@@ -16,6 +16,7 @@
     { "tag": "v2", "new_sqlite_classes": ["JarvisPolicy"] }
   ],
   "vars": {
+    "REQUEST_BUILD_WORKSHOP_ORIGIN": "https://odie-os.odie-os.workers.dev",
     "JARVIS_MCP_URL": "https://jarvis.unison.totango.com/api/jarvis/mcp",
     "JARVIS_TRUST_ANNOTATIONS": "true",
     "PRODUCT_FEEDBACK_MCP_URL": "https://jarvis.unison.totango.com/api/jarvis/product-feedback/mcp"

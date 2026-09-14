@@ -183,13 +183,15 @@ function AuthenticatedShell({
     return () => { cancelled = true }
   }, [authenticatedApi])
 
+  // Board participation never requires connector or onboarding setup.
+  const isRequests = pathname === '/requests' || pathname.startsWith('/requests/')
   // Still checking onboarding status
-  if (onboardingNeeded === null) {
+  if (!isRequests && onboardingNeeded === null) {
     return <AppLoadingSkeleton label="Preparing Odie OS" />
   }
 
   // Show onboarding wizard
-  if (onboardingNeeded) {
+  if (!isRequests && onboardingNeeded) {
     return <OnboardingWizard onComplete={() => setOnboardingNeeded(false)} />
   }
 
@@ -199,7 +201,7 @@ function AuthenticatedShell({
   return (
     <HubProvider enabledHubs={enabledHubs} financeStatus={financeStatus}>
       <RequiredConnectionsGate authenticatedApi={authenticatedApi} pathname={pathname}>
-        <AccountSelectionModal />
+        {!isRequests && <AccountSelectionModal />}
         <SessionsProvider loadRepositories={pathname === '/sessions'}>
           <AppShell key={fullscreen ? 'workspace' : 'app'} startCollapsed={fullscreen} fullscreenContent={fullscreen}>
             <Outlet />

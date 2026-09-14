@@ -37,7 +37,7 @@ test("production Work Items workers are built, deployed, and routed coherently",
     assert.match(buildScript, new RegExp(`"${packageName}"`), `${packageName} missing from build artifact`);
     assert.match(
       deployWorkflow,
-      new RegExp(`wrangler deploy --no-bundle --config ${packageName}/wrangler\\.json`),
+      new RegExp(`"\\$WRANGLER_BIN" deploy --no-bundle --config ${packageName}/wrangler\\.json`),
       `${packageName} missing from production deploy workflow`,
     );
 
@@ -53,6 +53,19 @@ test("production Work Items workers are built, deployed, and routed coherently",
   for (const config of [backend, webRouter, nativeRouter]) {
     assert.equal(serviceByBinding(config, "GATEKEEPER_TEAM_PI"), undefined);
   }
+});
+
+test("production deploy uses exact checked-out source and an isolated pinned Wrangler", () => {
+  const deployWorkflow = readFileSync(".github/workflows/deploy-production.yml", "utf8");
+  const deploy = deployWorkflow.slice(deployWorkflow.indexOf("  deploy:"));
+
+  assert.match(deploy, /- name: Check out exact tested source[\s\S]*ref: \$\{\{ env\.DEPLOY_SHA \}\}[\s\S]*persist-credentials: false/);
+  assert.match(deploy, /actions\/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020/);
+  assert.match(deploy, /npm install --prefix "\$tooling" --ignore-scripts[\s\S]*wrangler@4\.131\.1/);
+  assert.match(deploy, /WRANGLER_BIN=%s/);
+  assert.doesNotMatch(deploy, /run-install: true|pnpm exec wrangler|npm install --global wrangler/);
+  assert.match(deploy, /"\$WRANGLER_BIN" deploy --no-bundle --config workshop-backend\/wrangler\.json/);
+  assert.match(deploy, /"\$WRANGLER_BIN" secret put TEAM_PI_CODEX_MODELS --name odie-os-backend/);
 });
 
 test("production deployment fails before secret sync when Jira or Zendesk OAuth secrets are absent", () => {

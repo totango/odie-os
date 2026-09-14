@@ -1,3 +1,41 @@
+import type { AdminAuthorization } from "./admin-authority.js";
+
+/** Fresh backend challenge; correlation is not authority and may not originate in a browser. */
+export type AdminFenceChallenge = {
+  /** Deployment-specific AdminAuthority epoch. */
+  epoch: string;
+  /** Authority revision being activated. */
+  revision: number;
+  /** Unpredictable single-scan nonce minted by the backend. */
+  nonce: string;
+};
+
+/** Bounded binding-owned evidence from the actual privileged resource owners, not account wrappers. */
+export type AdminFenceEvidence = AdminFenceChallenge & {
+  /** Exact known privileged provider. */
+  provider: "context" | "jarvis";
+  /** Normalized binding-owned Context domain, or JARVIS's global policy scope. */
+  domain: string;
+  /** Owner code fence version; v1 rejects missing/currently invalid mutation authorization. */
+  fenceVersion: 1;
+  /** Registry mutation revision before and after the complete scan; zero for JARVIS. */
+  registryRevision: number;
+  /** Number of resource owners attested in this complete scan. */
+  ownerCount: number;
+  /** Digest of sorted Context collection IDs, or the fixed JARVIS policy identity. */
+  inventory: string;
+};
+
+/** Reject malformed private scan challenges before consulting resource owners. */
+export function validateAdminFenceChallenge(challenge: AdminFenceChallenge): void {
+  if (!challenge || typeof challenge.epoch !== "string" || !challenge.epoch || challenge.epoch.length > 128 ||
+      !Number.isSafeInteger(challenge.revision) || challenge.revision < 0 ||
+      typeof challenge.nonce !== "string" || !/^[a-f0-9-]{36}$/.test(challenge.nonce)) {
+    throw new Error("ADMIN_FENCE_CHALLENGE_INVALID");
+  }
+}
+/** Narrow administrator authorization contract minted by the Workshop, never by a provider. */
+export type { AdminAuthorization } from "./admin-authority.js";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
 // installation of the Gadgets Workshop may have access to different adapters, typically based on
@@ -87,6 +125,14 @@ export type AppUiContext = {
   isAdmin: boolean;
 }
 
+/** Capability-aware management open. The old boolean protocol remains legacy-only drain inventory. */
+export type AuthorizedAppUiContext = {
+  /** Explicit protocol negotiation; errors must never trigger boolean downgrade. */
+  protocol: "admin-authorization-v1";
+  /** Backend-minted fixed-purpose native authorization. Absence confers no admin rights. */
+  authorization?: Fetcher<AdminAuthorization>;
+};
+
 /** Describes how a management app participates in a Workshop-hosted composite application. */
 export type GatekeeperUiComposition = {
   /** Stable application family shared by a composite shell and its source capabilities. */
@@ -163,6 +209,9 @@ export function boundAgentCatalog(entries: AgentCatalogEntry[]): AgentCatalog {
 
 /** Describes a connected user account on an external service, for display purposes. */
 export type AccountDescription = {
+  /** Capability-aware management protocol support; neither UI discovery nor asserted admin authority. */
+  adminAuthorizationProtocol?: "admin-authorization-v1";
+
   /** User's display name, e.g. "John Doe". This is a non-unique name that is human-readable. */
   displayName?: string;
 
@@ -568,6 +617,11 @@ export function renderBrowserFlowCompletionHtml(options?: { returnUrl?: string; 
 }
 
 export interface GatekeeperVendor extends WorkerEntrypoint {
+  /** Private Workshop binding only: fresh resource-owner evidence for administrator cutover.
+   * Context/JARVIS implement this; never forward it through account/gadget/browser APIs.
+   * Missing/old implementations fail closed, without falling back to boolean authority.
+   */
+  adminFenceReadiness?(challenge: AdminFenceChallenge): Promise<AdminFenceEvidence>;
   /** Get display info for the service, suitable for display to a user. */
   describe(): Promise<VendorDescription>;
 
@@ -841,6 +895,9 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * fresh per open (not baked into the account) so admin-gated features reflect current status.
    */
   startAppUi?(context: AppUiContext): Promise<GatekeeperUiFrame>;
+
+  /** Advertised capability-aware protocol; errors must not trigger boolean downgrade. */
+  startAppUiAuthorized?(context: AuthorizedAppUiContext): Promise<GatekeeperUiFrame>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.
