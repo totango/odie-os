@@ -1,0 +1,43 @@
+# Finance operator separation — frozen release slice
+
+**Follow-up:** [Legacy owner fencing](legacy-owner-fencing.md) implements Context/JARVIS resource-owner mutation fences and fresh private activation evidence. Owner clarified that issued Context Git tokens are independent credentials, never automatically retired by administrator removal. JARVIS value-only reads remain ordinary. The earlier legacy vulnerability/type-error inventory below is historical; current owner tests deny old mutation calls and source-derived server result typing fixes the three build diagnostics. Finance semantics in this document are unchanged.
+
+## Approved semantics and migration
+
+Finance operator access is deployment configuration, not managed Workshop administrator membership. `FINANCE_OPERATORS` accepts an array of exact profile-ID strings or the JSON encoding of that array. Only **undefined/omitted** falls back to `ADMINS` with the same array/JSON-string semantics. `[]` or `"[]"` means no operators; null, objects, non-string entries and malformed JSON reject rather than falling back. There is no trimming, case folding, alias expansion or account creation. Duplicate entries have no additional effect. Authentication/provider/alias resolution is unchanged: the resulting exact authenticated account is checked, not the presented email.
+
+Odie's checked-in production config deliberately omits the new optional binding, preserving all four existing configured operators: `jacob.beck@totango.com`, `keith@totango.com`, `nick.roberts@totango.com`, `stacy.kennedy@totango.com`. An explicit deployment array can separate these roles later. Managed grant does not grant Finance; managed revoke does not revoke Finance. No role-management UI was added. Owners and direct `use` shares retain their existing entitlement. AdminApi Finance diagnostics/repair remain purpose/current-generation checked administrator operations, not operator workspace admission. AutoBuild remains managed-admin based, independent of Finance.
+
+Changes to operator configuration govern fresh status/create/open admissions. They **do not revoke already escaped Finance workspace/provider/gadget capabilities**. No managed-admin descendant drain claim or revocation barrier is made for Finance. A deployment restart alone is not proven to revoke persisted/provider descendants. If emergency removal of already-held Finance capabilities is required, separately inventory/revoke those capabilities and validate operational drain with the affected providers; do not describe managed revoke or a browser refresh as that mechanism.
+
+## Deployment plumbing and rollback
+
+- Odie's direct production workflow consumes `packages/workshop-backend/wrangler.odie-os-production.jsonc`. Optional `vars.FINANCE_OPERATORS` is backend-only; leave omitted for the migration default. No required production variable or credential wizard input is introduced.
+- Generic release generation passes configured backend `vars` through (`Object.assign(vars, config.vars ?? {})`); deployment operators may supply the optional binding at Worker deployment. No frontend/server-config serialization is added. Local `run-dev-server.ts` forwards the optional JSON-string value.
+- Before any future deploy record the exact prior backend config, artifact/release identity and authority mode/revision. This slice performs no deploy or live inspection and therefore supplies source/test rollback guidance, **not executed rollback evidence**.
+- Before managed activation, restore the previous explicit operator array (or omit it to restore ADMINS fallback) to undo a configuration change for fresh opens. Preserve exact account aliases and existing Finance owner/share records. An explicit `[]` is not omission.
+- After managed grant changes, never roll back to static-only administrator code: that can resurrect revoked admins. Preserve authority schema/history and current-generation consumers; roll forward. Do not delete the authority DO or claim restarting drains external tokens.
+
+## Concrete remaining legacy inventory — still blocks managed activation
+
+`FINANCE_GUARD_UNAVAILABLE` is removed from AdminAuthority transition evidence and build readiness because Finance is not managed authority. `LEGACY_CAPABILITIES_UNDRAINED` remains for these actual privileged capabilities:
+
+1. `ContextAccount.startAppUi({isAdmin:true})` can mint `ContextApiImpl` without an authorization capability. Its boolean branch still permits public collection create/edit/delete/Git management. A retained **child API**, not merely an account wrapper, succeeds after managed revoke in real workerd. Already-issued public-collection Git tokens require separate explicit semantics and evidence; current tests do not prove their revocation.
+2. `JarvisAccount.startAppUi({isAdmin:true})` can mint `JarvisPolicyApi` without an authorization capability. Retained policy **get/update** still succeed after managed revoke in real workerd.
+3. Older account/service references may retain pre-upgrade implementations. New advertised protocol/new opens do not establish their retirement. Provider upgrade ordering alone is not drain proof.
+
+New admissions remain upgraded: every AdminApi operation; board moderation/hidden reads; Context public management; JARVIS policy; AutoBuild admission/dispatch/publication use their expected purpose and current generation. Tests retain revoke/regrant/outage/wrong-purpose and no-downgrade coverage. Private Context, ordinary sessions and hidden JARVIS stay unchanged. Remaining image/pricing/notifier/managed-mode gates are not cleared by this slice. Production activation still fails closed; only local fixture controls demonstrate a transition without the invalid Finance guard.
+
+**Next exact work item (separate parent stage):** resource-owner fencing/retirement for the two boolean provider paths and retained privileged children, with an explicit decision for already-issued public Context Git tokens; then concrete legacy-reference inventory/drain tests. Do not clear the blocker based only on new-path tests or invent speculative drain machinery here.
+
+## Validation and release status
+
+All runtime checks use the approved runner SHA-256 `56d83de010ec5fb47e4d1f9c6da002a9a56804f7607d7de21ad8326da551f551`, no CI, original store, network/private/dependency protections and `pnpm --config.verify-deps-before-run=error`. Logs are `/tmp/odie-restricted-sessions-evidence/finance-role-*.log`.
+
+- Real workerd Finance/authority/facade: 64 assertions pass (3 files), including actual authenticated fresh opens, managed nonoperator grant, operator revoke, config empty/restore, owner/direct-share preservation, authority outage, exact parser and retained legacy-child proof.
+- Administrator UI: 23 assertions pass; Finance separation copy, four configured seeds, refined readiness, managed mutations and lifecycle retained.
+- Controller/publisher: 48 assertions pass; production readiness removes only the invalid Finance reason, retaining legacy/image/pricing/notifier controls. Existing RPC-result disposal warning in the admitted-PR race test remains unsuppressed/unattributed.
+- Rollout/notifier configuration: 6 assertions pass. Root `lint:check`: 142 existing warnings, zero errors. `git diff --check` passes; index empty. No package manifest, dependency, cache policy, generated declaration or runtime changes were made.
+- Workerd denial tests still print native rejected-open diagnostics; no rejection filters or test-runtime policy were changed by this slice.
+- Scoped authority test-program typecheck and uncached backend build currently fail at `server.ts` coding-session `find` and blueprint-library `filter` native-result inference (TS7031/TS2571). Same established `tsconfig.admin-authority-tests.json` as previously passing evidence; no new config/cast/declaration workaround. The touched Finance source does not change those operations; inspection confirms their user methods still explicitly return `Promise<CodingSessionSummary[]>` and `Promise<BlueprintLibrarySummary[]>`. The prior passing command recorded in `authority-core-implementation.md` uses this same test-program config, while current shared/notifier source is newer. No claim is made that the errors predate this checkout. Historical prior successes are not current build evidence; attribution remains unresolved and must be checked before release.
+- Full-release build/test/dryrun artifacts from before notifier/Finance edits are stale. Independent review and new full release gates remain required. No stage/commit/push/deploy/provider call or credential access occurred.

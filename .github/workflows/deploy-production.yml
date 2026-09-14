@@ -103,19 +103,27 @@ jobs:
       name: production
       url: https://odie-os.odie-os.workers.dev/
     steps:
+      - name: Check out exact tested source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and dependencies
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: true
+          run-install: true
+
       - name: Download deployment artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
           path: production-deploy
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install Wrangler
-        run: npm install --global wrangler@4.119.0
 
       - name: Verify deployment credentials
         env:
@@ -159,9 +167,9 @@ jobs:
         working-directory: production-deploy
         run: |
           message="GitHub Actions $DEPLOY_SHA"
-          wrangler deploy --no-bundle --config gatekeeper-slack/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-jira/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-zendesk/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-slack/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-jira/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-zendesk/wrangler.json --message "$message"
 
       - name: Sync browser editor capability secret
         env:
@@ -171,7 +179,7 @@ jobs:
         run: |
           test -n "$EDITOR_CAPABILITY_HMAC_SECRET"
           printf '%s' "$EDITOR_CAPABILITY_HMAC_SECRET" \
-            | wrangler secret put EDITOR_CAPABILITY_HMAC_SECRET --name odie-os-gk-sessions
+            | pnpm exec wrangler secret put EDITOR_CAPABILITY_HMAC_SECRET --name odie-os-gk-sessions
 
       - name: Sync OAuth connector secrets
         env:
@@ -198,8 +206,8 @@ jobs:
             fi
             test -n "$client_id"
             test -n "$client_secret"
-            printf '%s' "$client_id" | wrangler secret put CLIENT_ID --name "$worker"
-            printf '%s' "$client_secret" | wrangler secret put CLIENT_SECRET --name "$worker"
+            printf '%s' "$client_id" | pnpm exec wrangler secret put CLIENT_ID --name "$worker"
+            printf '%s' "$client_secret" | pnpm exec wrangler secret put CLIENT_SECRET --name "$worker"
           }
           sync_oauth_secrets odie-os-gk-google "$GOOGLE_CLIENT_ID" "$GOOGLE_CLIENT_SECRET"
           sync_oauth_secrets odie-os-gk-jira "$JIRA_CLIENT_ID" "$JIRA_CLIENT_SECRET"
@@ -215,7 +223,7 @@ jobs:
           require_secrets() {
             worker="$1"
             shift
-            present="$(wrangler secret list --name "$worker" --format json | jq -r '.[].name')"
+            present="$(pnpm exec wrangler secret list --name "$worker" --format json | jq -r '.[].name')"
             for secret in "$@"; do
               if ! printf '%s\n' "$present" | grep --fixed-strings --line-regexp --quiet "$secret"; then
                 echo "Missing required Worker secret $worker:$secret" >&2
@@ -246,21 +254,21 @@ jobs:
             | jq --raw-output '.object.sha')"
           test "$main_sha" = "$DEPLOY_SHA"
           message="GitHub Actions $DEPLOY_SHA"
-          wrangler deploy --no-bundle --config gatekeeper-context/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-github/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-google/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-jarvis/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-jira/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-mcp/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-notion/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-odie-kg/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-scheduler/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-work-items/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-zendesk/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config gatekeeper-sessions/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config workshop-backend/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config router-native/wrangler.json --message "$message"
-          wrangler deploy --no-bundle --config router/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-context/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-github/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-google/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-jarvis/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-jira/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-mcp/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-notion/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-odie-kg/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-scheduler/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-work-items/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-zendesk/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config gatekeeper-sessions/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config workshop-backend/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config router-native/wrangler.json --message "$message"
+          pnpm exec wrangler deploy --no-bundle --config router/wrangler.json --message "$message"
 
       - name: Sync Team PI Codex models
         shell: bash
@@ -272,7 +280,7 @@ jobs:
           test -n "$TEAM_PI_CODEX_MODELS"
           # Deploy model metadata first, then retain all configured profiles when changing the default.
           models="$(node -e 'const models = process.env.TEAM_PI_CODEX_MODELS.split(",").map(model => model.trim()).filter(Boolean); if (!models.length) process.exit(1); process.stdout.write([...new Set(["gpt-6-astra", ...models])].join(","));')"
-          printf '%s' "$models" | wrangler secret put TEAM_PI_CODEX_MODELS --name odie-os-backend
+          printf '%s' "$models" | pnpm exec wrangler secret put TEAM_PI_CODEX_MODELS --name odie-os-backend
 
       - name: Verify production origins
         run: |

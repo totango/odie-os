@@ -12,10 +12,10 @@ env:
   NODE_VERSION: "24.14.0"
   PNPM_PACKAGE_MANAGER: "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c"
   REPOSITORY_PNPM_PACKAGE_MANAGER: "pnpm@11.17.0+sha512.cca3cea332ad254bb84145f966d19f4879615210346fc92c79a047f23a0d7b3cca3c3792f0076ba1f1831d277efbcf0a9119b31a9a60eca7fb3d6231f331ef72"
-  OPENCODE_VERSION: "1.18.15"
-  PI_VERSION: "0.84.2"
-  PI_MCP_ADAPTER_VERSION: "2.26.0"
-  PRIME_AGENT_VERSION: "0.8.0"
+  OPENCODE_VERSION: "1.18.30"
+  PI_VERSION: "0.85.1"
+  PI_MCP_ADAPTER_VERSION: "2.33.0"
+  PRIME_AGENT_VERSION: "0.9.4"
   VALHALLA_VERSION: "0.3.0"
   CODE_SERVER_VERSION: "4.133.0"
 
@@ -30,8 +30,11 @@ jobs:
     timeout-minutes: 30
     environment: production
     steps:
-      - name: Check out repository
+      - name: Check out exact candidate source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -112,8 +115,15 @@ jobs:
           timeout --signal=TERM --kill-after=15s 8m \
             packages/gatekeeper-sessions/pi-image/test-image-network-none.sh "$source_ref"
 
-      - name: Install Wrangler
-        run: npm install --global wrangler@4.120.0
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and dependencies
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: true
+          run-install: true
 
       - name: Mirror image to Cloudflare registry
         env:
@@ -136,7 +146,7 @@ jobs:
           local_id="$(docker image inspect --format '{{.Id}}' "$local_ref")"
           test "$source_id" = "$local_id"
 
-          wrangler containers push "$local_ref"
+          pnpm exec wrangler containers push "$local_ref"
           cloudflare_ref="$(docker image inspect --format '{{json .RepoDigests}}' "$cloudflare_tag" \
             | jq --raw-output --arg repo "$cloudflare_repo" '[.[] | select(startswith($repo + "@"))][0] // empty')"
           test -n "$cloudflare_ref"
