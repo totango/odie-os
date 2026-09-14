@@ -6,7 +6,7 @@ import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
-import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestDetail, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
+import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
 import { COMMUNITY_REQUESTS_SINGLETON_NAME, CommunityRequests } from "./community-requests.js";
 export { CommunityRequests };
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -435,6 +435,17 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async createCommunityRequest(request: CreateCommunityRequest) {
     return this.#communityRequests.create(this.#userId.toString(), request);
   }
+  async attachCommunityRequestDiagnostics(id: string, attachment: AttachCommunityRequestDiagnostics) {
+    await this.#communityRequests.attachDiagnostics(this.#userId.toString(), id, attachment);
+  }
+  async deleteCommunityRequest(id: string) {
+    return this.#communityRequests.deleteOwned(this.#userId.toString(), id);
+  }
+  async getCommunityRequestPrivateDiagnostics(id: string) {
+    const claim = await this.#adminClaim("board-moderation");
+    if (!claim) throw new Error("Board moderation requires an administrator.");
+    return this.#communityRequests.privateDiagnostics(claim, id);
+  }
   async listCommunityRequests(query: CommunityRequestQuery = {}) {
     await this.#checkCommunityHiddenAccess(query?.includeHidden);
     return this.#communityRequests.list(this.#userId.toString(), query);
@@ -463,8 +474,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#communityRequests.details(this.#userId.toString(), id, options);
   }
   async moderateCommunityRequest(id: string, command: ModerateCommunityRequest) {
-    if (!await this.#adminClaim("board-moderation")) throw new Error("Board moderation requires an administrator.");
-    return this.#communityRequests.moderate(this.#userId.toString(), id, command);
+    const claim = await this.#adminClaim("board-moderation");
+    if (!claim) throw new Error("Board moderation requires an administrator.");
+    return this.#communityRequests.moderate(claim, id, command);
   }
 
   whoami(): Promise<AiChatAuthorInfo> {
@@ -631,12 +643,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.createCodingSession(request);
   }
 
-  getOpenCodeCustomization(): Promise<OpenCodeUserCustomization> {
-    return this.#user.getOpenCodeCustomization();
+  async getOpenCodeCustomization(): Promise<OpenCodeUserCustomization> {
+    return await this.#user.getOpenCodeCustomization();
   }
 
-  setOpenCodeCustomization(customization: OpenCodeUserCustomization): Promise<void> {
-    return this.#user.setOpenCodeCustomization(customization);
+  async setOpenCodeCustomization(customization: OpenCodeUserCustomization): Promise<void> {
+    await this.#user.setOpenCodeCustomization(customization);
   }
 
   stopCodingSession(sessionId: string): Promise<void> {

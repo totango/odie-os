@@ -1,12 +1,45 @@
 /** Public board limits, measured in UTF-16 code units; quotas are fixed account-scoped windows. */
 export const COMMUNITY_REQUEST_LIMITS = {
   title: 160, body: 8000, detail: 4000, query: 160, idempotencyKey: 80,
+  diagnosticEntries: 50, diagnosticMessage: 1000, diagnosticPathname: 512,
   page: 50, related: 10, readsPerMinute: 120, writesPerMinute: 30,
   createsPerHour: 5, detailsPerHour: 30,
 } as const;
 
 /** Authored public request category; bugs never import historical private feedback. */
 export type CommunityRequestKind = "feature" | "bug";
+
+/** One bounded current-tab diagnostic explicitly attached to a bug report as private evidence. */
+export interface CommunityRequestDiagnostic {
+  /** Browser event time, used only to order the private evidence display. */
+  timestamp: Date;
+  /** Browser console/error severity. */
+  level: "log" | "info" | "warn" | "error";
+  /** Sanitized diagnostic message, at most 1000 UTF-16 code units. */
+  message: string;
+}
+
+/** Explicit-consent private diagnostic attachment; never part of public board text or search. */
+export interface AttachCommunityRequestDiagnostics {
+  /** Stable account-scoped retry key for this attachment. */
+  idempotencyKey: string;
+  /** Current browser pathname only, without query string or fragment. */
+  pathname: string;
+  /** At most 50 bounded current-tab console/error entries. */
+  diagnostics: CommunityRequestDiagnostic[];
+}
+
+/** Moderator-only private diagnostic evidence retained for thirty days. */
+export interface CommunityRequestPrivateDiagnostics {
+  /** Captured browser pathname, never a URL with query or fragment. */
+  pathname: string;
+  /** Sanitized diagnostic entries; never projected into public board reads. */
+  diagnostics: CommunityRequestDiagnostic[];
+  /** Server capture time. */
+  capturedAt: Date;
+  /** Server-enforced evidence expiry time. */
+  expiresAt: Date;
+}
 
 /** Explicitly authored plain text for signed-in deployment users, not diagnostics or evidence. */
 export interface CreateCommunityRequest {

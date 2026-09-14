@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { Button } from '@cloudflare/kumo'
-import { COMMUNITY_REQUEST_LIMITS as LIMITS, type CommunityRequest, type CommunityRequestDetailPage, type ModerateCommunityRequest } from '@gadgets/workshop-shared/community-requests'
+import { COMMUNITY_REQUEST_LIMITS as LIMITS, type CommunityRequest, type CommunityRequestDetailPage, type CommunityRequestPrivateDiagnostics, type ModerateCommunityRequest } from '@gadgets/workshop-shared/community-requests'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { RequestBuildPanel } from './RequestBuildPanel'
@@ -9,6 +9,7 @@ import { fieldClass, panelClass, publicNotice, RelatedRequests, RequestVote, use
 
 export default function RequestDetailPage({ requestId, moderate = false }: { requestId: string; moderate?: boolean }) {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
+  const navigate = useNavigate()
   const includeHidden = isAdmin && moderate
   const scope = useMemo(() => ({ api: authenticatedApi, requestId, includeHidden }), [authenticatedApi, requestId, includeHidden])
   const [result, setResult] = useState<{ scope: typeof scope; request: CommunityRequest | null }>()
@@ -40,13 +41,63 @@ export default function RequestDetailPage({ requestId, moderate = false }: { req
         <p className="whitespace-pre-wrap break-words">{request.body}</p>
         {request.duplicateOf && <p>Duplicate of <Link to="/requests/$requestId" params={{ requestId: request.duplicateOf }} className="text-kumo-brand underline">canonical request</Link></p>}
         <RequestVote request={request} onChange={value => setResult({ scope, request: value })} />
+        {request.isOwn && <DeleteOwnedRequest requestId={request.id} onDeleted={() => navigate({ to: '/requests' })} />}
       </article>
-      {isAdmin && includeHidden && <RequestModeration key={request.id} request={request} onChange={value => setResult({ scope, request: value })} />}
+      {includeHidden && <PrivateDiagnostics key={`diagnostics:${request.id}`} requestId={request.id} />}
+      {includeHidden && <RequestModeration key={request.id} request={request} onChange={value => setResult({ scope, request: value })} />}
       {!request.hidden && <RequestBuildPanel key={`builds:${request.id}`} requestId={request.id} />}
       <RequestDetails key={`${request.id}:${includeHidden}:${request.hidden}`} requestId={request.id} includeHidden={includeHidden} hidden={request.hidden} />
       {!request.hidden && <RelatedRequests text={`${request.title}\n${request.body}`} excludeId={request.id} />}
     </>}
   </main>
+}
+
+function DeleteOwnedRequest({ requestId, onDeleted }: { requestId: string; onDeleted: () => void }) {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const lifetime = useRequestLifetime()
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(false)
+  async function remove() {
+    if (busy) return
+    const current = lifetime()
+    setBusy(true); setError(false)
+    try {
+      await authenticatedApi.deleteCommunityRequest(requestId)
+      if (current.active) onDeleted()
+    } catch { if (current.active) setError(true) }
+    finally { if (current.active) setBusy(false) }
+  }
+  if (!confirming) return <div className="border-t border-kumo-line pt-4"><Button variant="secondary" onClick={() => setConfirming(true)}>Delete your request</Button></div>
+  return <div className="space-y-3 rounded-xl border border-kumo-danger/30 bg-kumo-danger/10 p-4">
+    <p className="text-sm text-kumo-default"><strong>Delete this request?</strong> It will disappear from the public board. Its public text, details, votes, and private diagnostics will be scrubbed, and it cannot be restored.</p>
+    {error && <p role="alert" className="text-sm text-kumo-danger">Could not delete this request. Retry or cancel.</p>}
+    <div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={busy} onClick={() => { setConfirming(false); setError(false) }}>Cancel</Button><Button variant="primary" disabled={busy} onClick={() => void remove()}>{busy ? 'Deleting…' : 'Confirm deletion'}</Button></div>
+  </div>
+}
+
+function PrivateDiagnostics({ requestId }: { requestId: string }) {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const [result, setResult] = useState<{ api: typeof authenticatedApi; value: CommunityRequestPrivateDiagnostics | null }>()
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    setFailed(false)
+    authenticatedApi.getCommunityRequestPrivateDiagnostics(requestId).then(value => {
+      if (!cancelled) setResult({ api: authenticatedApi, value })
+    }).catch(() => { if (!cancelled) setFailed(true) })
+    return () => { cancelled = true }
+  }, [authenticatedApi, requestId])
+  if (failed) return <p role="alert" className="text-sm text-kumo-danger">Private diagnostics could not be loaded.</p>
+  const evidence = result?.api === authenticatedApi ? result.value : undefined
+  if (evidence === undefined) return <p role="status" className="text-sm text-kumo-subtle">Loading private diagnostics…</p>
+  if (evidence === null) return null
+  return <details className={panelClass}>
+    <summary className="cursor-pointer font-semibold text-kumo-strong">Private bug diagnostics ({evidence.diagnostics.length})</summary>
+    <div className="space-y-3 text-sm"><p className="text-kumo-subtle">Captured from <code>{evidence.pathname}</code>. Expires {evidence.expiresAt.toLocaleDateString()}. Visible only to current administrators and excluded from public search and Auto-Build.</p>
+      {evidence.diagnostics.length === 0 ? <p>No current-tab entries were available at submission.</p> : <ul className="max-h-80 space-y-2 overflow-auto">{evidence.diagnostics.map((entry, index) => <li key={`${entry.timestamp.valueOf()}:${index}`} className="rounded-lg bg-kumo-elevated p-3"><span className="text-xs font-semibold uppercase text-kumo-subtle">{entry.level} · {entry.timestamp.toLocaleString()}</span><pre className="mt-1 whitespace-pre-wrap break-words font-mono text-xs text-kumo-default">{entry.message}</pre></li>)}</ul>}
+    </div>
+  </details>
 }
 
 function RequestDetails({ requestId, includeHidden, hidden }: { requestId: string; includeHidden: boolean; hidden: boolean }) {
@@ -138,7 +189,7 @@ function RequestModeration({ request, onChange }: { request: CommunityRequest; o
   }
   return <form className={panelClass} aria-label="Moderate request" onSubmit={e => { e.preventDefault(); void moderate() }}>
     <h2 className="font-semibold">Moderate request</h2>
-    <p className="text-sm text-kumo-subtle">Existing static-admin checks apply on the server. Hide removes the entire request and its details from ordinary board reads; restore makes them visible again. Reopen clears duplicate status.</p>
+    <p className="text-sm text-kumo-subtle">Your current administrator authority is checked on the server. Hide removes the entire request and its details from ordinary board reads; restore makes moderator-hidden requests visible again. Author-deleted requests cannot be restored. Reopen clears duplicate status.</p>
     <label className="block">Moderation action<select className={fieldClass} value={action} disabled={busy} onChange={e => { setAction(e.target.value as ModerateCommunityRequest['action']); setConfirmed(false) }}>
       <option value="close">Close</option><option value="reopen">Reopen</option><option value="hide">Hide</option><option value="restore">Restore</option><option value="duplicate">Mark as duplicate</option>
     </select></label>

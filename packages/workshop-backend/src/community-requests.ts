@@ -6,10 +6,12 @@ import { buildHash, canonicalBuildJson, requestBuildNotifierDestinationReady } f
 import type { CodingSessionsService, CodingSessionOwner, RequestBuildAuthorizationRequest, RequestBuildReadiness, StartRequestBuild, CancelRequestBuild } from "@gadgets/workshop-shared/coding-sessions";
 import {
   COMMUNITY_REQUEST_LIMITS as LIMITS,
-  type AddCommunityRequestDetail, type CommunityRequest, type CommunityRequestDetail,
-  type CommunityRequestDetailPage, type CommunityRequestPage, type CommunityRequestPageOptions,
+  type AddCommunityRequestDetail, type AttachCommunityRequestDiagnostics,
+  type CommunityRequest, type CommunityRequestDetail, type CommunityRequestDetailPage,
+  type CommunityRequestPage, type CommunityRequestPageOptions, type CommunityRequestPrivateDiagnostics,
   type CommunityRequestQuery, type CreateCommunityRequest, type ModerateCommunityRequest,
 } from "@gadgets/workshop-shared/community-requests";
+import { sanitizeProductFeedbackText } from "@gadgets/workshop-shared/product-feedback";
 
 /** One registry per deployment; only the authenticated server facade holds this namespace. */
 export const COMMUNITY_REQUESTS_SINGLETON_NAME = "";
@@ -20,7 +22,12 @@ type RequestRow = {
   createdAt: number; updatedAt: number;
 };
 type DetailRow = { id: string; requestId: string; owner: string; body: string; createdAt: number };
+type PrivateDiagnosticsRow = {
+  requestId: string; owner: string; retryKey: string; payload: string;
+  pathname: string; diagnostics: string; capturedAt: number; expiresAt: number;
+};
 type Receipt = { payload: string; resultId: string };
+const PRIVATE_DIAGNOSTICS_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 
 // Explicit allowlists apply even to in-process/native RPC calls, independently of validateRpc.
 function fields(value: object, allowed: string[]): void {
@@ -149,6 +156,14 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
         id TEXT PRIMARY KEY, owner TEXT NOT NULL, requestId TEXT NOT NULL, action TEXT NOT NULL,
         duplicateOf TEXT, createdAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS privateDiagnostics (
+        requestId TEXT PRIMARY KEY, owner TEXT NOT NULL, retryKey TEXT NOT NULL, payload TEXT NOT NULL,
+        pathname TEXT NOT NULL, diagnostics TEXT NOT NULL, capturedAt INTEGER NOT NULL, expiresAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS privateDiagnostics_expiry ON privateDiagnostics(expiresAt);
+      CREATE TABLE IF NOT EXISTS ownerDeletions (
+        requestId TEXT PRIMARY KEY, owner TEXT NOT NULL, deletedAt INTEGER NOT NULL
+      );
     `);
     const sessions = (): Service<CodingSessionsService> => {
       if (!this.env.GATEKEEPER_SESSIONS) throw new Error("PROVIDER_PROTOCOL_UNAVAILABLE");
@@ -209,8 +224,20 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
   getRequestBuild(owner: string, requestId: string, runId: string) { return this.#read(owner, () => this.#builds.get(requestId, runId)); }
   /** Authenticated newest-first history, always filtered by public request visibility. */
   listRequestBuilds(owner: string, requestId: string) { return this.#read(owner, () => this.#builds.list(requestId)); }
-  /** Durable receipts and exact-generation cleanup progress independently of browser connections. */
-  alarm() { return this.#builds.alarm(); }
+  /** Durable receipts, private-evidence expiry and exact-generation cleanup progress independently of browsers. */
+  async alarm(): Promise<void> {
+    this.ctx.storage.sql.exec("DELETE FROM privateDiagnostics WHERE expiresAt <= ?", Date.now());
+    try { await this.#builds.alarm(); }
+    finally { await this.#armPrivateDiagnostics(); }
+  }
+
+  async #armPrivateDiagnostics(): Promise<void> {
+    const next = this.ctx.storage.sql.exec<{expiresAt: number}>(
+      "SELECT MIN(expiresAt) AS expiresAt FROM privateDiagnostics").toArray()[0]?.expiresAt;
+    if (!Number.isSafeInteger(next)) return;
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm > next) await this.ctx.storage.setAlarm(next);
+  }
 
   #charge(owner: string, bucket: string, maximum: number, milliseconds: number): void {
     const window = Math.floor(Date.now() / milliseconds);
@@ -283,7 +310,86 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  /** Internal read; includeHidden is supplied only after the facade's static admin check. */
+  /** Attach one explicit-consent private diagnostic bundle to an owned bug. */
+  attachDiagnostics(owner: string, requestId: string, input: AttachCommunityRequestDiagnostics): void {
+    fields(input, ["idempotencyKey", "pathname", "diagnostics"]);
+    id(requestId);
+    key(input.idempotencyKey);
+    if (typeof input.pathname !== "string" || !input.pathname.startsWith("/") ||
+        input.pathname.includes("?") || input.pathname.includes("#") ||
+        input.pathname.length > LIMITS.diagnosticPathname) throw new Error("Invalid diagnostic pathname.");
+    if (!Array.isArray(input.diagnostics) || input.diagnostics.length > LIMITS.diagnosticEntries) {
+      throw new Error("Invalid diagnostic entries.");
+    }
+    const diagnostics = input.diagnostics.map(entry => {
+      fields(entry, ["timestamp", "level", "message"]);
+      if (!entry || !["log", "info", "warn", "error"].includes(entry.level) ||
+          typeof entry.message !== "string" || entry.message.length > LIMITS.diagnosticMessage) {
+        throw new Error("Invalid diagnostic entry.");
+      }
+      const timestamp = entry.timestamp instanceof Date ? entry.timestamp : new Date(`${entry.timestamp}`);
+      if (Number.isNaN(timestamp.valueOf())) throw new Error("Invalid diagnostic timestamp.");
+      return {timestamp: timestamp.valueOf(), level: entry.level,
+        message: text(sanitizeProductFeedbackText(entry.message), LIMITS.diagnosticMessage, true)};
+    }).filter(entry => entry.message);
+    const payload = JSON.stringify([input.pathname, diagnostics]);
+    this.#read(owner, () => {
+      const request = this.#require(requestId, true);
+      if (request.owner !== owner || request.kind !== "bug") throw new Error("Private diagnostics require an owned bug report.");
+      if (this.ctx.storage.sql.exec(
+          "SELECT 1 FROM ownerDeletions WHERE requestId = ?", requestId).toArray().length) {
+        throw new Error("Private diagnostics cannot be attached to a deleted request.");
+      }
+      const existing = this.ctx.storage.sql.exec<PrivateDiagnosticsRow>(
+        "SELECT * FROM privateDiagnostics WHERE requestId = ?", requestId).toArray()[0];
+      if (existing) {
+        if (existing.retryKey === input.idempotencyKey && existing.payload === payload) return;
+        if (existing.retryKey === input.idempotencyKey) throw new Error("Diagnostic retry key already used for different input.");
+        throw new Error("Private diagnostics are already attached.");
+      }
+      this.#mutation(owner);
+      const capturedAt = Date.now(), expiresAt = capturedAt + PRIVATE_DIAGNOSTICS_TTL_MS;
+      this.ctx.storage.sql.exec("INSERT INTO privateDiagnostics VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        requestId, owner, input.idempotencyKey, payload, input.pathname, JSON.stringify(diagnostics), capturedAt, expiresAt);
+    });
+    this.ctx.waitUntil(this.#armPrivateDiagnostics());
+  }
+
+  /** Remove an owned request from public view and scrub authored text, details, votes and diagnostics. */
+  deleteOwned(owner: string, requestId: string): void {
+    id(requestId);
+    this.#read(owner, () => {
+      const request = this.#require(requestId, true);
+      if (request.owner !== owner) throw new Error("Only the request owner can delete it.");
+      if (this.ctx.storage.sql.exec("SELECT 1 FROM ownerDeletions WHERE requestId = ?", requestId).toArray().length) return;
+      this.#mutation(owner);
+      const now = Date.now();
+      this.ctx.storage.sql.exec("INSERT INTO ownerDeletions VALUES (?, ?, ?)", requestId, owner, now);
+      this.ctx.storage.sql.exec("UPDATE requests SET title = '[Deleted by author]', body = '', searchText = '', status = 'closed', hidden = 1, duplicateOf = NULL, updatedAt = ? WHERE id = ?", now, requestId);
+      this.ctx.storage.sql.exec("DELETE FROM details WHERE requestId = ?", requestId);
+      this.ctx.storage.sql.exec("DELETE FROM votes WHERE requestId = ?", requestId);
+      this.ctx.storage.sql.exec("DELETE FROM privateDiagnostics WHERE requestId = ?", requestId);
+      this.ctx.storage.sql.exec("INSERT INTO request_revisions VALUES (?,2) ON CONFLICT(requestId) DO UPDATE SET revision=revision+1", requestId);
+    });
+  }
+
+  /** Read unexpired private diagnostics only after a fresh purpose-bound authority check. */
+  async privateDiagnostics(claim: AdminClaim, requestId: string): Promise<CommunityRequestPrivateDiagnostics | null> {
+    await this.ctx.exports.AdminAuthority.getByName("").assertCurrent(claim, "board-moderation");
+    id(requestId);
+    return this.#read(claim.principalId, () => {
+      this.ctx.storage.sql.exec("DELETE FROM privateDiagnostics WHERE expiresAt <= ?", Date.now());
+      const row = this.ctx.storage.sql.exec<PrivateDiagnosticsRow>(
+        "SELECT * FROM privateDiagnostics WHERE requestId = ?", requestId).toArray()[0];
+      if (!row) return null;
+      const diagnostics = JSON.parse(row.diagnostics) as Array<{timestamp: number; level: "log" | "info" | "warn" | "error"; message: string}>;
+      return {pathname: row.pathname,
+        diagnostics: diagnostics.map(entry => ({...entry, timestamp: new Date(entry.timestamp)})),
+        capturedAt: new Date(row.capturedAt), expiresAt: new Date(row.expiresAt)};
+    });
+  }
+
+  /** Internal read; includeHidden is supplied only after the facade's current admin check. */
   get(owner: string, requestId: string, includeHidden = false): CommunityRequest | null {
     return this.#read(owner, () => {
       const row = this.#get(requestId, includeHidden);
@@ -382,8 +488,10 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  /** Internal admin-only mutation; the facade checks existing static admin status on every call. */
-  moderate(owner: string, requestId: string, input: ModerateCommunityRequest): CommunityRequest {
+  /** Internal admin-only mutation; current authority is rechecked at the durable mutation owner. */
+  async moderate(claim: AdminClaim, requestId: string, input: ModerateCommunityRequest): Promise<CommunityRequest> {
+    await this.ctx.exports.AdminAuthority.getByName("").assertCurrent(claim, "board-moderation");
+    const owner = claim.principalId;
     fields(input, ["idempotencyKey", "action", "duplicateOf"]);
     id(requestId);
     if (!["hide", "restore", "close", "reopen", "duplicate"].includes(input.action) ||
@@ -399,6 +507,10 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
             "SELECT 1 FROM requests WHERE duplicateOf = ? LIMIT 1", requestId).toArray().length) {
           throw new Error("Duplicate links must point to a distinct canonical request without chains.");
         }
+      }
+      if (input.action === "restore" && this.ctx.storage.sql.exec(
+          "SELECT 1 FROM ownerDeletions WHERE requestId = ?", requestId).toArray().length) {
+        throw new Error("An author-deleted request cannot be restored.");
       }
       this.#mutation(owner);
       if (input.action === "hide") row.hidden = 1;

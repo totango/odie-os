@@ -24,6 +24,9 @@ function makeApi() {
     getCommunityRequest: vi.fn<AuthenticatedApi['getCommunityRequest']>(async () => request),
     suggestRelatedCommunityRequests: vi.fn<AuthenticatedApi['suggestRelatedCommunityRequests']>(async () => [request]),
     createCommunityRequest: vi.fn<AuthenticatedApi['createCommunityRequest']>(async () => ({ ...request, id: 'created' })),
+    attachCommunityRequestDiagnostics: vi.fn<AuthenticatedApi['attachCommunityRequestDiagnostics']>(async () => {}),
+    deleteCommunityRequest: vi.fn<AuthenticatedApi['deleteCommunityRequest']>(async () => {}),
+    getCommunityRequestPrivateDiagnostics: vi.fn<AuthenticatedApi['getCommunityRequestPrivateDiagnostics']>(async () => null),
     voteCommunityRequest: vi.fn<AuthenticatedApi['voteCommunityRequest']>(async () => ({ ...request, viewerHasVoted: true, voteCount: 3 })),
     unvoteCommunityRequest: vi.fn<AuthenticatedApi['unvoteCommunityRequest']>(async () => request),
     listCommunityRequestDetails: vi.fn<AuthenticatedApi['listCommunityRequestDetails']>(async () => ({ items: [], nextCursor: null })),
@@ -75,7 +78,11 @@ describe('Community requests interactions', () => {
     const proto = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : node instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype
     await act(async () => { Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(node, value); node.dispatchEvent(new Event(node instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true })) })
   }
-  async function consent() { await act(async () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click()) }
+  async function consent() {
+    const checkbox = container.querySelector<HTMLInputElement>('input[aria-label="Consent to public request"]')
+      ?? container.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+    await act(async () => checkbox.click())
+  }
 
   it('lists, searches and filters for an ordinary account, paginates and renders authored text safely', async () => {
     api.listCommunityRequests.mockResolvedValueOnce({ items: [request], nextCursor: 'page-two' }).mockResolvedValueOnce({ items: [{ ...request, id: 'second', title: 'Second request' }], nextCursor: null })
@@ -142,7 +149,8 @@ describe('Community requests interactions', () => {
     expect(container.textContent).toContain('Possible duplicates')
     await click('Review public submission')
     expect(button('Publish public request').disabled).toBe(true)
-    expect(container.textContent).toContain('not private diagnostic consent')
+    expect(container.textContent).toContain('I consent to publishing')
+    expect(container.textContent).not.toContain('Include private browser diagnostics')
     await consent()
     await click('Publish public request')
     expect(container.textContent).toContain('Could not confirm publication')
@@ -157,10 +165,55 @@ describe('Community requests interactions', () => {
 
   it('publishes a new public bug with no private context or legacy automation', async () => {
     await render(<NewRequestPage />)
-    await input('select', 'bug'); await input('input', 'New public bug'); await input('textarea', 'Safe reproduction instructions')
-    await click('Review public submission'); await consent(); await click('Publish public request')
+    await click('Bug report'); await input('input:not([type="checkbox"])', 'New public bug'); await input('textarea', 'Safe reproduction instructions')
+    await click('Review public submission')
+    await act(async () => container.querySelector<HTMLInputElement>('input[aria-label="Include private browser diagnostics"]')!.click())
+    await consent(); await click('Publish public request')
     expect(api.createCommunityRequest.mock.lastCall?.[0]).toMatchObject({ kind: 'bug', title: 'New public bug', body: 'Safe reproduction instructions' })
+    expect(api.attachCommunityRequestDiagnostics).toHaveBeenCalledWith('created', expect.objectContaining({ pathname: '/', diagnostics: expect.any(Array), idempotencyKey: expect.any(String) }))
     expect(api.submitProductFeedback).not.toHaveBeenCalled()
+  })
+
+  it('does not attach private diagnostics after the new-request view is inactive', async () => {
+    const pending = deferred<CommunityRequest>()
+    api.createCommunityRequest.mockReturnValueOnce(pending.promise)
+    const router = await render(<NewRequestPage />)
+    await click('Bug report'); await input('input:not([type="checkbox"])', 'Late public bug'); await input('textarea', 'Safe reproduction instructions')
+    await click('Review public submission')
+    await act(async () => container.querySelector<HTMLInputElement>('input[aria-label="Include private browser diagnostics"]')!.click())
+    await consent(); await click('Publish public request')
+    await act(async () => { await router.navigate({ to: '/requests' }) })
+    await act(async () => pending.resolve({ ...request, id: 'created' }))
+    expect(api.attachCommunityRequestDiagnostics).not.toHaveBeenCalled()
+  })
+
+  it('lets an author confirm deletion and returns to the board', async () => {
+    api.getCommunityRequest.mockResolvedValueOnce({ ...request, isOwn: true })
+    await render(<RequestDetailPage requestId={request.id} />)
+    await click('Delete your request')
+    expect(container.textContent).toContain('cannot be restored')
+    await click('Confirm deletion')
+    expect(api.deleteCommunityRequest).toHaveBeenCalledWith(request.id)
+    expect(container.textContent).toContain('Board reached')
+  })
+
+  it('shows private diagnostics only to an administrator in the explicit moderation view', async () => {
+    auth(true)
+    api.getCommunityRequestPrivateDiagnostics.mockResolvedValueOnce({
+      pathname: '/workspace/private', capturedAt: new Date(1000), expiresAt: new Date(2000),
+      diagnostics: [{ timestamp: new Date(1500), level: 'error', message: 'sanitized private diagnostic' }],
+    })
+    await render(<RequestDetailPage requestId={request.id} />)
+    expect(api.getCommunityRequestPrivateDiagnostics).not.toHaveBeenCalled()
+    expect(container.textContent).not.toContain('Private bug diagnostics')
+    await render(<RequestDetailPage requestId={request.id} moderate />)
+    expect(api.getCommunityRequestPrivateDiagnostics).toHaveBeenCalledWith(request.id)
+    expect(container.textContent).toContain('Private bug diagnostics (1)')
+    expect(container.textContent).toContain('excluded from public search and Auto-Build')
+    auth(false)
+    await render(<RequestDetailPage requestId={request.id} moderate />)
+    expect(api.getCommunityRequestPrivateDiagnostics).toHaveBeenCalledTimes(1)
+    expect(container.textContent).not.toContain('Private bug diagnostics')
   })
 
   it('allows voting/unvoting and confirmed public details with idempotent retries', async () => {
@@ -212,7 +265,7 @@ describe('Community requests interactions', () => {
       expect(container.querySelector('textarea') === null).toBe(action === 'hide')
       expect(container.querySelector('a[href="/requests/canonical-id"]') !== null).toBe(action === 'duplicate')
     }
-    expect(container.textContent).toContain('Existing static-admin checks')
+    expect(container.textContent).toContain('current administrator authority')
   })
 
   it('handles moderation denial with safe errors and the same retry key', async () => {

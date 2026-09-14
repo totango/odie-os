@@ -55,6 +55,7 @@ export default function SidebarItem({
     <Link
       {...linkProps}
       title={collapsed ? label : undefined}
+      aria-label={label}
       aria-current={isActive ? 'page' : undefined}
       className={[
         'group relative flex h-11 items-center gap-2.5 rounded-lg px-2.5 text-[14px] leading-5 transition-colors md:h-8 md:text-[13px] md:leading-[18px]',

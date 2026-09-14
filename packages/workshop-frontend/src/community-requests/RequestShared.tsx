@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Button } from '@cloudflare/kumo'
+import { ArrowUp, Bug, Lightbulb } from '@phosphor-icons/react'
 import { COMMUNITY_REQUEST_LIMITS, type CommunityRequest } from '@gadgets/workshop-shared/community-requests'
 import { useAuthenticatedApi } from '../AuthContext'
 
-export const fieldClass = 'block w-full rounded-lg border border-kumo-line bg-kumo-base p-3 text-sm text-kumo-default focus-visible:outline-2 focus-visible:outline-kumo-ring'
-export const panelClass = 'rounded-xl border border-kumo-line bg-kumo-base p-4 space-y-4'
+export const fieldClass = 'block h-11 w-full rounded-lg border border-kumo-line bg-kumo-base px-3 text-sm text-kumo-default shadow-sm transition focus:border-kumo-brand focus-visible:outline-2 focus-visible:outline-kumo-ring'
+export const panelClass = 'rounded-2xl border border-kumo-line bg-kumo-base p-5 shadow-sm space-y-4'
 export const publicNotice = 'Public here means all signed-in users of this deployment. Only the text you write is published; no private diagnostics, chats, workspace or Code Session context is attached. Do not paste secrets or personal information.'
 
 /** The AuthProvider owns the API stub; board calls return values, not child capabilities.
@@ -36,12 +37,25 @@ export function useRequestRetryKey() {
 }
 
 export function RequestLinks({ items, moderate = false }: { items: CommunityRequest[]; moderate?: boolean }) {
-  return <ul className="space-y-3">
-    {items.map(item => <li key={item.id} className={panelClass}>
-      <Link to="/requests/$requestId" params={{ requestId: item.id }} search={{ moderate }} className="break-words font-semibold text-kumo-brand underline decoration-transparent hover:decoration-current focus-visible:outline-2">
-        {item.title}
+  return <ul className="grid gap-3 md:grid-cols-2">
+    {items.map(item => <li key={item.id}>
+      <Link to="/requests/$requestId" params={{ requestId: item.id }} search={{ moderate }} className="group flex h-full min-h-40 flex-col rounded-2xl border border-kumo-line bg-kumo-base p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-kumo-brand/40 hover:shadow-md focus-visible:outline-2 focus-visible:outline-kumo-ring">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="inline-flex items-center gap-1 rounded-full bg-kumo-fill px-2 py-1 text-[11px] font-medium text-kumo-strong">{item.kind === 'bug' ? <Bug size={12} weight="fill" /> : <Lightbulb size={12} weight="fill" />}{item.kind === 'bug' ? 'Bug' : 'Feature'}</span>
+            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${item.status === 'open' ? 'bg-kumo-success/10 text-kumo-success' : 'bg-kumo-tint text-kumo-subtle'}`}>{item.status === 'open' ? 'Open' : 'Closed'}</span>
+            {item.hidden && <span className="rounded-full bg-kumo-warning/10 px-2 py-1 text-[11px] font-medium text-kumo-warning">Hidden</span>}
+            {item.duplicateOf && <span className="rounded-full bg-kumo-tint px-2 py-1 text-[11px] font-medium text-kumo-subtle">Duplicate</span>}
+          </div>
+          <span className={`inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-1 text-xs font-semibold ${item.viewerHasVoted ? 'border-kumo-brand/30 bg-kumo-brand/10 text-kumo-brand' : 'border-kumo-line text-kumo-subtle'}`}><ArrowUp size={12} weight="bold" /> {item.voteCount}</span>
+        </div>
+        <h3 className="mt-4 break-words text-base font-semibold leading-6 text-kumo-strong transition-colors group-hover:text-kumo-brand">{item.title}</h3>
+        {item.body && <p className="mt-2 line-clamp-2 break-words text-sm leading-5 text-kumo-subtle">{item.body}</p>}
+        <div className="mt-auto flex flex-wrap gap-2 pt-4 text-[11px] text-kumo-inactive">
+          {item.isOwn && <span>Your request</span>}
+          {item.viewerHasVoted && <span>You voted</span>}
+        </div>
       </Link>
-      <p className="text-xs text-kumo-subtle">{item.kind === 'bug' ? 'Bug' : 'Feature'} · {item.status} · {item.voteCount} votes{item.viewerHasVoted ? ' · You voted' : ''}{item.isOwn ? ' · Your request' : ''}{item.hidden ? ' · Hidden' : ''}{item.duplicateOf ? ' · Duplicate' : ''}</p>
     </li>)}
   </ul>
 }

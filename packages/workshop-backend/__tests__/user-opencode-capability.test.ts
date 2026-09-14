@@ -10,6 +10,19 @@ declare module "cloudflare:workers" {
   }
 }
 
+describe("UserDurableObject OpenCode customization RPC", () => {
+  it("resolves default and persisted settings over the Durable Object boundary", async () => {
+    const stub = env.TEST_USER.getByName(crypto.randomUUID());
+    await expect(stub.getOpenCodeCustomization()).resolves.toEqual({ plugins: [], skills: [] });
+    const customization = {
+      plugins: ["opencode-plugin-example@1.0.0"],
+      skills: [{ name: "review-code", description: "Review code", instructions: "Review carefully." }],
+    };
+    await stub.setOpenCodeCustomization(customization);
+    await expect(stub.getOpenCodeCustomization()).resolves.toEqual(customization);
+  });
+});
+
 describe("UserDurableObject.mintCodingSessionOpenCodeCapability", () => {
   it.each([
     { scenario: "authorized", error: undefined },

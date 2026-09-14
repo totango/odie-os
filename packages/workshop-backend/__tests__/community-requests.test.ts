@@ -51,7 +51,7 @@ const command = (action: "hide" | "restore" | "close" | "reopen" | "duplicate", 
 
 beforeEach(async () => {
   await runInDurableObject(registry(), (_instance, ctx) => {
-    for (const table of ["requests", "details", "votes", "receipts", "quotas", "moderation"]) {
+    for (const table of ["requests", "details", "votes", "receipts", "quotas", "moderation", "privateDiagnostics", "ownerDeletions"]) {
       ctx.storage.sql.exec(`DELETE FROM ${table}`);
     }
   });
@@ -75,6 +75,57 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
     await alice.unvoteCommunityRequest(request.id);
     await alice.unvoteCommunityRequest(request.id);
     expect(await alice.getCommunityRequest(request.id)).toMatchObject({ voteCount: 1, viewerHasVoted: false });
+  });
+
+  it("keeps consented bug diagnostics private, sanitized, owner-bound and moderator-only", async () => {
+    const { alice, bob, admin } = await fixture();
+    const bug = await alice.createCommunityRequest(draft({ kind: "bug", title: "Broken export" }));
+    const attachment = { idempotencyKey: "diagnostics-one", pathname: "/requests/new", diagnostics: [
+      { timestamp: new Date(1000), level: "error" as const, message: "Failed at https://private.example/path token=secret-value" },
+    ] };
+    await alice.attachCommunityRequestDiagnostics(bug.id, attachment);
+    await alice.attachCommunityRequestDiagnostics(bug.id, attachment);
+    const diagnosticAlarm = await runInDurableObject(registry(), (_instance, ctx) => ctx.storage.getAlarm());
+    expect(diagnosticAlarm).toBeGreaterThan(Date.now());
+    await expect(bob.attachCommunityRequestDiagnostics(bug.id, attachment)).rejects.toThrow("owned bug");
+    await expect(async () => alice.getCommunityRequestPrivateDiagnostics(bug.id)).rejects.toThrow("administrator");
+    const evidence = await admin.getCommunityRequestPrivateDiagnostics(bug.id);
+    expect(evidence).toMatchObject({ pathname: "/requests/new", diagnostics: [
+      { level: "error", message: "Failed at [redacted-url] token=[redacted]" },
+    ] });
+    expect(evidence?.capturedAt).toBeInstanceOf(Date);
+    expect(evidence?.expiresAt).toBeInstanceOf(Date);
+    const publicReads = JSON.stringify([
+      await bob.getCommunityRequest(bug.id), await bob.listCommunityRequests(),
+      await bob.searchCommunityRequests({ query: "private.example" }),
+      await bob.suggestRelatedCommunityRequests("secret-value"),
+    ]);
+    expect(publicReads).not.toContain("private.example");
+    expect(publicReads).not.toContain("secret-value");
+    await runInDurableObject(registry(), (_instance, ctx) => {
+      ctx.storage.sql.exec("UPDATE privateDiagnostics SET expiresAt = 0 WHERE requestId = ?", bug.id);
+    });
+    expect(await admin.getCommunityRequestPrivateDiagnostics(bug.id)).toBeNull();
+  });
+
+  it("lets an author delete a request while preserving an unrestorable scrubbed moderator tombstone", async () => {
+    const { alice, bob, admin } = await fixture();
+    const bug = await alice.createCommunityRequest(draft({ kind: "bug", title: "Delete me", body: "private-ish authored text" }));
+    await bob.voteCommunityRequest(bug.id);
+    await alice.addCommunityRequestDetail(bug.id, { idempotencyKey: "delete-detail", body: "Delete this detail" });
+    await alice.attachCommunityRequestDiagnostics(bug.id, { idempotencyKey: "delete-diagnostics", pathname: "/requests/new", diagnostics: [] });
+    await expect(async () => bob.deleteCommunityRequest(bug.id)).rejects.toThrow("request owner");
+    await alice.deleteCommunityRequest(bug.id);
+    await alice.deleteCommunityRequest(bug.id);
+    expect(await alice.getCommunityRequest(bug.id)).toBeNull();
+    expect((await bob.listCommunityRequests()).items).toEqual([]);
+    const tombstone = await admin.getCommunityRequest(bug.id, true);
+    expect(tombstone).toMatchObject({ title: "[Deleted by author]", body: "", hidden: true, status: "closed" });
+    await expect(alice.attachCommunityRequestDiagnostics(bug.id, {
+      idempotencyKey: "delete-diagnostics", pathname: "/requests/new", diagnostics: [],
+    })).rejects.toThrow("deleted request");
+    expect(await admin.getCommunityRequestPrivateDiagnostics(bug.id)).toBeNull();
+    await expect(async () => admin.moderateCommunityRequest(bug.id, command("restore"))).rejects.toThrow("cannot be restored");
   });
 
   it("atomically deduplicates concurrent submissions, details and votes per account, rejecting conflicting retries", async () => {
@@ -299,6 +350,12 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
       return await call(batch.authenticate(tokens[account]!));
     }
     try {
+      expect(await asAccount(1, api => api.getOpenCodeCustomization())).toEqual({ plugins: [], skills: [] });
+      const customization = { plugins: ["opencode-plugin-example@1.0.0"], skills: [
+        { name: "review-code", description: "Review code", instructions: "Review carefully." },
+      ] };
+      await asAccount(1, api => api.setOpenCodeCustomization(customization));
+      expect(await asAccount(1, api => api.getOpenCodeCustomization())).toEqual(customization);
       const input = draft({ kind: "bug", title: "Keyboard focus bug", body: "New authored public reproduction" });
       const bug = await asAccount(1, api => api.createCommunityRequest(input));
       expect(await asAccount(1, api => api.createCommunityRequest(input))).toEqual(bug);
