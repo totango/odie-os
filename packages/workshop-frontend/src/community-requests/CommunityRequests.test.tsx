@@ -2,12 +2,12 @@
 /* eslint-disable react/react-in-jsx-scope */
 import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from '@tanstack/react-router'
+import { createMemoryHistory, createRootRoute, createRoute, createRouter, Outlet, RouterProvider } from '@tanstack/react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import type { CommunityRequest } from '@gadgets/workshop-shared/community-requests'
 import { useAuthenticatedApi } from '../AuthContext'
-import RequestsPage from './RequestsPage'
+import RequestsPage, { RequestDetailSheet } from './RequestsPage'
 import NewRequestPage from './NewRequestPage'
 import RequestDetailPage from './RequestDetailPage'
 import { RelatedRequests, RequestVote } from './RequestShared'
@@ -44,7 +44,7 @@ function deferred<T>() {
 
 async function debounce() { await act(async () => { await new Promise(resolve => setTimeout(resolve, 650)) }) }
 
-describe('Community requests interactions', () => {
+describe('Feature requests interactions', () => {
   let root: Root
   let container: HTMLDivElement
   let api: ReturnType<typeof makeApi>
@@ -60,7 +60,11 @@ describe('Community requests interactions', () => {
   async function render(component: ReactNode) {
     const base = createRootRoute()
     const index = createRoute({ getParentRoute: () => base, path: '/', component: () => component })
-    const detail = createRoute({ getParentRoute: () => base, path: '/requests/$requestId', component: () => <p>Created request reached</p> })
+    const detail = createRoute({ getParentRoute: () => base, path: '/requests/$requestId', component: DetailRoute })
+    function DetailRoute() {
+      const { requestId } = detail.useParams()
+      return <RequestDetailSheet requestId={requestId} moderate={false} />
+    }
     const list = createRoute({ getParentRoute: () => base, path: '/requests', component: () => <p>Board reached</p> })
     const newRoute = createRoute({ getParentRoute: () => base, path: '/requests/new', component: NewRequestPage })
     const router = createRouter({ routeTree: base.addChildren([index, detail, list, newRoute]), history: createMemoryHistory({ initialEntries: ['/'] }) })
@@ -90,6 +94,8 @@ describe('Community requests interactions', () => {
     expect(api.listCommunityRequests).toHaveBeenCalledWith({ query: '', kind: undefined, status: undefined, cursor: undefined, limit: 20 })
     expect(container.querySelector('img')).toBeNull()
     expect(container.textContent).toContain(request.title)
+    expect(container.textContent).toContain('Feature requests')
+    expect(container.textContent).not.toContain('View my legacy private feedback status')
     expect(container.textContent).not.toContain('Moderate requests')
     await click('Load more requests')
     expect(api.listCommunityRequests.mock.lastCall?.[0]?.cursor).toBe('page-two')
@@ -105,6 +111,34 @@ describe('Community requests interactions', () => {
     await act(async () => { selects[1].value = 'closed'; selects[1].dispatchEvent(new Event('change', { bubbles: true })) })
     expect(api.searchCommunityRequests.mock.lastCall?.[0]).toMatchObject({ status: 'closed', cursor: undefined })
     expect(api.submitProductFeedback).not.toHaveBeenCalled()
+  })
+
+  it('keeps the mounted board behind a URL-backed detail sheet and browser Back closes it', async () => {
+    const base = createRootRoute({component: () => <Outlet />})
+    const board = createRoute({getParentRoute: () => base, path: '/requests', component: RequestsPage})
+    const detail = createRoute({getParentRoute: () => board, path: '$requestId', component: DetailSheet})
+    function DetailSheet() { return <RequestDetailSheet requestId={detail.useParams().requestId} moderate={false} /> }
+    const router = createRouter({routeTree: base.addChildren([board.addChildren([detail])]), history: createMemoryHistory({initialEntries: ['/requests']})})
+    await act(async () => { await router.load(); root.render(<RouterProvider router={router} />) })
+    const typeFilter = container.querySelector<HTMLSelectElement>('select[aria-label="Request type"]')!
+    await act(async () => { typeFilter.value = 'feature'; typeFilter.dispatchEvent(new Event('change', {bubbles: true})) })
+    const requestLink = [...container.querySelectorAll<HTMLAnchorElement>('a')].find(link => link.textContent?.includes(request.title))!
+    await act(async () => requestLink.click())
+    expect(router.state.location.pathname).toBe(`/requests/${request.id}`)
+    expect(document.body.textContent).toContain('Feature requests')
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Feature request details')
+    await act(async () => router.history.back())
+    expect(router.state.location.pathname).toBe('/requests')
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Request type"]')?.value).toBe('feature')
+
+    const reopenedLink = [...container.querySelectorAll<HTMLAnchorElement>('a')].find(link => link.textContent?.includes(request.title))!
+    await act(async () => reopenedLink.click())
+    await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close feature request"]')!.click())
+    expect(router.state.location.pathname).toBe('/requests')
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    await act(async () => router.history.back())
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
   })
 
   it('discards a late list response after changing the search', async () => {
@@ -159,7 +193,7 @@ describe('Community requests interactions', () => {
     expect(api.createCommunityRequest).toHaveBeenCalledTimes(2)
     expect(api.createCommunityRequest.mock.calls[0]).toEqual(api.createCommunityRequest.mock.calls[1])
     expect(Object.keys(api.createCommunityRequest.mock.calls[0][0]).toSorted()).toEqual(['body', 'idempotencyKey', 'kind', 'title'])
-    expect(container.textContent).toContain('Created request reached')
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Feature request details')
     expect(api.submitProductFeedback).not.toHaveBeenCalled()
   })
 
@@ -263,7 +297,7 @@ describe('Community requests interactions', () => {
       expect(api.moderateCommunityRequest.mock.lastCall?.[1]).toMatchObject({ action, ...(action === 'duplicate' ? { duplicateOf: 'canonical-id' } : {}) })
       expect(container.textContent?.includes('Hidden from the board')).toBe(action === 'hide')
       expect(container.querySelector('textarea') === null).toBe(action === 'hide')
-      expect(container.querySelector('a[href="/requests/canonical-id"]') !== null).toBe(action === 'duplicate')
+      expect(container.querySelector('a[href="/requests/canonical-id?moderate=true"]') !== null).toBe(action === 'duplicate')
     }
     expect(container.textContent).toContain('current administrator authority')
   })
@@ -288,19 +322,6 @@ describe('Community requests interactions', () => {
     expect(container.textContent).not.toContain('Stale suggestion')
     await act(async () => root.render(<div>Gone</div>)); await debounce()
     expect(api.suggestRelatedCommunityRequests).toHaveBeenCalledTimes(1)
-  })
-
-  it('keeps legacy status private, explicit and read-only without polling or automation availability', async () => {
-    api.listProductFeedbackStatuses.mockResolvedValue([{ id: 'legacy', kind: 'bug', title: 'Old private bug', state: 'pr-created', message: 'Owner-only status', prUrl: 'https://github.com/totango/odie-os/pull/123', createdAt: new Date(), updatedAt: new Date() }])
-    await render(<RequestsPage />)
-    expect(api.listProductFeedbackStatuses).not.toHaveBeenCalled()
-    expect(container.textContent).not.toContain('Old private bug')
-    await click('View my legacy private feedback status')
-    expect(container.textContent).toContain('Old private bug')
-    expect(container.querySelector('a[href="https://github.com/totango/odie-os/pull/123"]')).not.toBeNull()
-    await click('Refresh private status')
-    expect(api.listProductFeedbackStatuses).toHaveBeenCalledTimes(2)
-    expect(api.submitProductFeedback).not.toHaveBeenCalled()
   })
 
   it('handles list and detail failures without exposing raw RPC errors', async () => {

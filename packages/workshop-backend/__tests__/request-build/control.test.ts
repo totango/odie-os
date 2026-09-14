@@ -348,7 +348,7 @@ describe("request-build actual backend/Sessions workerd lifecycle with mocked Gi
     expect(notifications).toHaveLength(1);
     expect(publicRun.notification).toBe("acknowledged");
     expect(notifications).toEqual([{ channel: "C1234567890", unfurl_links: false, unfurl_media: false,
-      text: `Draft community-request PR created. Request: https://workshop.example.invalid/requests/${requestId}\nRun: https://workshop.example.invalid/requests/${requestId}/runs/${run.runId}\nPR: ${publicRun.pullRequest.url}` }]);
+      text: `Draft feature-request PR created. Request: https://workshop.example.invalid/requests/${requestId}\nRun: https://workshop.example.invalid/requests/${requestId}/runs/${run.runId}\nPR: ${publicRun.pullRequest.url}` }]);
     await tick(name, 3);
     expect(notifications).toHaveLength(1);
     expect(await call(name, "list", { requestId })).toEqual([await call(name, "get", { requestId, runId: run.runId })]);

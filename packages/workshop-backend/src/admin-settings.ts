@@ -1011,6 +1011,7 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   async listAdministrators(cursor?: string) { return this.authority.list(this.claim, cursor); }
   async resolveAdministratorCandidate(profileId: string) { return this.authority.resolve(this.claim, profileId); }
+  async searchAdministratorCandidates(query: string) { return this.authority.search(this.claim, query); }
   async previewAdministratorBootstrap() { return this.authority.preview(this.claim); }
   async prepareAdministratorBootstrap(input: Parameters<AdminApi["prepareAdministratorBootstrap"]>[0]) { return this.authority.prepare(this.claim, input); }
   async activateManagedAdministrators(input: Parameters<AdminApi["activateManagedAdministrators"]>[0]) { return this.authority.activate(this.claim, input); }

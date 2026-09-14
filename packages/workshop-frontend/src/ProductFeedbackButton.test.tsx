@@ -21,7 +21,7 @@ describe('ProductFeedbackButton board transition', () => {
     const requests = createRoute({ getParentRoute: () => base, path: '/requests', component: () => <h1>Board reached</h1> })
     const router = createRouter({ routeTree: base.addChildren([index, requests]), history: createMemoryHistory({ initialEntries: ['/'] }) })
     await act(async () => { await router.load(); root.render(<RouterProvider router={router} />) })
-    expect(container.querySelector('a')?.getAttribute('aria-label')).toBe('Community requests')
+    expect(container.querySelector('a')?.getAttribute('aria-label')).toBe('Feature requests')
     expect(container.querySelector('a')?.getAttribute('href')).toBe('/requests')
     await act(async () => container.querySelector('a')!.click())
     expect(container.textContent).toContain('Board reached')

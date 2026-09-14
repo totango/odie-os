@@ -26,7 +26,7 @@ import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
-import { Route as RequestsRequestIdRouteImport } from './routes/requests_.$requestId'
+import { Route as RequestsRequestIdRouteImport } from './routes/requests.$requestId'
 import { Route as RequestsNewRouteImport } from './routes/requests_.new'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
 import { Route as RequestsRequestIdRunsRunIdRouteImport } from './routes/requests_.$requestId_.runs.$runId'
@@ -117,9 +117,9 @@ const GatekeepersAppIdRoute = GatekeepersAppIdRouteImport.update({
   getParentRoute: () => rootRouteImport,
 } as any)
 const RequestsRequestIdRoute = RequestsRequestIdRouteImport.update({
-  id: '/requests_/$requestId',
-  path: '/requests/$requestId',
-  getParentRoute: () => rootRouteImport,
+  id: '/$requestId',
+  path: '/$requestId',
+  getParentRoute: () => RequestsRoute,
 } as any)
 const RequestsNewRoute = RequestsNewRouteImport.update({
   id: '/requests_/new',
@@ -149,7 +149,7 @@ export interface FileRoutesByFullPath {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
-  '/requests': typeof RequestsRoute
+  '/requests': typeof RequestsRouteWithChildren
   '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
@@ -172,7 +172,7 @@ export interface FileRoutesByTo {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
-  '/requests': typeof RequestsRoute
+  '/requests': typeof RequestsRouteWithChildren
   '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
@@ -196,14 +196,14 @@ export interface FileRoutesById {
   '/outputs': typeof OutputsRoute
   '/profile': typeof ProfileRoute
   '/providers': typeof ProvidersRoute
-  '/requests': typeof RequestsRoute
+  '/requests': typeof RequestsRouteWithChildren
   '/sessions': typeof SessionsRoute
   '/signup': typeof SignupRoute
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
-  '/requests_/$requestId': typeof RequestsRequestIdRoute
+  '/requests/$requestId': typeof RequestsRequestIdRoute
   '/requests_/new': typeof RequestsNewRoute
   '/workspace/$id': typeof WorkspaceIdRoute
   '/requests_/$requestId_/runs/$runId': typeof RequestsRequestIdRunsRunIdRoute
@@ -274,7 +274,7 @@ export interface FileRouteTypes {
     | '/blueprint/$id'
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
-    | '/requests_/$requestId'
+    | '/requests/$requestId'
     | '/requests_/new'
     | '/workspace/$id'
     | '/requests_/$requestId_/runs/$runId'
@@ -291,14 +291,13 @@ export interface RootRouteChildren {
   OutputsRoute: typeof OutputsRoute
   ProfileRoute: typeof ProfileRoute
   ProvidersRoute: typeof ProvidersRoute
-  RequestsRoute: typeof RequestsRoute
+  RequestsRoute: typeof RequestsRouteWithChildren
   SessionsRoute: typeof SessionsRoute
   SignupRoute: typeof SignupRoute
   WorkspacesRoute: typeof WorkspacesRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
-  RequestsRequestIdRoute: typeof RequestsRequestIdRoute
   RequestsNewRoute: typeof RequestsNewRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
   RequestsRequestIdRunsRunIdRoute: typeof RequestsRequestIdRunsRunIdRoute
@@ -425,12 +424,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GatekeepersAppIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/requests_/$requestId': {
-      id: '/requests_/$requestId'
-      path: '/requests/$requestId'
+    '/requests/$requestId': {
+      id: '/requests/$requestId'
+      path: '/$requestId'
       fullPath: '/requests/$requestId'
       preLoaderRoute: typeof RequestsRequestIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof RequestsRoute
     }
     '/requests_/new': {
       id: '/requests_/new'
@@ -456,6 +455,18 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface RequestsRouteChildren {
+  RequestsRequestIdRoute: typeof RequestsRequestIdRoute
+}
+
+const RequestsRouteChildren: RequestsRouteChildren = {
+  RequestsRequestIdRoute: RequestsRequestIdRoute,
+}
+
+const RequestsRouteWithChildren = RequestsRoute._addFileChildren(
+  RequestsRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
@@ -467,14 +478,13 @@ const rootRouteChildren: RootRouteChildren = {
   OutputsRoute: OutputsRoute,
   ProfileRoute: ProfileRoute,
   ProvidersRoute: ProvidersRoute,
-  RequestsRoute: RequestsRoute,
+  RequestsRoute: RequestsRouteWithChildren,
   SessionsRoute: SessionsRoute,
   SignupRoute: SignupRoute,
   WorkspacesRoute: WorkspacesRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
-  RequestsRequestIdRoute: RequestsRequestIdRoute,
   RequestsNewRoute: RequestsNewRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
   RequestsRequestIdRunsRunIdRoute: RequestsRequestIdRunsRunIdRoute,

@@ -137,7 +137,7 @@ export async function sendRequestBuildNotification(env: RequestBuildNotifierEnv,
       method: "POST", redirect: "manual", signal: controller.signal,
       headers: { "Authorization": `Bearer ${config.token}`, "Content-Type": "application/json; charset=utf-8" },
       body: JSON.stringify({ channel: config.channel,
-        text: `Draft community-request PR created. Request: ${requestUrl}\nRun: ${requestUrl}/runs/${request.runId}\nPR: https://github.com/totango/odie-os/pull/${request.prNumber}`,
+        text: `Draft feature-request PR created. Request: ${requestUrl}\nRun: ${requestUrl}/runs/${request.runId}\nPR: https://github.com/totango/odie-os/pull/${request.prNumber}`,
         unfurl_links: false, unfurl_media: false }),
     });
     const data = await responseBody(response);

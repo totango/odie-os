@@ -84,7 +84,7 @@ describe('RequiredConnectionsGate', () => {
     expect(rendered.textContent).toContain('Connect required services to continue')
     expect(rendered.textContent).toContain('GitHub')
     expect(rendered.textContent).not.toContain('Unlocked app')
-    expect(rendered.querySelector('nav[aria-label="Recovery pages"] a[href="/requests"]')?.textContent).toBe('Community requests')
+    expect(rendered.querySelector('nav[aria-label="Recovery pages"] a[href="/requests"]')?.textContent).toBe('Feature requests')
   })
 
   it('starts a missing connection and shows a popup-blocked fallback', async () => {

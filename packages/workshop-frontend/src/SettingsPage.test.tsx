@@ -11,7 +11,6 @@ const state = vi.hoisted(() => {
   return {
     getOpenCodeCustomization,
     toast,
-    toastManager: { add: toast },
     authenticatedApi: {
       hasPasswordLogin: vi.fn<() => Promise<boolean>>(async () => false),
       getSimplifiedTechnicalEnglishEnabled: vi.fn<() => Promise<boolean>>(async () => false),
@@ -24,7 +23,8 @@ const state = vi.hoisted(() => {
 vi.mock('@cloudflare/kumo', () => ({
   Switch: (props: { checked: boolean; disabled?: boolean; 'aria-labelledby'?: string }) =>
     <input type="checkbox" role="switch" checked={props.checked} aria-checked={props.checked} disabled={props.disabled} readOnly aria-labelledby={props['aria-labelledby']} />,
-  useKumoToastManager: () => state.toastManager,
+  // Kumo returns a new wrapper on each render; effects must not restart because of it.
+  useKumoToastManager: () => ({ add: state.toast }),
 }))
 vi.mock('./AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: state.authenticatedApi }) }))
 vi.mock('./useAvatar', () => ({ useAvatar: () => undefined, invalidateAvatarCache: vi.fn<() => void>() }))
@@ -60,6 +60,7 @@ describe('SettingsPage OpenCode loading recovery', () => {
     expect(container.textContent).toContain('Loading OpenCode settings…')
 
     await act(async () => vi.advanceTimersByTimeAsync(12_000))
+    expect(state.getOpenCodeCustomization).toHaveBeenCalledTimes(1)
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Failed to load OpenCode settings')
     expect(container.querySelector<HTMLTextAreaElement>('textarea[aria-describedby="opencode-plugin-help"]')?.disabled).toBe(true)
     expect(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Save OpenCode settings')?.hasAttribute('disabled')).toBe(true)

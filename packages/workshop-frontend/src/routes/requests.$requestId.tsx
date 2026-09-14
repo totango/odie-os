@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
-import RequestDetailPage from '../community-requests/RequestDetailPage'
+import { RequestDetailSheet } from '../community-requests/RequestsPage'
 
-export const Route = createFileRoute('/requests_/$requestId')({
+export const Route = createFileRoute('/requests/$requestId')({
   validateSearch: (search: Record<string, unknown>): { moderate?: boolean } => ({ moderate: search.moderate === true || undefined }),
   component: RequestRoute,
 })
@@ -9,5 +9,5 @@ export const Route = createFileRoute('/requests_/$requestId')({
 function RequestRoute() {
   const { requestId } = Route.useParams()
   const { moderate } = Route.useSearch()
-  return <RequestDetailPage key={`${requestId}:${moderate}`} requestId={requestId} moderate={moderate} />
+  return <RequestDetailSheet key={`${requestId}:${moderate}`} requestId={requestId} moderate={!!moderate} />
 }

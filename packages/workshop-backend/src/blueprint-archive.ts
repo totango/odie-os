@@ -14,6 +14,9 @@ export const FEATURED_BLUEPRINTS_KEY = '.featured';
  */
 export const ADMIN_CONFIG_KEY = '.adminConfig';
 
+/** Reserved prefix for derived, administrator-only account discovery hints. */
+export const ACCOUNT_DIRECTORY_KEY_PREFIX = '.accountDirectory.v1:';
+
 const BLUEPRINT_ARCHIVE_MAGIC = 0xec2e2d3a2300e317n;
 const BLUEPRINT_ARCHIVE_VERSION = 1;
 const BLUEPRINT_ARCHIVE_PREFIX_BYTES = 24;
@@ -35,7 +38,7 @@ export type BlueprintKvRecord = {
 };
 
 export function isReservedBlueprintKey(id: string): boolean {
-  return id === FEATURED_BLUEPRINTS_KEY || id === ADMIN_CONFIG_KEY;
+  return id === FEATURED_BLUEPRINTS_KEY || id === ADMIN_CONFIG_KEY || id.startsWith(ACCOUNT_DIRECTORY_KEY_PREFIX);
 }
 
 export function reviveBlueprintMetadata(metadata: BlueprintMetadata): BlueprintMetadata {
