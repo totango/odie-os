@@ -15,10 +15,10 @@ test("Odie deploys capability-aware providers before the authority consumer", ()
   }
 });
 
-test("all four configured administrator seeds and authentication policy remain deployment-owned", () => {
+test("exact existing administrator seeds and authentication policy remain deployment-owned", () => {
   const config = read("packages/workshop-backend/wrangler.odie-os-production.jsonc");
   const admins = JSON.parse(config.match(/"ADMINS"\s*:\s*(\[[\s\S]*?\])/)![1]);
-  assert.deepEqual(admins, ["jacob.beck@heyodie.ai", "keith@totango.com", "nick.roberts@totango.com", "stacy.kennedy@totango.com"]);
+  assert.deepEqual(admins, ["jacob.beck@heyodie.ai", "stacy.kennedy@totango.com"]);
   const authority = read("packages/workshop-backend/src/admin-authority.ts");
   for (const authenticationVariable of ["AUTH_GATEKEEPERS", "DISABLE_PASSWORD_AUTH", "AUTH_EMAIL_DOMAIN_ALIASES"]) {
     assert.equal(authority.includes(authenticationVariable), false);
@@ -31,9 +31,10 @@ test("all four configured administrator seeds and authentication policy remain d
   assert.ok(authority.includes('"LEGACY_CAPABILITIES_UNDRAINED"'));
 });
 
-test("Finance operator configuration stays backend-only and optional in deployment plumbing", () => {
+test("Finance operator configuration stays backend-only and explicit when administrators diverge", () => {
   const production = read("packages/workshop-backend/wrangler.odie-os-production.jsonc");
-  assert.equal(/"FINANCE_OPERATORS"\s*:/.test(production), false, "omission preserves all four configured seeds");
+  const operators = JSON.parse(production.match(/"FINANCE_OPERATORS"\s*:\s*(\[[\s\S]*?\])/)![1]);
+  assert.deepEqual(operators, ["jacob.beck@heyodie.ai", "keith@totango.com", "nick.roberts@totango.com", "stacy.kennedy@totango.com"]);
   assert.ok(read("scripts/run-dev-server.ts").includes('"FINANCE_OPERATORS"'));
   assert.ok(read("scripts/release/manifest-lib.ts").includes('Object.assign(vars, config.vars ?? {})'));
   assert.equal(read("scripts/release/manifest-lib.ts").includes('FINANCE_OPERATORS'), false, "not a credential wizard input");

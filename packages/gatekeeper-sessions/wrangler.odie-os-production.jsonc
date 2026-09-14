@@ -17,7 +17,9 @@
     "SESSION_ALLOWED_ORIGIN": "https://odie-os.odie-os.workers.dev",
     "CODING_SESSION_PI_RUNTIME_ENABLED": "true",
     "CODING_SESSION_DURABLE_LIFECYCLE_ENABLED": "true",
-    "APPLICATION_PREVIEW_ENABLED": "false"
+    "APPLICATION_PREVIEW_ENABLED": "false",
+    "REQUEST_BUILD_POLICY": "{\"version\":\"auto-build-2026-09-14-v1\",\"runtimeVersion\":\"0.85.1\",\"model\":\"gpt-5.6-sol\",\"dependencyHosts\":[\"registry.npmjs.org\"],\"wallTimeMs\":3600000,\"modelCalls\":1000,\"spendMicros\":1000000000,\"callChargeMicros\":5000000,\"modelInputBytes\":524288,\"modelOutputTokens\":16000,\"outputBytes\":8388608,\"diffBytes\":1048576,\"diffFiles\":100,\"concurrency\":1}"
+
   },
   "containers": [
     {

@@ -16,13 +16,16 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
-    // FINANCE_OPERATORS is deliberately omitted: these four exact ADMINS are also Finance
-    // operators, independently of managed administrator grant/revoke. Set an explicit array
-    // (including [] for none) here only when deployment operators intend to separate the roles.
-    "ADMINS": [
+    // Finance access remains deployment-owned and independent of managed Workshop administration.
+    "FINANCE_OPERATORS": [
       "jacob.beck@heyodie.ai",
       "keith@totango.com",
       "nick.roberts@totango.com",
+      "stacy.kennedy@totango.com"
+    ],
+    // Seed only exact existing accounts into the one-time managed-administrator cutover.
+    "ADMINS": [
+      "jacob.beck@heyodie.ai",
       "stacy.kennedy@totango.com"
     ],
     "AUTH_GATEKEEPERS": "google",
@@ -36,6 +39,9 @@
     "DEPLOY_URL": "https://os.cloudflare.app/deploy/?instance=0b25cd3c-6772-4200-be89-353ceea1c63e",
     "PUBLIC_BASE_URL": "https://odie-os-native-api.odie-os.workers.dev",
     "REQUEST_BUILD_WORKSHOP_ORIGIN": "https://odie-os.odie-os.workers.dev",
+    "REQUEST_BUILD_NOTIFIER_GENERATION": "jarvis-unilyst-prs-v1",
+    "REQUEST_BUILD_PUBLICATION_POLICY": "{\"version\":\"auto-build-2026-09-14-v1\",\"allowedPaths\":[\"packages/\",\"docs/\"],\"changedLines\":5000,\"textBytes\":524288}",
+    "REQUEST_BUILD_DEPLOYMENT_EVIDENCE": "{\"image\":\"registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b\",\"runtimeVersion\":\"0.85.1\",\"policyHash\":\"93508dfad58fc5a93f322bbe1ddfad709940f68fa6709546f2e0ff378c3ef161\",\"pricing\":{\"model\":\"gpt-5.6-sol\",\"callChargeMicros\":5000000,\"spendMicros\":1000000000,\"source\":\"https://developers.openai.com/api/docs/models/gpt-5.6-sol\"},\"repository\":\"totango/odie-os\",\"baseBranch\":\"main\"}",
     "DISABLE_PASSWORD_AUTH": "true",
     "REQUIRED_HEALTHY_CONNECTIONS": "odie_kg",
     "TEAM_PI_CODEX_ONLY": "true"
