@@ -40,6 +40,7 @@ describe("native canary workflow cleanup", () => {
     expect(publish).toContain("npm install --prefix \"$tooling\" --ignore-scripts");
     expect(publish).toContain("wrangler@4.131.1");
     expect(publish).toContain("\"$WRANGLER_BIN\" containers push");
+    expect(workflow).toContain('run: |\n          "$WRANGLER_BIN" deploy --config "$CANARY_CONFIG"');
     expect(publish).not.toContain("run-install: true");
     expect(publish).not.toContain("pnpm exec wrangler");
     expect(publish).not.toContain("npm install --global wrangler");
