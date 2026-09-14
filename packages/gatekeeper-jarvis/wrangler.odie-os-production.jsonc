@@ -17,6 +17,12 @@
   ],
   "vars": {
     "REQUEST_BUILD_WORKSHOP_ORIGIN": "https://odie-os.odie-os.workers.dev",
+    "REQUEST_BUILD_SLACK_CHANNEL": "C09EW0T5VB5",
+    "REQUEST_BUILD_SLACK_TEAM_ID": "T029S9MAU",
+    "REQUEST_BUILD_SLACK_BOT_USER_ID": "U0ASJH874Q2",
+    "REQUEST_BUILD_SLACK_BOT_ID": "B0ASN51AUJ0",
+    "REQUEST_BUILD_SLACK_CHANNEL_TYPE": "public",
+    "REQUEST_BUILD_NOTIFIER_GENERATION": "jarvis-unilyst-prs-v1",
     "JARVIS_MCP_URL": "https://jarvis.unison.totango.com/api/jarvis/mcp",
     "JARVIS_TRUST_ANNOTATIONS": "true",
     "PRODUCT_FEEDBACK_MCP_URL": "https://jarvis.unison.totango.com/api/jarvis/product-feedback/mcp"

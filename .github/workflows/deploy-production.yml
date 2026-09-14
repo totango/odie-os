@@ -244,7 +244,7 @@ jobs:
             done
           }
           require_secrets odie-os-gk-github CLIENT_ID CLIENT_SECRET
-          require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN PRODUCT_FEEDBACK_MCP_TOKEN
+          require_secrets odie-os-gk-jarvis JARVIS_MCP_TOKEN PRODUCT_FEEDBACK_MCP_TOKEN REQUEST_BUILD_SLACK_TOKEN
           require_secrets odie-os-gk-jira CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-slack CLIENT_ID CLIENT_SECRET
           require_secrets odie-os-gk-zendesk CLIENT_ID CLIENT_SECRET
