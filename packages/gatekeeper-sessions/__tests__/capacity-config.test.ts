@@ -56,7 +56,7 @@ describe.each([
   [
     "Odie production",
     "wrangler.odie-os-production.jsonc",
-    "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+    "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22",
   ],
 ])("%s capacity config", (_label, file, image) => {
   const config = readConfig(file);

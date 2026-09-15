@@ -24,37 +24,37 @@
   "containers": [
     {
       "class_name": "CodingSessionSandbox",
-      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22",
       "instance_type": "standard-1",
       "max_instances": 20
     },
     {
       "class_name": "CodingSessionSandboxStandard2",
-      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22",
       "instance_type": "standard-2",
       "max_instances": 8
     },
     {
       "class_name": "CodingSessionSandboxStandard3",
-      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22",
       "instance_type": "standard-3",
       "max_instances": 4
     },
     {
       "class_name": "CodingSessionSandboxStandard4",
-      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22",
       "instance_type": "standard-4",
       "max_instances": 2
     },
     {
       "class_name": "RequestBuildSandbox",
-      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22",
       "instance_type": "standard-1",
       "max_instances": 1
     },
     {
       "class_name": "ProductFeedbackSandbox",
-      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:2d2edbdb0eb6e2ba382b878425dd928ad5b957862e5ad7450b062a9c75f1f01b",
+      "image": "registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22",
       "instance_type": "standard-1",
       "max_instances": 4
     }
