@@ -141,7 +141,10 @@ export class BuildFixture extends DurableObject {
           };
         },
         ensureRequestBuild: (owner, intent) => execution(owner).ensure(owner, intent),
-        getRequestBuildReceipt: (owner, key) => execution(owner).receipt(owner, key),
+        getRequestBuildReceipt: (owner, key) => {
+          if (kv.get("receipt-callback-unavailable")) throw new Error("registry callback unavailable");
+          return execution(owner).receipt(owner, key);
+        },
         cancelRequestBuildExecution: (owner, key, revision) =>
           execution(owner).cancel(owner, key, revision),
         getRequestBuildArtifact: (owner, key) => execution(owner).artifact(owner, key),

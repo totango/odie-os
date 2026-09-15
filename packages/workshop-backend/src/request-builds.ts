@@ -492,10 +492,16 @@ export class RequestBuilds {
         canonicalBuildJson(setup.publicationPolicy) !== canonicalBuildJson(run.publicationPolicy)
       )
         throw new Error();
-      const receipt = await this.deps.sessions.getRequestBuildReceipt(
-        run.owner,
-        request.dispatchKey,
-      );
+      // Registry alarms call this host while that same registry is occupied. Reuse the receipt
+      // already bound by the controller instead of making a circular RPC back into the caller.
+      // Its state can lag the registry, so it proves immutable identity but not current lifecycle
+      // phase. The trusted registry enforces stage ordering before and after this callback.
+      // Model and publication calls originate outside the registry and still read live state.
+      const registryCallback = request.phase === "start" || request.phase === "collect";
+      const boundRegistryReceipt = registryCallback ? run.receipt : undefined;
+      const receipt =
+        boundRegistryReceipt ??
+        (await this.deps.sessions.getRequestBuildReceipt(run.owner, request.dispatchKey));
       if (
         !receipt ||
         receipt.dispatchKey !== request.dispatchKey ||
@@ -520,11 +526,11 @@ export class RequestBuilds {
             (request.phase === "reserve"
               ? !executionTerminal.has(receipt.state)
               : request.phase === "start"
-                ? ["reserved", "starting"].includes(receipt.state)
+                ? !!boundRegistryReceipt || ["reserved", "starting"].includes(receipt.state)
                 : request.phase === "model"
                   ? receipt.state === "running"
                   : request.phase === "collect"
-                    ? ["running", "collecting"].includes(receipt.state)
+                    ? !!boundRegistryReceipt || ["running", "collecting"].includes(receipt.state)
                     : false);
       if (!phaseAllowed) throw new Error();
       await this.deps.assertCurrent(run.claim);
