@@ -17,6 +17,7 @@ export type RequestBuildRecord = RequestBuildExecutionReceipt & {
 export interface RequestBuildExecutionDependencies {
   readiness(): RequestBuildReadiness;
   authorize: CodingSessionToolHost["authorizeRequestBuild"];
+  contextFile: CodingSessionToolHost["readRequestBuildContextFile"];
   sandbox(record: RequestBuildRecord): RequestBuildSandboxClient;
   configure(record: RequestBuildRecord): Promise<void>;
   disable(record: RequestBuildRecord): Promise<void>;
@@ -38,6 +39,11 @@ type RequestBuildLogFields = {
 const logger = createLogger<RequestBuildLogFields>({ component: "gatekeeper.sessions.request-build", vendorId: "sessions" });
 
 const terminal = new Set(["artifact_ready", "canceled", "failed", "needs_attention"]);
+async function hashBytes(content: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", content);
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 const processFailureMarkers = [
   "BUILD_RUNTIME_MISMATCH",
   "BUILD_MODEL_UNAVAILABLE",
@@ -113,7 +119,8 @@ export class RequestBuildExecution {
     record ??= {
       owner, intent, intentHash, dispatchKey: intent.dispatchKey, sessionId: crypto.randomUUID(),
       sandboxId: `request-build-${crypto.randomUUID()}`, generation: 1, sequence: 1,
-      state: "reserved", stage: "authorize", cancelRevision: 0, createdAt: now, updatedAt: now,
+      state: "reserved", stage: "authorize", contextFileIndex: 0,
+      cancelRevision: 0, createdAt: now, updatedAt: now,
       deadline: now + intent.policy.wallTimeMs, cleanup: "pending",
     };
     // Reserve precedes remote authorization: concurrent ensure calls must name the same identity.
@@ -217,6 +224,8 @@ export class RequestBuildExecution {
   }
 
   async #advance(record: RequestBuildRecord): Promise<void> {
+    // Records reserved before attachment support have no contextFiles field.
+    const contextFiles = record.intent.contextFiles ?? [];
     if (record.state === "cancel_requested") record = this.#save(record, { state: "canceled", stage: "done" });
     if (!terminal.has(record.state) && Date.now() >= record.deadline) record = this.#save(record, { state: "failed", errorCode: "BUILD_WALLTIME_LIMIT" });
     if (!terminal.has(record.state) && !this.deps.current(record)) record = this.#save(record, { state: "needs_attention", errorCode: "BUILD_GENERATION_STALE" });
@@ -248,6 +257,23 @@ export class RequestBuildExecution {
       this.#save(record, { state: "needs_attention", errorCode: "BUILD_PROCESS_START_AMBIGUOUS" }); return;
     }
     const sandbox = this.deps.sandbox(record);
+    if (record.stage === "context") {
+      await this.#authorize(record, "start");
+      const index = record.contextFileIndex ?? 0;
+      const descriptor = contextFiles[index];
+      if (!descriptor) {
+        await this.#launch(record, "runner_launch", "runner_wait", ["node", "/workspace/.request-build/runner.mjs"]); return;
+      }
+      const content = await this.deps.contextFile(record.owner, {
+        dispatchKey: record.dispatchKey, phase: "start", sessionId: record.sessionId,
+        generation: record.generation, intentHash: record.intentHash,
+      }, descriptor.id);
+      if (!(content instanceof Uint8Array) || content.byteLength !== descriptor.byteLength ||
+          await hashBytes(content) !== descriptor.sha256) throw new Error("BUILD_CONTEXT_INVALID");
+      await sandbox.writeFile(`/workspace/.request-build/context/${descriptor.path}`,
+        new Blob([new Uint8Array(content)]).stream());
+      this.#save(record, { contextFileIndex: index + 1 }); return;
+    }
     const process = record.processId ? await sandbox.getProcess(record.processId) : null;
     if (!process) { this.#save(record, { state: "needs_attention", errorCode: "BUILD_PROCESS_LOST" }); return; }
     const status = await process.status();
@@ -265,6 +291,10 @@ export class RequestBuildExecution {
     }
     if (record.stage === "clone_wait") {
       await this.#authorize(record, "start");
+      if (contextFiles.length) {
+        await sandbox.mkdir("/workspace/.request-build/context", { recursive: true });
+        this.#save(record, { stage: "context", contextFileIndex: 0, processId: undefined }); return;
+      }
       await this.#launch(record, "runner_launch", "runner_wait", ["node", "/workspace/.request-build/runner.mjs"]); return;
     }
     if (record.stage === "runner_wait") {

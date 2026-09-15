@@ -120,6 +120,8 @@ const requestBuildFixturePolicy: RequestBuildPolicy = {
   spendMicros: 2000,
   callChargeMicros: 1000,
   modelInputBytes: 8192,
+contextFiles: 10,
+contextBytes: 100 * 1024 * 1024,
   modelOutputTokens: 200,
   outputBytes: 8192,
   diffBytes: 4096,

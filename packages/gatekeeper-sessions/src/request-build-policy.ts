@@ -1,4 +1,5 @@
 import type { RequestBuildIntent, RequestBuildPolicy, RequestBuildReadiness } from "@gadgets/workshop-shared/coding-sessions";
+import { COMMUNITY_REQUEST_ATTACHMENT_TYPES } from "@gadgets/workshop-shared/community-requests";
 
 /** Exact SDK ABI used by the restricted runner, independent of personal runtime selection. */
 export const REQUEST_BUILD_RUNTIME_VERSION = "0.85.1";
@@ -9,9 +10,12 @@ export const REQUEST_BUILD_MODEL_URL = "https://team-pi-proxy.unison.totango.com
 
 const numericLimits = {
   wallTimeMs: 3_600_000, modelCalls: 1000, spendMicros: 1_000_000_000, callChargeMicros: 1_000_000_000,
-  modelInputBytes: 8 * 1024 * 1024, modelOutputTokens: 100_000, outputBytes: 8 * 1024 * 1024,
+  modelInputBytes: 8 * 1024 * 1024, contextFiles: 10, contextBytes: 100 * 1024 * 1024,
+  modelOutputTokens: 100_000, outputBytes: 8 * 1024 * 1024,
   diffBytes: 1024 * 1024, diffFiles: 100, concurrency: 1,
 };
+const contextExtensions = new Map(Object.entries(COMMUNITY_REQUEST_ATTACHMENT_TYPES)
+  .map(([mimeType, extensions]) => [mimeType, extensions[0]] as const));
 
 /** Closed syntax for backend-generated correlation IDs (not titles or branch input). */
 export function assertRequestBuildKey(key: string): void {
@@ -53,7 +57,29 @@ export async function validateRequestBuildIntent(intent: RequestBuildIntent, pol
   assertRequestBuildKey(intent.dispatchKey); assertRequestBuildKey(intent.runId);
   if (!Number.isSafeInteger(intent.attempt) || intent.attempt < 1 || intent.attempt > 100 ||
       intent.repository !== "totango/odie-os" || intent.baseBranch !== "main" || !/^[a-f0-9]{40}$/.test(intent.baseSha) ||
-      typeof intent.specification !== "string" || !intent.specification.trim() || new TextEncoder().encode(intent.specification).length > 32768) throw new Error("INVALID_BUILD_INTENT");
+      typeof intent.specification !== "string" || !intent.specification.trim() ||
+      new TextEncoder().encode(intent.specification).length > policy.modelInputBytes ||
+      !Array.isArray(intent.contextFiles) || intent.contextFiles.length > policy.contextFiles) {
+    throw new Error("INVALID_BUILD_INTENT");
+  }
+  let contextBytes = 0;
+  const ids = new Set<string>(), paths = new Set<string>();
+  for (const [index, file] of intent.contextFiles.entries()) {
+    const extension = file && typeof file === "object" && !Array.isArray(file) &&
+      typeof file.mimeType === "string" ? contextExtensions.get(file.mimeType) : undefined;
+    if (!file || typeof file !== "object" || Array.isArray(file) ||
+        Object.keys(file).toSorted().join(",") !== "byteLength,id,mimeType,path,sha256" ||
+        typeof file.id !== "string" ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(file.id) ||
+        ids.has(file.id) || !extension ||
+        file.path !== `${String(index + 1).padStart(2, "0")}-${file.id}.${extension}` || paths.has(file.path) ||
+        !Number.isSafeInteger(file.byteLength) || file.byteLength < 1 ||
+        typeof file.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(file.sha256)) {
+      throw new Error("INVALID_BUILD_CONTEXT");
+    }
+    ids.add(file.id); paths.add(file.path); contextBytes += file.byteLength;
+  }
+  if (contextBytes > policy.contextBytes) throw new Error("BUILD_CONTEXT_LIMIT");
   if (canonicalBuildJson(intent.policy) !== canonicalBuildJson(policy) ||
       await buildHash(canonicalBuildJson(policy)) !== intent.policyHash ||
       await buildHash(intent.specification) !== intent.specificationHash) throw new Error("BUILD_IMMUTABLE_HASH_MISMATCH");

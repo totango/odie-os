@@ -5,6 +5,7 @@ import {
   type CodingSessionsService,
   type RequestBuildAuthorization,
   type RequestBuildAuthorizationRequest,
+  type RequestBuildContextFile,
   type RequestBuildExecutionReceipt,
   type RequestBuildIntent,
   type RequestBuildReadiness,
@@ -30,8 +31,13 @@ import {
   type RequestBuildPublicationPolicy,
 } from "./request-build-publisher";
 
-/** Only authored visible board content is available to this controller. */
-export type RequestBuildSpecification = { revision: number; specification: string; open: boolean };
+/** Only authored visible board content and immutable public attachments are available to this controller. */
+export type RequestBuildSpecification = {
+  revision: number;
+  specification: string;
+  contextFiles: RequestBuildContextFile[];
+  open: boolean;
+};
 /** Private adapters use actual Sessions methods, not mirrored native/Cap'n Web interfaces. */
 export interface RequestBuildDependencies {
   sessions: Pick<
@@ -49,6 +55,7 @@ export interface RequestBuildDependencies {
   activationReasons(component?: RequestBuildReadiness): Promise<string[]>;
   publicationPolicy(): RequestBuildPublicationPolicy | null;
   specification(requestId: string): RequestBuildSpecification | null;
+  contextFile(attachmentId: string): Promise<Uint8Array | null>;
   /** Trusted deployment origin; missing configuration gates production admission. */
   notificationOrigin?: string;
   /** Current receiver configuration generation; no evidence survives a mismatched deployment. */
@@ -189,15 +196,17 @@ export class RequestBuilds {
   }
   #spec(run: RequestBuildRun): RequestBuildSpecification {
     const spec = this.deps.specification(run.requestId);
-    // Later details cannot rewrite approval. Hiding/closing/revision drift blocks new work.
-    if (
-      !spec ||
-      !spec.open ||
-      spec.revision !== run.requestRevision ||
-      spec.specification !== run.intent.specification
-    )
-      throw new Error("BUILD_APPROVAL_UNAVAILABLE");
+    // The committed intent is immutable. Later public additions belong to future runs, while
+    // hiding, closing, duplicating, or owner-deleting the request revokes current execution.
+    if (!spec?.open) throw new Error("BUILD_APPROVAL_UNAVAILABLE");
     return spec;
+  }
+  #assertApprovalSnapshotCurrent(run: RequestBuildRun): void {
+    const spec = this.#spec(run);
+    if (spec.revision !== run.requestRevision || spec.specification !== run.intent.specification ||
+        canonicalBuildJson(spec.contextFiles) !== canonicalBuildJson(run.intent.contextFiles)) {
+      throw new Error("BUILD_APPROVAL_UNAVAILABLE");
+    }
   }
   async #setup(
     claim: AdminClaim,
@@ -329,7 +338,9 @@ export class RequestBuilds {
     if (
       !spec?.open ||
       spec.revision !== input.expectedRequestRevision ||
-      new TextEncoder().encode(spec.specification).length > 32768
+      new TextEncoder().encode(spec.specification).length > setup.component.policy.modelInputBytes ||
+      spec.contextFiles.length > setup.component.policy.contextFiles ||
+      spec.contextFiles.reduce((bytes, file) => bytes + file.byteLength, 0) > setup.component.policy.contextBytes
     )
       throw new Error("BUILD_APPROVAL_UNAVAILABLE");
     const baseSha = await resolveRequestBuildBase((operation) =>
@@ -348,6 +359,7 @@ export class RequestBuilds {
       attempt,
       specification: spec.specification,
       specificationHash: await buildHash(spec.specification),
+      contextFiles: spec.contextFiles,
       repository: "totango/odie-os",
       baseBranch: "main",
       baseSha,
@@ -387,7 +399,7 @@ export class RequestBuilds {
     const result = this.storage.transactionSync(() => {
       const concurrent = this.#prior(claim, "start", input.mutationKey, payload);
       if (concurrent) return this.#project(concurrent);
-      this.#spec(run);
+      this.#assertApprovalSnapshotCurrent(run);
       if (
         this.storage.sql
           .exec<{ n: number }>(
@@ -464,6 +476,29 @@ export class RequestBuilds {
       "SELECT value FROM build_runs WHERE requestId=? ORDER BY json_extract(value,'$.createdAt') DESC,runId DESC LIMIT 20", requestId,
     ).toArray().map(row => this.#project(JSON.parse(row.value)));
   }
+  /** Privately transfers one exact frozen context file after authorization before and after storage I/O. */
+  async contextFile(
+    owner: CodingSessionOwner,
+    request: RequestBuildAuthorizationRequest,
+    fileId: string,
+  ): Promise<Uint8Array> {
+    identifier(fileId);
+    if (request.phase !== "start" || request.publicationHash !== undefined) throw new Error("BUILD_AUTHORIZATION_DENIED");
+    const first = await this.authorize(owner, request);
+    if (!first.allowed) throw new Error("BUILD_AUTHORIZATION_DENIED");
+    const run = this.#dispatch(request.dispatchKey);
+    const descriptor = run?.intent.contextFiles?.find(file => file.id === fileId);
+    if (!run || !descriptor || run.intentHash !== request.intentHash) throw new Error("BUILD_CONTEXT_UNAVAILABLE");
+    const content = await this.deps.contextFile(fileId);
+    if (!content || content.byteLength !== descriptor.byteLength) throw new Error("BUILD_CONTEXT_UNAVAILABLE");
+    const digest = await crypto.subtle.digest("SHA-256", content);
+    const hash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    if (hash !== descriptor.sha256) throw new Error("BUILD_CONTEXT_UNAVAILABLE");
+    const current = await this.authorize(owner, request);
+    if (!current.allowed) throw new Error("BUILD_AUTHORIZATION_DENIED");
+    return content;
+  }
+
   /** Private host admission is derived from persisted approval AND the real Sessions reservation. */
   async authorize(
     owner: CodingSessionOwner,

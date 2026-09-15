@@ -57,6 +57,7 @@ export default defineConfig({
           TEST_REQUEST_BUILD_NOTIFIER: {name: kCurrentWorker, entrypoint: 'RequestBuildNotifierFixture'},
         },
         kvNamespaces: ['BLUEPRINTS', 'CONTEXT_COLLECTIONS'],
+        r2Buckets: ['BLUEPRINT_CONTENT'],
         durableObjects: {
           TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },

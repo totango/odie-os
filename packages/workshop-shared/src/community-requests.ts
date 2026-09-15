@@ -2,8 +2,18 @@
 export const COMMUNITY_REQUEST_LIMITS = {
   title: 160, body: 8000, detail: 4000, query: 160, idempotencyKey: 80,
   diagnosticEntries: 50, diagnosticMessage: 1000, diagnosticPathname: 512,
+  attachmentName: 180, attachmentBytes: 25 * 1024 * 1024,
+  attachmentsPerRequest: 10, attachmentBytesPerRequest: 100 * 1024 * 1024,
   page: 50, related: 10, readsPerMinute: 120, writesPerMinute: 30,
-  createsPerHour: 5, detailsPerHour: 30,
+  createsPerHour: 5, detailsPerHour: 30, attachmentsPerHour: 20,
+} as const;
+
+/** Public attachment media types and filename extensions accepted after server-side content checks. */
+export const COMMUNITY_REQUEST_ATTACHMENT_TYPES = {
+  "image/jpeg": ["jpg", "jpeg"], "image/png": ["png"], "image/webp": ["webp"],
+  "image/gif": ["gif"], "application/pdf": ["pdf"], "text/plain": ["txt"],
+  "text/markdown": ["md", "markdown"], "application/json": ["json"],
+  "video/mp4": ["mp4", "m4v"], "video/webm": ["webm"], "video/quicktime": ["mov"],
 } as const;
 
 /** Authored public request category; bugs never import historical private feedback. */
@@ -39,6 +49,46 @@ export interface CommunityRequestPrivateDiagnostics {
   capturedAt: Date;
   /** Server-enforced evidence expiry time. */
   expiresAt: Date;
+}
+
+/** Immutable public attachment metadata; bytes are fetched separately and never enter list/search reads. */
+export interface CommunityRequestAttachment {
+  /** Opaque attachment identifier. */
+  id: string;
+  /** Sanitized display filename, at most 180 UTF-16 code units. */
+  name: string;
+  /** Server-validated allowlisted media type. */
+  mimeType: string;
+  /** Exact stored byte length. */
+  byteLength: number;
+  /** Lowercase SHA-256 of the immutable bytes. */
+  sha256: string;
+  /** Server creation time in Unix milliseconds. */
+  createdAt: number;
+  /** Whether this authenticated account uploaded the attachment. */
+  isOwn: boolean;
+}
+
+/** One immutable public attachment upload for a request or an authored public detail. */
+export interface AddCommunityRequestAttachment {
+  /** Stable account-scoped retry key for this upload. */
+  idempotencyKey: string;
+  /** Sanitized for display only; storage and sandbox paths are server-owned. */
+  name: string;
+  /** Browser-declared type, accepted only when it matches server-side content validation. */
+  mimeType: string;
+  /** Attachment bytes, bounded to 25 MiB before persistence. */
+  content: Uint8Array;
+  /** Optional authored detail receiving this attachment; omission attaches it to the request. */
+  detailId?: string;
+}
+
+/** Authenticated attachment download; metadata remains public while bytes are loaded on demand. */
+export interface CommunityRequestAttachmentContent {
+  /** Public metadata for the exact immutable object. */
+  attachment: CommunityRequestAttachment;
+  /** Exact stored bytes after hash and length verification. */
+  content: Uint8Array;
 }
 
 /** Explicitly authored plain text for signed-in deployment users, not diagnostics or evidence. */
@@ -79,6 +129,8 @@ export interface CommunityRequest {
   voteCount: number;
   /** Whether the current authenticated account has voted. */
   viewerHasVoted: boolean;
+  /** Immutable public attachments placed directly on the request. */
+  attachments: CommunityRequestAttachment[];
 }
 
 /** Public detail appended to a request; immutable authored text, with no attached private evidence. */
@@ -91,6 +143,8 @@ export interface CommunityRequestDetail {
   createdAt: number;
   /** Whether this authenticated account authored the detail. */
   isOwn: boolean;
+  /** Immutable public attachments placed on this detail. */
+  attachments: CommunityRequestAttachment[];
 }
 
 /** Cursor page options; cursors are opaque, bound to the query, and convey no authority. */

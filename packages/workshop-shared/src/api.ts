@@ -31,7 +31,7 @@ import { AccountDescription, ActionKind, ActionDescription, AvatarImage, Gatekee
 import type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicRequestBuildReadiness } from "./request-build-publication.js";
 /** Public request-build control and safe projection contracts. */
 export type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicRequestBuildReadiness } from "./request-build-publication.js";
-import type { CreateCommunityRequest, CommunityRequest, CommunityRequestQuery, CommunityRequestPage, CommunityRequestPageOptions, CommunityRequestDetail, CommunityRequestDetailPage, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, CommunityRequestPrivateDiagnostics, ModerateCommunityRequest } from "./community-requests.js";
+import type { CreateCommunityRequest, CommunityRequest, CommunityRequestQuery, CommunityRequestPage, CommunityRequestPageOptions, CommunityRequestDetail, CommunityRequestDetailPage, AddCommunityRequestDetail, AddCommunityRequestAttachment, AttachCommunityRequestDiagnostics, CommunityRequestAttachment, CommunityRequestAttachmentContent, CommunityRequestPrivateDiagnostics, ModerateCommunityRequest } from "./community-requests.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
@@ -823,6 +823,10 @@ export interface AuthenticatedApi extends RpcTarget {
   unvoteCommunityRequest(id: string): Promise<CommunityRequest>;
   /** Append authored public details idempotently. Never accepts diagnostics or private attachments. */
   addCommunityRequestDetail(id: string, detail: AddCommunityRequestDetail): Promise<CommunityRequestDetail>;
+  /** Upload one immutable public attachment to an owned request or authored detail. */
+  addCommunityRequestAttachment(id: string, attachment: AddCommunityRequestAttachment): Promise<CommunityRequestAttachment>;
+  /** Load one visible public attachment on demand; hidden access is moderator-only. */
+  getCommunityRequestAttachment(id: string, attachmentId: string, includeHidden?: boolean): Promise<CommunityRequestAttachmentContent>;
   /** Read a bounded public detail page; hidden requests are unavailable unless explicitly authorized. */
   listCommunityRequestDetails(id: string, options?: CommunityRequestPageOptions): Promise<CommunityRequestDetailPage>;
   /** Moderate with current purpose-bound administrator authority on each call. */

@@ -12,7 +12,7 @@ test("production request-build policy is finite and bound to reviewed deployment
   const jarvis = config("packages/gatekeeper-jarvis/wrangler.odie-os-production.jsonc");
   const policy = JSON.parse(sessions.vars.REQUEST_BUILD_POLICY);
   assert.deepEqual(policy, {
-    version: "auto-build-2026-09-14-v1",
+    version: "auto-build-2026-09-15-v2",
     runtimeVersion: "0.85.1",
     model: "gpt-5.6-sol",
     dependencyHosts: ["registry.npmjs.org"],
@@ -21,6 +21,8 @@ test("production request-build policy is finite and bound to reviewed deployment
     spendMicros: 1_000_000_000,
     callChargeMicros: 5_000_000,
     modelInputBytes: 512 * 1024,
+    contextFiles: 10,
+    contextBytes: 100 * 1024 * 1024,
     modelOutputTokens: 16_000,
     outputBytes: 8 * 1024 * 1024,
     diffBytes: 1024 * 1024,

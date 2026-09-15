@@ -19,13 +19,14 @@ const rpcValidation = require("capnweb-validate/esbuild");
 const policy: RequestBuildPolicy = {
   version: "fixture-1", runtimeVersion: "0.85.1", model: "fixture-model", wallTimeMs: 120000,
   modelCalls: 2, spendMicros: 2000, callChargeMicros: 1000, modelInputBytes: 8192,
+contextFiles: 10, contextBytes: 100 * 1024 * 1024,
   modelOutputTokens: 200, outputBytes: 8192, diffBytes: 4096, diffFiles: 2, concurrency: 1, dependencyHosts: [],
 };
 const owner = { userId: "fixture-owner", email: "fixture@example.invalid" };
 const key = "dispatch_fixture_123";
 async function intent(): Promise<RequestBuildIntent> {
   return { dispatchKey: key, runId: "run_fixture_123456", attempt: 1, specification: "Update a fixture",
-    specificationHash: await buildHash("Update a fixture"), repository: "totango/odie-os", baseBranch: "main", baseSha: "a".repeat(40), policy, policyHash: await buildHash(canonicalBuildJson(policy)) };
+    specificationHash: await buildHash("Update a fixture"), contextFiles: [], repository: "totango/odie-os", baseBranch: "main", baseSha: "a".repeat(40), policy, policyHash: await buildHash(canonicalBuildJson(policy)) };
 }
 
 describe("request-build policy", () => {
@@ -47,6 +48,19 @@ describe("request-build policy", () => {
     for (const patch of [{specification:"changed"},{policyHash:"b".repeat(64)},{baseSha:"main"},{repository:"other/repo"},{baseBranch:"other"}]) {
       await expect(validateRequestBuildIntent({...value,...patch} as RequestBuildIntent,policy)).rejects.toThrow();
     }
+    const fileId = crypto.randomUUID();
+    const contextFile = {id: fileId, path: `01-${fileId}.txt`, mimeType: "text/plain",
+      byteLength: 1, sha256: "a".repeat(64)};
+    const withContext = {...value, contextFiles: [contextFile]};
+    expect(await validateRequestBuildIntent(withContext, policy)).toMatch(/^[a-f0-9]{64}$/);
+    for (const bad of [
+      {...contextFile, id: "-".repeat(36)},
+      {...contextFile, path: `02-${fileId}.txt`},
+      {...contextFile, path: `01-${fileId}.html`},
+      {...contextFile, mimeType: "text/html"},
+      {...contextFile, byteLength: 0},
+      {...contextFile, sha256: "x".repeat(64)},
+    ]) await expect(validateRequestBuildIntent({...value, contextFiles: [bad]}, policy)).rejects.toThrow("INVALID_BUILD_CONTEXT");
   });
   it("forces output limit and rejects remote hosted tools/background/billing escapes", () => {
     const payload = {model:policy.model,input:[],max_output_tokens:9999,store:true};
@@ -190,6 +204,39 @@ describe("request-build execution in real workerd SQLite", () => {
     expect(await call("happy","inspect")).toMatchObject({execs:3,slot:null,destroys:1,disabled:true,work:false,receipt:{state:"artifact_ready",cleanup:"complete",sessionId:reserved.sessionId,generation:1}});
     const artifact=await call("happy","artifact"); expect(artifact.hash).toBe(await buildHash(artifact.patch));
     expect(await call("happy","ensure",{intent:await intent()})).toMatchObject({sessionId:reserved.sessionId,state:"artifact_ready"});
+  });
+  it("continues pre-attachment persisted executions with an empty context manifest", async () => {
+    await setup("legacy-context");
+    await call("legacy-context", "legacy-context");
+    for (let n = 0; n < 6; n++) await call("legacy-context", "tick");
+    expect(await call("legacy-context", "inspect")).toMatchObject({
+      receipt: {state: "artifact_ready", cleanup: "complete"},
+    });
+  });
+  it("materializes each frozen context file only after hash and length validation", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const fileId = crypto.randomUUID();
+    const path = `01-${fileId}.txt`;
+    const value = await intent();
+    value.contextFiles = [{
+      id: fileId, path, mimeType: "text/plain", byteLength: bytes.length,
+      sha256: [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+        .map(byte => byte.toString(16).padStart(2, "0")).join(""),
+    }];
+    await call("context", "configure", {fields: {
+      policy: JSON.stringify(policy), [`context:${fileId}`]: [...bytes],
+    }});
+    expect(await call("context", "ensure", {intent: value})).toMatchObject({state: "reserved"});
+    for (let n = 0; n < 3; n++) await call("context", "tick");
+    await call("context", "configure", {fields: {"process-lost": true}});
+    await call("context", "tick");
+    await call("context", "configure", {fields: {"process-lost": false}});
+    for (let n = 0; n < 5; n++) await call("context", "tick");
+    const snapshot = await call("context", "inspect");
+    expect(snapshot.receipt).toMatchObject({state: "artifact_ready", cleanup: "complete"});
+    expect(snapshot.writes).toContainEqual({
+      path: `/workspace/.request-build/context/${path}`, bytes: [...bytes],
+    });
   });
   it.each([1,2,3])("does not repeat process start after lost response at launch %i",async launch=>{
     const id=`lost-${launch}`;await setup(id,{"lose-start":launch});
