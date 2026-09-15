@@ -8,7 +8,7 @@ import { RequestBuildPanel } from './RequestBuildPanel'
 
 const context = vi.hoisted(() => ({ current: {} as Record<string, unknown> }))
 vi.mock('../AuthContext', () => ({ useAuthenticatedApi: () => context.current }))
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children, to, params }: { children: ReactNode; to: string; params: Record<string, string> }) => <a href={to.replace('$requestId', params.requestId).replace('$runId', params.runId ?? '')}>{children}</a> }))
+vi.mock('@tanstack/react-router', () => ({ Link: ({ children, to, params, search }: { children: ReactNode; to: string; params: Record<string, string>; search?: { moderate?: boolean } }) => <a href={`${to.replace('$requestId', params.requestId).replace('$runId', params.runId ?? '')}${search?.moderate ? '?moderate=true' : ''}`}>{children}</a> }))
 vi.mock('@cloudflare/kumo', () => ({ Button: ({ children, variant: _variant, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & {variant?: string}) => <button {...props}>{children}</button> }))
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 const requestId = '11111111-1111-4111-8111-111111111111', runId = '22222222-2222-4222-8222-222222222222'
@@ -25,34 +25,34 @@ function setup(admin = true) {
 let root: Root, container: HTMLDivElement
 beforeEach(() => { container = document.createElement('div'); document.body.append(container); root = createRoot(container) })
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.clearAllMocks() })
-async function render(runRoute = false) { await act(async () => root.render(<RequestBuildPanel requestId={requestId} runId={runRoute ? runId : undefined} />)) }
+async function render(runRoute = false, moderate = false) { await act(async () => root.render(<RequestBuildPanel requestId={requestId} runId={runRoute ? runId : undefined} moderate={moderate} />)) }
 function button(text: string) { const b = [...container.querySelectorAll('button')].find(b => b.textContent === text); if (!b) throw new Error(`Missing button ${text}`); return b }
 async function click(text: string) { await act(async () => button(text).click()) }
-async function approve() { await act(async () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click()) }
 describe('RequestBuildPanel real API control path and private lifetime boundary', () => {
   it('approves the exact server snapshot revision then displays the canonical mutation receipt', async () => {
-    const { capability } = setup(); await render()
+    const { capability } = setup(); await render(false, true)
     expect(container.textContent).toContain(readiness.specification)
-    expect(button('Approve and start build').disabled).toBe(true)
-    await approve(); await click('Approve and start build')
+    expect(button('Approve exact specification and start build').disabled).toBe(false)
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull()
+    await click('Approve exact specification and start build')
     expect(capability.startRequestBuild).toHaveBeenCalledWith({ requestId, expectedRequestRevision: 3, mutationKey: expect.any(String) })
-    expect(container.querySelector('a')?.getAttribute('href')).toBe(`/requests/${requestId}/runs/${runId}`)
+    expect(container.querySelector('a')?.getAttribute('href')).toBe(`/requests/${requestId}/runs/${runId}?moderate=true`)
   })
   it('locks double clicks and retains the identical start retry key after lost acknowledgement and refresh', async () => {
     const { capability } = setup(); const response = deferred<typeof run>()
     capability.startRequestBuild.mockReturnValueOnce(response.promise).mockRejectedValueOnce(new Error('lost'))
-    await render(); await approve()
-    await act(async () => { button('Approve and start build').click(); button('Approve and start build').click() })
+    await render()
+    await act(async () => { button('Approve exact specification and start build').click(); button('Approve exact specification and start build').click() })
     expect(capability.startRequestBuild).toHaveBeenCalledTimes(1)
     await act(async () => response.resolve(run))
-    await approve(); await click('Approve and start build')
+    await click('Approve exact specification and start build')
     const input = capability.startRequestBuild.mock.calls[1][0]
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not confirm')
     expect(button('Retry same start operation').disabled).toBe(false)
     capability.getRequestBuildReadiness.mockResolvedValue({ ...readiness, ready: false, reasons: ['BUILD_CAPACITY_UNAVAILABLE'] })
     await click('Refresh builds')
     expect(container.textContent).toContain('BUILD_CAPACITY_UNAVAILABLE')
-    expect(button('Approve and start build').disabled).toBe(true)
+    expect(button('Approve exact specification and start build').disabled).toBe(true)
     await click('Retry same start operation')
     expect(capability.startRequestBuild.mock.calls[2][0]).toEqual(input)
   })
@@ -72,7 +72,7 @@ describe('RequestBuildPanel real API control path and private lifetime boundary'
   it.each(['account', 'request'] as const)('does not retain pending mutation authority across %s replacement or return', async replacement => {
     const { capability } = setup(); const original = context.current
     capability.startRequestBuild.mockRejectedValueOnce(new Error('lost'))
-    await render(); await approve(); await click('Approve and start build')
+    await render(); await click('Approve exact specification and start build')
     expect(button('Retry same start operation').disabled).toBe(false)
     if (replacement === 'account') setup()
     await act(async () => root.render(<RequestBuildPanel requestId={replacement === 'request' ? '33333333-3333-4333-8333-333333333333' : requestId} />))
@@ -81,7 +81,7 @@ describe('RequestBuildPanel real API control path and private lifetime boundary'
     await render()
     expect(container.textContent).not.toContain('Retry same')
     expect(capability.startRequestBuild).toHaveBeenCalledTimes(1)
-    expect(button('Approve and start build').disabled).toBe(true)
+    expect(button('Approve exact specification and start build').disabled).toBe(false)
   })
   it('renders signed-in run route status and PR without requesting admin or GitHub capabilities', async () => {
     const { api } = setup(false)
@@ -103,7 +103,7 @@ describe('RequestBuildPanel real API control path and private lifetime boundary'
     const { capability } = setup(); capability.getRequestBuildReadiness.mockRejectedValue(new Error('revoked private details')); await render()
     expect(container.querySelector('[role="alert"]')).not.toBeNull()
     expect(container.textContent).not.toContain('revoked private details')
-    expect(container.textContent).not.toContain('Approve and start build')
+    expect(container.textContent).not.toContain('Approve exact specification and start build')
     expect(capability.startRequestBuild).not.toHaveBeenCalled()
   })
   it('wraps callable stubs rather than executing them and disposes on unmount', async () => {
@@ -121,7 +121,7 @@ describe('RequestBuildPanel real API control path and private lifetime boundary'
   })
   it('suppresses mutation results after account replacement', async () => {
     const { capability, dispose } = setup(); const late = deferred<typeof run>(); capability.startRequestBuild.mockReturnValue(late.promise)
-    await render(); await approve(); await click('Approve and start build')
+    await render(); await click('Approve exact specification and start build')
     setup(false); await render(); await act(async () => late.resolve(run))
     expect(dispose).toHaveBeenCalledTimes(1)
     expect(container.textContent).not.toContain('Build attempt 1')

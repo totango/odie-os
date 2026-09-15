@@ -29,7 +29,7 @@ import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$app
 import { Route as RequestsRequestIdRouteImport } from './routes/requests.$requestId'
 import { Route as RequestsNewRouteImport } from './routes/requests_.new'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
-import { Route as RequestsRequestIdRunsRunIdRouteImport } from './routes/requests_.$requestId_.runs.$runId'
+import { Route as RequestsRequestIdRunsRunIdRouteImport } from './routes/requests.$requestId_.runs.$runId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -133,9 +133,9 @@ const WorkspaceIdRoute = WorkspaceIdRouteImport.update({
 } as any)
 const RequestsRequestIdRunsRunIdRoute =
   RequestsRequestIdRunsRunIdRouteImport.update({
-    id: '/requests_/$requestId_/runs/$runId',
-    path: '/requests/$requestId/runs/$runId',
-    getParentRoute: () => rootRouteImport,
+    id: '/$requestId_/runs/$runId',
+    path: '/$requestId/runs/$runId',
+    getParentRoute: () => RequestsRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -206,7 +206,7 @@ export interface FileRoutesById {
   '/requests/$requestId': typeof RequestsRequestIdRoute
   '/requests_/new': typeof RequestsNewRoute
   '/workspace/$id': typeof WorkspaceIdRoute
-  '/requests_/$requestId_/runs/$runId': typeof RequestsRequestIdRunsRunIdRoute
+  '/requests/$requestId_/runs/$runId': typeof RequestsRequestIdRunsRunIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -277,7 +277,7 @@ export interface FileRouteTypes {
     | '/requests/$requestId'
     | '/requests_/new'
     | '/workspace/$id'
-    | '/requests_/$requestId_/runs/$runId'
+    | '/requests/$requestId_/runs/$runId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -300,7 +300,6 @@ export interface RootRouteChildren {
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
   RequestsNewRoute: typeof RequestsNewRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
-  RequestsRequestIdRunsRunIdRoute: typeof RequestsRequestIdRunsRunIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -445,22 +444,24 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof WorkspaceIdRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/requests_/$requestId_/runs/$runId': {
-      id: '/requests_/$requestId_/runs/$runId'
-      path: '/requests/$requestId/runs/$runId'
+    '/requests/$requestId_/runs/$runId': {
+      id: '/requests/$requestId_/runs/$runId'
+      path: '/$requestId/runs/$runId'
       fullPath: '/requests/$requestId/runs/$runId'
       preLoaderRoute: typeof RequestsRequestIdRunsRunIdRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof RequestsRoute
     }
   }
 }
 
 interface RequestsRouteChildren {
   RequestsRequestIdRoute: typeof RequestsRequestIdRoute
+  RequestsRequestIdRunsRunIdRoute: typeof RequestsRequestIdRunsRunIdRoute
 }
 
 const RequestsRouteChildren: RequestsRouteChildren = {
   RequestsRequestIdRoute: RequestsRequestIdRoute,
+  RequestsRequestIdRunsRunIdRoute: RequestsRequestIdRunsRunIdRoute,
 }
 
 const RequestsRouteWithChildren = RequestsRoute._addFileChildren(
@@ -487,7 +488,6 @@ const rootRouteChildren: RootRouteChildren = {
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
   RequestsNewRoute: RequestsNewRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,
-  RequestsRequestIdRunsRunIdRoute: RequestsRequestIdRunsRunIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
