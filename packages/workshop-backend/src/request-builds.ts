@@ -562,7 +562,16 @@ export class RequestBuilds {
       checkpoint = "current";
       const current = this.#get(run.runId)!;
       this.#spec(current);
-      if (current.version !== run.version || current.cancelRevision) throw new Error();
+      if (
+        current.cancelRevision ||
+        terminal.has(current.state) ||
+        current.state === "queued" ||
+        current.state === "cancel_requested" ||
+        current.intentHash !== run.intentHash ||
+        current.owner.userId !== run.owner.userId ||
+        current.owner.email !== run.owner.email
+      )
+        throw new Error();
       if (!current.receipt) {
         checkpoint = "binding";
         if (request.phase !== "reserve") throw new Error();

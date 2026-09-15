@@ -161,6 +161,16 @@ export class BuildFixture extends DurableObject {
       assertCurrent: async (claim) => {
         if (kv.get("outage")) throw new Error("ADMIN_AUTHORITY_UNAVAILABLE");
         this.authority().assertCurrent(claim, "request-build");
+        if (kv.get("benign-version-drift")) {
+          kv.delete("benign-version-drift");
+          const row = storage.sql.exec("SELECT runId,value FROM build_runs WHERE slot=1").toArray()[0];
+          if (row) {
+            const value = JSON.parse(row.value);
+            value.version++;
+            value.updatedAt = Date.now();
+            storage.sql.exec("UPDATE build_runs SET value=? WHERE runId=?", JSON.stringify(value), row.runId);
+          }
+        }
       },
       eligibility: async (claim, model) => {
         if (kv.get("ineligible") || model !== "fixture-model") throw new Error("ineligible");
