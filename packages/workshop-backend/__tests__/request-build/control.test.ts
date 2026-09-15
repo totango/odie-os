@@ -739,6 +739,43 @@ describe("request-build actual backend/Sessions workerd lifecycle with mocked Gi
     });
     expect((await tick(name, 8)).slots).toBe(0);
   });
+  it("authorizes registry callbacks from bound identity while live-only phases stay fail closed", async () => {
+    const name = "bound-registry-receipt",
+      { input } = await setup(name);
+    await call(name, "start", { claim, input });
+    await tick(name, 3);
+    const run = (await call(name, "inspect")).runs[0];
+    // The registry is already running while the controller still has the prior starting receipt.
+    expect(run.receipt?.state).toBe("starting");
+    await call(name, "configure", {
+      fields: { "receipt-callback-unavailable": true },
+    });
+    const authorization = {
+      dispatchKey: run.intent.dispatchKey,
+      intentHash: run.intentHash,
+      sessionId: run.receipt.sessionId,
+      generation: run.receipt.generation,
+    };
+    await expect(call(name, "authorize", {
+      owner: run.owner,
+      request: { ...authorization, phase: "start" },
+    })).resolves.toMatchObject({ allowed: true });
+    await expect(call(name, "authorize", {
+      owner: run.owner,
+      request: { ...authorization, phase: "model" },
+    })).resolves.toMatchObject({ allowed: false });
+    // Advance only Sessions: collect must not call back into the occupied registry or trust its
+    // stale lifecycle state, but the registry's own state machine must still reach the artifact.
+    await call(name, "tick", { execution: true });
+    await call(name, "tick", { execution: true });
+    await call(name, "tick", { execution: true });
+    const execution = await call(name, "inspect", {
+      execution: true,
+      owner: run.owner,
+      key: run.intent.dispatchKey,
+    });
+    expect(execution.receipt.state).toBe("artifact_ready");
+  });
   it("unknown/forged identity and publication digests cannot authorize provider writes", async () => {
     const name = "forged",
       { input } = await setup(name);
