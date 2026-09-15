@@ -167,6 +167,39 @@ describe("getContributionPolicyViolations", () => {
     assert.deepEqual(violations, []);
   });
 
+  it("exempts trusted draft request-build pull requests", () => {
+    const violations = getContributionPolicyViolations(
+      makePullRequest({
+        additions: 100,
+        body: "",
+        draft: true,
+        head: { ref: "request-build/1d457b49-bdb8-41a2-b74a-d4a4ae3f99b8/1" },
+        user: { login: "jarvis-totango[bot]" },
+      }),
+    );
+
+    assert.deepEqual(violations, []);
+  });
+
+  for (const [description, overrides] of [
+    ["a non-draft pull request", { draft: false }],
+    ["a different branch", { head: { ref: "feature/untrusted" } }],
+    ["a different bot", { user: { login: "some-bot[bot]" } }],
+  ] satisfies [string, Partial<FixturePullRequest>][]) {
+    it(`does not exempt ${description}`, () => {
+      const violations = getContributionPolicyViolations(makePullRequest({
+        additions: 100,
+        body: "",
+        draft: true,
+        head: { ref: "request-build/1d457b49-bdb8-41a2-b74a-d4a4ae3f99b8/1" },
+        user: { login: "jarvis-totango[bot]" },
+        ...overrides,
+      }));
+
+      assert.notDeepEqual(violations, []);
+    });
+  }
+
   it("exempts pull requests with the policy override label", () => {
     const violations = getContributionPolicyViolations(
       makePullRequest({
