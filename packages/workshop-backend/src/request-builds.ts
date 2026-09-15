@@ -117,6 +117,7 @@ function fields(value: object, allowed: string[]): void {
 /** Durable control plane embedded in the existing board SQLite DO; alarms, not browsers, own progress. */
 export class RequestBuilds {
   #busy = false;
+  #authorizationDiagnostics = new Map<string, Set<string>>();
   #outbox: RequestBuildOutbox;
   constructor(
     private storage: DurableObjectStorage,
@@ -468,9 +469,16 @@ export class RequestBuilds {
     owner: CodingSessionOwner,
     request: RequestBuildAuthorizationRequest,
   ): Promise<RequestBuildAuthorization> {
+    let executionId: string | undefined;
+    let checkpoint = "lookup";
+    const phase = ["reserve", "start", "model", "collect", "publish"].includes(request.phase)
+      ? request.phase
+      : "invalid";
     try {
       const run = this.#dispatch(request.dispatchKey);
       if (!run) return { allowed: false, reasons: ["UNKNOWN_RUN"] };
+      executionId = run.runId;
+      checkpoint = "run";
       if (
         owner.userId !== run.owner.userId ||
         owner.email !== run.owner.email ||
@@ -481,22 +489,37 @@ export class RequestBuilds {
         run.state === "cancel_requested"
       )
         throw new Error();
+      checkpoint = "specification";
       this.#spec(run);
+      checkpoint = "setup";
       const setup = await this.#setup(run.claim);
-      if (
-        !setup.readiness.ready ||
-        !setup.owner ||
-        setup.owner.userId !== run.owner.userId ||
-        setup.owner.email !== run.owner.email ||
-        canonicalBuildJson(setup.component?.policy) !== canonicalBuildJson(run.intent.policy) ||
-        canonicalBuildJson(setup.publicationPolicy) !== canonicalBuildJson(run.publicationPolicy)
-      )
+      if (!setup.readiness.ready) {
+        const reason = setup.readiness.reasons.find(value => /^[A-Z0-9_]{1,80}$/.test(value));
+        checkpoint = `setup.${reason ?? "unavailable"}`;
         throw new Error();
+      }
+      if (!setup.owner) {
+        checkpoint = "setup.owner_missing";
+        throw new Error();
+      }
+      if (setup.owner.userId !== run.owner.userId || setup.owner.email !== run.owner.email) {
+        checkpoint = "setup.owner_changed";
+        throw new Error();
+      }
+      if (canonicalBuildJson(setup.component?.policy) !== canonicalBuildJson(run.intent.policy)) {
+        checkpoint = "setup.policy_changed";
+        throw new Error();
+      }
+      if (canonicalBuildJson(setup.publicationPolicy) !== canonicalBuildJson(run.publicationPolicy)) {
+        checkpoint = "setup.publication_changed";
+        throw new Error();
+      }
       // Registry alarms call this host while that same registry is occupied. Reuse the receipt
       // already bound by the controller instead of making a circular RPC back into the caller.
       // Its state can lag the registry, so it proves immutable identity but not current lifecycle
       // phase. The trusted registry enforces stage ordering before and after this callback.
       // Model and publication calls originate outside the registry and still read live state.
+      checkpoint = "receipt";
       const registryCallback = request.phase === "start" || request.phase === "collect";
       const boundRegistryReceipt = registryCallback ? run.receipt : undefined;
       const receipt =
@@ -532,12 +555,16 @@ export class RequestBuilds {
                   : request.phase === "collect"
                     ? !!boundRegistryReceipt || ["running", "collecting"].includes(receipt.state)
                     : false);
+      checkpoint = "phase";
       if (!phaseAllowed) throw new Error();
+      checkpoint = "authority";
       await this.deps.assertCurrent(run.claim);
+      checkpoint = "current";
       const current = this.#get(run.runId)!;
       this.#spec(current);
       if (current.version !== run.version || current.cancelRevision) throw new Error();
       if (!current.receipt) {
+        checkpoint = "binding";
         if (request.phase !== "reserve") throw new Error();
         this.#receipt(current, receipt);
         this.#save(current); // Bind once to the actual durable reservation.
@@ -549,6 +576,28 @@ export class RequestBuilds {
         generation: receipt.generation,
       };
     } catch {
+      const operation = `${phase}.${checkpoint}`;
+      if (executionId) {
+        let operations = this.#authorizationDiagnostics.get(executionId);
+        if (!operations) {
+          // One slot is active at a time. Retain only recent runs so later failures stay visible.
+          if (this.#authorizationDiagnostics.size >= 4) {
+            const oldest = this.#authorizationDiagnostics.keys().next().value;
+            if (oldest) this.#authorizationDiagnostics.delete(oldest);
+          }
+          operations = new Set();
+          this.#authorizationDiagnostics.set(executionId, operations);
+        }
+        // Bound repeated private-provider callbacks without mutating durable run/version state.
+        if (operations.size < 10 && !operations.has(operation)) {
+          operations.add(operation);
+          logger.warn("request build authorization denied", {
+            event: "request.build.authorization.denied",
+            executionId,
+            operation,
+          });
+        }
+      }
       return { allowed: false, reasons: ["BUILD_AUTHORIZATION_DENIED"] };
     }
   }
