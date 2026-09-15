@@ -11,6 +11,10 @@ export interface PolicyPullRequest {
   author_association: string;
   /** The author. */
   user?: { login?: string } | null;
+  /** Whether GitHub still treats the pull request as a draft. */
+  draft?: boolean;
+  /** The source branch. */
+  head?: { ref?: string } | null;
   /** Labels on the pull request; the override label exempts it. */
   labels?: { name: string }[];
   /** The description, where the confirmation checkboxes live. */
@@ -80,6 +84,8 @@ const AUTOMATION_COMMENT_MARKER = "<!-- contribution-policy-automation -->";
 const MAX_CHANGED_LINES = 30;
 const MAX_COMMENT_PAGES = 5;
 const OVERRIDE_LABEL = "policy/override";
+const REQUEST_BUILD_BOT = "jarvis-totango[bot]";
+const REQUEST_BUILD_BRANCH = /^request-build\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\/[1-9]\d*$/;
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const TRUSTED_PERMISSIONS = new Set(["admin", "maintain", "write"]);
@@ -111,6 +117,7 @@ export function getContributionPolicyViolations(pullRequest: PolicyPullRequest):
     pullRequest.state !== "open" ||
     TRUSTED_ASSOCIATIONS.has(pullRequest.author_association) ||
     pullRequest.user?.login === "dependabot[bot]" ||
+    isTrustedRequestBuild(pullRequest) ||
     pullRequest.labels?.some((label) => label.name === OVERRIDE_LABEL)
   ) {
     return [];
@@ -201,6 +208,12 @@ export async function enforceContributionPolicy({ github, context, core }: {
     state: "closed",
   });
   core.notice(`Closed pull request #${pullNumber} for contribution policy violations.`);
+}
+
+function isTrustedRequestBuild(pullRequest: PolicyPullRequest): boolean {
+  return pullRequest.user?.login === REQUEST_BUILD_BOT &&
+    pullRequest.draft === true &&
+    REQUEST_BUILD_BRANCH.test(pullRequest.head?.ref ?? "");
 }
 
 function hasCheckedConfirmation(body: string, marker: string): boolean {
