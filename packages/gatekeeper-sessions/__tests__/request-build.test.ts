@@ -1,9 +1,13 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RequestBuildIntent, RequestBuildPolicy } from "@gadgets/workshop-shared/coding-sessions";
 import { buildHash, canonicalBuildJson, parseRequestBuildPolicy, validateRequestBuildIntent, boundedBuildModelPayload } from "../src/request-build-policy.js";
-import { requestBuildRunnerSource } from "../src/request-build-runner.js";
+import { requestBuildCloneCommand, requestBuildCollectCommand, requestBuildRunnerSource } from "../src/request-build-runner.js";
 const require = createRequire(import.meta.url);
 const tooling = createRequire(require.resolve("wrangler/package.json"));
 const { Miniflare, convertV4MiniflareOptions } = tooling("miniflare");
@@ -49,6 +53,50 @@ describe("request-build policy", () => {
     expect(bounded).toMatchObject({max_output_tokens:200,store:false});
     for (const extra of [{background:true},{model:"other"},{tools:[{type:"web_search"}]},{previous_response_id:"x"}]) {
       expect(()=>boundedBuildModelPayload(new TextEncoder().encode(JSON.stringify({...payload,...extra})),policy)).toThrow();
+    }
+  });
+  it("uses the image's Node runtime and enforces collection bounds at runtime", async () => {
+    const value = await intent();
+    const clone = requestBuildCloneCommand(value);
+    expect(clone[0]).toBe("node");
+    expect(clone.join("\n")).not.toContain("python3");
+
+    const directory = mkdtempSync(join(tmpdir(), "request-build-collect-"));
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+      return result.stdout.trim();
+    };
+    const run = (candidate: RequestBuildIntent) => {
+      const [command, ...args] = requestBuildCollectCommand(candidate);
+      args[2] = args[2].replaceAll("/workspace/repository", directory);
+      return spawnSync(command, args, {
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      });
+    };
+    try {
+      git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture");
+      writeFileSync(join(directory, "a.ts"), "export const a = 1;\n");
+      git("add", "a.ts"); git("commit", "-m", "base");
+      const baseSha = git("rev-parse", "HEAD");
+      writeFileSync(join(directory, "a.ts"), "export const a = 2;\n");
+      const expected = spawnSync("git", ["diff", "--no-ext-diff", "--no-textconv", "--binary", baseSha, "--"], { cwd: directory }).stdout;
+
+      const exactLimit = { ...value, baseSha, policy: { ...value.policy, diffBytes: expected.length } };
+      const accepted = run(exactLimit);
+      expect(accepted.status).toBe(0);
+      expect(accepted.stdout).toEqual(expected);
+
+      const overLimit = run({ ...exactLimit, policy: { ...exactLimit.policy, diffBytes: expected.length - 1 } });
+      expect(overLimit.status).toBe(2);
+      expect(overLimit.stdout).toHaveLength(0);
+
+      writeFileSync(join(directory, "b.ts"), "export const b = 1;\n");
+      const tooManyFiles = run({ ...exactLimit, policy: { ...exactLimit.policy, diffBytes: 8192, diffFiles: 1 } });
+      expect(tooManyFiles.status).toBe(2);
+      expect(run({ ...exactLimit, baseSha: "b".repeat(40) }).status).not.toBe(0);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
   it("materializes only SDK, owned loader/settings/toolset and ephemeral session", async () => {
