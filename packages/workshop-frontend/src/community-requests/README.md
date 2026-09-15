@@ -3,7 +3,8 @@
 The board is enabled for every authenticated deployment account at `/requests`. `/requests/new`
 creates a feature or newly authored public bug; `/requests/$requestId` opens a URL-backed desktop
 side sheet (mobile full-screen) over the board with its public description, account vote, details and
-related requests. Browser Back closes the sheet and direct links remain shareable. A quiet primary-style sidebar row replaces the old oversized
+related requests. `/requests/$requestId/runs/$runId` uses the same URL-backed sheet pattern for an
+individual Auto-Build run. Browser Back closes the sheet and direct links remain shareable. A quiet primary-style sidebar row replaces the old oversized
 feedback callout, including in Code mode and the collapsed rail. Current administrators also receive a
 persistent Admin row. The root still requires login,
 but board routes bypass onboarding, required connectors and the mandatory billing-account picker.
@@ -13,10 +14,11 @@ following those links does not complete onboarding or connect a service.
 
 ## Privacy and behavior
 
-- “Public” means signed-in users of this deployment. The form previews the exact public title/body
-  and requires explicit public-summary consent. Details require their own public-text consent.
-  Text is rendered as React text, never Markdown/HTML. A bug author may separately consent to attach
-  the bounded current-tab console/error snapshot. That evidence is sanitized, stored separately for
+- “Public” means signed-in users of this deployment. The form previews the exact public title/body;
+  its final publish action explicitly confirms that public payload, and the details form labels its
+  publish action the same way without an extra checkbox. Text is rendered as React text, never
+  Markdown/HTML. A bug author may separately opt in to attach the bounded current-tab console/error
+  snapshot with an explicit, default-off diagnostics button. That evidence is sanitized, stored separately for
   thirty days, readable only with current board-moderation authority, and never enters public list,
   detail, search, related-request or Auto-Build projections.
 - Draft and detail text is not persisted to browser storage or logged. RPC failures use fixed safe

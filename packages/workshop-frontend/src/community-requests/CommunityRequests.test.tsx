@@ -82,9 +82,8 @@ describe('Feature requests interactions', () => {
     const proto = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : node instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype
     await act(async () => { Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(node, value); node.dispatchEvent(new Event(node instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true })) })
   }
-  async function consent() {
-    const checkbox = container.querySelector<HTMLInputElement>('input[aria-label="Consent to public request"]')
-      ?? container.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+  async function confirmCheckbox() {
+    const checkbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!
     await act(async () => checkbox.click())
   }
 
@@ -171,7 +170,7 @@ describe('Feature requests interactions', () => {
     expect(api.listCommunityRequests.mock.lastCall?.[0]?.includeHidden).toBeUndefined()
   })
 
-  it('bounds and debounces draft suggestions, reviews public consent and retries the identical feature submission', async () => {
+  it('bounds and debounces draft suggestions, reviews the public payload and retries the identical feature submission', async () => {
     api.createCommunityRequest.mockRejectedValueOnce(new Error('PRIVATE_BACKEND_EXCEPTION'))
     await render(<NewRequestPage />)
     await input('input:not([type="checkbox"])', 'Better exports')
@@ -182,10 +181,10 @@ describe('Feature requests interactions', () => {
     expect(api.suggestRelatedCommunityRequests.mock.lastCall?.[0].length).toBe(160)
     expect(container.textContent).toContain('Possible duplicates')
     await click('Review public submission')
-    expect(button('Publish public request').disabled).toBe(true)
-    expect(container.textContent).toContain('I consent to publishing')
-    expect(container.textContent).not.toContain('Include private browser diagnostics')
-    await consent()
+    expect(button('Publish public request').disabled).toBe(false)
+    expect(container.textContent).toContain('visible to all signed-in deployment users')
+    expect(container.textContent).not.toContain('Private browser diagnostics')
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull()
     await click('Publish public request')
     expect(container.textContent).toContain('Could not confirm publication')
     expect(container.textContent).not.toContain('PRIVATE_BACKEND_EXCEPTION')
@@ -201,8 +200,9 @@ describe('Feature requests interactions', () => {
     await render(<NewRequestPage />)
     await click('Bug report'); await input('input:not([type="checkbox"])', 'New public bug'); await input('textarea', 'Safe reproduction instructions')
     await click('Review public submission')
-    await act(async () => container.querySelector<HTMLInputElement>('input[aria-label="Include private browser diagnostics"]')!.click())
-    await consent(); await click('Publish public request')
+    await click('Include private diagnostics')
+    expect(button('Remove private diagnostics').getAttribute('aria-pressed')).toBe('true')
+    await click('Publish public request')
     expect(api.createCommunityRequest.mock.lastCall?.[0]).toMatchObject({ kind: 'bug', title: 'New public bug', body: 'Safe reproduction instructions' })
     expect(api.attachCommunityRequestDiagnostics).toHaveBeenCalledWith('created', expect.objectContaining({ pathname: '/', diagnostics: expect.any(Array), idempotencyKey: expect.any(String) }))
     expect(api.submitProductFeedback).not.toHaveBeenCalled()
@@ -214,8 +214,8 @@ describe('Feature requests interactions', () => {
     const router = await render(<NewRequestPage />)
     await click('Bug report'); await input('input:not([type="checkbox"])', 'Late public bug'); await input('textarea', 'Safe reproduction instructions')
     await click('Review public submission')
-    await act(async () => container.querySelector<HTMLInputElement>('input[aria-label="Include private browser diagnostics"]')!.click())
-    await consent(); await click('Publish public request')
+    await click('Include private diagnostics')
+    await click('Publish public request')
     await act(async () => { await router.navigate({ to: '/requests' }) })
     await act(async () => pending.resolve({ ...request, id: 'created' }))
     expect(api.attachCommunityRequestDiagnostics).not.toHaveBeenCalled()
@@ -259,17 +259,18 @@ describe('Feature requests interactions', () => {
     await click('Remove upvote')
     expect(api.unvoteCommunityRequest).toHaveBeenCalledWith(request.id)
     await input('textarea', 'Also affects keyboard navigation')
-    expect(button('Publish public details').disabled).toBe(true)
-    await consent(); await click('Publish public details')
+    expect(button('Publish public details').disabled).toBe(false)
+    expect(container.textContent).toContain('visible to signed-in deployment users')
+    await click('Publish public details')
     expect(container.textContent).not.toContain('PRIVATE_DIAGNOSTICS')
     await click('Publish public details')
     expect(api.addCommunityRequestDetail.mock.calls[0]).toEqual(api.addCommunityRequestDetail.mock.calls[1])
     expect(container.textContent).toContain('Your detail was published')
     // An explicitly new, identical detail is a new operation after a confirmed success.
-    await input('textarea', 'Also affects keyboard navigation'); await consent(); await click('Publish public details')
+    await input('textarea', 'Also affects keyboard navigation'); await click('Publish public details')
     expect(api.addCommunityRequestDetail.mock.calls[2][1].idempotencyKey).not.toBe(api.addCommunityRequestDetail.mock.calls[1][1].idempotencyKey)
     expect(container.textContent).toContain('No public builds yet.')
-    expect(container.textContent).not.toContain('Approve and start build')
+    expect(container.textContent).not.toContain('Approve exact specification and start build')
     expect(container.querySelector('[aria-label="Moderate request"]')).toBeNull()
   })
 
@@ -293,7 +294,7 @@ describe('Feature requests interactions', () => {
     for (const action of ['hide', 'restore', 'duplicate', 'close', 'reopen']) {
       await input('select', action)
       if (action === 'duplicate') await input('input:not([type="checkbox"])', 'canonical-id')
-      await consent(); await click('Apply moderation')
+      await confirmCheckbox(); await click('Apply moderation')
       expect(api.moderateCommunityRequest.mock.lastCall?.[1]).toMatchObject({ action, ...(action === 'duplicate' ? { duplicateOf: 'canonical-id' } : {}) })
       expect(container.textContent?.includes('Hidden from the board')).toBe(action === 'hide')
       expect(container.querySelector('textarea') === null).toBe(action === 'hide')
@@ -305,7 +306,7 @@ describe('Feature requests interactions', () => {
   it('handles moderation denial with safe errors and the same retry key', async () => {
     auth(true); api.moderateCommunityRequest.mockRejectedValue(new Error('private admin detail'))
     await render(<RequestDetailPage requestId={request.id} moderate />)
-    await consent(); await click('Apply moderation'); await click('Apply moderation')
+    await confirmCheckbox(); await click('Apply moderation'); await click('Apply moderation')
     expect(api.moderateCommunityRequest.mock.calls[0]).toEqual(api.moderateCommunityRequest.mock.calls[1])
     expect(container.textContent).toContain('Could not confirm moderation')
     expect(container.textContent).not.toContain('private admin detail')

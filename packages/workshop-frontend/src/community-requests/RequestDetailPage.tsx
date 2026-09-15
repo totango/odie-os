@@ -47,7 +47,7 @@ export default function RequestDetailPage({ requestId, moderate = false, onBack 
       </article>
       {includeHidden && <PrivateDiagnostics key={`diagnostics:${request.id}`} requestId={request.id} />}
       {includeHidden && <RequestModeration key={request.id} request={request} onChange={value => setResult({ scope, request: value })} />}
-      {!request.hidden && <RequestBuildPanel key={`builds:${request.id}`} requestId={request.id} />}
+      {!request.hidden && <RequestBuildPanel key={`builds:${request.id}`} requestId={request.id} moderate={includeHidden} />}
       <RequestDetails key={`${request.id}:${includeHidden}:${request.hidden}`} requestId={request.id} includeHidden={includeHidden} hidden={request.hidden} />
       {!request.hidden && <RelatedRequests text={`${request.title}\n${request.body}`} excludeId={request.id} />}
     </>}
@@ -115,7 +115,6 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [body, setBody] = useState('')
-  const [consent, setConsent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [writeError, setWriteError] = useState(false)
   const [published, setPublished] = useState(false)
@@ -134,7 +133,7 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
     return () => { cancelled = true }
   }, [authenticatedApi, requestId, includeHidden, scope, cursor, revision])
   async function add() {
-    if (busy || !consent || !body.trim() || hidden) return
+    if (busy || !body.trim() || hidden) return
     const current = lifetime()
     const payload = { requestId, body: body.trim() }
     setBusy(true)
@@ -144,7 +143,7 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
       await authenticatedApi.addCommunityRequestDetail(requestId, { body: payload.body, idempotencyKey: retryKey.keyFor(payload) })
       if (current.active) {
         retryKey.confirmed()
-        setBody(''); setConsent(false); setPublished(true)
+        setBody(''); setPublished(true)
         setCursor(undefined); setResult(undefined); setRevision(n => n + 1)
       }
     } catch { if (current.active) setWriteError(true) }
@@ -161,9 +160,9 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
     {!hidden && <form className={panelClass} onSubmit={e => { e.preventDefault(); void add() }}>
       <label className="block">Add public details<textarea className={`${fieldClass} min-h-28`} maxLength={LIMITS.detail} required value={body} disabled={busy} onChange={e => setBody(e.target.value)} /></label>
       <p className="text-sm text-kumo-subtle">{publicNotice}</p>
-      <label className="flex items-start gap-2"><input type="checkbox" checked={consent} disabled={busy} onChange={e => setConsent(e.target.checked)} className="mt-1" />I consent to publishing these details to signed-in deployment users.</label>
+      <p className="text-sm text-kumo-subtle">Publishing makes these details visible to signed-in deployment users.</p>
       {writeError && <p role="alert">Could not confirm publication. Retry unchanged details. If you leave or reload, check existing details before submitting again.</p>}
-      <Button type="submit" variant="primary" disabled={busy || !consent || !body.trim()}>{busy ? 'Publishing…' : 'Publish public details'}</Button>
+      <Button type="submit" variant="primary" disabled={busy || !body.trim()}>{busy ? 'Publishing…' : 'Publish public details'}</Button>
     </form>}
   </section>
 }

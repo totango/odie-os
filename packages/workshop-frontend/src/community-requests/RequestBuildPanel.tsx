@@ -10,7 +10,7 @@ type Readiness = Awaited<ReturnType<AdminApi['getRequestBuildReadiness']>>
 type Mutation = { kind: 'start'; input: StartRequestBuild } | { kind: 'cancel'; input: CancelRequestBuild }
 
 /** Public reads need no connector. Only this mounted admin panel owns the private admin stub. */
-export function RequestBuildPanel({ requestId, runId }: { requestId: string; runId?: string }) {
+export function RequestBuildPanel({ requestId, runId, moderate = false }: { requestId: string; runId?: string; moderate?: boolean }) {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
   const scope = useMemo(() => ({ authenticatedApi, isAdmin, requestId, runId }), [authenticatedApi, isAdmin, requestId, runId])
   const [revision, setRevision] = useState(0)
@@ -18,7 +18,6 @@ export function RequestBuildPanel({ requestId, runId }: { requestId: string; run
   const [admin, setAdmin] = useState<{ scope: typeof scope; api: RpcStub<AdminApi> }>()
   const [problem, setProblem] = useState<{ scope: typeof scope; message: string }>()
   const [pending, setPending] = useState<{ scope: typeof scope; mutation: Mutation }>()
-  const [approval, setApproval] = useState<Readiness>()
   const [busy, setBusy] = useState(false)
   const token = useRef<{ active: boolean; scope: typeof scope } | null>(null)
   const lock = useRef(false)
@@ -28,7 +27,7 @@ export function RequestBuildPanel({ requestId, runId }: { requestId: string; run
   useEffect(() => {
     const life = { active: true, scope }
     token.current = life; lock.current = false
-    setBusy(false); setData(undefined); setAdmin(undefined); setApproval(undefined); setProblem(undefined)
+    setBusy(false); setData(undefined); setAdmin(undefined); setProblem(undefined)
     let owned: RpcStub<AdminApi> | null = null
     ;(async () => {
       try {
@@ -57,7 +56,7 @@ export function RequestBuildPanel({ requestId, runId }: { requestId: string; run
       const run = mutation.kind === 'start' ? await capability.startRequestBuild(mutation.input) : await capability.cancelRequestBuild(mutation.input)
       if (!life.active) return
       setData(previous => ({ scope, runs: [run, ...(previous?.scope === scope ? previous.runs.filter(r => r.runId !== run.runId) : [])], readiness: previous?.scope === scope ? previous.readiness : undefined }))
-      setPending(undefined); setApproval(undefined)
+      setPending(undefined)
     } catch {
       if (life.active) setProblem({ scope, message: 'Could not confirm the operation. Retry the same operation safely. After leaving or reloading, check run history before starting another build.' })
     } finally { if (life.active) { lock.current = false; setBusy(false) } }
@@ -71,7 +70,7 @@ export function RequestBuildPanel({ requestId, runId }: { requestId: string; run
     <Button variant="secondary" disabled={busy} onClick={() => setRevision(n => n + 1)}>Refresh builds</Button>
     {current?.runs.length === 0 && <p>{runId ? 'Run unavailable or hidden' : 'No public builds yet.'}</p>}
     {current?.runs.map(run => <article key={run.runId} className={panelClass}>
-      <Link to="/requests/$requestId/runs/$runId" params={{ requestId, runId: run.runId }} className="text-kumo-brand underline">Build attempt {run.attempt}</Link>
+      <Link to="/requests/$requestId/runs/$runId" params={{ requestId, runId: run.runId }} search={{ moderate: moderate || undefined }} className="text-kumo-brand underline">Build attempt {run.attempt}</Link>
       <p>Revision {run.requestRevision} · {run.state} · Cleanup: {run.cleanup}</p>
       <p>Updated {new Date(run.updatedAt).toLocaleString()}</p>
       {run.errorCode && <p>{run.errorCode}</p>}
@@ -86,11 +85,11 @@ export function RequestBuildPanel({ requestId, runId }: { requestId: string; run
       {readiness.specification !== undefined && <>
         <p>Frozen public specification · revision {readiness.requestRevision}. Appended details, private Context and sessions are not included.</p>
         <pre className="whitespace-pre-wrap break-words text-sm">{readiness.specification}</pre>
-        <label className="flex gap-2"><input type="checkbox" checked={approval === readiness} disabled={busy || !!retry || !readiness.ready} onChange={e => setApproval(e.target.checked ? readiness : undefined)} />I approve this exact public specification and starting a restricted build.</label>
+        <p className="text-sm text-kumo-subtle">Starting confirms approval of this exact public specification for one restricted build.</p>
       </>}
-      <Button variant="primary" disabled={busy || !!retry || !capability || !readiness.ready || approval !== readiness || !readiness.requestRevision || readiness.specification === undefined} onClick={() => {
+      <Button variant="primary" disabled={busy || !!retry || !capability || !readiness.ready || !readiness.requestRevision || readiness.specification === undefined} onClick={() => {
         if (readiness.requestRevision) void mutate({ kind: 'start', input: { requestId, expectedRequestRevision: readiness.requestRevision, mutationKey: crypto.randomUUID() } })
-      }}>Approve and start build</Button>
+      }}>Approve exact specification and start build</Button>
     </div>}
     {retry && capability && <Button variant="secondary" disabled={busy} onClick={() => void mutate(retry)}>Retry same {retry.kind} operation</Button>}
   </section>

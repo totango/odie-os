@@ -20,7 +20,6 @@ export default function NewRequestPage() {
   const captureDiagnostics = () => diagnostics.current ??= productFeedbackDiagnosticsSnapshot()
   const [title, setTitle] = useState('')
   const [body, setBody] = useState('')
-  const [consent, setConsent] = useState(false)
   const [review, setReview] = useState(false)
   const [includeDiagnostics, setIncludeDiagnostics] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -28,7 +27,7 @@ export default function NewRequestPage() {
   const [diagnosticsError, setDiagnosticsError] = useState(false)
   useEffect(() => { setBusy(false) }, [authenticatedApi])
   async function publish() {
-    if (busy || !review || !consent || !title.trim() || !body.trim()) return
+    if (busy || !review || !title.trim() || !body.trim()) return
     const current = lifetime()
     const payload = { kind, title: title.trim(), body: body.trim() }
     setBusy(true)
@@ -65,7 +64,7 @@ export default function NewRequestPage() {
             <div className="flex items-center gap-2 text-sm font-medium text-kumo-brand">{kind === 'bug' ? <Bug size={17} weight="fill" /> : <Lightbulb size={17} weight="fill" />} Public preview</div>
             <h2 className="break-words text-xl font-semibold text-kumo-strong">{title}</h2>
             <p className="whitespace-pre-wrap break-words text-sm leading-6">{body}</p>
-            <Button type="button" variant="secondary" disabled={busy} onClick={() => { setReview(false); setConsent(false) }}>Edit draft</Button>
+            <Button type="button" variant="secondary" disabled={busy} onClick={() => setReview(false)}>Edit draft</Button>
           </section> : <div className={`${panelClass} space-y-5`}>
             <fieldset><legend className="mb-2 text-sm font-medium">Request type</legend><div className="grid grid-cols-2 gap-2 rounded-xl bg-kumo-elevated p-1">
               <button type="button" aria-pressed={kind === 'feature'} onClick={() => setKind('feature')} className={`flex items-center justify-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium transition ${kind === 'feature' ? 'bg-kumo-base text-kumo-strong shadow-sm ring-1 ring-kumo-line' : 'text-kumo-subtle hover:text-kumo-default'}`}><Lightbulb size={16} weight={kind === 'feature' ? 'fill' : 'regular'} /> Feature</button>
@@ -75,11 +74,11 @@ export default function NewRequestPage() {
             <label className="block"><span className="mb-1.5 block text-sm font-medium">Public description</span><textarea className={`${fieldClass} min-h-44 resize-y py-3`} required maxLength={LIMITS.body} value={body} placeholder={kind === 'bug' ? 'What happened, what did you expect, and how can we reproduce it?' : 'What should change, and who would it help?'} onChange={e => setBody(e.target.value)} /></label>
           </div>}
           <RelatedRequests text={`${title}\n${body}`.trim()} />
-          {review && kind === 'bug' && <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-kumo-line bg-kumo-elevated p-4"><input aria-label="Include private browser diagnostics" type="checkbox" checked={includeDiagnostics} onChange={e => { setIncludeDiagnostics(e.target.checked); if (e.target.checked) captureDiagnostics() }} disabled={busy} className="mt-1 h-4 w-4 accent-kumo-brand" /><ShieldCheck size={19} weight="fill" className="mt-0.5 shrink-0 text-kumo-brand" /><span className="text-sm"><strong className="block text-kumo-strong">Include private browser diagnostics</strong><span className="text-kumo-subtle">Attach {diagnosticCount} bounded current-tab console/error {diagnosticCount === 1 ? 'entry' : 'entries'} for administrators. They are sanitized, expire after 30 days, and never enter the public board, search, or Auto-Build input.</span></span></label>}
-          {review && <label className="flex items-start gap-2 text-sm"><input aria-label="Consent to public request" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={busy} className="mt-1 h-4 w-4 accent-kumo-brand" />I consent to publishing this title and description to all signed-in deployment users.</label>}
+          {review && kind === 'bug' && <section className="flex items-start gap-3 rounded-xl border border-kumo-line bg-kumo-elevated p-4"><ShieldCheck size={19} weight="fill" className="mt-0.5 shrink-0 text-kumo-brand" /><div className="min-w-0 flex-1 text-sm"><strong className="block text-kumo-strong">Private browser diagnostics</strong><p className="text-kumo-subtle">Optionally attach {diagnosticCount} bounded current-tab console/error {diagnosticCount === 1 ? 'entry' : 'entries'} for administrators. They are sanitized, expire after 30 days, and never enter the public board, search, or Auto-Build input.</p><Button type="button" variant="secondary" aria-pressed={includeDiagnostics} disabled={busy} onClick={() => { const next = !includeDiagnostics; setIncludeDiagnostics(next); if (next) captureDiagnostics() }} className="mt-3">{includeDiagnostics ? 'Remove private diagnostics' : 'Include private diagnostics'}</Button></div></section>}
+          {review && <p className="text-sm text-kumo-subtle">Publishing makes this title and description visible to all signed-in deployment users.</p>}
           {error && <p role="alert" className="rounded-xl bg-kumo-danger/10 p-3 text-sm text-kumo-danger">Could not confirm publication. Retry this unchanged submission to avoid duplicates. If you reload or leave this draft, check the board before submitting again.</p>}
           {diagnosticsError && <p role="alert" className="rounded-xl bg-kumo-warning/10 p-3 text-sm text-kumo-warning">The public bug was created, but private diagnostics were not confirmed. Retry unchanged to attach them without creating a duplicate.</p>}
-          <Button type="submit" variant="primary" disabled={busy || !title.trim() || !body.trim() || (review && !consent)}>{busy ? 'Publishing…' : review ? 'Publish public request' : 'Review public submission'}</Button>
+          <Button type="submit" variant="primary" disabled={busy || !title.trim() || !body.trim()}>{busy ? 'Publishing…' : review ? 'Publish public request' : 'Review public submission'}</Button>
         </form>
       </section>
       <aside className="space-y-4 lg:pt-16"><div className="rounded-2xl border border-kumo-line bg-kumo-elevated p-5"><h2 className="text-sm font-semibold text-kumo-strong">What stays private</h2><p className="mt-2 text-sm leading-6 text-kumo-subtle">{publicNotice}</p></div><div className="rounded-2xl border border-kumo-line bg-kumo-base p-5 text-sm leading-6 text-kumo-subtle"><strong className="text-kumo-strong">No automatic changes</strong><br />Publishing does not start a build or create a GitHub pull request. Administrators control that separately.</div></aside>
