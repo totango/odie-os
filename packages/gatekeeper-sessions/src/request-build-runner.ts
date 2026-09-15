@@ -3,34 +3,44 @@ import { REQUEST_BUILD_MODEL_URL, REQUEST_BUILD_RUNTIME_VERSION } from "./reques
 
 /** Bounded read-only clone from the immutable approved SHA; no repository scripts, filters or submodules run. */
 export function requestBuildCloneCommand(intent: RequestBuildIntent): [string, ...string[]] {
-  return ["python3", "-c", `
-import os, subprocess
-os.makedirs('/workspace/repository', exist_ok=True)
-os.chdir('/workspace/repository')
-def git(*args):
- subprocess.run(['git','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false',*args],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-git('init')
-git('remote','add','origin','https://github.com/totango/odie-os.git')
-git('fetch','--no-tags','--depth=1','origin',${JSON.stringify(intent.baseSha)})
-git('-c','filter.lfs.required=false','-c','filter.lfs.smudge=','checkout','--detach','FETCH_HEAD')
-assert subprocess.check_output(['git','rev-parse','HEAD']).decode().strip() == ${JSON.stringify(intent.baseSha)}
+  return ["node", "--input-type=module", "-e", `
+import { mkdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+mkdirSync('/workspace/repository', { recursive: true });
+process.chdir('/workspace/repository');
+function git(...args) {
+ const result=spawnSync('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false',...args],{stdio:'ignore'});
+ if(result.error || result.status!==0) process.exit(result.status ?? 1);
+}
+git('init');
+git('remote','add','origin','https://github.com/totango/odie-os.git');
+git('fetch','--no-tags','--depth=1','origin',${JSON.stringify(intent.baseSha)});
+git('-c','filter.lfs.required=false','-c','filter.lfs.smudge=','checkout','--detach','FETCH_HEAD');
+const head=spawnSync('git',['rev-parse','HEAD'],{encoding:'utf8'});
+if(head.error || head.status!==0) process.exit(head.status ?? 1);
+if(head.stdout.trim()!==${JSON.stringify(intent.baseSha)}) process.exit(1);
 `];
 }
 
 /** Collects against the approved base, including additions; output bytes are bounded again in the Worker. */
 export function requestBuildCollectCommand(intent: RequestBuildIntent): [string, ...string[]] {
-  return ["python3", "-c", `
-import os, subprocess, sys
-os.chdir('/workspace/repository')
-git=['git','-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','diff.external=']
-assert subprocess.check_output(git+['rev-parse','HEAD']).decode().strip() == ${JSON.stringify(intent.baseSha)}
-subprocess.run(git+['add','--intent-to-add','--all'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-# Exceeding a bound is a failure, not a silently truncated patch.
-p=subprocess.Popen(git+['diff','--no-ext-diff','--no-textconv','--binary',${JSON.stringify(intent.baseSha)},'--'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-data=p.stdout.read(${intent.policy.diffBytes + 1})
-if len(data)>${intent.policy.diffBytes}: p.kill(); p.wait(); sys.exit(2)
-assert p.wait()==0 and data.count(b'diff --git ') <= ${intent.policy.diffFiles}
-sys.stdout.buffer.write(data)
+  return ["node", "--input-type=module", "-e", `
+import { spawnSync } from 'node:child_process';
+process.chdir('/workspace/repository');
+const git=['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-c','diff.external='];
+const head=spawnSync('git',[...git,'rev-parse','HEAD'],{encoding:'utf8'});
+if(head.error || head.status!==0) process.exit(head.status ?? 1);
+if(head.stdout.trim()!==${JSON.stringify(intent.baseSha)}) process.exit(1);
+const add=spawnSync('git',[...git,'add','--intent-to-add','--all'],{stdio:'ignore'});
+if(add.error || add.status!==0) process.exit(add.status ?? 1);
+const diff=spawnSync('git',[...git,'diff','--no-ext-diff','--no-textconv','--binary',${JSON.stringify(intent.baseSha)},'--'],{maxBuffer:${intent.policy.diffBytes + 1}});
+if(diff.error?.code==='ENOBUFS' || diff.stdout.length>${intent.policy.diffBytes}) process.exit(2);
+if(diff.error || diff.status!==0) process.exit(diff.status ?? 1);
+const marker=Buffer.from('diff --git ');
+let files=0, offset=0;
+while((offset=diff.stdout.indexOf(marker,offset))!==-1) { files++; offset+=marker.length; }
+if(files>${intent.policy.diffFiles}) process.exit(2);
+process.stdout.write(diff.stdout);
 `];
 }
 
