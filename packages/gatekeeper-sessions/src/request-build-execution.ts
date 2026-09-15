@@ -38,6 +38,47 @@ type RequestBuildLogFields = {
 const logger = createLogger<RequestBuildLogFields>({ component: "gatekeeper.sessions.request-build", vendorId: "sessions" });
 
 const terminal = new Set(["artifact_ready", "canceled", "failed", "needs_attention"]);
+const processFailureMarkers = [
+  "BUILD_RUNTIME_MISMATCH",
+  "BUILD_MODEL_UNAVAILABLE",
+  "BUILD_RESOURCES_FORBIDDEN",
+  "BUILD_MODEL_REQUEST_DENIED",
+  "BUILD_MODEL_RESPONSE_REJECTED",
+  "ERR_MODULE_NOT_FOUND",
+  "EEXIST",
+] as const;
+
+/** Maps untrusted process stderr to a closed diagnostic code without retaining its contents. */
+export function classifyProcessFailure(stderr: string, truncated: boolean): string {
+  for (const marker of processFailureMarkers) if (stderr.includes(marker)) return marker;
+  if (/\b(?:401|403)\b/.test(stderr)) return "BUILD_MODEL_HTTP_AUTHORIZATION";
+  if (/\b429\b/.test(stderr)) return "BUILD_MODEL_HTTP_RATE_LIMIT";
+  if (/\b5[0-9]{2}\b/.test(stderr)) return "BUILD_MODEL_HTTP_UPSTREAM";
+  if (/fetch failed|ECONN|ENOTFOUND|ETIMEDOUT/i.test(stderr)) return "BUILD_MODEL_NETWORK_FAILED";
+  if (/Executable not found|ENOENT/i.test(stderr)) return "BUILD_PROCESS_EXECUTABLE_MISSING";
+  if (/SyntaxError/.test(stderr)) return "BUILD_PROCESS_SYNTAX_ERROR";
+  return truncated ? "BUILD_PROCESS_DIAGNOSTIC_TRUNCATED" : "BUILD_PROCESS_FAILED_UNKNOWN";
+}
+
+type FailedProcessStatus =
+  | { state: "error"; error: { code: string; message: string } }
+  | { state: "exited"; exit: { code: number; timedOut: boolean } };
+
+/** Classifies SDK failures or bounded terminal stderr while never returning untrusted text. */
+export async function diagnoseProcessFailure(
+  status: FailedProcessStatus,
+  readOutput: () => Promise<{ stderr: string; truncated: boolean }>,
+): Promise<string> {
+  if (status.state === "error")
+    return classifyProcessFailure(`${status.error.code}\n${status.error.message}`, false);
+  if (status.exit.timedOut) return "BUILD_PROCESS_TIMED_OUT";
+  try {
+    const output = await readOutput();
+    return classifyProcessFailure(output.stderr, output.truncated);
+  } catch {
+    return "BUILD_PROCESS_DIAGNOSTIC_UNAVAILABLE";
+  }
+}
 
 /** Restricted mode lifecycle embedded in CodingSessionRegistry, not a separate feedback job store. */
 export class RequestBuildExecution {
@@ -212,6 +253,14 @@ export class RequestBuildExecution {
     const status = await process.status();
     if (status.state === "running") return;
     if (status.state !== "exited" || status.exit.code !== 0 || status.exit.timedOut) {
+      const reason = await diagnoseProcessFailure(status, async () =>
+        process.output({ encoding: "utf8", maxBytes: 16_384, timeout: 1000 }));
+      logger.warn("request build process failed", {
+        event: "request.build.process.failed",
+        dispatchKey: record.dispatchKey,
+        stage: record.stage,
+        error: new Error(reason),
+      });
       this.#save(record, { state: "failed", errorCode: "BUILD_PROCESS_FAILED" }); return;
     }
     if (record.stage === "clone_wait") {
