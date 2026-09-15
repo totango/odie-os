@@ -748,7 +748,11 @@ describe("request-build actual backend/Sessions workerd lifecycle with mocked Gi
     // The registry is already running while the controller still has the prior starting receipt.
     expect(run.receipt?.state).toBe("starting");
     await call(name, "configure", {
-      fields: { "receipt-callback-unavailable": true },
+      fields: {
+        "receipt-callback-unavailable": true,
+        // Receipt reconciliation may advance persisted version while authorization awaits setup.
+        "benign-version-drift": true,
+      },
     });
     const authorization = {
       dispatchKey: run.intent.dispatchKey,
