@@ -51,8 +51,17 @@ export class RequestBuildFixture extends DurableObject {
   process(id) {
     return {
       id,
-      status: async () => this.ctx.storage.kv.get("process-running") ? { state: "running" } : { state: "exited", exit: { code: this.ctx.storage.kv.get("exit-code") ?? 0 } },
-      output: async () => ({ stdout: id === "3" ? "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n" : "", stderr: "", exitCode: 0, timedOut: false, truncated: !!this.ctx.storage.kv.get("truncated") }),
+      status: async () => {
+        if (this.ctx.storage.kv.get("process-running")) return { state: "running" };
+        if (this.ctx.storage.kv.get("process-error-id") === id)
+          return { state: "error", error: { code: "SPAWN", message: "Executable not found: fixture" } };
+        return { state: "exited", exit: { code: this.ctx.storage.kv.get("failed-process-id") === id ? 1 : 0 } };
+      },
+      output: async () => {
+        this.ctx.storage.kv.put("output-reads", (this.ctx.storage.kv.get("output-reads") ?? 0) + 1);
+        if (this.ctx.storage.kv.get("output-throws-id") === id) throw new Error("fixture output unavailable");
+        return { stdout: id === "3" ? "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-a\n+b\n" : "", stderr: this.ctx.storage.kv.get("process-stderr") ?? "", exitCode: 0, timedOut: false, truncated: !!this.ctx.storage.kv.get("truncated") };
+      },
     };
   }
   async operation({ op, owner, intent, key, revision, fields }) {
@@ -70,6 +79,7 @@ export class RequestBuildFixture extends DurableObject {
     return { runtime: navigator.userAgent, receipt: record ? c.receipt(record) : null,
       sessions: [...this.ctx.storage.kv.list({prefix:"session:"})].length,
       execs: this.ctx.storage.kv.get("execs") ?? 0, destroys: this.ctx.storage.kv.get("destroys") ?? 0,
+      outputReads: this.ctx.storage.kv.get("output-reads") ?? 0,
       slot: this.ctx.storage.kv.get("slot") ?? null, disabled: this.ctx.storage.kv.get("disabled") ?? false,
       alarm: await this.ctx.storage.getAlarm(), work: c.hasWork(), authorization: this.ctx.storage.kv.get("last-authorization") };
   }

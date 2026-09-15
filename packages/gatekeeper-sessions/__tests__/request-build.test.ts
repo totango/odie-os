@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { RequestBuildIntent, RequestBuildPolicy } from "@gadgets/workshop-shared/coding-sessions";
+import { classifyProcessFailure, diagnoseProcessFailure } from "../src/request-build-execution.js";
 import { buildHash, canonicalBuildJson, parseRequestBuildPolicy, validateRequestBuildIntent, boundedBuildModelPayload } from "../src/request-build-policy.js";
 import { requestBuildCloneCommand, requestBuildCollectCommand, requestBuildRunnerSource } from "../src/request-build-runner.js";
 const require = createRequire(import.meta.url);
@@ -54,6 +55,22 @@ describe("request-build policy", () => {
     for (const extra of [{background:true},{model:"other"},{tools:[{type:"web_search"}]},{previous_response_id:"x"}]) {
       expect(()=>boundedBuildModelPayload(new TextEncoder().encode(JSON.stringify({...payload,...extra})),policy)).toThrow();
     }
+  });
+  it("reduces untrusted process output to closed diagnostics", async () => {
+    expect(classifyProcessFailure("Error: BUILD_RUNTIME_MISMATCH", false)).toBe("BUILD_RUNTIME_MISMATCH");
+    expect(classifyProcessFailure("API error (403): secret response body", false)).toBe("BUILD_MODEL_HTTP_AUTHORIZATION");
+    expect(classifyProcessFailure("token=do-not-reflect", false)).toBe("BUILD_PROCESS_FAILED_UNKNOWN");
+    expect(classifyProcessFailure("token=do-not-reflect", true)).toBe("BUILD_PROCESS_DIAGNOSTIC_TRUNCATED");
+
+    let reads = 0;
+    const read = async () => { reads++; return { stderr: "Error: BUILD_MODEL_UNAVAILABLE", truncated: false }; };
+    expect(await diagnoseProcessFailure({ state: "exited", exit: { code: 1, timedOut: false } }, read)).toBe("BUILD_MODEL_UNAVAILABLE");
+    expect(reads).toBe(1);
+    expect(await diagnoseProcessFailure({ state: "exited", exit: { code: 1, timedOut: true } }, read)).toBe("BUILD_PROCESS_TIMED_OUT");
+    expect(reads).toBe(1);
+    expect(await diagnoseProcessFailure({ state: "error", error: { code: "SPAWN", message: "Executable not found: secret" } }, read)).toBe("BUILD_PROCESS_EXECUTABLE_MISSING");
+    expect(reads).toBe(1);
+    expect(await diagnoseProcessFailure({ state: "exited", exit: { code: 1, timedOut: false } }, async () => { throw new Error("secret"); })).toBe("BUILD_PROCESS_DIAGNOSTIC_UNAVAILABLE");
   });
   it("uses the image's Node runtime and enforces collection bounds at runtime", async () => {
     const value = await intent();
@@ -199,6 +216,22 @@ describe("request-build execution in real workerd SQLite", () => {
   it("deadline expires even when provider process is running",async()=>{
     await setup("deadline",{"process-running":true});await call("deadline","tick");await call("deadline","tick");await call("deadline","expire");await call("deadline","tick");
     expect(await call("deadline","inspect")).toMatchObject({execs:1,receipt:{state:"failed",errorCode:"BUILD_WALLTIME_LIMIT",cleanup:"complete"}});
+  });
+  it("reads bounded output for a nonzero runner and keeps its public error generic", async () => {
+    await setup("runner-failure", { "failed-process-id": "2", "process-stderr": "Error: BUILD_MODEL_UNAVAILABLE" });
+    for (let n = 0; n < 5; n++) await call("runner-failure", "tick");
+    expect(await call("runner-failure", "inspect")).toMatchObject({
+      execs: 2, outputReads: 1,
+      receipt: { state: "failed", errorCode: "BUILD_PROCESS_FAILED", cleanup: "complete" },
+    });
+  });
+  it("classifies an SDK process error without trying to read unavailable output", async () => {
+    await setup("sdk-process-error", { "process-error-id": "2" });
+    for (let n = 0; n < 5; n++) await call("sdk-process-error", "tick");
+    expect(await call("sdk-process-error", "inspect")).toMatchObject({
+      execs: 2, outputReads: 0,
+      receipt: { state: "failed", errorCode: "BUILD_PROCESS_FAILED", cleanup: "complete" },
+    });
   });
   it("does not reserve without an alarm and fails closed on capacity or truncated output",async()=>{
     expect(await setup("alarm",{"alarm-failed":true})).toMatchObject({error:"alarm unavailable"});
