@@ -480,8 +480,14 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async addCommunityRequestDetail(id: string, detail: AddCommunityRequestDetail) {
     return this.#communityRequests.addDetail(this.#userId.toString(), id, detail);
   }
+  async deleteCommunityRequestDetail(id: string, detailId: string) {
+    return this.#communityRequests.deleteDetail(this.#userId.toString(), id, detailId);
+  }
   async addCommunityRequestAttachment(id: string, attachment: AddCommunityRequestAttachment) {
     return this.#communityRequests.addAttachment(this.#userId.toString(), id, attachment);
+  }
+  async deleteCommunityRequestAttachment(id: string, attachmentId: string) {
+    return this.#communityRequests.deleteAttachment(this.#userId.toString(), id, attachmentId);
   }
   async getCommunityRequestAttachment(id: string, attachmentId: string, includeHidden = false) {
     await this.#checkCommunityHiddenAccess(includeHidden);

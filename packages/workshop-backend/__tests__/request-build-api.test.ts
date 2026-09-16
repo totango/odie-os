@@ -205,7 +205,7 @@ it("authenticated PublicApi admin facade reaches managed board start/cancel with
     idempotencyKey: "public-detail", body: "Complete public conversation detail.",
   });
   const detailText = new TextEncoder().encode("public detail attachment\n");
-  await viewerApi.addCommunityRequestAttachment(request.id, {
+  const detailAttachment = await viewerApi.addCommunityRequestAttachment(request.id, {
     idempotencyKey: "detail-attachment", detailId: detail.id,
     name: "detail.md", mimeType: "text/markdown", content: detailText,
   });
@@ -235,6 +235,18 @@ it("authenticated PublicApi admin facade reaches managed board start/cancel with
   const canceled = await admin!.cancelRequestBuild({ requestId: request.id, runId: started.runId, mutationKey: "cancel" });
   expect(canceled).toMatchObject({ runId: started.runId, state: "cancel_requested" });
   expect(await viewerApi.getRequestBuild(request.id, started.runId)).toMatchObject({ state: "cancel_requested" });
+
+  await viewerApi.deleteCommunityRequestAttachment(request.id, detailAttachment.id);
+  const withoutDetailAttachment = await admin!.getRequestBuildReadiness(request.id);
+  expect(withoutDetailAttachment).toMatchObject({requestRevision: 5});
+  expect(withoutDetailAttachment.specification).not.toContain("detail.md");
+  expect(withoutDetailAttachment.specification).toContain("Complete public conversation detail.");
+
+  await viewerApi.deleteCommunityRequestDetail(request.id, detail.id);
+  const withoutDetail = await admin!.getRequestBuildReadiness(request.id);
+  expect(withoutDetail).toMatchObject({requestRevision: 6});
+  expect(withoutDetail.specification).not.toContain("Complete public conversation detail.");
+  expect(withoutDetail.specification).toContain("request.txt");
 });
 
 it("requires exact deployment evidence for request-build image, pricing, repository, and model readiness", async () => {
