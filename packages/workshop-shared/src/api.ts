@@ -823,8 +823,12 @@ export interface AuthenticatedApi extends RpcTarget {
   unvoteCommunityRequest(id: string): Promise<CommunityRequest>;
   /** Append authored public details idempotently. Never accepts diagnostics or private attachments. */
   addCommunityRequestDetail(id: string, detail: AddCommunityRequestDetail): Promise<CommunityRequestDetail>;
+  /** Delete one authored public detail and its attachments; other accounts' details are unaffected. */
+  deleteCommunityRequestDetail(id: string, detailId: string): Promise<void>;
   /** Upload one immutable public attachment to an owned request or authored detail. */
   addCommunityRequestAttachment(id: string, attachment: AddCommunityRequestAttachment): Promise<CommunityRequestAttachment>;
+  /** Delete one authored public attachment without affecting its request or detail text. */
+  deleteCommunityRequestAttachment(id: string, attachmentId: string): Promise<void>;
   /** Load one visible public attachment on demand; hidden access is moderator-only. */
   getCommunityRequestAttachment(id: string, attachmentId: string, includeHidden?: boolean): Promise<CommunityRequestAttachmentContent>;
   /** Read a bounded public detail page; hidden requests are unavailable unless explicitly authorized. */

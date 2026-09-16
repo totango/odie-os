@@ -39,7 +39,7 @@ export interface AttachCommunityRequestDiagnostics {
   diagnostics: CommunityRequestDiagnostic[];
 }
 
-/** Moderator-only private diagnostic evidence retained for thirty days. */
+/** Administrator-only private diagnostic evidence retained for thirty days. */
 export interface CommunityRequestPrivateDiagnostics {
   /** Captured browser pathname, never a URL with query or fragment. */
   pathname: string;

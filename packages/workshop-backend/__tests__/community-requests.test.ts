@@ -52,7 +52,7 @@ const command = (action: "hide" | "restore" | "close" | "reopen" | "duplicate", 
 
 beforeEach(async () => {
   await runInDurableObject(registry(), (_instance, ctx) => {
-    for (const table of ["requests", "details", "attachments", "attachmentDeletions", "votes", "receipts", "quotas", "moderation", "privateDiagnostics", "ownerDeletions"]) {
+    for (const table of ["requests", "details", "detailDeletions", "attachments", "attachmentAuthorDeletions", "attachmentDeletions", "votes", "receipts", "quotas", "moderation", "privateDiagnostics", "ownerDeletions"]) {
       ctx.storage.sql.exec(`DELETE FROM ${table}`);
     }
   });
@@ -108,6 +108,79 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
       idempotencyKey: "wrong-detail", detailId: detail.id, name: "trace.txt",
       mimeType: "text/plain", content: text,
     })).rejects.toThrow("authored public detail");
+  });
+
+  it("lets only attachment authors delete their files without removing parent text", async () => {
+    const { alice, bob } = await fixture();
+    const request = await alice.createCommunityRequest(draft({title: "Delete authored attachments"}));
+    const root = await alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "delete-own-root", name: "root.txt", mimeType: "text/plain",
+      content: new TextEncoder().encode("root evidence"),
+    });
+    const detail = await bob.addCommunityRequestDetail(request.id, {
+      idempotencyKey: "delete-own-detail", body: "Keep this comment",
+    });
+    const child = await bob.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "delete-own-child", detailId: detail.id, name: "child.txt", mimeType: "text/plain",
+      content: new TextEncoder().encode("detail evidence"),
+    });
+
+    await expect(async () => bob.deleteCommunityRequestAttachment(request.id, root.id)).rejects.toThrow("attachment author");
+    await expect(async () => alice.deleteCommunityRequestAttachment(request.id, child.id)).rejects.toThrow("attachment author");
+    await alice.deleteCommunityRequestAttachment(request.id, root.id);
+    await alice.deleteCommunityRequestAttachment(request.id, root.id);
+    await bob.deleteCommunityRequestAttachment(request.id, child.id);
+    await bob.deleteCommunityRequestAttachment(request.id, child.id);
+
+    expect((await alice.getCommunityRequest(request.id))?.attachments).toEqual([]);
+    expect((await alice.listCommunityRequestDetails(request.id)).items).toEqual([
+      expect.objectContaining({id: detail.id, body: "Keep this comment", attachments: []}),
+    ]);
+    await runInDurableObject(registry(), async (instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT attachmentId FROM attachmentAuthorDeletions ORDER BY attachmentId").toArray())
+        .toEqual([{attachmentId: root.id}, {attachmentId: child.id}].toSorted((a, b) => a.attachmentId.localeCompare(b.attachmentId)));
+      ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=0");
+      await instance.alarm();
+    });
+    expect(await env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${root.id}`)).toBeNull();
+    expect(await env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${child.id}`)).toBeNull();
+    await alice.deleteCommunityRequest(request.id);
+    await runInDurableObject(registry(), (_instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT * FROM attachmentAuthorDeletions WHERE requestId=?", request.id).toArray()).toEqual([]);
+    });
+  });
+
+  it("lets only a detail author delete their detail and durably removes its attachment", async () => {
+    const { alice, bob } = await fixture();
+    const request = await alice.createCommunityRequest(draft({title: "Delete authored detail"}));
+    const detail = await bob.addCommunityRequestDetail(request.id, {
+      idempotencyKey: "detail-delete", body: "Remove my public comment keyword",
+    });
+    const attachment = await bob.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "detail-delete-file", detailId: detail.id,
+      name: "comment.txt", mimeType: "text/plain", content: new TextEncoder().encode("remove me"),
+    });
+
+    await expect(alice.deleteCommunityRequestDetail(request.id, detail.id)).rejects.toThrow("detail author");
+    await bob.deleteCommunityRequestDetail(request.id, detail.id);
+    await bob.deleteCommunityRequestDetail(request.id, detail.id);
+
+    expect((await alice.listCommunityRequestDetails(request.id)).items).toEqual([]);
+    expect((await alice.searchCommunityRequests({query: "keyword"})).items).toEqual([]);
+    await runInDurableObject(registry(), async (instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT * FROM details WHERE id=?", detail.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT * FROM attachments WHERE id=?", attachment.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT owner FROM detailDeletions WHERE detailId=?", detail.id).toArray())
+        .toEqual([{owner: expect.any(String)}]);
+      expect(ctx.storage.sql.exec("SELECT id FROM attachmentDeletions").toArray()).toEqual([{id: attachment.id}]);
+      ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=0");
+      await instance.alarm();
+    });
+    expect(await env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${attachment.id}`)).toBeNull();
+    await alice.deleteCommunityRequest(request.id);
+    await runInDurableObject(registry(), (_instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT * FROM detailDeletions WHERE requestId=?", request.id).toArray()).toEqual([]);
+    });
   });
 
   it("rejects unsupported, mismatched, and empty public attachments", async () => {
@@ -199,6 +272,8 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
     });
     await runInDurableObject(registry(), async (instance, ctx) => {
       expect(ctx.storage.sql.exec("SELECT * FROM attachments WHERE requestId=?", bug.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT * FROM detailDeletions WHERE requestId=?", bug.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT * FROM attachmentAuthorDeletions WHERE requestId=?", bug.id).toArray()).toEqual([]);
       expect(ctx.storage.sql.exec("SELECT * FROM receipts").toArray()).toEqual([]);
       expect(ctx.storage.sql.exec("SELECT id FROM attachmentDeletions").toArray())
         .toEqual([{id: publicAttachment.id}]);
