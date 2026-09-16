@@ -83,9 +83,9 @@ export function RequestBuildPanel({ requestId, runId, moderate = false }: { requ
       <h3>{readiness.ready ? 'Ready for explicit approval' : 'Auto-Build is not ready'}</h3>
       <ul>{readiness.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
       {readiness.specification !== undefined && <>
-        <p>Frozen public specification · revision {readiness.requestRevision}. Appended details, private Context and sessions are not included.</p>
+        <p>Frozen public specification · revision {readiness.requestRevision}. This includes the current public description, metadata, appended details, and attachment manifest. Private diagnostics, Context collections, chats, workspaces, and Code Sessions are not included.</p>
         <pre className="whitespace-pre-wrap break-words text-sm">{readiness.specification}</pre>
-        <p className="text-sm text-kumo-subtle">Starting confirms approval of this exact public specification for one restricted build.</p>
+        <p className="text-sm text-kumo-subtle">Starting confirms approval of this exact public specification and its referenced attachment files for one restricted build.</p>
       </>}
       <Button variant="primary" disabled={busy || !!retry || !capability || !readiness.ready || !readiness.requestRevision || readiness.specification === undefined} onClick={() => {
         if (readiness.requestRevision) void mutate({ kind: 'start', input: { requestId, expectedRequestRevision: readiness.requestRevision, mutationKey: crypto.randomUUID() } })

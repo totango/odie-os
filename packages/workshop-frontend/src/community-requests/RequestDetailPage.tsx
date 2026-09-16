@@ -6,6 +6,7 @@ import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { RequestBuildPanel } from './RequestBuildPanel'
 import { fieldClass, panelClass, publicNotice, RelatedRequests, RequestVote, useRequestLifetime, useRequestRetryKey } from './RequestShared'
+import { CommunityAttachmentList, CommunityAttachmentPicker, uploadCommunityAttachmentDrafts, type CommunityAttachmentDraft } from './CommunityRequestAttachments'
 
 export default function RequestDetailPage({ requestId, moderate = false, onBack }: { requestId: string; moderate?: boolean; onBack?: () => void }) {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
@@ -41,6 +42,7 @@ export default function RequestDetailPage({ requestId, moderate = false, onBack 
         <h1 className="break-words text-2xl font-semibold">{request.title}</h1>
         <p className="text-sm text-kumo-subtle">{request.kind === 'bug' ? 'Public bug summary' : 'Feature request'} · {request.status}{request.hidden ? ' · Hidden from the board' : ''}{request.isOwn ? ' · Your request' : ''}</p>
         <p className="whitespace-pre-wrap break-words">{request.body}</p>
+        <CommunityAttachmentList requestId={request.id} attachments={request.attachments} includeHidden={includeHidden} />
         {request.duplicateOf && <p>Duplicate of <Link to="/requests/$requestId" params={{ requestId: request.duplicateOf }} search={{ moderate: includeHidden }} replace className="text-kumo-brand underline">canonical request</Link></p>}
         <RequestVote request={request} onChange={value => setResult({ scope, request: value })} />
         {request.isOwn && <DeleteOwnedRequest requestId={request.id} onDeleted={() => { if (onBack) onBack(); else void navigate({ to: '/requests', replace: true }) }} />}
@@ -72,7 +74,7 @@ function DeleteOwnedRequest({ requestId, onDeleted }: { requestId: string; onDel
   }
   if (!confirming) return <div className="border-t border-kumo-line pt-4"><Button variant="secondary" onClick={() => setConfirming(true)}>Delete your request</Button></div>
   return <div className="space-y-3 rounded-xl border border-kumo-danger/30 bg-kumo-danger/10 p-4">
-    <p className="text-sm text-kumo-default"><strong>Delete this request?</strong> It will disappear from the public board. Its public text, details, votes, and private diagnostics will be scrubbed, and it cannot be restored.</p>
+    <p className="text-sm text-kumo-default"><strong>Delete this request?</strong> It will disappear from the public board. Its public text, details, attachments, votes, and private diagnostics will be scrubbed, and it cannot be restored.</p>
     {error && <p role="alert" className="text-sm text-kumo-danger">Could not delete this request. Retry or cancel.</p>}
     <div className="flex flex-wrap gap-2"><Button variant="secondary" disabled={busy} onClick={() => { setConfirming(false); setError(false) }}>Cancel</Button><Button variant="primary" disabled={busy} onClick={() => void remove()}>{busy ? 'Deleting…' : 'Confirm deletion'}</Button></div>
   </div>
@@ -115,8 +117,10 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
   const [body, setBody] = useState('')
+  const [attachments, setAttachments] = useState<CommunityAttachmentDraft[]>([])
   const [busy, setBusy] = useState(false)
   const [writeError, setWriteError] = useState(false)
+  const [attachmentsError, setAttachmentsError] = useState(false)
   const [published, setPublished] = useState(false)
   const page = result?.scope === scope ? result.page : undefined
   useEffect(() => { setBusy(false) }, [authenticatedApi])
@@ -138,12 +142,18 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
     const payload = { requestId, body: body.trim() }
     setBusy(true)
     setWriteError(false)
+    setAttachmentsError(false)
     setPublished(false)
     try {
-      await authenticatedApi.addCommunityRequestDetail(requestId, { body: payload.body, idempotencyKey: retryKey.keyFor(payload) })
+      const detail = await authenticatedApi.addCommunityRequestDetail(requestId, { body: payload.body, idempotencyKey: retryKey.keyFor(payload) })
+      try {
+        if (!await uploadCommunityAttachmentDrafts(
+          authenticatedApi, requestId, attachments, detail.id, () => current.active,
+        )) return
+      } catch { if (current.active) setAttachmentsError(true); return }
       if (current.active) {
         retryKey.confirmed()
-        setBody(''); setPublished(true)
+        setBody(''); setAttachments([]); setPublished(true)
         setCursor(undefined); setResult(undefined); setRevision(n => n + 1)
       }
     } catch { if (current.active) setWriteError(true) }
@@ -151,7 +161,7 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
   }
   return <section className="space-y-4" aria-label="Public details">
     <h2 className="text-lg font-semibold">Public details</h2>
-    {page?.items.map(item => <article key={item.id} className={panelClass}><p className="whitespace-pre-wrap break-words">{item.body}</p><p className="text-xs text-kumo-subtle">{item.isOwn ? 'Your detail · ' : ''}{new Date(item.createdAt).toLocaleDateString()}</p></article>)}
+    {page?.items.map(item => <article key={item.id} className={panelClass}><p className="whitespace-pre-wrap break-words">{item.body}</p><CommunityAttachmentList requestId={requestId} attachments={item.attachments} includeHidden={includeHidden} /><p className="text-xs text-kumo-subtle">{item.isOwn ? 'Your detail · ' : ''}{new Date(item.createdAt).toLocaleDateString()}</p></article>)}
     {page?.items.length === 0 && <p>No details yet.</p>}
     {loading && <p role="status">Loading details…</p>}
     {error && <p role="alert">Details unavailable. <Button variant="secondary" disabled={loading} onClick={() => setRevision(n => n + 1)}>Retry details</Button></p>}
@@ -159,9 +169,11 @@ function RequestDetails({ requestId, includeHidden, hidden }: { requestId: strin
     {published && <p role="status">Your detail was published.</p>}
     {!hidden && <form className={panelClass} onSubmit={e => { e.preventDefault(); void add() }}>
       <label className="block">Add public details<textarea className={`${fieldClass} min-h-28`} maxLength={LIMITS.detail} required value={body} disabled={busy} onChange={e => setBody(e.target.value)} /></label>
+      <CommunityAttachmentPicker drafts={attachments} onChange={setAttachments} disabled={busy} />
       <p className="text-sm text-kumo-subtle">{publicNotice}</p>
-      <p className="text-sm text-kumo-subtle">Publishing makes these details visible to signed-in deployment users.</p>
+      <p className="text-sm text-kumo-subtle">Publishing makes these details and selected attachments visible to signed-in deployment users.</p>
       {writeError && <p role="alert">Could not confirm publication. Retry unchanged details. If you leave or reload, check existing details before submitting again.</p>}
+      {attachmentsError && <p role="alert">The public detail was created, but one or more attachments were not confirmed. Retry unchanged to resume confirmed uploads. If the same file is rejected again, remove it before trying a new detail.</p>}
       <Button type="submit" variant="primary" disabled={busy || !body.trim()}>{busy ? 'Publishing…' : 'Publish public details'}</Button>
     </form>}
   </section>

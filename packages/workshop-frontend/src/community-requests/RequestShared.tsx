@@ -7,7 +7,7 @@ import { useAuthenticatedApi } from '../AuthContext'
 
 export const fieldClass = 'block h-11 w-full rounded-lg border border-kumo-line bg-kumo-base px-3 text-sm text-kumo-default shadow-sm transition focus:border-kumo-brand focus-visible:outline-2 focus-visible:outline-kumo-ring'
 export const panelClass = 'rounded-2xl border border-kumo-line bg-kumo-base p-5 shadow-sm space-y-4'
-export const publicNotice = 'Public here means all signed-in users of this deployment. Only the text you write is published; no private diagnostics, chats, workspace or Code Session context is attached. Do not paste secrets or personal information.'
+export const publicNotice = 'Public here means all signed-in users of this deployment. Only the text you write and files you explicitly select are published; no private diagnostics, chats, workspace, or Code Session context is attached. Do not include secrets or personal information.'
 
 /** The AuthProvider owns the API stub; board calls return values, not child capabilities.
  * Cleanup also runs when React Activity hides the authenticated tree on reconnect. */
