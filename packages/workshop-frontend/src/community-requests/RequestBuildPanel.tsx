@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link } from '@tanstack/react-router'
+import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@cloudflare/kumo'
+import { ArrowSquareOut } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { AdminApi, PublicRequestBuild, StartRequestBuild, CancelRequestBuild } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../AuthContext'
@@ -10,8 +11,9 @@ type Readiness = Awaited<ReturnType<AdminApi['getRequestBuildReadiness']>>
 type Mutation = { kind: 'start'; input: StartRequestBuild } | { kind: 'cancel'; input: CancelRequestBuild }
 
 /** Public reads need no connector. Only this mounted admin panel owns the private admin stub. */
-export function RequestBuildPanel({ requestId, runId, moderate = false }: { requestId: string; runId?: string; moderate?: boolean }) {
+export function RequestBuildPanel({ requestId, runId }: { requestId: string; runId?: string }) {
   const { authenticatedApi, isAdmin } = useAuthenticatedApi()
+  const navigate = useNavigate()
   const scope = useMemo(() => ({ authenticatedApi, isAdmin, requestId, runId }), [authenticatedApi, isAdmin, requestId, runId])
   const [revision, setRevision] = useState(0)
   const [data, setData] = useState<{ scope: typeof scope; runs: PublicRequestBuild[]; readiness?: Readiness }>()
@@ -70,12 +72,12 @@ export function RequestBuildPanel({ requestId, runId, moderate = false }: { requ
     <Button variant="secondary" disabled={busy} onClick={() => setRevision(n => n + 1)}>Refresh builds</Button>
     {current?.runs.length === 0 && <p>{runId ? 'Run unavailable or hidden' : 'No public builds yet.'}</p>}
     {current?.runs.map(run => <article key={run.runId} className={panelClass}>
-      <Link to="/requests/$requestId/runs/$runId" params={{ requestId, runId: run.runId }} search={{ moderate: moderate || undefined }} className="text-kumo-brand underline">Build attempt {run.attempt}</Link>
+      <div><Button variant="secondary" onClick={() => void navigate({ to: '/requests/$requestId/runs/$runId', params: { requestId, runId: run.runId } })}>View build attempt {run.attempt}</Button></div>
       <p>Revision {run.requestRevision} · {run.state} · Cleanup: {run.cleanup}</p>
       <p>Updated {new Date(run.updatedAt).toLocaleString()}</p>
       {run.errorCode && <p>{run.errorCode}</p>}
       {run.notification && <p>Notification: {run.notification}{run.notification === 'ambiguous' ? ' — delivery may have occurred; operator reconciliation required, no automatic resend.' : ''}</p>}
-      {run.pullRequest && /^https:\/\/github\.com\/totango\/odie-os\/pull\/[1-9][0-9]*$/.test(run.pullRequest.url) && <a href={run.pullRequest.url} target="_blank" rel="noopener noreferrer" className="text-kumo-brand underline">Verified draft PR #{run.pullRequest.number}</a>}
+      {run.pullRequest && /^https:\/\/github\.com\/totango\/odie-os\/pull\/[1-9][0-9]*$/.test(run.pullRequest.url) && <Button variant="secondary" onClick={() => window.open(run.pullRequest!.url, '_blank', 'noopener,noreferrer')}><ArrowSquareOut size={16} /> Open verified draft PR #{run.pullRequest.number}</Button>}
       {run.cancelTooLate && <p>Publication was admitted before cancellation. The PR was not undone.</p>}
       {capability && !['pr_created', 'failed', 'canceled', 'needs_attention'].includes(run.state) && <Button variant="secondary" disabled={busy || !!retry} onClick={() => void mutate({ kind: 'cancel', input: { requestId, runId: run.runId, mutationKey: crypto.randomUUID() } })}>Cancel build attempt {run.attempt}</Button>}
     </article>)}
