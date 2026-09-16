@@ -14,10 +14,16 @@ following those links does not complete onboarding or connect a service.
 
 ## Privacy and behavior
 
-- “Public” means signed-in users of this deployment. The form previews the exact public title/body;
-  its final publish action explicitly confirms that public payload, and the details form labels its
-  publish action the same way without an extra checkbox. Text is rendered as React text, never
-  Markdown/HTML. A bug author may separately opt in to attach the bounded current-tab console/error
+- “Public” means signed-in users of this deployment. The form previews the exact public title/body
+  and selected attachment names; its final publish action explicitly confirms that public payload,
+  and the details form labels its publish action the same way without an extra checkbox. Text is
+  rendered as React text, never Markdown/HTML. Request authors and detail authors may upload up to
+  ten immutable attachments per request, 25 MiB each and 100 MiB combined. The server allowlists and
+  checks expected signatures for binary files and valid UTF-8 for text/Markdown/JSON,
+  MP4, WebM, and QuickTime content;
+  SVG, HTML, archives, Office files, executables, and MIME/extension mismatches are rejected. Bytes
+  load only after an authenticated user explicitly requests a preview or download. A bug author may
+  separately opt in to attach the bounded current-tab console/error
   snapshot with an explicit, default-off diagnostics button. That evidence is sanitized, stored separately for
   thirty days, readable only with current board-moderation authority, and never enters public list,
   detail, search, related-request or Auto-Build projections.
@@ -27,7 +33,7 @@ following those links does not complete onboarding or connect a service.
   They remain visible during preview/submission; failure does not block publishing. List search
   debounces for 400 ms. Pages use the backend cursors, reset for query/API changes, and load only on
   user demand. There is no board polling or external search/model provider.
-- Create/detail/diagnostic/moderation writes retain one retry key for an unchanged uncertain payload during the
+- Create/detail/attachment/diagnostic/moderation writes retain one retry key for an unchanged uncertain payload during the
   mounted form's lifetime, including API reconnect. Confirmed detail/moderation writes reset it.
   Votes explicitly set/remove the account's vote; the UI does not optimistically toggle. Drafts and
   retry keys are **not durable across reload/navigation**: uncertainty copy asks users to check the
@@ -47,12 +53,17 @@ board ID plus confirmation). Every private read and moderation call rechecks cur
 server. Hiding covers the entire request and all details; there is no per-detail moderation API.
 
 Authors can delete their own requests. Deletion immediately hides the request and transactionally
-scrubs its authored title/body, public details, votes and private diagnostics. A minimal moderator-only
+scrubs its authored title/body, public details, attachments, votes and private diagnostics. Attachment
+objects are removed from private object storage through a durable retry queue. A minimal moderator-only
 tombstone remains for durable build/audit integrity and cannot be restored.
 
 Auto-Build is request-bound and administrator-controlled, with authority, image, budget, repository,
-model and notification readiness checked independently. Publishing never invokes the legacy
-`submitProductFeedback` runner; attached diagnostics remain excluded from build specifications.
+model and notification readiness checked independently. Approval freezes the complete public request
+text, public metadata, all public details, and an immutable attachment manifest. Attachment bytes are
+privately transferred into the restricted sandbox, rechecked by length and SHA-256, and materialized
+outside the repository before Pi starts; the sandbox receives no object-storage or publication
+credentials. Later comments or attachments affect later approvals only. Publishing never invokes the
+legacy `submitProductFeedback` runner; private diagnostics remain excluded from build specifications.
 
 The legacy private-feedback status button is no longer rendered on the Feature Requests board. Older
 records are not imported or searchable as Feature Requests. The backend private-feedback APIs remain
@@ -63,7 +74,7 @@ unchanged for compatibility; removing the button is not a legacy-capability cuto
 `CommunityRequests.test.tsx` uses jsdom, real React/Kumo controls and memory-router navigation with
 method-typed RPC doubles. It covers public submission/bug privacy and separate diagnostic consent,
 retry keys, bounded suggestions, list/search/filter/pagination, URL-backed detail-sheet navigation,
-safe text/errors, stale responses/API replacement, votes/details, owner deletion, moderation, and
+safe text/errors, stale responses/API replacement, votes/details/attachments, owner deletion, moderation, and
 private diagnostic display. Root integration tests verify signed-out
 login and board onboarding/billing/connector escape behavior; Sidebar and RequiredConnectionsGate tests
 cover availability without GitHub and no required-connector RPC reads. This is frontend interaction
@@ -74,7 +85,7 @@ The existing Vite TanStack plugin generates `src/routeTree.gen.ts` on test/build
 route without completing setup and checks subscription cleanup. Required-connection tests assert the
 board recovery link on missing-service and failed-status screens. Backend HTTP-batch coverage exercises
 the real authenticated facade/SQLite across new-bug creation, another account's votes/details/search/
-suggestions, private diagnostic sanitization/isolation, author deletion, admin
+suggestions, public attachment validation/authorization/storage, private diagnostic sanitization/isolation, author deletion, admin
 hide/restore/close/reopen, and ordinary-user denials; it uses local interception only.
 
 Run `pnpm --filter @gadgets/workshop-frontend test:run`,

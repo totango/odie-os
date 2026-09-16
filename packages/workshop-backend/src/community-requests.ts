@@ -1,17 +1,21 @@
 import { DurableObject } from "cloudflare:workers";
-import { RequestBuilds } from "./request-builds";
+import { RequestBuilds, type RequestBuildSpecification } from "./request-builds";
 import { parseBuildPublicationPolicy } from "./request-build-publisher";
+import { COMMUNITY_ATTACHMENT_R2_PREFIX, communityAttachmentSandboxName, validateCommunityAttachment } from "./community-request-attachments";
 import type { AdminClaim } from "./admin-authority";
 import { buildHash, canonicalBuildJson, requestBuildNotifierDestinationReady } from "@gadgets/workshop-shared/coding-sessions";
 import type { CodingSessionsService, CodingSessionOwner, RequestBuildAuthorizationRequest, RequestBuildReadiness, StartRequestBuild, CancelRequestBuild } from "@gadgets/workshop-shared/coding-sessions";
 import {
   COMMUNITY_REQUEST_LIMITS as LIMITS,
-  type AddCommunityRequestDetail, type AttachCommunityRequestDiagnostics,
-  type CommunityRequest, type CommunityRequestDetail, type CommunityRequestDetailPage,
+  type AddCommunityRequestAttachment, type AddCommunityRequestDetail, type AttachCommunityRequestDiagnostics,
+  type CommunityRequest, type CommunityRequestAttachment, type CommunityRequestAttachmentContent,
+  type CommunityRequestDetail, type CommunityRequestDetailPage,
   type CommunityRequestPage, type CommunityRequestPageOptions, type CommunityRequestPrivateDiagnostics,
   type CommunityRequestQuery, type CreateCommunityRequest, type ModerateCommunityRequest,
 } from "@gadgets/workshop-shared/community-requests";
 import { sanitizeProductFeedbackText } from "@gadgets/workshop-shared/product-feedback";
+import { createWorkshopLogger } from "./observability";
+const logger = createWorkshopLogger("workshop.community-requests");
 
 /** One registry per deployment; only the authenticated server facade holds this namespace. */
 export const COMMUNITY_REQUESTS_SINGLETON_NAME = "";
@@ -22,6 +26,10 @@ type RequestRow = {
   createdAt: number; updatedAt: number;
 };
 type DetailRow = { id: string; requestId: string; owner: string; body: string; createdAt: number };
+type AttachmentRow = {
+  id: string; requestId: string; detailId: string | null; owner: string; name: string;
+  mimeType: string; byteLength: number; sha256: string; createdAt: number; ready: number;
+};
 type PrivateDiagnosticsRow = {
   requestId: string; owner: string; retryKey: string; payload: string;
   pathname: string; diagnostics: string; capturedAt: number; expiresAt: number;
@@ -164,6 +172,17 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       CREATE TABLE IF NOT EXISTS ownerDeletions (
         requestId TEXT PRIMARY KEY, owner TEXT NOT NULL, deletedAt INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS attachments (
+        id TEXT PRIMARY KEY, requestId TEXT NOT NULL, detailId TEXT, owner TEXT NOT NULL,
+        name TEXT NOT NULL, mimeType TEXT NOT NULL, byteLength INTEGER NOT NULL,
+        sha256 TEXT NOT NULL, createdAt INTEGER NOT NULL, ready INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS attachments_request ON attachments(requestId, createdAt, id);
+      CREATE INDEX IF NOT EXISTS attachments_detail ON attachments(detailId, createdAt, id);
+      CREATE TABLE IF NOT EXISTS attachmentDeletions (
+        id TEXT PRIMARY KEY, notBefore INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS attachmentDeletions_due ON attachmentDeletions(notBefore, id);
     `);
     const sessions = (): Service<CodingSessionsService> => {
       if (!this.env.GATEKEEPER_SESSIONS) throw new Error("PROVIDER_PROTOCOL_UNAVAILABLE");
@@ -204,12 +223,21 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       publicationPolicy: () => parseBuildPublicationPolicy(this.env.REQUEST_BUILD_PUBLICATION_POLICY),
       specification: requestId => {
         const row = this.#get(requestId);
+        return row ? this.#buildSpecification(row) : null;
+      },
+      contextFile: async attachmentId => {
+        const row = this.ctx.storage.sql.exec<AttachmentRow>(
+          "SELECT * FROM attachments WHERE id=? AND ready=1", attachmentId).toArray()[0];
         if (!row) return null;
-        const revision = this.ctx.storage.sql.exec<{revision: number}>("SELECT revision FROM request_revisions WHERE requestId=?", requestId).toArray()[0]?.revision ?? 1;
-        return {revision, specification: `${row.kind}: ${row.title}\n\n${row.body}`, open: row.status === "open" && !row.duplicateOf};
+        const object = await this.env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${row.id}`);
+        if (!object || object.size !== row.byteLength || object.customMetadata?.sha256 !== row.sha256) return null;
+        return new Uint8Array(await object.arrayBuffer());
       },
     });
-    ctx.blockConcurrencyWhile(() => this.#builds.recover());
+    ctx.blockConcurrencyWhile(async () => {
+      await this.#builds.recover();
+      await this.#armMaintenance();
+    });
   }
 
   /** Private purpose-bound build admission; only the authenticated AdminApi facade supplies claims. */
@@ -220,6 +248,10 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
   requestBuildReadiness(claim: AdminClaim, requestId: string) { return this.#builds.readiness(claim, requestId); }
   /** Private Sessions callback performs real persisted/current admission, not an UNKNOWN_RUN placeholder. */
   authorizeRequestBuild(owner: CodingSessionOwner, request: RequestBuildAuthorizationRequest) { return this.#builds.authorize(owner, request); }
+  /** Private Sessions transfer for one exact frozen public attachment; never exposed to browsers. */
+  readRequestBuildContextFile(owner: CodingSessionOwner, request: RequestBuildAuthorizationRequest, fileId: string) {
+    return this.#builds.contextFile(owner, request, fileId);
+  }
   /** Authenticated ordinary users need no GitHub account to read a visible public run. */
   getRequestBuild(owner: string, requestId: string, runId: string) { return this.#read(owner, () => this.#builds.get(requestId, runId)); }
   /** Authenticated newest-first history, always filtered by public request visibility. */
@@ -228,12 +260,34 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
   async alarm(): Promise<void> {
     this.ctx.storage.sql.exec("DELETE FROM privateDiagnostics WHERE expiresAt <= ?", Date.now());
     try { await this.#builds.alarm(); }
-    finally { await this.#armPrivateDiagnostics(); }
+    finally {
+      try { await this.#deletePendingAttachments(); }
+      finally { await this.#armMaintenance(); }
+    }
   }
 
-  async #armPrivateDiagnostics(): Promise<void> {
-    const next = this.ctx.storage.sql.exec<{expiresAt: number}>(
-      "SELECT MIN(expiresAt) AS expiresAt FROM privateDiagnostics").toArray()[0]?.expiresAt;
+  async #deletePendingAttachments(): Promise<void> {
+    const rows = this.ctx.storage.sql.exec<{id: string}>(
+      "SELECT id FROM attachmentDeletions WHERE notBefore<=? ORDER BY notBefore,id LIMIT 50", Date.now()).toArray();
+    for (const row of rows) {
+      try {
+        await this.env.BLUEPRINT_CONTENT.delete(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${row.id}`);
+        this.ctx.storage.sql.exec("DELETE FROM attachmentDeletions WHERE id=?", row.id);
+      } catch (error) {
+        this.ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=? WHERE id=?", Date.now() + 60_000, row.id);
+        logger.warn("public attachment deletion will retry", {
+          event: "community.request.attachment.delete.retry", actionId: row.id, error,
+        });
+      }
+    }
+  }
+
+  async #armMaintenance(): Promise<void> {
+    const diagnostics = this.ctx.storage.sql.exec<{next: number}>(
+      "SELECT MIN(expiresAt) AS next FROM privateDiagnostics").toArray()[0]?.next;
+    const deletion = this.ctx.storage.sql.exec<{next: number}>(
+      "SELECT MIN(notBefore) AS next FROM attachmentDeletions").toArray()[0]?.next;
+    const next = [diagnostics, deletion].filter(Number.isSafeInteger).toSorted((a, b) => a - b)[0];
     if (!Number.isSafeInteger(next)) return;
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm > next) await this.ctx.storage.setAlarm(next);
@@ -253,10 +307,11 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       return fn();
     });
   }
-  #mutation(owner: string, special?: "create" | "detail"): void {
+  #mutation(owner: string, special?: "create" | "detail" | "attachment"): void {
     this.#charge(owner, "write", LIMITS.writesPerMinute, 60_000);
     if (special) this.#charge(owner, special,
-      special === "create" ? LIMITS.createsPerHour : LIMITS.detailsPerHour, 3_600_000);
+      special === "create" ? LIMITS.createsPerHour :
+      special === "detail" ? LIMITS.detailsPerHour : LIMITS.attachmentsPerHour, 3_600_000);
   }
   #receipt(owner: string, operation: string, retryKey: string, payload: string): string | undefined {
     const receipt = this.ctx.storage.sql.exec<Receipt>(
@@ -277,6 +332,12 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
     if (!row) throw new Error("Board request unavailable.");
     return row;
   }
+  #attachments(requestId: string, owner: string, detailId: string | null): CommunityRequestAttachment[] {
+    return this.ctx.storage.sql.exec<AttachmentRow>(`SELECT * FROM attachments
+      WHERE requestId=? AND detailId IS ? AND ready=1 ORDER BY createdAt,id`, requestId, detailId).toArray()
+      .map(row => ({id: row.id, name: row.name, mimeType: row.mimeType, byteLength: row.byteLength,
+        sha256: row.sha256, createdAt: row.createdAt, isOwn: row.owner === owner}));
+  }
   #project(row: RequestRow, owner: string): CommunityRequest {
     const vote = this.ctx.storage.sql.exec<{ count: number; own: number }>(
       "SELECT COUNT(*) AS count, COALESCE(MAX(owner = ?), 0) AS own FROM votes WHERE requestId = ?",
@@ -286,10 +347,48 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       hidden: !!row.hidden, duplicateOf: row.duplicateOf && this.#get(row.duplicateOf) ? row.duplicateOf : null,
       createdAt: row.createdAt, updatedAt: row.updatedAt, isOwn: row.owner === owner,
       voteCount: vote.count, viewerHasVoted: !!vote.own,
+      attachments: this.#attachments(row.id, owner, null),
     };
   }
   #detail(row: DetailRow, owner: string): CommunityRequestDetail {
-    return { id: row.id, body: row.body, createdAt: row.createdAt, isOwn: row.owner === owner };
+    return { id: row.id, body: row.body, createdAt: row.createdAt, isOwn: row.owner === owner,
+      attachments: this.#attachments(row.requestId, owner, row.id) };
+  }
+  #buildSpecification(row: RequestRow): RequestBuildSpecification {
+    const revision = this.ctx.storage.sql.exec<{revision: number}>(
+      "SELECT revision FROM request_revisions WHERE requestId=?", row.id).toArray()[0]?.revision ?? 1;
+    const details = this.ctx.storage.sql.exec<DetailRow>(
+      "SELECT * FROM details WHERE requestId=? ORDER BY createdAt,id", row.id).toArray();
+    const attachments = this.ctx.storage.sql.exec<AttachmentRow>(
+      "SELECT * FROM attachments WHERE requestId=? AND ready=1 ORDER BY createdAt,id", row.id).toArray();
+    const voteCount = this.ctx.storage.sql.exec<{count: number}>(
+      "SELECT COUNT(*) AS count FROM votes WHERE requestId=?", row.id).one().count;
+    const contextFiles = attachments.map((attachment, index) => ({
+      id: attachment.id,
+      path: communityAttachmentSandboxName(index + 1, attachment.id, attachment.mimeType),
+      mimeType: attachment.mimeType,
+      byteLength: attachment.byteLength,
+      sha256: attachment.sha256,
+    }));
+    const attachmentLines = new Map<string | null, string[]>();
+    for (const [index, attachment] of attachments.entries()) {
+      const lines = attachmentLines.get(attachment.detailId) ?? [];
+      lines.push(`- ${JSON.stringify(attachment.name)} added ${new Date(attachment.createdAt).toISOString()}: /workspace/.request-build/context/${contextFiles[index].path} (${attachment.mimeType}, ${attachment.byteLength} bytes, sha256 ${attachment.sha256})`);
+      attachmentLines.set(attachment.detailId, lines);
+    }
+    const sections = [
+      `${row.kind}: ${row.title}`,
+      `Public metadata:\n- Request ID: ${row.id}\n- Status: ${row.status}\n- Created: ${new Date(row.createdAt).toISOString()}\n- Updated: ${new Date(row.updatedAt).toISOString()}\n- Votes: ${voteCount}`,
+      `Description:\n${row.body}`,
+    ];
+    const rootAttachments = attachmentLines.get(null);
+    if (rootAttachments?.length) sections.push(`Request attachments:\n${rootAttachments.join("\n")}`);
+    if (details.length) sections.push(`Public details:\n${details.map((detail, index) => {
+      const files = attachmentLines.get(detail.id);
+      return `${index + 1}. Added ${new Date(detail.createdAt).toISOString()}\n${detail.body}${files?.length ? `\nAttachments:\n${files.join("\n")}` : ""}`;
+    }).join("\n\n")}`);
+    return {revision, specification: sections.join("\n\n"), contextFiles,
+      open: row.status === "open" && !row.duplicateOf};
   }
 
   /** Internal authenticated facade supplies the immutable account DO ID; no client-supplied owner. */
@@ -308,6 +407,93 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       this.#remember(owner, "create", input.idempotencyKey, payload, requestId);
       return this.#project(this.#require(requestId), owner);
     });
+  }
+
+  /** Store one immutable public attachment on an owned request or authored public detail. */
+  async addAttachment(owner: string, requestId: string, input: AddCommunityRequestAttachment): Promise<CommunityRequestAttachment> {
+    fields(input, ["idempotencyKey", "name", "mimeType", "content", "detailId"]);
+    id(requestId); key(input.idempotencyKey);
+    const detailId = input.detailId === undefined ? null : id(input.detailId);
+    const validated = await validateCommunityAttachment(input);
+    const payload = JSON.stringify([requestId, detailId, validated.name, validated.mimeType,
+      validated.byteLength, validated.sha256]);
+    const row = this.#read(owner, () => {
+      const request = this.#require(requestId);
+      if (detailId) {
+        const detail = this.ctx.storage.sql.exec<DetailRow>(
+          "SELECT * FROM details WHERE id=? AND requestId=?", detailId, requestId).toArray()[0];
+        if (!detail || detail.owner !== owner) throw new Error("Attachments require an authored public detail.");
+      } else if (request.owner !== owner) throw new Error("Only the request owner can attach files to the request.");
+      const prior = this.#receipt(owner, "attachment", input.idempotencyKey, payload);
+      if (prior) return this.ctx.storage.sql.exec<AttachmentRow>(
+        "SELECT * FROM attachments WHERE id=?", prior).one();
+      const totals = this.ctx.storage.sql.exec<{count: number; bytes: number}>(
+        "SELECT COUNT(*) AS count, COALESCE(SUM(byteLength),0) AS bytes FROM attachments WHERE requestId=?",
+        requestId).one();
+      if (totals.count >= LIMITS.attachmentsPerRequest ||
+          totals.bytes + validated.byteLength > LIMITS.attachmentBytesPerRequest) {
+        throw new Error("Request attachment limit reached.");
+      }
+      this.#mutation(owner, "attachment");
+      const attachmentId = crypto.randomUUID(), createdAt = Date.now();
+      this.ctx.storage.sql.exec("INSERT INTO attachments VALUES (?,?,?,?,?,?,?,?,?,0)",
+        attachmentId, requestId, detailId, owner, validated.name, validated.mimeType,
+        validated.byteLength, validated.sha256, createdAt);
+      this.#remember(owner, "attachment", input.idempotencyKey, payload, attachmentId);
+      return this.ctx.storage.sql.exec<AttachmentRow>("SELECT * FROM attachments WHERE id=?", attachmentId).one();
+    });
+    if (!row.ready) {
+      await this.env.BLUEPRINT_CONTENT.put(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${row.id}`, validated.content, {
+        httpMetadata: {contentType: validated.mimeType},
+        customMetadata: {sha256: validated.sha256},
+      });
+      const committed = this.#read(owner, () => {
+        const current = this.ctx.storage.sql.exec<AttachmentRow>(
+          "SELECT * FROM attachments WHERE id=?", row.id).toArray()[0];
+        if (!current || this.ctx.storage.sql.exec(
+            "SELECT 1 FROM ownerDeletions WHERE requestId=?", requestId).toArray().length) {
+          this.ctx.storage.sql.exec("INSERT OR REPLACE INTO attachmentDeletions VALUES (?,?)", row.id, Date.now());
+          return false;
+        }
+        const now = Date.now();
+        this.ctx.storage.sql.exec("UPDATE attachments SET ready=1 WHERE id=?", row.id);
+        this.ctx.storage.sql.exec("UPDATE requests SET updatedAt=? WHERE id=?", now, requestId);
+        this.ctx.storage.sql.exec("INSERT INTO request_revisions VALUES (?,2) ON CONFLICT(requestId) DO UPDATE SET revision=revision+1", requestId);
+        return true;
+      });
+      if (!committed) {
+        try { await this.#deletePendingAttachments(); }
+        finally { await this.#armMaintenance(); }
+        throw new Error("Board request unavailable.");
+      }
+    }
+    return {id: row.id, name: row.name, mimeType: row.mimeType, byteLength: row.byteLength,
+      sha256: row.sha256, createdAt: row.createdAt, isOwn: true};
+  }
+
+  /** Read one public attachment only while its parent request remains visible to this caller. */
+  async attachment(owner: string, requestId: string, attachmentId: string,
+      includeHidden = false): Promise<CommunityRequestAttachmentContent> {
+    id(requestId); id(attachmentId);
+    const row = this.#read(owner, () => {
+      this.#require(requestId, includeHidden);
+      const attachment = this.ctx.storage.sql.exec<AttachmentRow>(
+        "SELECT * FROM attachments WHERE id=? AND requestId=? AND ready=1", attachmentId, requestId).toArray()[0];
+      if (!attachment) throw new Error("Board attachment unavailable.");
+      return attachment;
+    });
+    const object = await this.env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${row.id}`);
+    if (!object || object.size !== row.byteLength || object.customMetadata?.sha256 !== row.sha256) {
+      throw new Error("Board attachment unavailable.");
+    }
+    const content = new Uint8Array(await object.arrayBuffer());
+    const digest = await crypto.subtle.digest("SHA-256", content);
+    const sha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    if (sha256 !== row.sha256) throw new Error("Board attachment unavailable.");
+    this.#read(owner, () => this.#require(requestId, includeHidden));
+    return {attachment: {id: row.id, name: row.name, mimeType: row.mimeType,
+      byteLength: row.byteLength, sha256: row.sha256, createdAt: row.createdAt,
+      isOwn: row.owner === owner}, content};
   }
 
   /** Attach one explicit-consent private diagnostic bundle to an owned bug. */
@@ -352,7 +538,7 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       this.ctx.storage.sql.exec("INSERT INTO privateDiagnostics VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         requestId, owner, input.idempotencyKey, payload, input.pathname, JSON.stringify(diagnostics), capturedAt, expiresAt);
     });
-    this.ctx.waitUntil(this.#armPrivateDiagnostics());
+    this.ctx.waitUntil(this.#armMaintenance());
   }
 
   /** Remove an owned request from public view and scrub authored text, details, votes and diagnostics. */
@@ -366,11 +552,20 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       const now = Date.now();
       this.ctx.storage.sql.exec("INSERT INTO ownerDeletions VALUES (?, ?, ?)", requestId, owner, now);
       this.ctx.storage.sql.exec("UPDATE requests SET title = '[Deleted by author]', body = '', searchText = '', status = 'closed', hidden = 1, duplicateOf = NULL, updatedAt = ? WHERE id = ?", now, requestId);
+      const attachments = this.ctx.storage.sql.exec<{id: string}>(
+        "SELECT id FROM attachments WHERE requestId=?", requestId).toArray();
+      for (const attachment of attachments) this.ctx.storage.sql.exec(
+        "INSERT OR REPLACE INTO attachmentDeletions VALUES (?,?)", attachment.id, now + 60_000);
+      this.ctx.storage.sql.exec(`DELETE FROM receipts WHERE resultId=?
+        OR resultId IN (SELECT id FROM details WHERE requestId=?)
+        OR resultId IN (SELECT id FROM attachments WHERE requestId=?)`, requestId, requestId, requestId);
       this.ctx.storage.sql.exec("DELETE FROM details WHERE requestId = ?", requestId);
       this.ctx.storage.sql.exec("DELETE FROM votes WHERE requestId = ?", requestId);
       this.ctx.storage.sql.exec("DELETE FROM privateDiagnostics WHERE requestId = ?", requestId);
+      this.ctx.storage.sql.exec("DELETE FROM attachments WHERE requestId=?", requestId);
       this.ctx.storage.sql.exec("INSERT INTO request_revisions VALUES (?,2) ON CONFLICT(requestId) DO UPDATE SET revision=revision+1", requestId);
     });
+    this.ctx.waitUntil(this.#armMaintenance());
   }
 
   /** Read unexpired private diagnostics only after a fresh purpose-bound authority check. */
@@ -467,8 +662,9 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       const detailId = crypto.randomUUID(), now = Date.now();
       this.ctx.storage.sql.exec("INSERT INTO details VALUES (?, ?, ?, ?, ?, ?)", detailId, requestId, owner, body, body.toLowerCase(), now);
       this.ctx.storage.sql.exec("UPDATE requests SET updatedAt = ? WHERE id = ?", now, requestId);
+      this.ctx.storage.sql.exec("INSERT INTO request_revisions VALUES (?,2) ON CONFLICT(requestId) DO UPDATE SET revision=revision+1", requestId);
       this.#remember(owner, "detail", input.idempotencyKey, payload, detailId);
-      return { id: detailId, body, createdAt: now, isOwn: true };
+      return { id: detailId, body, createdAt: now, isOwn: true, attachments: [] };
     });
   }
 

@@ -163,6 +163,8 @@ it("authenticated PublicApi admin facade reaches managed board start/cancel with
     spendMicros: 2000,
     callChargeMicros: 1000,
     modelInputBytes: 8192,
+    contextFiles: 10,
+    contextBytes: 100 * 1024 * 1024,
     modelOutputTokens: 200,
     outputBytes: 8192,
     diffBytes: 4096,
@@ -192,15 +194,39 @@ it("authenticated PublicApi admin facade reaches managed board start/cancel with
     title: "Facade success",
     body: "Exercise the authenticated facade path only.",
   });
-  const admin = await authed.getAdminApi();
-  expect(admin).not.toBeNull();
-  expect(await admin!.getRequestBuildReadiness(request.id)).toMatchObject({ ready: true, requestRevision: 1 });
-  const started = await admin!.startRequestBuild({ requestId: request.id, expectedRequestRevision: 1, mutationKey: "start" });
-  expect(started).toMatchObject({ requestId: request.id, requestRevision: 1, state: "queued", cleanup: "pending" });
-  expect(await admin!.startRequestBuild({ requestId: request.id, expectedRequestRevision: 1, mutationKey: "start" })).toMatchObject({ runId: started.runId });
+  const rootText = new TextEncoder().encode("public request attachment\n");
+  await authed.addCommunityRequestAttachment(request.id, {
+    idempotencyKey: "root-attachment", name: "request.txt", mimeType: "text/plain", content: rootText,
+  });
   const viewer = `facadeviewer${crypto.randomUUID().replaceAll("-", "")}@totango.com`;
   const viewerRoot = publicApiRoot({ email: viewer });
   const viewerApi = await viewerRoot.authenticateFromCfAccess();
+  const detail = await viewerApi.addCommunityRequestDetail(request.id, {
+    idempotencyKey: "public-detail", body: "Complete public conversation detail.",
+  });
+  const detailText = new TextEncoder().encode("public detail attachment\n");
+  await viewerApi.addCommunityRequestAttachment(request.id, {
+    idempotencyKey: "detail-attachment", detailId: detail.id,
+    name: "detail.md", mimeType: "text/markdown", content: detailText,
+  });
+  const admin = await authed.getAdminApi();
+  expect(admin).not.toBeNull();
+  const readiness = await admin!.getRequestBuildReadiness(request.id);
+  expect(readiness).toMatchObject({ ready: true, requestRevision: 4 });
+  const started = await admin!.startRequestBuild({ requestId: request.id, expectedRequestRevision: readiness.requestRevision!, mutationKey: "start" });
+  expect(started).toMatchObject({ requestId: request.id, requestRevision: 4, state: "queued", cleanup: "pending" });
+  expect(await admin!.startRequestBuild({ requestId: request.id, expectedRequestRevision: 4, mutationKey: "start" })).toMatchObject({ runId: started.runId });
+  const frozen = await runInDurableObject(board, (_instance, ctx) => {
+    const value = ctx.storage.sql.exec<{value: string}>("SELECT value FROM build_runs WHERE runId=?", started.runId).one().value;
+    return JSON.parse(value) as {intent: {specification: string; contextFiles: Array<{id: string; path: string; byteLength: number; sha256: string}>}};
+  });
+  expect(frozen.intent.specification).toContain("Exercise the authenticated facade path only.");
+  expect(frozen.intent.specification).toContain("Complete public conversation detail.");
+  expect(frozen.intent.specification).toContain("/workspace/.request-build/context/01-");
+  expect(frozen.intent.contextFiles).toHaveLength(2);
+  expect(frozen.intent.contextFiles.map(file => file.byteLength)).toEqual([rootText.length, detailText.length]);
+  expect(frozen.intent.specification).not.toContain(adminName);
+  expect(frozen.intent.specification).not.toContain(viewer);
   const viewerRun = await viewerApi.getRequestBuild(request.id, started.runId);
   expect(viewerRun).toMatchObject({ runId: started.runId, requestId: request.id, state: "queued" });
   expect(Object.keys(viewerRun ?? {}).toSorted()).toEqual([
@@ -221,6 +247,8 @@ it("requires exact deployment evidence for request-build image, pricing, reposit
     spendMicros: 2000,
     callChargeMicros: 1000,
     modelInputBytes: 8192,
+    contextFiles: 10,
+    contextBytes: 100 * 1024 * 1024,
     modelOutputTokens: 200,
     outputBytes: 8192,
     diffBytes: 4096,

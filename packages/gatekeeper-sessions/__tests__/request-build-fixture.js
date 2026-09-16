@@ -14,8 +14,15 @@ export class RequestBuildFixture extends DurableObject {
         this.ctx.storage.kv.put("last-authorization", request);
         return this.ctx.storage.kv.get("denied") ? { allowed: false, reasons: ["FIXTURE_REVOKED"] } : { allowed: true, ...request };
       },
+      contextFile: async (_owner, _request, fileId) =>
+        new Uint8Array(this.ctx.storage.kv.get(`context:${fileId}`) ?? []),
       sandbox: () => ({
-        mkdir: async () => ({}), writeFile: async () => ({}),
+        mkdir: async () => ({}),
+        writeFile: async (path, stream) => {
+          const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+          this.ctx.storage.kv.put("writes", [...(this.ctx.storage.kv.get("writes") ?? []), {path, bytes: [...bytes]}]);
+          return {};
+        },
         exec: async argv => {
           const n = (this.ctx.storage.kv.get("execs") ?? 0) + 1;
           this.ctx.storage.kv.put("execs", n);
@@ -69,6 +76,13 @@ export class RequestBuildFixture extends DurableObject {
     const c = this.controller();
     if (op === "configure") { for (const [k, v] of Object.entries(fields)) this.ctx.storage.kv.put(k, v); return true; }
     if (op === "ensure") return c.ensure(owner, intent);
+    if (op === "legacy-context") {
+      const record = c.get(owner, key);
+      if (!record) throw new Error("fixture record missing");
+      delete record.intent.contextFiles;
+      this.ctx.storage.kv.put(`request-build:${key}`, record);
+      return true;
+    }
     if (op === "cancel") return c.cancel(owner, key, revision);
     if (op === "artifact") return c.artifact(owner, key);
     if (op === "tick") { await this.ctx.storage.deleteAlarm(); await c.alarm(); }
@@ -80,6 +94,7 @@ export class RequestBuildFixture extends DurableObject {
       sessions: [...this.ctx.storage.kv.list({prefix:"session:"})].length,
       execs: this.ctx.storage.kv.get("execs") ?? 0, destroys: this.ctx.storage.kv.get("destroys") ?? 0,
       outputReads: this.ctx.storage.kv.get("output-reads") ?? 0,
+      writes: this.ctx.storage.kv.get("writes") ?? [],
       slot: this.ctx.storage.kv.get("slot") ?? null, disabled: this.ctx.storage.kv.get("disabled") ?? false,
       alarm: await this.ctx.storage.getAlarm(), work: c.hasWork(), authorization: this.ctx.storage.kv.get("last-authorization") };
   }

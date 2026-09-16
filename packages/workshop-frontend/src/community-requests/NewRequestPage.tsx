@@ -7,6 +7,7 @@ import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
 import { fieldClass, panelClass, publicNotice, RelatedRequests, useRequestLifetime, useRequestRetryKey } from './RequestShared'
 import { productFeedbackDiagnosticsSnapshot } from '../productFeedbackDiagnostics'
+import { CommunityAttachmentPicker, uploadCommunityAttachmentDrafts, type CommunityAttachmentDraft } from './CommunityRequestAttachments'
 
 export default function NewRequestPage() {
   useDocumentTitle('Submit a feature request')
@@ -22,8 +23,10 @@ export default function NewRequestPage() {
   const [body, setBody] = useState('')
   const [review, setReview] = useState(false)
   const [includeDiagnostics, setIncludeDiagnostics] = useState(false)
+  const [attachments, setAttachments] = useState<CommunityAttachmentDraft[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(false)
+  const [attachmentsError, setAttachmentsError] = useState(false)
   const [diagnosticsError, setDiagnosticsError] = useState(false)
   useEffect(() => { setBusy(false) }, [authenticatedApi])
   async function publish() {
@@ -32,12 +35,18 @@ export default function NewRequestPage() {
     const payload = { kind, title: title.trim(), body: body.trim() }
     setBusy(true)
     setError(false)
+    setAttachmentsError(false)
     setDiagnosticsError(false)
     let publicRequestCreated = false
     try {
       const created = await authenticatedApi.createCommunityRequest({ ...payload, idempotencyKey: retryKey.keyFor(payload) })
       publicRequestCreated = true
       if (!current.active) return
+      try {
+        if (!await uploadCommunityAttachmentDrafts(
+          authenticatedApi, created.id, attachments, undefined, () => current.active,
+        )) return
+      } catch { if (current.active) setAttachmentsError(true); return }
       if (kind === 'bug' && includeDiagnostics) {
         const privatePayload = { pathname: window.location.pathname, diagnostics: captureDiagnostics() }
         await authenticatedApi.attachCommunityRequestDiagnostics(created.id, {
@@ -64,6 +73,8 @@ export default function NewRequestPage() {
             <div className="flex items-center gap-2 text-sm font-medium text-kumo-brand">{kind === 'bug' ? <Bug size={17} weight="fill" /> : <Lightbulb size={17} weight="fill" />} Public preview</div>
             <h2 className="break-words text-xl font-semibold text-kumo-strong">{title}</h2>
             <p className="whitespace-pre-wrap break-words text-sm leading-6">{body}</p>
+            {attachments.length > 0 && <ul className="space-y-1 text-sm">{attachments.map(attachment =>
+              <li key={attachment.idempotencyKey}>Attachment: {attachment.file.name}</li>)}</ul>}
             <Button type="button" variant="secondary" disabled={busy} onClick={() => setReview(false)}>Edit draft</Button>
           </section> : <div className={`${panelClass} space-y-5`}>
             <fieldset><legend className="mb-2 text-sm font-medium">Request type</legend><div className="grid grid-cols-2 gap-2 rounded-xl bg-kumo-elevated p-1">
@@ -72,11 +83,13 @@ export default function NewRequestPage() {
             </div></fieldset>
             <label className="block"><span className="mb-1.5 block text-sm font-medium">Public title</span><input className={fieldClass} required maxLength={LIMITS.title} value={title} placeholder="Summarize the request" onChange={e => setTitle(e.target.value)} /></label>
             <label className="block"><span className="mb-1.5 block text-sm font-medium">Public description</span><textarea className={`${fieldClass} min-h-44 resize-y py-3`} required maxLength={LIMITS.body} value={body} placeholder={kind === 'bug' ? 'What happened, what did you expect, and how can we reproduce it?' : 'What should change, and who would it help?'} onChange={e => setBody(e.target.value)} /></label>
+            <CommunityAttachmentPicker drafts={attachments} onChange={setAttachments} disabled={busy} />
           </div>}
           <RelatedRequests text={`${title}\n${body}`.trim()} />
           {review && kind === 'bug' && <section className="flex items-start gap-3 rounded-xl border border-kumo-line bg-kumo-elevated p-4"><ShieldCheck size={19} weight="fill" className="mt-0.5 shrink-0 text-kumo-brand" /><div className="min-w-0 flex-1 text-sm"><strong className="block text-kumo-strong">Private browser diagnostics</strong><p className="text-kumo-subtle">Optionally attach {diagnosticCount} bounded current-tab console/error {diagnosticCount === 1 ? 'entry' : 'entries'} for administrators. They are sanitized, expire after 30 days, and never enter the public board, search, or Auto-Build input.</p><Button type="button" variant="secondary" aria-pressed={includeDiagnostics} disabled={busy} onClick={() => { const next = !includeDiagnostics; setIncludeDiagnostics(next); if (next) captureDiagnostics() }} className="mt-3">{includeDiagnostics ? 'Remove private diagnostics' : 'Include private diagnostics'}</Button></div></section>}
-          {review && <p className="text-sm text-kumo-subtle">Publishing makes this title and description visible to all signed-in deployment users.</p>}
+          {review && <p className="text-sm text-kumo-subtle">Publishing makes this title, description, and selected attachments visible to all signed-in deployment users.</p>}
           {error && <p role="alert" className="rounded-xl bg-kumo-danger/10 p-3 text-sm text-kumo-danger">Could not confirm publication. Retry this unchanged submission to avoid duplicates. If you reload or leave this draft, check the board before submitting again.</p>}
+          {attachmentsError && <p role="alert" className="rounded-xl bg-kumo-warning/10 p-3 text-sm text-kumo-warning">The public request was created, but one or more attachments were not confirmed. Retry this unchanged submission to resume confirmed uploads without creating a duplicate. If the same file is rejected again, edit the draft and remove it.</p>}
           {diagnosticsError && <p role="alert" className="rounded-xl bg-kumo-warning/10 p-3 text-sm text-kumo-warning">The public bug was created, but private diagnostics were not confirmed. Retry unchanged to attach them without creating a duplicate.</p>}
           <Button type="submit" variant="primary" disabled={busy || !title.trim() || !body.trim()}>{busy ? 'Publishing…' : review ? 'Publish public request' : 'Review public submission'}</Button>
         </form>

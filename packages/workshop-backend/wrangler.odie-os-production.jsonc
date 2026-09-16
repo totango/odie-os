@@ -41,7 +41,7 @@
     "REQUEST_BUILD_WORKSHOP_ORIGIN": "https://odie-os.odie-os.workers.dev",
     "REQUEST_BUILD_NOTIFIER_GENERATION": "jarvis-unilyst-prs-v1",
     "REQUEST_BUILD_PUBLICATION_POLICY": "{\"version\":\"auto-build-2026-09-14-v1\",\"allowedPaths\":[\"packages/\",\"docs/\"],\"changedLines\":5000,\"textBytes\":524288}",
-    "REQUEST_BUILD_DEPLOYMENT_EVIDENCE": "{\"image\":\"registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22\",\"runtimeVersion\":\"0.85.1\",\"policyHash\":\"93508dfad58fc5a93f322bbe1ddfad709940f68fa6709546f2e0ff378c3ef161\",\"pricing\":{\"model\":\"gpt-5.6-sol\",\"callChargeMicros\":5000000,\"spendMicros\":1000000000,\"source\":\"https://developers.openai.com/api/docs/models/gpt-5.6-sol\"},\"repository\":\"totango/odie-os\",\"baseBranch\":\"main\"}",
+    "REQUEST_BUILD_DEPLOYMENT_EVIDENCE": "{\"image\":\"registry.cloudflare.com/286469790a4362a2e194b32045c5eca7/odie-os-coding-session@sha256:b14dd5a7d0530f8c33b9a2e83600b850b812f94becb3d0359fce8a08945c0a22\",\"runtimeVersion\":\"0.85.1\",\"policyHash\":\"5716d230319aa3036482c6f63c10c63b1f6408b91068cbc3f10c7b5ba5ab6dff\",\"pricing\":{\"model\":\"gpt-5.6-sol\",\"callChargeMicros\":5000000,\"spendMicros\":1000000000,\"source\":\"https://developers.openai.com/api/docs/models/gpt-5.6-sol\"},\"repository\":\"totango/odie-os\",\"baseBranch\":\"main\"}",
     "DISABLE_PASSWORD_AUTH": "true",
     "REQUIRED_HEALTHY_CONNECTIONS": "odie_kg",
     "TEAM_PI_CODEX_ONLY": "true"

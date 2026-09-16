@@ -16,6 +16,10 @@ export interface RequestBuildPolicy {
   callChargeMicros: number;
   /** Maximum serialized model input bytes. */
   modelInputBytes: number;
+  /** Maximum immutable public attachment files materialized beside the repository. */
+  contextFiles: number;
+  /** Maximum combined immutable public attachment bytes materialized beside the repository. */
+  contextBytes: number;
   /** Enforced Responses output-token limit. */
   modelOutputTokens: number;
   /** Maximum retained process output and model response bytes. */
@@ -30,6 +34,20 @@ export interface RequestBuildPolicy {
   dependencyHosts: string[];
 }
 
+/** One immutable public attachment frozen into a request-build attempt. */
+export interface RequestBuildContextFile {
+  /** Opaque board attachment identifier. */
+  id: string;
+  /** Backend-owned relative path below `/workspace/.request-build/context`. */
+  path: string;
+  /** Server-validated allowlisted media type. */
+  mimeType: string;
+  /** Exact byte length enforced before and after private transfer. */
+  byteLength: number;
+  /** Lowercase SHA-256 of the immutable bytes. */
+  sha256: string;
+}
+
 /** Private, backend-authored immutable attempt; never accepted from a browser or sandbox. */
 export interface RequestBuildIntent {
   /** Opaque idempotency key shared by backend persistence and Sessions reservation. */
@@ -42,6 +60,8 @@ export interface RequestBuildIntent {
   specification: string;
   /** SHA-256 of the exact UTF-8 specification. */
   specificationHash: string;
+  /** Frozen public attachments, transferred privately and materialized as files before the runner starts. */
+  contextFiles: RequestBuildContextFile[];
   /** Fixed canonical repository, not chosen by model output. */
   repository: "totango/odie-os";
   /** Fixed publication base branch. */
@@ -97,7 +117,9 @@ export interface RequestBuildExecutionReceipt {
   /** Current durable execution outcome. */
   state: RequestBuildExecutionState;
   /** Persisted side-effect stage; launch without a handle is ambiguous, not retryable. */
-  stage: "authorize" | "setup" | "clone_launch" | "clone_wait" | "runner_launch" | "runner_wait" | "collect_launch" | "collect_wait" | "done";
+  stage: "authorize" | "setup" | "clone_launch" | "clone_wait" | "context" | "runner_launch" | "runner_wait" | "collect_launch" | "collect_wait" | "done";
+  /** Number of frozen context files durably materialized before the runner starts. */
+  contextFileIndex?: number;
   /** Latest accepted cancellation revision. */
   cancelRevision: number;
   /** Reservation time in Unix milliseconds. */

@@ -15,7 +15,7 @@ import { RelatedRequests, RequestVote } from './RequestShared'
 vi.mock('../AuthContext', () => ({ useAuthenticatedApi: vi.fn<typeof useAuthenticatedApi>() }))
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const request: CommunityRequest = { id: 'request-1', kind: 'feature', title: '<img src=x onerror=alert(1)>', body: 'Public authored description', status: 'open', hidden: false, duplicateOf: null, createdAt: 1000, updatedAt: 1000, isOwn: false, voteCount: 2, viewerHasVoted: false }
+const request: CommunityRequest = { id: 'request-1', kind: 'feature', title: '<img src=x onerror=alert(1)>', body: 'Public authored description', status: 'open', hidden: false, duplicateOf: null, createdAt: 1000, updatedAt: 1000, isOwn: false, voteCount: 2, viewerHasVoted: false, attachments: [] }
 function makeApi() {
   return {
     listRequestBuilds: vi.fn<AuthenticatedApi['listRequestBuilds']>(async () => []),
@@ -30,7 +30,12 @@ function makeApi() {
     voteCommunityRequest: vi.fn<AuthenticatedApi['voteCommunityRequest']>(async () => ({ ...request, viewerHasVoted: true, voteCount: 3 })),
     unvoteCommunityRequest: vi.fn<AuthenticatedApi['unvoteCommunityRequest']>(async () => request),
     listCommunityRequestDetails: vi.fn<AuthenticatedApi['listCommunityRequestDetails']>(async () => ({ items: [], nextCursor: null })),
-    addCommunityRequestDetail: vi.fn<AuthenticatedApi['addCommunityRequestDetail']>(async (_id, data) => ({ id: 'detail-1', body: data.body, createdAt: 2000, isOwn: true })),
+    addCommunityRequestDetail: vi.fn<AuthenticatedApi['addCommunityRequestDetail']>(async (_id, data) => ({ id: 'detail-1', body: data.body, createdAt: 2000, isOwn: true, attachments: [] })),
+    addCommunityRequestAttachment: vi.fn<AuthenticatedApi['addCommunityRequestAttachment']>(async (_id, data) => ({
+      id: 'attachment-1', name: data.name, mimeType: data.mimeType, byteLength: data.content.byteLength,
+      sha256: 'a'.repeat(64), createdAt: 3000, isOwn: true,
+    })),
+    getCommunityRequestAttachment: vi.fn<AuthenticatedApi['getCommunityRequestAttachment']>(),
     moderateCommunityRequest: vi.fn<AuthenticatedApi['moderateCommunityRequest']>(async (_id, data) => ({ ...request, hidden: data.action === 'hide', status: data.action === 'reopen' ? 'open' : 'closed', duplicateOf: data.duplicateOf ?? null })),
     listProductFeedbackStatuses: vi.fn<AuthenticatedApi['listProductFeedbackStatuses']>(async () => []),
     submitProductFeedback: vi.fn<AuthenticatedApi['submitProductFeedback']>(),
@@ -196,6 +201,47 @@ describe('Feature requests interactions', () => {
     expect(api.submitProductFeedback).not.toHaveBeenCalled()
   })
 
+  it('previews and uploads selected public attachments only after request creation', async () => {
+    await render(<NewRequestPage />)
+    await input('input:not([type="file"]):not([type="checkbox"])', 'Request with evidence')
+    await input('textarea', 'Public context with an attached screenshot.')
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const file = new File([bytes], 'screen.png', {type: 'image/png'})
+    Object.defineProperty(file, 'arrayBuffer', {value: async () => bytes.buffer})
+    const picker = container.querySelector<HTMLInputElement>('input[aria-label="Choose public attachments"]')!
+    Object.defineProperty(picker, 'files', {configurable: true, value: [file]})
+    await act(async () => picker.dispatchEvent(new Event('change', {bubbles: true})))
+    expect(container.textContent).toContain('screen.png')
+    expect(container.textContent).toContain('Files are public to signed-in users')
+    await click('Review public submission')
+    expect(container.textContent).toContain('Attachment: screen.png')
+    await click('Publish public request')
+    expect(api.createCommunityRequest).toHaveBeenCalledTimes(1)
+    expect(api.addCommunityRequestAttachment).toHaveBeenCalledWith('created', expect.objectContaining({
+      name: 'screen.png', mimeType: 'image/png', content: bytes,
+    }))
+  })
+
+  it('does not upload local attachment bytes after the request view becomes inactive', async () => {
+    const bytes = new ArrayBuffer(8)
+    const pendingRead = deferred<ArrayBuffer>()
+    const file = new File([bytes], 'screen.png', {type: 'image/png'})
+    const arrayBuffer = vi.fn<() => Promise<ArrayBuffer>>(() => pendingRead.promise)
+    Object.defineProperty(file, 'arrayBuffer', {value: arrayBuffer})
+    const router = await render(<NewRequestPage />)
+    await input('input:not([type="file"]):not([type="checkbox"])', 'Stale attachment')
+    await input('textarea', 'Do not upload after leaving this request view.')
+    const picker = container.querySelector<HTMLInputElement>('input[aria-label="Choose public attachments"]')!
+    Object.defineProperty(picker, 'files', {configurable: true, value: [file]})
+    await act(async () => picker.dispatchEvent(new Event('change', {bubbles: true})))
+    await click('Review public submission')
+    await click('Publish public request')
+    expect(arrayBuffer).toHaveBeenCalledTimes(1)
+    await act(async () => { await router.navigate({to: '/requests'}) })
+    await act(async () => { pendingRead.resolve(bytes); await pendingRead.promise })
+    expect(api.addCommunityRequestAttachment).not.toHaveBeenCalled()
+  })
+
   it('publishes a new public bug with no private context or legacy automation', async () => {
     await render(<NewRequestPage />)
     await click('Bug report'); await input('input:not([type="checkbox"])', 'New public bug'); await input('textarea', 'Safe reproduction instructions')
@@ -275,7 +321,7 @@ describe('Feature requests interactions', () => {
   })
 
   it('loads additional details and handles hidden/missing requests without rendering old content', async () => {
-    api.listCommunityRequestDetails.mockResolvedValueOnce({ items: [{ id: 'first', body: 'First detail', createdAt: 1000, isOwn: false }], nextCursor: 'next-details' }).mockResolvedValueOnce({ items: [{ id: 'second', body: 'Second detail', createdAt: 2000, isOwn: true }], nextCursor: null })
+    api.listCommunityRequestDetails.mockResolvedValueOnce({ items: [{ id: 'first', body: 'First detail', createdAt: 1000, isOwn: false, attachments: [] }], nextCursor: 'next-details' }).mockResolvedValueOnce({ items: [{ id: 'second', body: 'Second detail', createdAt: 2000, isOwn: true, attachments: [] }], nextCursor: null })
     await render(<RequestDetailPage requestId={request.id} />)
     await click('Load more details')
     expect(api.listCommunityRequestDetails.mock.lastCall?.[1]?.cursor).toBe('next-details')
