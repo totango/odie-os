@@ -200,8 +200,12 @@ describe("generated configurator error reporting", () => {
 
     assert.match(runtime, /reportFrontendIssue\("configurator\.checkbox-list-load", error\)/);
     assert.match(runtime, /reportFrontendIssue\("configurator\.autocomplete-load", error\)/);
-    assert.match(runtime, /reportFrontendIssue\("configurator\.initial-resource-load", error\)/);
-    assert.match(runtime, /reportFrontendIssue\("configurator\.initial-values-load", error\)/);
+    assert.match(runtime, /let failureSite = "configurator\.initial-resource-load"/);
+    assert.match(runtime, /failureSite = "configurator\.initial-values-load"/);
+    assert.match(runtime, /reportFrontendIssue\(failureSite, failure\.error\)/);
+    assert.ok(runtime.indexOf('if (readiness !== "legacy" && !await host.isReady(generation)) continue;') <
+      runtime.indexOf('reportFrontendIssue(failureSite, failure.error)'),
+    'suspension is retried as unfinished bootstrap, not reported as a permanent option failure');
   });
 
   it("disables reporting and removes source-map artifacts when reporting is disabled", async () => {

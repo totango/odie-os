@@ -674,6 +674,7 @@ function render(focusState = undefined) {
 
 class ResourceConfiguratorIframe extends RpcTarget {
   async collectResourceUrl() {
+    if (!initialized) throw new Error("Configurator is still initializing.");
     if (hasBlockingCheckboxFailure(checkboxOptionsByName)) {
       throw new Error("Configurator options did not load.");
     }
@@ -725,39 +726,62 @@ function defaultValuesFromResourceUrl(resourceUrl, resourceUrlPattern) {
   }
 }
 
-// Seed initial form values from a concrete resource URL provided by the host (e.g. an AI agent's
-// connection request), so the form opens pre-filled and editable.
+let initialized = false;
+
+// Only this pre-render, read-only derivation may retry after suspension. No input handlers exist
+// yet, so it cannot overwrite edits. Once rendered, startup is never re-entered; resourceUrl and
+// ordinary UI calls (including mutations) are not retried by this protocol.
 async function seedInitialValues() {
-  let initialResource = null;
-  try {
-    initialResource = await host.getInitialResource();
-  } catch (error) {
-    reportFrontendIssue("configurator.initial-resource-load", error);
+  let readiness = "unknown";
+  for (;;) {
+    let generation;
+    if (readiness !== "legacy") {
+      try {
+        generation = await host.awaitReady();
+        readiness = "current";
+      } catch (error) {
+        // Rolling deploy: an already-open Workshop may host newly generated HTML. Cap'n Web
+        // reports an absent method with this precise TypeError. Only the first probe may downgrade;
+        // authority rejection, terminal closure and errors from an established protocol stay fatal.
+        if (readiness === "unknown" && error instanceof TypeError &&
+            error.message === "'awaitReady' is not a function.") readiness = "legacy";
+        else throw error;
+      }
+    }
+    let seeded;
+    let failure;
+    let failureSite = "configurator.initial-resource-load";
+    try {
+      // Do not cache a rejected property lookup from a suspended first handshake.
+      ui?.[Symbol.dispose]?.();
+      ui = await host.gatekeeper;
+      const initialResource = await host.getInitialResource();
+      if (initialResource?.resourceUrl) {
+        failureSite = "configurator.initial-values-load";
+        seeded = typeof spec.initialValuesFromResourceUrl === "function"
+          ? await spec.initialValuesFromResourceUrl({
+              resourceUrl: initialResource.resourceUrl,
+              resourceUrlPattern: initialResource.resourceUrlPattern,
+              ui,
+            })
+          : defaultValuesFromResourceUrl(initialResource.resourceUrl, initialResource.resourceUrlPattern);
+      }
+    } catch (error) {
+      failure = { error };
+    }
+    // Discard both failed and successful results from an interrupted generation. A final close
+    // rejects the protocol itself, rather than spinning or silently rendering unseeded defaults.
+    if (readiness !== "legacy" && !await host.isReady(generation)) continue;
+    if (failure) { reportFrontendIssue(failureSite, failure.error); return; }
+    if (seeded && typeof seeded === "object") {
+      for (const [key, value] of Object.entries(seeded)) {
+        if (value === undefined) continue;
+        values[key] = value;
+        // Autocomplete displays its query, unlike TextInput/RadioCards which read values.
+        if (typeof value === "string" && value.length > 0) queryByName[key] = value;
+      }
+    }
     return;
-  }
-  if (!initialResource || !initialResource.resourceUrl) return;
-
-  let seeded;
-  try {
-    seeded = typeof spec.initialValuesFromResourceUrl === "function"
-      ? await spec.initialValuesFromResourceUrl({
-          resourceUrl: initialResource.resourceUrl,
-          resourceUrlPattern: initialResource.resourceUrlPattern,
-          ui,
-        })
-      : defaultValuesFromResourceUrl(initialResource.resourceUrl, initialResource.resourceUrlPattern);
-  } catch (error) {
-    reportFrontendIssue("configurator.initial-values-load", error);
-    return;
-  }
-  if (!seeded || typeof seeded !== "object") return;
-
-  for (const [key, value] of Object.entries(seeded)) {
-    if (value === undefined) continue;
-    values[key] = value;
-    // Autocomplete inputs display the typed query (queryByName), not the value, so seed it too;
-    // TextInput/RadioCards read \`values\` directly and ignore queryByName.
-    if (typeof value === "string" && value.length > 0) queryByName[key] = value;
   }
 }
 
@@ -765,13 +789,13 @@ async function main() {
   const { port1, port2 } = new MessageChannel();
   window.parent.postMessage({ type: "handshake" }, "*", [port2]);
   host = newMessagePortRpcSession(port1, new ResourceConfiguratorIframe());
-  ui = host.gatekeeper;
 
   Object.assign(globalThis, { h, Fragment, Section, Field, TextInput, RadioCards, CheckboxList, Autocomplete });
   spec = new Function(${JSON.stringify(configuratorUIModuleSource)})();
   if (!spec) throw new Error("Configurator UI module did not define a configurator UI.");
   values = { ...(spec.initial || {}) };
   await seedInitialValues();
+  initialized = true;
   postSelectionState();
   render();
 }

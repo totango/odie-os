@@ -56,6 +56,11 @@ export type ConfiguratorUISpec<
    * whose value keys already match its pattern groups (e.g. `:areaId` -> `areaId`) needs nothing
    * here; implement this only when the mapping differs (e.g. GitHub's `:owner/:repo` ->
    * `repoFullName`).
+   *
+   * This hook must be side-effect-free: it may perform backend reads to resolve display values,
+   * but must not mutate backend state. The runtime may retry an unfinished derivation when host
+   * authority is suspended during startup. After the form is initialized it is not reseeded;
+   * subsequent user edits and ordinary UI operations are never replayed by this mechanism.
    */
   initialValuesFromResourceUrl?(context: {
     resourceUrl: string;
