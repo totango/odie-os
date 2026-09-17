@@ -1,4 +1,5 @@
 import { ResourceConfiguratorFrame } from '@gadgets/workshop-shared/gatekeeper'
+import { Activity, useState } from 'react'
 import SandboxedResourceConfigurator from './SandboxedResourceConfigurator'
 
 /** Renders the resource configurator slot inside the gatekeeper modal. */
@@ -13,6 +14,10 @@ export default function ResourceConfiguratorHost({
   topOffset = 0,
   initialResourceUrl,
   resourceUrlPattern,
+  resourceIdentity,
+  frameIdentity,
+  authorityAvailable = true,
+  isAuthorityCurrent,
 }: {
   frame: ResourceConfiguratorFrame | null
   frameKey: number | null
@@ -24,21 +29,43 @@ export default function ResourceConfiguratorHost({
   topOffset?: number
   initialResourceUrl?: string
   resourceUrlPattern?: string
+  /** Desired verified owner, exact account ID and resource scope. Changes on authority switches. */
+  resourceIdentity?: string
+  /** Identity verified at acquisition, not inferred from the current selection. */
+  frameIdentity?: string
+  /** Caller fence: the acquired frame belongs to the current verified API and selection. */
+  authorityAvailable?: boolean
+  /** Invocation-time fence, including acquisition cleanup and Activity suspension. */
+  isAuthorityCurrent?: () => boolean
 }) {
-  if (disabled) return <Placeholder>Choose an account before selecting a resource.</Placeholder>
-  if (loading) return <Placeholder>Loading configurator...</Placeholder>
-  if (error) return <Placeholder>{error}</Placeholder>
-  if (!frame) return null
+  const ready = authorityAvailable && !disabled && !loading && !error && frame !== null
+    && (resourceIdentity === undefined || frameIdentity === resourceIdentity)
+  const identity = resourceIdentity ?? String(frameKey)
+  const [retained, setRetained] = useState<{ frame: ResourceConfiguratorFrame; identity: string } | null>(null)
+  const current = ready && frame ? { frame, identity } : retained
+  if (ready && frame && (retained?.frame !== frame || retained.identity !== identity)) setRetained({ frame, identity })
+  // Retention is visual only. Pending/failed acquisition never grants the previous target.
+  const compatible = resourceIdentity === undefined || current?.identity === resourceIdentity
 
-  return <SandboxedResourceConfigurator
-    key={frameKey}
-    frame={frame}
+  return <>
+    {disabled ? <Placeholder>Choose an account before selecting a resource.</Placeholder>
+      : loading ? <Placeholder>Loading configurator...</Placeholder>
+      : error ? <Placeholder>{error}</Placeholder> : null}
+    <Activity mode={ready && compatible ? 'visible' : 'hidden'}>
+    {current && compatible && <SandboxedResourceConfigurator
+    key={current.identity}
+    frame={current.frame}
+    resourceIdentity={resourceIdentity}
+    authorityAvailable={ready}
+    isAuthorityCurrent={isAuthorityCurrent}
     topOffset={topOffset}
     onCollectResourceUrlChange={onCollectResourceUrlChange}
     onSelectionReadyChange={onSelectionReadyChange}
     initialResourceUrl={initialResourceUrl}
     resourceUrlPattern={resourceUrlPattern}
-  />
+  />}
+    </Activity>
+  </>
 }
 
 function Placeholder({ children }: { children: React.ReactNode }) {

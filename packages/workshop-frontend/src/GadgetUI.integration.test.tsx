@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, type ReactNode } from 'react'
+import { Activity, act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { newMessagePortRpcSession, RpcStub, RpcTarget } from 'capnweb'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -123,7 +123,7 @@ function fakeGadget(
     async () => new RpcStub(new TestGadgetTarget(value)) as unknown as RpcStub<TestGadget>,
   ),
 ) {
-  const getUiBundle = vi.fn<() => Promise<UiBundle>>(async () => ({ jsCode: bundleCode }))
+  const getUiBundle = vi.fn<() => Promise<UiBundle | null>>(async () => ({ jsCode: bundleCode }))
   return {
     connectToGadget,
     getUiBundle,
@@ -143,7 +143,7 @@ function deferred<T>() {
 
 function dispatchIframeHandshake(iframe: HTMLIFrameElement, port: MessagePort) {
   window.dispatchEvent(new MessageEvent('message', {
-    data: 'handshake',
+    data: { type: 'handshake', documentId: iframe.srcdoc.match(/data-bridge-id="([^"]+)"/)?.[1] },
     origin: 'null',
     source: iframe.contentWindow,
     ports: [port],
@@ -175,6 +175,267 @@ describe('GadgetUI RPC recovery', () => {
     dispatchIframeHandshake(iframe, port2)
     return child
   }
+
+  it('waits for delayed first acquisition and dispatches immediate bootstrap read exactly once', async () => {
+    const acquisition = deferred<RpcStub<TestGadget>>()
+    const read = vi.fn<() => string>(() => 'booted')
+    class BootTarget extends TestGadgetTarget {
+      read() { return read() }
+    }
+    const gadget = fakeGadget('first', 'first', vi.fn(() => acquisition.promise))
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" />))
+    const iframe = container.querySelector('iframe')!
+    const child = connectIframe(iframe)
+    const boot = Promise.resolve(child.read())
+    let settled = false
+    void boot.then(() => { settled = true }, () => { settled = true })
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(settled).toBe(false)
+    expect(read).not.toHaveBeenCalled()
+    await act(async () => {
+      acquisition.resolve(new RpcStub(new BootTarget('booted')) as unknown as RpcStub<TestGadget>)
+      await acquisition.promise
+    })
+    await expect(boot).resolves.toBe('booted')
+    expect(read).toHaveBeenCalledOnce()
+    expect(container.querySelector('iframe')).toBe(iframe)
+  })
+
+  it.each(['failure', 'suspension'] as const)('rejects bootstrap on %s, releases callback args and never replays it', async reason => {
+    const acquisition = deferred<RpcStub<TestGadget>>()
+    const connect = vi.fn<() => Promise<RpcStub<TestGadget>>>()
+      .mockReturnValueOnce(acquisition.promise)
+      .mockImplementation(async () => new RpcStub(new TestGadgetTarget('recovered')) as unknown as RpcStub<TestGadget>)
+    const gadget = fakeGadget('first', 'first', connect)
+    const render = (hidden: boolean) => root.render(
+      <Activity mode={hidden ? 'hidden' : 'visible'}><GadgetUI gadget={gadget.stub} height="100px" /></Activity>,
+    )
+    await act(async () => render(false))
+    const iframe = container.querySelector('iframe')!
+    const child = connectIframe(iframe)
+    const values: string[] = []
+    const disposed = vi.fn<() => void>()
+    const callback = new RpcStub(new TestCallbacks(values, disposed))
+    const pending = Promise.resolve(child.subscribe(callback))
+    void pending.catch(() => {})
+    callback[Symbol.dispose]()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    await act(async () => {
+      if (reason === 'failure') acquisition.reject(new Error('offline'))
+      else render(true)
+    })
+    await expect(pending).rejects.toThrow('not dispatched')
+    await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce())
+    const lateDisposed = vi.fn<() => void>()
+    if (reason === 'failure') {
+      await act(async () => container.querySelector('button')!.click())
+    } else {
+      await act(async () => {
+        acquisition.resolve(new RpcStub(new TestGadgetTarget('late', lateDisposed)) as unknown as RpcStub<TestGadget>)
+        await acquisition.promise
+      })
+      await act(async () => render(false))
+    }
+    expect(lateDisposed).toHaveBeenCalledTimes(reason === 'suspension' ? 1 : 0)
+    await expect(child.read()).resolves.toBe('recovered')
+    expect(values).toEqual([])
+    expect(disposed).toHaveBeenCalledOnce()
+    expect(container.querySelector('iframe')).toBe(iframe)
+  })
+
+  it.each([false, true])('loads newly available UI after a null bundle (hidden update: %s)', async hidden => {
+    const gadget = fakeGadget('first', 'new-ui')
+    gadget.getUiBundle.mockResolvedValueOnce(null)
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={0} />))
+    expect(container.textContent).toContain('No gadget UI yet')
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={1} isVisible={!hidden} />))
+    expect(gadget.getUiBundle).toHaveBeenCalledTimes(hidden ? 1 : 2)
+    if (hidden) {
+      await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" reloadTrigger={1} />))
+    }
+    expect(container.querySelector('iframe')?.srcdoc).toContain('new-ui')
+    expect(gadget.getUiBundle).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves the document and local bridge across Activity while revoking derived capabilities', async () => {
+    const first = fakeGadget('first', 'first')
+    const render = (hidden: boolean, gadget = first) => root.render(
+      <Activity mode={hidden ? 'hidden' : 'visible'}>
+        <GadgetUI gadget={gadget.stub} height="100px" />
+      </Activity>,
+    )
+    await act(async () => render(false))
+    const iframe = container.querySelector('iframe')!
+    const srcdoc = iframe.srcdoc
+    const child = connectIframe(iframe)
+    const derived = await child.child()
+    await expect(derived.read()).resolves.toBe('first')
+    await act(async () => render(true))
+    await expect(child.read()).rejects.toThrow('not dispatched')
+    await expect(derived.read()).rejects.toBeDefined()
+    expect(container.querySelector('iframe')).toBe(iframe)
+    const replacement = fakeGadget('replacement', 'unused')
+    await act(async () => render(false, replacement))
+    expect(iframe.srcdoc).toBe(srcdoc)
+    expect(container.querySelector('iframe')).toBe(iframe)
+    await expect(child.read()).resolves.toBe('replacement')
+    await expect(derived.read()).rejects.toBeDefined()
+    derived[Symbol.dispose]()
+  })
+
+  it('accepts a first handshake while Activity is hidden without acquiring backend authority', async () => {
+    const gadget = fakeGadget('first', 'first')
+    const render = (hidden: boolean) => root.render(
+      <Activity mode={hidden ? 'hidden' : 'visible'}>
+        <GadgetUI gadget={gadget.stub} height="100px" />
+      </Activity>,
+    )
+    await act(async () => render(false))
+    const iframe = container.querySelector('iframe')!
+    await act(async () => render(true))
+    const child = connectIframe(iframe)
+    await expect(child.read()).rejects.toThrow('not dispatched')
+    expect(gadget.connectToGadget).not.toHaveBeenCalled()
+    await act(async () => render(false))
+    await expect(child.read()).resolves.toBe('first')
+    expect(container.querySelector('iframe')).toBe(iframe)
+    await act(async () => root.unmount())
+    await expect(child.read()).rejects.toBeDefined()
+    root = createRoot(container)
+  })
+
+  it('retains the initial bridge on acquisition failure and retries without reloading', async () => {
+    const connect = vi.fn<() => Promise<RpcStub<TestGadget>>>()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(new RpcStub(new TestGadgetTarget('recovered')) as unknown as RpcStub<TestGadget>)
+    const gadget = fakeGadget('first', 'first', connect)
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" />))
+    const iframe = container.querySelector('iframe')!
+    let child!: RpcStub<TestGadget>
+    await act(async () => { child = connectIframe(iframe) })
+    await expect(child.read()).rejects.toThrow('not dispatched')
+    expect(container.textContent).toContain('unavailable')
+    expect(container.querySelector('iframe')).toBe(iframe)
+    await act(async () => container.querySelector('button')!.click())
+    await expect(child.read()).resolves.toBe('recovered')
+    expect(gadget.getUiBundle).toHaveBeenCalledOnce()
+  })
+
+  it('rejects stale document and duplicate handshakes without replacing the bridge', async () => {
+    const gadget = fakeGadget('first', 'first')
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" />))
+    const iframe = container.querySelector('iframe')!
+    const stalePort = { close: vi.fn<() => void>() } as unknown as MessagePort
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'handshake', documentId: 'stale' }, origin: 'null',
+      source: iframe.contentWindow, ports: [stalePort],
+    }))
+    expect(stalePort.close).toHaveBeenCalledOnce()
+    expect(gadget.connectToGadget).not.toHaveBeenCalled()
+    const child = connectIframe(iframe)
+    await expect(child.read()).resolves.toBe('first')
+    const duplicate = { close: vi.fn<() => void>() } as unknown as MessagePort
+    dispatchIframeHandshake(iframe, duplicate)
+    expect(duplicate.close).toHaveBeenCalledOnce()
+    await expect(child.read()).resolves.toBe('first')
+    expect(gadget.connectToGadget).toHaveBeenCalledOnce()
+  })
+
+  it('retries a broken backend with unchanged props', async () => {
+    let broken!: () => void
+    const backend = new RpcStub(new TestGadgetTarget('first')) as unknown as RpcStub<TestGadget>
+    const connect = vi.fn<() => Promise<RpcStub<TestGadget>>>()
+      .mockResolvedValueOnce(new Proxy(backend, {
+        get(target, property) {
+          if (property === 'onRpcBroken') return (callback: () => void) => { broken = callback }
+          return Reflect.get(target, property)
+        },
+      }))
+      .mockResolvedValueOnce(new RpcStub(new TestGadgetTarget('recovered')) as unknown as RpcStub<TestGadget>)
+    const gadget = fakeGadget('first', 'first', connect)
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" />))
+    const iframe = container.querySelector('iframe')!
+    const child = connectIframe(iframe)
+    await expect(child.read()).resolves.toBe('first')
+    vi.useFakeTimers()
+    await act(async () => broken())
+    await act(async () => vi.advanceTimersByTimeAsync(500))
+    vi.useRealTimers()
+    await expect(child.read()).resolves.toBe('recovered')
+    expect(connect).toHaveBeenCalledTimes(2)
+    expect(container.querySelector('iframe')).toBe(iframe)
+  })
+
+  it('rejects wrong source/origin handshakes before acquiring any backend', async () => {
+    const gadget = fakeGadget('first', 'first')
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" />))
+    const iframe = container.querySelector('iframe')!
+    const port = { close: vi.fn<() => void>() } as unknown as MessagePort
+    const data = { type: 'handshake', documentId: iframe.srcdoc.match(/data-bridge-id="([^"]+)"/)?.[1] }
+    window.dispatchEvent(new MessageEvent('message', {
+      data, origin: 'https://example.com', source: iframe.contentWindow, ports: [port],
+    }))
+    window.dispatchEvent(new MessageEvent('message', {
+      data, origin: 'null', source: window, ports: [port],
+    }))
+    expect(gadget.connectToGadget).not.toHaveBeenCalled()
+    const child = connectIframe(iframe)
+    await expect(child.read()).resolves.toBe('first')
+  })
+
+  it('disposes an acquisition that times out without replacing the document or bridge', async () => {
+    const connection = deferred<RpcStub<TestGadget>>()
+    const gadget = fakeGadget('first', 'first', vi.fn(() => connection.promise))
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="100px" />))
+    const iframe = container.querySelector('iframe')!
+    const srcdoc = iframe.srcdoc
+    vi.useFakeTimers()
+    let child!: RpcStub<TestGadget>
+    await act(async () => { child = connectIframe(iframe) })
+    await act(async () => vi.advanceTimersByTimeAsync(20_000))
+    const disposed = vi.fn<() => void>()
+    await act(async () => {
+      connection.resolve(new RpcStub(new TestGadgetTarget('late', disposed)) as unknown as RpcStub<TestGadget>)
+      await connection.promise
+    })
+    expect(disposed).toHaveBeenCalledOnce()
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(iframe.srcdoc).toBe(srcdoc)
+    vi.useRealTimers()
+    await expect(child.read()).rejects.toThrow('not dispatched')
+  })
+
+  it('does not replay a dispatched mutation and disposes its late capability after suspension', async () => {
+    const result = deferred<TestChildTarget>()
+    const write = vi.fn<() => Promise<TestChildTarget>>(() => result.promise)
+    class MutationTarget extends RpcTarget {
+      child() { return write() }
+    }
+    const gadget = fakeGadget('first', 'first', vi.fn(async () =>
+      new RpcStub(new MutationTarget()) as unknown as RpcStub<TestGadget>,
+    ))
+    const render = (hidden: boolean) => root.render(
+      <Activity mode={hidden ? 'hidden' : 'visible'}>
+        <GadgetUI gadget={gadget.stub} height="100px" />
+      </Activity>,
+    )
+    await act(async () => render(false))
+    let child!: RpcStub<TestGadget>
+    await act(async () => { child = connectIframe(container.querySelector('iframe')!) })
+    const pending = Promise.resolve(child.child())
+    void pending.catch(() => {})
+    await vi.waitFor(() => expect(write).toHaveBeenCalledOnce())
+    await act(async () => render(true))
+    await expect(pending).rejects.toBeDefined()
+    const disposed = vi.fn<() => void>()
+    class LateChild extends TestChildTarget {
+      [Symbol.dispose]() { disposed() }
+    }
+    result.resolve(new LateChild('late'))
+    await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce())
+    await act(async () => render(false))
+    expect(write).toHaveBeenCalledOnce()
+  })
 
   it('lays out gadget UI against the device-width viewport', async () => {
     const gadget = fakeGadget('responsive', 'document.body.textContent = "responsive"')
@@ -213,7 +474,7 @@ describe('GadgetUI RPC recovery', () => {
     await expect((firstChild as any).child().read()).resolves.toBe('replacement')
   })
 
-  it('queues calls while the replacement connection is pending', async () => {
+  it('fails calls fast while replacement is pending and never replays them', async () => {
     const first = fakeGadget('first', 'document.body.textContent = "first"')
     await act(async () => {
       root.render(<GadgetUI gadget={first.stub} height="100px" />)
@@ -235,12 +496,13 @@ describe('GadgetUI RPC recovery', () => {
     await vi.waitFor(() => expect(replacement.connectToGadget).toHaveBeenCalledOnce())
 
     const read = child.read()
+    await expect(read).rejects.toThrow('not dispatched')
     const replacementStub = new RpcStub(
       new TestGadgetTarget('replacement'),
     ) as unknown as RpcStub<TestGadget>
     connection.resolve(replacementStub)
 
-    await expect(read).resolves.toBe('replacement')
+    await expect(child.read()).resolves.toBe('replacement')
     expect(container.querySelector('iframe')).toBe(iframe)
   })
 
@@ -265,6 +527,7 @@ describe('GadgetUI RPC recovery', () => {
       root.render(<GadgetUI gadget={replacement.stub} height="100px" reloadTrigger={0} />)
     })
     const read = child.read()
+    await expect(read).rejects.toThrow('not dispatched')
 
     await act(async () => {
       root.render(<GadgetUI gadget={replacement.stub} height="100px" reloadTrigger={1} />)
@@ -273,7 +536,7 @@ describe('GadgetUI RPC recovery', () => {
     expect(container.textContent).toContain('Reload when ready')
 
     await act(async () => {
-      container.querySelector('button')!.click()
+      Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reload when ready')!.click()
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(iframe))
     const reloadedChild = connectIframe(container.querySelector('iframe')!)
@@ -345,7 +608,7 @@ describe('GadgetUI RPC recovery', () => {
     expect(subscribeCount).toBe(2)
   })
 
-  it('reloads after a replacement timeout and disposes the late capability', async () => {
+  it('preserves the document beyond five seconds and accepts a slow replacement', async () => {
     const first = fakeGadget('first', 'document.body.textContent = "first"')
     await act(async () => {
       root.render(<GadgetUI gadget={first.stub} height="100px" />)
@@ -362,19 +625,18 @@ describe('GadgetUI RPC recovery', () => {
       root.render(<GadgetUI gadget={replacement.stub} height="100px" />)
     })
     expect(replacement.connectToGadget).toHaveBeenCalledOnce()
-    const read = child.read()
-
-    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    await act(async () => vi.advanceTimersByTimeAsync(6_200))
     vi.useRealTimers()
-    await expect(read).rejects.toBeDefined()
-    expect(container.querySelector('iframe')).not.toBe(iframe)
+    await expect(child.read()).rejects.toThrow('not dispatched')
+    expect(container.querySelector('iframe')).toBe(iframe)
 
     const disposed = vi.fn<() => void>()
     connection.resolve(
       new RpcStub(new TestGadgetTarget('late', disposed)) as unknown as RpcStub<TestGadget>,
     )
     await connection.promise
-    await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce())
+    await expect(child.read()).resolves.toBe('late')
+    expect(disposed).not.toHaveBeenCalled()
   })
 
   it('ignores a superseded replacement connection', async () => {
@@ -479,7 +741,7 @@ describe('GadgetUI RPC recovery', () => {
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
     const firstIframe = container.querySelector('iframe')!
-    dispatchIframeHandshake(firstIframe, new MessageChannel().port2)
+    const child = connectIframe(firstIframe)
 
     const replacement = fakeGadget(
       'replacement',
@@ -488,7 +750,7 @@ describe('GadgetUI RPC recovery', () => {
     await act(async () => {
       root.render(<GadgetUI gadget={replacement.stub} height="100px" />)
     })
-    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(firstIframe))
+    expect(container.querySelector('iframe')).toBe(firstIframe)
 
     const disposed = vi.fn<() => void>()
     await act(async () => {
@@ -499,8 +761,7 @@ describe('GadgetUI RPC recovery', () => {
     })
     expect(disposed).toHaveBeenCalledOnce()
 
-    const replacementChild = connectIframe(container.querySelector('iframe')!)
-    await expect(replacementChild.read()).resolves.toBe('replacement')
+    await expect(child.read()).resolves.toBe('replacement')
   })
 
   it('ignores a handshake rejection from an iframe that was reloaded', async () => {
@@ -528,7 +789,7 @@ describe('GadgetUI RPC recovery', () => {
     expect(container.querySelector('iframe')).toBe(oldIframe)
 
     await act(async () => {
-      container.querySelector('button')!.click()
+      Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Reload when ready')!.click()
     })
     await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(oldIframe))
 

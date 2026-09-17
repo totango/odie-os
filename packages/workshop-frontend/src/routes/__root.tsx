@@ -93,6 +93,8 @@ function RootComponent() {
 
   // Keep visual state through reconnect, but disconnect every effect while authority is absent.
   // Logout and errors return above, deliberately destroying this boundary and its saved state.
+  // useAuth publishes only after verifying whoami and increments identityRevision on an owner
+  // change. A new owner's API must never resume another owner's retained DOM or frame bridge.
   return (
     <>
       <Activity mode={isLoading ? 'hidden' : 'visible'}>

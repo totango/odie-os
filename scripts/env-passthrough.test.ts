@@ -56,6 +56,9 @@ const EXPECTED: Record<string, ExpectedArea> = {
   // `env: ['VITE_*']` — vite's `define` inlines any VITE_-prefixed variable, so the set this
   // package can depend on is open-ended and the wildcard is the only honest declaration.
   "packages/workshop-frontend": {
+    // Playwright's Node-side test config selects a local browser channel. The browser
+    // suite runs directly via pnpm, outside vp tasks; this is not a production build input.
+    external: ["CONTINUITY_BROWSER_CHANNEL"],
     forwarded: [
       "VITE_BACKEND_HOST",
       "VITE_CF_ACCESS_MODE",

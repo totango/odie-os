@@ -1,5 +1,5 @@
 import { logRpcFailure } from './rpcErrors'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, useKumoToastManager, type PortalContainer } from '@cloudflare/kumo'
 import {
   CaretDown,
@@ -117,6 +117,16 @@ type ConfiguratorFrameState = {
   frame: ResourceConfiguratorFrame
   accountId: number
   resourceUrlPattern: string
+  authority: ConfiguratorAuthority
+  identity: string
+  lease: { live: boolean }
+}
+
+type ConfiguratorAuthority = {
+  api: ReturnType<typeof useAuthenticatedApi>['authenticatedApi']
+  ownerId: string
+  isAdmin: boolean
+  lease: { live: boolean }
 }
 
 function platformConnectionTypes(siteName: string): ConnectionType[] {
@@ -187,10 +197,36 @@ function disposeConfiguratorFrame(frame: ResourceConfiguratorFrame | null) {
   uiDisposable?.[Symbol.dispose]?.()
 }
 
-export default function GatekeeperModal({
+function releaseConfiguratorState(state: ConfiguratorFrameState | null) {
+  if (!state?.lease.live) return
+  state.lease.live = false
+  disposeConfiguratorFrame(state.frame)
+}
+
+export default function GatekeeperModal(props: GatekeeperModalProps) {
+  const { authenticatedApi } = useAuthenticatedApi()
+  const [verified, setVerified] = useState<ConfiguratorAuthority | null>(null)
+  useEffect(() => {
+    if (!props.open) return
+    const lease = { live: true }
+    // Preserve the old owner key while this exact API is unresolved, never its authority.
+    setVerified(previous => previous ? { ...previous } : null)
+    Promise.all([authenticatedApi.whoami(), authenticatedApi.amIAdmin()]).then(([owner, isAdmin]) => {
+      if (lease.live) setVerified({ api: authenticatedApi, ownerId: owner.id, isAdmin, lease })
+    }).catch(err => {
+      if (lease.live) reportIssue('gatekeeper.configurator-identity', err)
+    })
+    return () => { lease.live = false }
+  }, [authenticatedApi, props.open])
+  const authority = verified?.api === authenticatedApi && verified.lease.live ? verified : null
+  return <OwnedGatekeeperModal key={JSON.stringify([verified?.ownerId, verified?.isAdmin])} {...props} authority={authority} />
+}
+
+function OwnedGatekeeperModal({
   open, onClose, getOverseer, onCreated, spawnerEnvCandidates,
   initialVendorId, initialResourceUrl, initialResourceUrlPattern,
-}: GatekeeperModalProps) {
+  authority,
+}: GatekeeperModalProps & { authority: ConfiguratorAuthority | null }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const toasts = useKumoToastManager()
 
@@ -202,6 +238,7 @@ export default function GatekeeperModal({
   const [grantingAccountId, setGrantingAccountId] = useState<number | null>(null)
   const [reconnectingAccountId, setReconnectingAccountId] = useState<number | null>(null)
   const [accounts, setAccounts] = useState<AccountOption[]>([])
+  const [accountsAuthority, setAccountsAuthority] = useState<ConfiguratorAuthority | null>(null)
   const [vendors, setVendors] = useState<VendorOption[]>([])
 
   const [availableModels, setAvailableModels] = useState<AiChatAuthorInfo[]>([])
@@ -233,6 +270,8 @@ export default function GatekeeperModal({
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
   const nextConfiguratorFrameKeyRef = useRef(0)
   const autoAttachedSingletonRef = useRef<string | null>(null)
+  const resetScopeRef = useRef<string | null>(null)
+  const connectionScopeRef = useRef<ConnectionTypeId | null | undefined>(undefined)
 
   useEffect(() => {
     const el = document.createElement('div')
@@ -248,7 +287,7 @@ export default function GatekeeperModal({
 
   const updateConfiguratorFrameState = (next: ConfiguratorFrameState | null) => {
     const previous = configuratorFrameRef.current
-    if (previous?.frame !== next?.frame) disposeConfiguratorFrame(previous?.frame ?? null)
+    if (previous !== next) releaseConfiguratorState(previous)
     configuratorFrameRef.current = next
     if (!next) {
       configuratorCollectResourceUrlRef.current = null
@@ -324,7 +363,7 @@ export default function GatekeeperModal({
 
   useEffect(() => {
     return () => {
-      disposeConfiguratorFrame(configuratorFrameRef.current?.frame ?? null)
+      releaseConfiguratorState(configuratorFrameRef.current)
       configuratorFrameRef.current = null
     }
   }, [])
@@ -369,6 +408,9 @@ export default function GatekeeperModal({
   }, [open, selectedConnectionId])
 
   useEffect(() => {
+    const scope = JSON.stringify([open, initialVendorId])
+    if (resetScopeRef.current === scope) return
+    resetScopeRef.current = scope
     if (!open) {
       // Reset the selection on close so reopening (e.g. for a different connection request) starts
       // clean and the pre-seed effect below can run again.
@@ -380,8 +422,6 @@ export default function GatekeeperModal({
       autoAttachedSingletonRef.current = null
       return
     }
-
-    let cancelled = false
 
     setSelectedConnectionId(null)
     setSearchText('')
@@ -400,17 +440,22 @@ export default function GatekeeperModal({
     setSpawnerModelId(null)
     setSpawnerEnv(
       (spawnerEnvCandidatesRef.current ?? []).map(entry => ({ ...entry, enabled: true })))
+  }, [open, initialVendorId])
 
+  // Transport refresh reloads discovery, not the user's in-progress selection or edits.
+  useEffect(() => {
+    if (!open || !authority?.lease.live) return
+    let cancelled = false
     authenticatedApi.listModels().then(models => {
       if (cancelled) return
       setAvailableModels(models)
       if (models.length > 0) {
-        setSelectedModelId(models[0].id)
+        setSelectedModelId(previous => models.some(model => model.id === previous) ? previous : models[0].id)
         const lastSelected = localStorage.getItem('lastSelectedModel')
         if (lastSelected && models.some(m => m.id === lastSelected)) {
-          setSpawnerModelId(lastSelected)
+          setSpawnerModelId(previous => previous ?? lastSelected)
         } else {
-          setSpawnerModelId(models[0].id)
+          setSpawnerModelId(previous => previous ?? models[0].id)
         }
       }
     }).catch(err => {
@@ -433,23 +478,30 @@ export default function GatekeeperModal({
     return () => {
       cancelled = true
     }
-  }, [open, authenticatedApi, initialVendorId])
+  }, [open, authenticatedApi, authority])
 
   useEffect(() => {
-    if (!open) return
+    if (!open || !authority?.lease.live) return
     let cancelled = false
+    let ready = false
     const accountMap = new Map<number, AccountOption>()
 
     const subscriber = new AccountsSubscriberAdapter({
       add({ id, description, vendor, supportedResources, credentialsValid, vendorId }) {
         if (cancelled) return
         accountMap.set(id, { id, description, vendorId, vendorDescription: vendor, supportedResources, credentialsValid })
-        setAccounts(Array.from(accountMap.values()))
+        if (ready) setAccounts(Array.from(accountMap.values()))
       },
       remove(id) {
         if (cancelled) return
         accountMap.delete(id)
+        if (ready) setAccounts(Array.from(accountMap.values()))
+      },
+      ready() {
+        if (cancelled) return
+        ready = true
         setAccounts(Array.from(accountMap.values()))
+        setAccountsAuthority(authority)
       },
     })
     const subscription = authenticatedApi.subscribeConnectedAccounts(subscriber) as unknown as RpcPromise<{}>
@@ -462,9 +514,11 @@ export default function GatekeeperModal({
       cancelled = true
       subscription[Symbol.dispose]()
     }
-  }, [open, authenticatedApi])
+  }, [open, authenticatedApi, authority])
 
   useEffect(() => {
+    if (connectionScopeRef.current === selectedConnectionId) return
+    connectionScopeRef.current = selectedConnectionId
     setSelectedAccountId(null)
     updateConfiguratorFrameState(null)
     setConfiguratorLoading(false)
@@ -551,20 +605,42 @@ export default function GatekeeperModal({
     return required.filter(p => !granted.includes(p))
   }, [selectedConnection, selectedAccount])
   const hasMissingResourceGrants = missingResourceUrlPatterns.length > 0
+  const identityAuthority = authority ?? configuratorFrameState?.authority
+  const resourceIdentity = JSON.stringify([
+    identityAuthority?.ownerId, identityAuthority?.isAdmin, selectedAccountId, selectedConnection?.resourceUrlPattern,
+  ])
+  const configuratorAuthorityCurrent = Boolean(open && authority?.lease.live
+    && authority.api === authenticatedApi && accountsAuthority === authority
+    && configuratorFrameState?.authority === authority && configuratorFrameState?.lease.live
+    && configuratorFrameState.identity === resourceIdentity && selectedAccount && !hasMissingResourceGrants)
+  const currentConfiguratorRef = useRef<ConfiguratorFrameState | null>(null)
+  useLayoutEffect(() => {
+    currentConfiguratorRef.current = configuratorAuthorityCurrent ? configuratorFrameState : null
+    return () => { currentConfiguratorRef.current = null }
+  }, [configuratorAuthorityCurrent, configuratorFrameState])
+  const isConfiguratorCurrent = useCallback(() => {
+    const state = currentConfiguratorRef.current
+    return Boolean(state?.lease.live && state.authority.lease.live)
+  }, [])
 
   useEffect(() => {
+    if (!authority?.lease.live || accountsAuthority !== authority) return
     if (!selectedConnection?.vendorId) return
     const currentIsValid = selectedAccountId !== null
       && matchingAccounts.some(account => account.id === selectedAccountId && account.credentialsValid)
     if (currentIsValid) return
     const firstValidAccount = matchingAccounts.find(account => account.credentialsValid)
     setSelectedAccountId(firstValidAccount?.id ?? null)
-  }, [selectedConnection, matchingAccounts, selectedAccountId])
+  }, [selectedConnection, matchingAccounts, selectedAccountId, authority, accountsAuthority])
 
   useEffect(() => {
     const resourceUrlPattern = selectedConnection?.resourceUrlPattern ?? null
+    if (open && (!authority?.lease.live || accountsAuthority !== authority)) {
+      setConfiguratorLoading(true)
+      return
+    }
     if (!open || !resourceUrlPattern || !selectedAccount || hasMissingResourceGrants ||
-        selectedConnection?.providedBySingleton) {
+        selectedConnection?.providedBySingleton || !authority) {
       updateConfiguratorFrameState(null)
       setConfiguratorError(null)
       setConfiguratorLoading(false)
@@ -573,8 +649,8 @@ export default function GatekeeperModal({
     }
 
     let cancelled = false
+    let acquired: ConfiguratorFrameState | null = null
     setConfiguratorLoading(true)
-    updateConfiguratorFrameState(null)
     setConfiguratorError(null)
     setConfiguratorSelectionReady(null)
 
@@ -584,12 +660,16 @@ export default function GatekeeperModal({
           disposeConfiguratorFrame(frame)
           return
         }
-        updateConfiguratorFrameState({
+        acquired = {
           key: ++nextConfiguratorFrameKeyRef.current,
           frame,
           accountId: selectedAccount.id,
           resourceUrlPattern,
-        })
+          authority,
+          identity: JSON.stringify([authority.ownerId, authority.isAdmin, selectedAccount.id, resourceUrlPattern]),
+          lease: { live: true },
+        }
+        updateConfiguratorFrameState(acquired)
       })
       .catch(error => {
         console.error('Failed to start resource configurator:', error)
@@ -606,8 +686,9 @@ export default function GatekeeperModal({
 
     return () => {
       cancelled = true
+      releaseConfiguratorState(acquired)
     }
-  }, [open, authenticatedApi, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
+  }, [open, authenticatedApi, authority, accountsAuthority, selectedConnection?.id, selectedConnection?.resourceUrlPattern, selectedAccount?.id, hasMissingResourceGrants])
 
   const handleSelectConnection = (connection: ConnectionType) => {
     setSelectedConnectionId(connection.id)
@@ -743,13 +824,15 @@ export default function GatekeeperModal({
     if (hasMissingResourceGrants) return
     const resourceUrlPattern = selectedConnection.resourceUrlPattern
     if (!resourceUrlPattern) return
+    if (!authority?.lease.live || accountsAuthority !== authority) return
+    const expectedConfigurator = currentConfiguratorRef.current
 
     setCreating(true)
     let gatekeeper: RpcStub<GatekeeperClient<any>> | null = null
     let transferred = false
     try {
       if (!selectedConnection.providedBySingleton &&
-          (!configuratorFrameState?.frame || configuratorFrameState.accountId !== selectedAccountId || configuratorFrameState.resourceUrlPattern !== resourceUrlPattern)) {
+          !isConfiguratorCurrent()) {
         throw new Error('Configurator is not ready.')
       }
       const resourceUrl = selectedConnection.providedBySingleton
@@ -757,6 +840,10 @@ export default function GatekeeperModal({
         : await configuratorCollectResourceUrlRef.current?.()
       if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
       const overseer = await getOverseer()
+      if (!authority.lease.live || (!selectedConnection.providedBySingleton &&
+          (!isConfiguratorCurrent() || currentConfiguratorRef.current !== expectedConfigurator))) {
+        throw new Error('Configurator authorization changed. Please wait for reconnection.')
+      }
       gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
       if (gatekeeper) {
         await onCreated(gatekeeper)
@@ -775,6 +862,7 @@ export default function GatekeeperModal({
   }
 
   const canCreate = (() => {
+    if (!authority?.lease.live) return false
     if (!selectedConnection) return false
     if (selectedConnection.id === 'ai-model') return Boolean(selectedModelId)
     if (selectedConnection.id === 'agent-spawner') {
@@ -783,14 +871,12 @@ export default function GatekeeperModal({
     if (selectedConnection.resourceUrlPattern) {
       const resourceUrlPattern = selectedConnection.resourceUrlPattern
       if (selectedConnection.providedBySingleton) {
-        return selectedAccountId !== null && selectedAccount !== null && !hasMissingResourceGrants
+        return accountsAuthority === authority && selectedAccountId !== null && selectedAccount !== null && !hasMissingResourceGrants
       }
       return Boolean(
         selectedAccountId !== null &&
         resourceUrlPattern &&
-        configuratorFrameState?.frame &&
-        configuratorFrameState.accountId === selectedAccountId &&
-        configuratorFrameState.resourceUrlPattern === resourceUrlPattern &&
+        configuratorAuthorityCurrent &&
         configuratorSelectionReady !== false &&
         !hasMissingResourceGrants,
       )
@@ -894,6 +980,10 @@ export default function GatekeeperModal({
                   <ResourceConfiguratorHost
                     frame={configuratorFrameState?.frame ?? null}
                     frameKey={configuratorFrameState?.key ?? null}
+                    resourceIdentity={resourceIdentity}
+                    frameIdentity={configuratorFrameState?.identity}
+                    authorityAvailable={configuratorAuthorityCurrent}
+                    isAuthorityCurrent={isConfiguratorCurrent}
                     loading={configuratorLoading}
                     error={configuratorError}
                     disabled={needsAccount && !selectedAccount}

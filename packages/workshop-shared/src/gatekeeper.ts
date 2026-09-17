@@ -490,6 +490,18 @@ export interface ResourceConfiguratorHost extends RpcTarget {
   gatekeeper: RpcStub<RpcTarget>;
 
   /**
+   * Wait for active configurator authority and return its local generation. Only unfinished,
+   * read-only bootstrap may wait; ordinary UI calls still fail fast while suspended. The host
+   * bounds outstanding waiters and rejects them on final disposal.
+   * Generated runtimes may use legacy startup only when their initial probe receives Cap'n Web's
+   * explicit missing-method TypeError from an older host; other errors must not downgrade.
+   */
+  awaitReady(): Promise<number>;
+
+  /** Whether a bootstrap result still belongs to the active authority generation. */
+  isReady(generation: number): boolean;
+
+  /**
    * The concrete resource URL the configurator should pre-fill to (e.g. supplied by an AI agent's
    * connection request), together with this resource's urlPattern, or null for a fresh/manual
    * configuration. The iframe runtime uses this to seed the form's initial values so it opens

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Activity, useCallback, useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import type { GatekeeperUiFrame } from '@gadgets/workshop-shared/gatekeeper'
 import type { GatekeeperAppInfo } from '@gadgets/workshop-shared/api'
@@ -33,6 +33,12 @@ export default function GatekeeperAppPage({
   // Wrap the frame in an object: it holds a `ui` RPC stub, and we never want useState's setter to
   // treat a stored value as an updater function.
   const [state, setState] = useState<{
+    api: typeof authenticatedApi
+    appId: string
+    reload: number
+    owner: string
+    isAdmin: boolean
+    lease: { live: boolean }
     frame: GatekeeperUiFrame
     dependencies: GatekeeperAppDependency[]
     app?: GatekeeperAppInfo
@@ -43,10 +49,15 @@ export default function GatekeeperAppPage({
 
   useEffect(() => {
     let cancelled = false
+    const lease = { live: true }
     const acquired: GatekeeperUiFrame[] = []
     setError(null)
-    setState(null)
+    setState(previous => previous ? { ...previous } : null)
     const load = async () => {
+      // AuthContext can be unresolved while its exact-current-API identity replay runs. Do not
+      // acquire or expose a new target until this API's owner and admin context are both verified.
+      const [owner, isAdmin] = await Promise.all([authenticatedApi.whoami(), authenticatedApi.amIAdmin()])
+      if (cancelled) return
       let discoveryFailed = false
       // Discover afresh: the navigation cache may predate an existing account's UI declaration.
       const availableApps = authenticatedApi.listGatekeeperApps().catch((err) => {
@@ -87,7 +98,8 @@ export default function GatekeeperAppPage({
         }
       }))).filter((dependency): dependency is GatekeeperAppDependency => dependency !== null)
       if (cancelled) return
-      setState({ frame, dependencies, app: currentApp, discoveryFailed })
+      setState({ frame, dependencies, app: currentApp, discoveryFailed,
+        api: authenticatedApi, appId, reload, owner: owner.id, isAdmin, lease })
     }
     load()
       .catch((err) => {
@@ -99,6 +111,7 @@ export default function GatekeeperAppPage({
       })
     return () => {
       cancelled = true
+      lease.live = false
       for (const frame of acquired) disposeFrame(frame)
     }
   }, [appId, authenticatedApi, reload])
@@ -108,21 +121,20 @@ export default function GatekeeperAppPage({
     void navigate({ to: '/sessions' })
   }, [navigate, sessions])
 
-  if (error) {
-    return (
+  const ready = state?.lease.live && state?.api === authenticatedApi && state?.appId === appId && state?.reload === reload && !error
+  const fallback = error ? (
       <div className="mx-auto max-w-md px-4 py-16 text-center text-sm text-kumo-subtle">
         <p role="alert">{error}</p>
         <button className="mt-4 underline" type="button" onClick={() => setReload((value) => value + 1)}>Retry loading app</button>
       </div>
-    )
-  }
-  if (!state) {
-    return <div className="px-4 py-16 text-center text-sm text-kumo-subtle">Loading…</div>
-  }
+    ) : <div className="px-4 py-16 text-center text-sm text-kumo-subtle">Loading…</div>
 
   // Fill the routed area below the header so the embedded app can manage its own internal layout.
   return (
-    <div className="flex h-full flex-col">
+    <>
+    {!ready && fallback}
+    <Activity mode={ready ? 'visible' : 'hidden'}>
+    {state && <div className="flex h-full flex-col">
       {state.discoveryFailed && (
         <div className="shrink-0 px-4 py-2 text-sm text-kumo-subtle">
           <span role="status">Provider discovery is unavailable. Connected app capabilities could not be loaded.</span>{' '}
@@ -132,6 +144,14 @@ export default function GatekeeperAppPage({
       <div className="min-h-0 flex-1">
       <SandboxedGatekeeperApp
         frame={state.frame}
+        // Conservative, frontend-known compatibility only: verified owner, exact account-addressed
+        // app ID and admin context. HTML updates await explicit reload, not transport replacement.
+        // Dependencies are reauthorized independently by exact ID;
+        // removed IDs revoke their slots permanently. This is NOT proof of full grant equivalence:
+        // the backend frame currently carries no grant revision/fingerprint.
+        documentIdentity={JSON.stringify([state.owner, state.appId, state.isAdmin])}
+        authorityAvailable={Boolean(ready)}
+        isAuthorityCurrent={() => Boolean(ready && state.lease.live)}
         gatekeeperVendorId={state.app?.vendorId ?? appId}
         dependencies={state.dependencies}
         routeState={routeState}
@@ -142,6 +162,8 @@ export default function GatekeeperAppPage({
         onRetryProviders={() => setReload((value) => value + 1)}
       />
       </div>
-    </div>
+    </div>}
+    </Activity>
+    </>
   )
 }

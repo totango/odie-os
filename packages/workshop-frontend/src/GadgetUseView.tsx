@@ -1,4 +1,5 @@
 import { Link } from '@tanstack/react-router'
+import { Activity, Suspense, type ComponentProps } from 'react'
 import { Hexagon } from '@phosphor-icons/react'
 import { FormatGlyph } from './components/format/FormatVisuals'
 import { RpcStub } from 'capnweb'
@@ -44,6 +45,23 @@ type Props = {
 
 // Matches the top bar height used by the full editor (and the home page header).
 const TOPBAR_H = 56
+
+const waitingForGadget = new Promise<never>(() => {})
+type RetainedGadgetProps = Omit<ComponentProps<typeof GadgetUI>, 'gadget'> & {
+  gadget: RpcStub<GadgetClient> | null
+}
+
+/** Retain the frame DOM while its effect-owned capability is being reacquired. */
+export function RetainedGadgetUI(props: RetainedGadgetProps) {
+  return <Activity mode={props.gadget ? 'visible' : 'hidden'}>
+    <Suspense fallback={null}><CurrentGadgetUI {...props} /></Suspense>
+  </Activity>
+}
+
+function CurrentGadgetUI({ gadget, ...props }: RetainedGadgetProps) {
+  if (!gadget) throw waitingForGadget
+  return <GadgetUI {...props} gadget={gadget} />
+}
 
 export default function GadgetUseView({
   overseer,
@@ -148,8 +166,11 @@ export default function GadgetUseView({
 
       {/* ═══ GADGET UI ══════════════════════════════════════════════════════════ */}
       <div className="flex-1 min-h-0 overflow-hidden">
-        {gadget ? (
-          <GadgetUI
+        {selectedGadgetId !== null && !gadget && <p role="status" className="p-4 text-sm text-kumo-subtle">
+          The selected app is unavailable. Waiting for access to return; you can also select another app.
+        </p>}
+        {selectedGadgetId !== null ? (
+          <RetainedGadgetUI
             key={selectedGadgetId}
             gadget={gadget}
             height="100%"
