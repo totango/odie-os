@@ -14,7 +14,7 @@ Object.defineProperty(window, "scrollTo", { value: vi.fn<() => void>(), configur
 
 const sandboxedGatekeeperApp = vi.hoisted(() => vi.fn<(_props: unknown) => ReactElement>((_props) => React.createElement('div', { 'data-testid': 'gatekeeper-app' })));
 const getGatekeeperApp = vi.hoisted(() => vi.fn<(_id: string) => Promise<GatekeeperUiFrame | null>>());
-const authenticatedApi = vi.hoisted(() => ({ getGatekeeperApp, listGatekeeperApps: vi.fn<() => Promise<GatekeeperAppInfo[]>>() }));
+const authenticatedApi = vi.hoisted(() => ({ getGatekeeperApp, listGatekeeperApps: vi.fn<() => Promise<GatekeeperAppInfo[]>>(), whoami: vi.fn<() => Promise<{ id: string }>>(async () => ({ id: 'owner' })), amIAdmin: vi.fn<() => Promise<boolean>>(async () => false) }));
 const appsRef = vi.hoisted(() => ({ current: [] as GatekeeperAppInfo[] }));
 
 vi.mock("./SandboxedGatekeeperApp", () => ({
@@ -56,6 +56,37 @@ describe("GatekeeperAppPage Work Items composition", () => {
     getGatekeeperApp.mockReset();
     appsRef.current = [];
     authenticatedApi.listGatekeeperApps.mockReset();
+    authenticatedApi.whoami.mockReset().mockResolvedValue({ id: 'owner' });
+    authenticatedApi.amIAdmin.mockReset().mockResolvedValue(false);
+  });
+
+  it('retains the committed document hidden during reacquisition and verifies identity before acquiring', async () => {
+    authenticatedApi.listGatekeeperApps.mockResolvedValue([]);
+    getGatekeeperApp.mockResolvedValue(frame('same-html'));
+    const route = createRootRoute({ component: () => <GatekeeperAppPage appId="account-addressed-app" /> });
+    const router = createRouter({ history: createMemoryHistory({ initialEntries: ['/'] }), routeTree: route.addChildren([createRoute({ getParentRoute: () => route, path: '/' })]) });
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => root!.render(<RouterProvider router={router} />));
+    const documentNode = container.querySelector('[data-testid="gatekeeper-app"]');
+    expect(documentNode).not.toBeNull();
+    const previous = sandboxedGatekeeperApp.mock.lastCall![0] as { onRetryProviders(): void; documentIdentity: string; isAuthorityCurrent(): boolean };
+    let verify!: (user: { id: string }) => void;
+    authenticatedApi.whoami.mockImplementationOnce(() => new Promise(resolve => { verify = resolve; }));
+    let acquire!: (value: GatekeeperUiFrame) => void;
+    getGatekeeperApp.mockImplementationOnce(() => new Promise(resolve => { acquire = resolve; }));
+    await act(async () => previous.onRetryProviders());
+    expect(getGatekeeperApp).toHaveBeenCalledTimes(1);
+    expect(previous.isAuthorityCurrent()).toBe(false);
+    expect(container.querySelector('[data-testid="gatekeeper-app"]')).toBe(documentNode);
+    expect(container.textContent).toContain('Loading');
+    await act(async () => verify({ id: 'owner' }));
+    expect(getGatekeeperApp).toHaveBeenCalledTimes(2);
+    await act(async () => acquire(frame('same-html')));
+    expect(container.querySelector('[data-testid="gatekeeper-app"]')).toBe(documentNode);
+    const current = sandboxedGatekeeperApp.mock.lastCall![0] as typeof previous;
+    expect(current.documentIdentity).toBe(previous.documentIdentity);
+    expect(current.documentIdentity).toContain('account-addressed-app');
+    expect(current.isAuthorityCurrent()).toBe(true);
   });
 
   it.each([false, true])("discovers existing sources independently of the nav cache and retries failed loads (%s)", async (failSource) => {

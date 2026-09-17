@@ -42,7 +42,11 @@ export function useWorkspaceOpen({
   onShareKeyConsumed,
   onInvalidShareKey,
 }: Options) {
-  const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
+  // React Activity preserves state, not effect-owned capabilities. Invalidate the record
+  // synchronously before disposal: a reveal can render before cleanup's state update lands.
+  const [overseer, setOverseer] = useState<{
+    stub: RpcStub<Overseer>; active: boolean; id: string; api: RpcStub<AuthenticatedApi>
+  } | null>(null)
   const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
   const [error, setError] = useState<WorkspaceLoadError | null>(null)
   const [connectionLost, setConnectionLost] = useState(false)
@@ -56,13 +60,16 @@ export function useWorkspaceOpen({
   useDocumentTitle(error ? '' : metadata?.title)
 
   useEffect(() => {
+    setConnectionLost(false)
     let overseerStub: RpcStub<Overseer> | null = null
     let metadataSubscription: RpcStub<{}> | null = null
     let configureObservers: RpcStub<ObserverConfigCallback> | null = null
     let cancelled = false
+    let published: typeof overseer = null
     const hadOpenWorkspace = id !== undefined && openWorkspaceIdRef.current === id
 
     const disposeAttempt = () => {
+      if (published) published.active = false
       metadataSubscription?.[Symbol.dispose]()
       overseerStub?.[Symbol.dispose]()
       configureObservers?.[Symbol.dispose]()
@@ -100,11 +107,13 @@ export function useWorkspaceOpen({
               setObserverConfig({
                 needs,
                 resolve: choices => {
+                  if (cancelled) return
                   pendingObserverRejectRef.current = null
                   setObserverConfig(null)
                   resolve(choices)
                 },
                 reject: observerError => {
+                  if (cancelled) return
                   pendingObserverRejectRef.current = null
                   setObserverConfig(null)
                   reject(observerError)
@@ -128,10 +137,11 @@ export function useWorkspaceOpen({
         }
         metadataSubscription = resolvedSubscription
 
-        setOverseer({ stub: overseerStub })
+        published = { stub: overseerStub, active: true, id, api: authenticatedApi }
+        setOverseer(published)
         openWorkspaceIdRef.current = id
         setError(null)
-        if (connectionLost) setConnectionLost(false)
+        setConnectionLost(false)
       } catch (caught) {
         if (cancelled) return
         console.error('Failed to load gadget:', caught)
@@ -158,7 +168,8 @@ export function useWorkspaceOpen({
           } else if (!hadOpenWorkspace) {
             reportIssue('gadget.load', caught, { gadgetId: id })
             showTerminalError({ kind: 'open', failure })
-          } else if (!connectionLost) {
+          } else {
+            disposeAttempt()
             setConnectionLost(true)
           }
         }
@@ -174,17 +185,22 @@ export function useWorkspaceOpen({
       }
       setObserverConfig(null)
       disposeAttempt()
+      setOverseer(null)
     }
   }, [id, authenticatedApi, reloadNonce])
 
+  const liveOverseer: { stub: RpcStub<Overseer> } | null =
+    overseer?.active && overseer.id === id && overseer.api === authenticatedApi ? overseer : null
+
   return {
-    overseer,
+    overseer: liveOverseer,
     metadata,
     error,
     connectionLost,
     observerConfig,
     retry() {
       setError(null)
+      setConnectionLost(false)
       setReloadNonce(value => value + 1)
     },
     cancelObserverConfig() {

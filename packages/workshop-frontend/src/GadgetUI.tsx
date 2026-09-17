@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useInsertionEffect, useLayoutEffect } from 'react'
 import { Text, Loader, Banner } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
-import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
+import { RpcStub } from 'capnweb'
+import { GadgetBridge } from './gadget-bridge'
 import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
@@ -28,7 +29,7 @@ import { RpcTarget, RpcStub, newMessagePortRpcSession } from "data:text/javascri
 let gadget;  // RPC stub to the gadget's server-side Durable Object.
 {
   let {port1, port2} = new MessageChannel();
-  window.parent.postMessage("handshake", "*", [port2]);
+  window.parent.postMessage({ type: "handshake", documentId: document.documentElement.dataset.bridgeId }, "*", [port2]);
   gadget = newMessagePortRpcSession(port1);
 }
 
@@ -102,9 +103,9 @@ window.addEventListener('unhandledrejection', (event) => {
 
 `);
 
-const createSandboxedHtml = (jsCode: string): string => {
+const createSandboxedHtml = (jsCode: string, documentId: string): string => {
   return `<!DOCTYPE html>
-<html>
+<html data-bridge-id="${documentId}">
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; frame-src 'none'; script-src data: 'unsafe-inline'; style-src data: 'unsafe-inline'; img-src data:; media-src data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none';">
@@ -130,7 +131,6 @@ interface GadgetUIProps {
 // How long to wait for a UI bundle before offering a retry instead of a spinner. Not a latency
 // budget: the point at which we conclude the reply is never coming.
 const UI_BUNDLE_LOAD_TIMEOUT_MS = 20_000
-const RECONNECT_TIMEOUT_MS = 5_000
 
 export default function GadgetUI(props: GadgetUIProps) {
   return <GadgetUISession key={props.chatId} {...props} />
@@ -143,106 +143,32 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   const [hasLoaded, setHasLoaded] = useState(false)
   const [isInvalidated, setIsInvalidated] = useState(false)
   const [iframeGeneration, setIframeGeneration] = useState(0)
-  const iframeRef = useRef<HTMLIFrameElement>(null)
   const prevReloadTriggerRef = useRef(reloadTrigger)
   // Identifies the newest bundle load, so an older one can't write state after being superseded.
   const loadGenerationRef = useRef(0)
   // Bumped by the retry button to ask for a fresh load.
   const [retryNonce, setRetryNonce] = useState(0)
-  const connectionGenerationRef = useRef(0)
-  const handshakePendingRef = useRef<number | null>(null)
-  const gadgetRef = useRef(gadget)
-  gadgetRef.current = gadget
-  // TODO: Remove `any` when Cap'n Web fixes cyclic type issues (RpcStub<any> triggers deep instantiation)
-  const gadgetStubRef = useRef<any>(null)
-  const pendingGadgetStubRef = useRef<{
-    promise: Promise<any>
-    resolve: (stub: any) => void
-    reject: (reason: unknown) => void
-  } | null>(null)
-  const rpcSessionRef = useRef<any>(null)
+  const [connectionStatus, setConnectionStatus] = useState<string | null>(null)
+  const [bridge] = useState(() => new GadgetBridge(setConnectionStatus))
   // Keep latest callbacks in refs so the message-handler effect never tears down the RPC session.
   const onIframeEscapeRef = useRef(onIframeEscape)
   const onConsoleLogRef = useRef(onConsoleLog)
   onIframeEscapeRef.current = onIframeEscape
   onConsoleLogRef.current = onConsoleLog
 
-  const suspendGadgetCalls = () => {
-    if (!pendingGadgetStubRef.current) {
-      let resolve!: (stub: any) => void
-      let reject!: (reason: unknown) => void
-      const promise = new Promise<any>((resolvePromise, rejectPromise) => {
-        resolve = resolvePromise
-        reject = rejectPromise
-      })
-      void promise.catch(() => {})
-      pendingGadgetStubRef.current = { promise, resolve, reject }
-    }
-    return pendingGadgetStubRef.current
-  }
-
-  const installGadgetStub = (stub: any) => {
-    gadgetStubRef.current = stub
-    stub.onRpcBroken?.(() => {
-      if (gadgetStubRef.current === stub) suspendGadgetCalls()
-    })
-  }
-
-  const resetConnection = (reason: unknown) => {
-    ++connectionGenerationRef.current
-    handshakePendingRef.current = null
-    pendingGadgetStubRef.current?.reject(reason)
-    pendingGadgetStubRef.current = null
-    gadgetStubRef.current?.[Symbol.dispose]?.()
-    gadgetStubRef.current = null
-    rpcSessionRef.current?.[Symbol.dispose]?.()
-    rpcSessionRef.current = null
-  }
-
-  const reloadIframe = (reason: unknown) => {
-    resetConnection(reason)
+  const reloadIframe = () => {
+    bridge.dispose()
     setIframeGeneration(generation => generation + 1)
   }
 
+  useLayoutEffect(() => {
+    return () => bridge.suspend()
+  }, [bridge, gadget, chatId, isVisible])
+
   useEffect(() => {
-    if (!rpcSessionRef.current) {
-      if (handshakePendingRef.current !== null) {
-        reloadIframe(new Error('Gadget changed during RPC handshake.'))
-      }
-      return
-    }
-
-    const generation = ++connectionGenerationRef.current
-    const isCurrent = () => generation === connectionGenerationRef.current
-    const pendingStub = suspendGadgetCalls()
-    const replacementPromise = Promise.resolve().then(() => gadget.connectToGadget(chatId))
-    void replacementPromise.then(stub => {
-      if (!isCurrent()) stub[Symbol.dispose]?.()
-    }, () => {})
-
-    const reconnect = async () => {
-      let timeout: ReturnType<typeof setTimeout> | undefined
-      try {
-        const replacementStub = await Promise.race([
-          replacementPromise,
-          new Promise<never>((_, reject) => {
-            timeout = setTimeout(() => reject(new Error('Timed out reconnecting gadget UI.')), RECONNECT_TIMEOUT_MS)
-          }),
-        ])
-        if (!isCurrent()) return
-        const oldStub = gadgetStubRef.current
-        installGadgetStub(replacementStub)
-        pendingStub.resolve(replacementStub)
-        if (pendingGadgetStubRef.current === pendingStub) pendingGadgetStubRef.current = null
-        oldStub?.[Symbol.dispose]?.()
-      } catch (caught) {
-        if (isCurrent()) reloadIframe(caught)
-      } finally {
-        if (timeout !== undefined) clearTimeout(timeout)
-      }
-    }
-    void reconnect()
-  }, [gadget, chatId])
+    if (isVisible) bridge.resume(() => Promise.resolve(gadget.connectToGadget(chatId)))
+    return () => bridge.releaseBackend()
+  }, [bridge, gadget, chatId, isVisible, iframeGeneration])
 
   // Effect to handle reloadTrigger changes (code changes). If the gadget UI is visible, never
   // refresh the iframe automatically: the app may contain in-progress form edits that only exist in
@@ -251,18 +177,20 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     // Only react if reloadTrigger has actually changed from the previous value
     if (reloadTrigger !== undefined && reloadTrigger !== prevReloadTriggerRef.current && reloadTrigger > 0) {
       setIsInvalidated(true)
-      if (!isVisible && !hasLoaded) {
-        // If no frame has ever loaded, keep the empty state so the next visit fetches latest code.
-        setSandboxedHtml(null)
+      if (!sandboxedHtml) {
+        // A null bundle is a completed load, but there is no document/draft to preserve.
+        // Fetch updated code now (or on the next visible visit) instead of trapping the empty UI.
+        setHasLoaded(false)
         setError(null)
+        setRetryNonce(n => n + 1)
       }
       // Update the ref to the current value
       prevReloadTriggerRef.current = reloadTrigger
     }
-  }, [reloadTrigger, isVisible, hasLoaded])
+  }, [reloadTrigger, sandboxedHtml])
 
   const loadPendingUiUpdate = () => {
-    reloadIframe(new Error('Gadget UI update requested.'))
+    reloadIframe()
     setSandboxedHtml(null)
     setHasLoaded(false)
     setError(null)
@@ -300,7 +228,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
         const bundle = await gadget.getUiBundle(chatId)
         if (!isCurrent()) return
         if (bundle) {
-          const html = createSandboxedHtml(bundle.jsCode)
+          bridge.documentId = crypto.randomUUID()
+          const html = createSandboxedHtml(bundle.jsCode, bridge.documentId)
           setSandboxedHtml(html)
         } else {
           setSandboxedHtml(null)
@@ -329,76 +258,41 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   // The LSP error is due to bugs that need to be fixed in Cap'n Web.
   }, [gadget, isVisible, hasLoaded, isInvalidated, chatId, retryNonce])
 
-  // Effect to handle iframe RPC handshake
-  useEffect(() => {
-    let cancelled = false
-
-    const handleMessage = async (event: MessageEvent) => {
+  // Document lifetime, not Activity effect lifetime. Insertion cleanup must never update state.
+  // The host ref captures contentWindow later; insertion effects run before refs are attached.
+  useInsertionEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
       // Only handle messages from our iframe. As an extra level of paranoia, also make sure it's
       // from the null origin, just in case somehow the frame managed to browse away (though that
       // should be blocked). Yes, the null origin is identified by the string value "null", not the
       // JS `null`.
-      if (event.source !== iframeRef.current?.contentWindow ||
+      if (!bridge.source || event.source !== bridge.source ||
           event.origin !== "null") {
         return
       }
 
-      if (event.data === 'handshake' && event.ports && event.ports[0]) {
-        const port = event.ports[0]
-        let gadgetStub: any = null
-        resetConnection(new Error('Gadget iframe reloaded.'))
-        const generation = connectionGenerationRef.current
-        handshakePendingRef.current = generation
-        const isCurrent = () => !cancelled &&
-          generation === connectionGenerationRef.current &&
-          event.source === iframeRef.current?.contentWindow
-        try {
-          // Open the RPC connection to the gadget's server side
-          gadgetStub = await gadgetRef.current.connectToGadget(chatId)
-          if (!isCurrent()) {
-            gadgetStub[Symbol.dispose]?.()
-            port.close()
-            return
-          }
-          installGadgetStub(gadgetStub)
-          // Redirectable target: swapping gadgetStubRef reconnects top-level calls without reloading.
-          const forwardingTarget = new Proxy(new RpcTarget() as any, {
-            get: (target, property, receiver) => {
-              if (typeof property === 'symbol' || property in target) {
-                return Reflect.get(target, property, receiver)
-              }
-              const pending = pendingGadgetStubRef.current
-              return pending
-                ? (...args: any[]) => pending.promise.then(stub => stub[property](...args))
-                : gadgetStubRef.current[property]
-            },
-          })
-          rpcSessionRef.current = newMessagePortRpcSession(port, forwardingTarget)
-        } catch (caught) {
-          gadgetStub?.[Symbol.dispose]?.()
-          port.close()
-          if (!isCurrent()) return
-          console.error('Failed to establish RPC connection:', caught)
-          setError('Failed to connect gadget to server')
-        } finally {
-          if (handshakePendingRef.current === generation) handshakePendingRef.current = null
+      if (event.data?.type === 'handshake' && event.ports?.[0]) {
+        if (event.data.documentId !== bridge.documentId) {
+          event.ports.forEach(port => port.close())
+          return
         }
-      } else if (event.data?.type === 'console' && onConsoleLogRef.current) {
+        bridge.handshake(event.ports[0])
+        event.ports.slice(1).forEach(port => port.close())
+      } else if (bridge.active && event.data?.type === 'console' && onConsoleLogRef.current) {
         onConsoleLogRef.current({
           timestamp: new Date(),
           level: event.data.level,
           message: event.data.message,
         })
-      } else if (event.data?.type === 'escape') {
+      } else if (bridge.active && event.data?.type === 'escape') {
         onIframeEscapeRef.current?.()
       }
     }
 
     window.addEventListener('message', handleMessage)
     return () => {
-      cancelled = true
       window.removeEventListener('message', handleMessage)
-      resetConnection(new Error('Gadget RPC session was closed.'))
+      bridge.dispose()
     }
   }, [])
 
@@ -496,6 +390,11 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
 
   return (
     <div className="relative" style={{ height, width: '100%' }}>
+      {connectionStatus && (
+        <div role="status" className="absolute bottom-3 inset-x-3 z-10 bg-kumo-base p-3">
+          {connectionStatus} <button type="button" onClick={bridge.retry}>Retry connection</button>
+        </div>
+      )}
       {isInvalidated && (
         <div className="absolute inset-x-3 top-3 z-10 flex justify-center pointer-events-none">
           <div
@@ -515,7 +414,10 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
       )}
       <iframe
         key={iframeGeneration}
-        ref={iframeRef}
+        ref={node => {
+          // Activity detaches host refs while hidden. Keep the captured WindowProxy.
+          if (node) bridge.source = node.contentWindow
+        }}
         srcDoc={sandboxedHtml}
         style={{
           display: 'block',

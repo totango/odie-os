@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, useState } from "react";
+import { Activity, act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   createMemoryHistory,
@@ -52,6 +52,9 @@ vi.mock("./AuthContext", () => ({
 Object.defineProperty(window, "scrollTo", { value: vi.fn<() => void>(), configurable: true });
 
 interface TestHost extends RpcTarget {
+  ui: TestSource;
+  setPresenting(active: boolean): Promise<unknown>;
+  refresh(): Promise<void>;
   openWorkItemsConnectors(): Promise<void>;
   retryWorkItemsProviders(): Promise<void>;
   listCapabilities(): Promise<GatekeeperAppInfo[]>;
@@ -101,6 +104,101 @@ describe("SandboxedGatekeeperApp navigation", () => {
     container?.remove();
     vi.restoreAllMocks();
     dependencyCapability = undefined;
+  });
+
+  it('keeps the document, cached ui and port across Activity while hidden helpers fail closed', async () => {
+    const errors = vi.spyOn(console, 'error');
+    const first = new RpcStub(new SourceUi('first'));
+    const second = new RpcStub(new SourceUi('second'));
+    const update = { current: undefined as ((value: { hidden: boolean; ui: RpcStub<SourceUi> }) => void) | undefined };
+    const App = () => {
+      const [state, set] = useState({ hidden: false, ui: first });
+      capture(update, set);
+      return <Activity mode={state.hidden ? 'hidden' : 'visible'}>
+        <SandboxedGatekeeperApp frame={{ iframeHtml: '<p>persistent</p>', ui: state.ui }} gatekeeperVendorId="context" />
+      </Activity>;
+    };
+    const route = createRootRoute({ component: App });
+    const router = createRouter({ history: createMemoryHistory({ initialEntries: ['/'] }), routeTree: route.addChildren([createRoute({ getParentRoute: () => route, path: '/' })]) });
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => root!.render(<RouterProvider router={router} />));
+    const iframe = container.querySelector('iframe')!;
+    const channel = new MessageChannel(); host = newMessagePortRpcSession<TestHost>(channel.port1);
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [channel.port2] }));
+    const cached = host.ui.dup();
+    await expect(host.refresh()).rejects.toThrow(/refresh/);
+    await expect(cached.identify()).resolves.toBe('first');
+    await act(async () => update.current!({ hidden: true, ui: first }));
+    await expect(cached.identify()).rejects.toThrow('no longer available');
+    await expect(host.resolveWorkspaceTitles([WORKSPACE_ID])).rejects.toThrow('no longer available');
+    await expect(host.openPrompt('test')).rejects.toThrow('no longer available');
+    await expect(host.setPresenting(true)).rejects.toThrow('no longer available');
+    await act(async () => update.current!({ hidden: false, ui: second }));
+    expect(container.querySelector('iframe')).toBe(iframe);
+    await expect(cached.identify()).resolves.toBe('second');
+    await expect(host.resolveWorkspaceTitles([WORKSPACE_ID])).resolves.toEqual(['Daily Brief']);
+    await act(async () => { await host!.setPresenting(true); });
+    await act(async () => root!.unmount()); root = undefined;
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/useInsertionEffect must not schedule|flushSync was called/);
+    cached[Symbol.dispose](); first[Symbol.dispose](); second[Symbol.dispose]();
+  });
+
+  it('lets held writes settle once through route, callback and equivalent dependency-array churn', async () => {
+    class Writer extends RpcTarget {
+      finish: (() => void) | undefined;
+      calls = 0;
+      write() { this.calls++; return new Promise<void>(resolve => { this.finish = resolve; }); }
+    }
+    const backend = new Writer(); const source = new Writer();
+    const main = new RpcStub(backend); const dependency = new RpcStub(source);
+    const apps: GatekeeperAppInfo[] = [{ id: 'one', vendorId: 'jira', title: 'One' }, { id: 'two', vendorId: 'jira', title: 'Two' }];
+    const update = { current: undefined as ((value: number) => void) | undefined };
+    const App = () => {
+      const [revision, setRevision] = useState(0); capture(update, setRevision);
+      const dependencies = apps.map(app => ({ app: { ...app }, capability: dependency }));
+      return <SandboxedGatekeeperApp frame={{ iframeHtml: '<p>held</p>', ui: main }} gatekeeperVendorId="context"
+        dependencies={revision ? dependencies.toReversed() : dependencies} routeState={String(revision)}
+        isAuthorityCurrent={() => true} setRouteState={() => {}} />;
+    };
+    const route = createRootRoute({ component: App });
+    const router = createRouter({ history: createMemoryHistory({ initialEntries: ['/'] }), routeTree: route.addChildren([createRoute({ getParentRoute: () => route, path: '/' })]) });
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => root!.render(<RouterProvider router={router} />));
+    const iframe = container.querySelector('iframe')!; const channel = new MessageChannel();
+    const remote = newMessagePortRpcSession<{ ui: Writer; getCapability(id: string): Writer }>(channel.port1);
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'handshake' }, origin: 'null', source: iframe.contentWindow, ports: [channel.port2] }));
+    const cached = await remote.getCapability('one');
+    const mainWrite = Promise.resolve(remote.ui.write()).then(() => 'done', error => String(error));
+    const dependencyWrite = Promise.resolve(cached.write()).then(() => 'done', error => String(error));
+    await vi.waitFor(() => { expect(backend.calls).toBe(1); expect(source.calls).toBe(1); });
+    await act(async () => update.current!(1));
+    backend.finish!(); source.finish!();
+    expect(await mainWrite).toBe('done'); expect(await dependencyWrite).toBe('done');
+    expect(backend.calls).toBe(1); expect(source.calls).toBe(1);
+    expect(container.querySelector('iframe')).toBe(iframe);
+    cached[Symbol.dispose](); remote[Symbol.dispose](); main[Symbol.dispose](); dependency[Symbol.dispose]();
+  });
+
+  it('retains committed HTML until explicit Reload, but resets immediately for incompatible identity', async () => {
+    const ui = new RpcStub(new EmptyUi());
+    const update = { current: undefined as ((value: { html: string; identity: string }) => void) | undefined };
+    const App = () => {
+      const [value, set] = useState({ html: '<p>v1</p>', identity: 'owner/account/admin-false' }); capture(update, set);
+      return <SandboxedGatekeeperApp frame={{ iframeHtml: value.html, ui }} documentIdentity={value.identity} gatekeeperVendorId="context" />;
+    };
+    const route = createRootRoute({ component: App });
+    const router = createRouter({ history: createMemoryHistory({ initialEntries: ['/'] }), routeTree: route.addChildren([createRoute({ getParentRoute: () => route, path: '/' })]) });
+    container = document.createElement('div'); document.body.append(container); root = createRoot(container);
+    await act(async () => root!.render(<RouterProvider router={router} />));
+    const iframe = container.querySelector('iframe')!;
+    await act(async () => update.current!({ html: '<p>v2</p>', identity: 'owner/account/admin-false' }));
+    expect(container.querySelector('iframe')).toBe(iframe); expect(iframe.srcdoc).toBe('<p>v1</p>');
+    const reload = container.querySelector('button')!; expect(reload.textContent).toBe('Reload when ready');
+    await act(async () => reload.click());
+    const replaced = container.querySelector('iframe')!; expect(replaced).not.toBe(iframe); expect(replaced.srcdoc).toBe('<p>v2</p>');
+    await act(async () => update.current!({ html: '<p>v2</p>', identity: 'other-owner/account/admin-false' }));
+    expect(container.querySelector('iframe')).not.toBe(replaced);
+    ui[Symbol.dispose]();
   });
 
   it("provides the deployment theme and routes bounded iframe requests", async () => {
@@ -260,7 +358,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
     await expect(host.retryWorkItemsProviders()).rejects.toThrow("Not available to this app");
   });
 
-  it("reloads the sandbox when Work Items source capabilities appear after the UI session starts", async () => {
+  it("retains the sandbox and permanently revokes removed dependency slots", async () => {
     const frame = {
       iframeHtml: "<!doctype html><title>Work Items</title>",
       ui: new RpcStub(new EmptyUi()),
@@ -295,7 +393,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
 
     const firstIframe = container.querySelector("iframe");
     if (!firstIframe) throw new Error("Missing first gatekeeper iframe");
-    let channel = new MessageChannel();
+    const channel = new MessageChannel();
     host = newMessagePortRpcSession<TestHost>(channel.port1);
     window.dispatchEvent(new MessageEvent("message", {
       data: { type: "handshake" }, origin: "null", source: firstIframe.contentWindow, ports: [channel.port2],
@@ -304,19 +402,20 @@ describe("SandboxedGatekeeperApp navigation", () => {
 
     await act(async () => setDependencies.current!([{ app: dependency, capability: dependencyCapability! }]));
     const secondIframe = container.querySelector("iframe");
-    expect(secondIframe).not.toBe(firstIframe);
-
-    host[Symbol.dispose]();
-    channel = new MessageChannel();
-    host = newMessagePortRpcSession<TestHost>(channel.port1);
-    window.dispatchEvent(new MessageEvent("message", {
-      data: { type: "handshake" }, origin: "null", source: secondIframe!.contentWindow, ports: [channel.port2],
-    }));
+    expect(secondIframe).toBe(firstIframe);
     await expect(host.listCapabilities()).resolves.toEqual([dependency]);
     await expect(host.getCapability("other-users-jira-app")).resolves.toBeNull();
+    const old = await host.getCapability(dependency.id) as RpcStub<TestSource>;
+    await act(async () => setDependencies.current!([]));
+    await expect(old.identify()).rejects.toThrow('no longer available');
+    await act(async () => setDependencies.current!([{ app: dependency, capability: dependencyCapability! }]));
+    await expect(old.identify()).rejects.toThrow('no longer available');
+    const fresh = await host.getCapability(dependency.id) as RpcStub<TestSource>;
+    await expect(fresh.identify()).resolves.toBe('jira');
+    old[Symbol.dispose](); fresh[Symbol.dispose]();
   });
 
-  it("reloads the sandbox when an existing dependency id receives a fresh capability", async () => {
+  it("retains a cached dependency slot when its account id receives a fresh capability", async () => {
     const frame = {
       iframeHtml: "<!doctype html><title>Work Items</title>",
       ui: new RpcStub(new EmptyUi()),
@@ -355,27 +454,18 @@ describe("SandboxedGatekeeperApp navigation", () => {
     window.dispatchEvent(new MessageEvent("message", {
       data: { type: "handshake" }, origin: "null", source: firstIframe.contentWindow, ports: [channel.port2],
     }));
-    let source = await host.getCapability(dependency.id) as RpcStub<TestSource>;
+    const source = await host.getCapability(dependency.id) as RpcStub<TestSource>;
     await expect(source.identify()).resolves.toBe("old-jira");
-    source[Symbol.dispose]();
 
     await act(async () => setCapability.current!(dependencyCapability!));
     const secondIframe = container.querySelector("iframe")!;
-    expect(secondIframe).not.toBe(firstIframe);
-
-    host[Symbol.dispose]();
-    channel = new MessageChannel();
-    host = newMessagePortRpcSession<TestHost>(channel.port1);
-    window.dispatchEvent(new MessageEvent("message", {
-      data: { type: "handshake" }, origin: "null", source: secondIframe.contentWindow, ports: [channel.port2],
-    }));
-    source = await host.getCapability(dependency.id) as RpcStub<TestSource>;
+    expect(secondIframe).toBe(firstIframe);
     await expect(source.identify()).resolves.toBe("new-jira");
     source[Symbol.dispose]();
     firstCapability[Symbol.dispose]();
   });
 
-  it("does not let a stale listener adopt a remounted iframe during capability replacement", async () => {
+  it("does not let a stale listener adopt a remounted iframe during owner replacement", async () => {
     const messageHandlers: EventListener[] = [];
     const addEventListener = window.addEventListener.bind(window);
     const removeEventListener = window.removeEventListener.bind(window);
@@ -404,6 +494,7 @@ describe("SandboxedGatekeeperApp navigation", () => {
       capture(setCapability, (value) => updateCapability({ value }));
       return <SandboxedGatekeeperApp
         frame={frame}
+        documentIdentity={capability.value === firstCapability ? 'owner-one' : 'owner-two'}
         gatekeeperVendorId="work-items"
         dependencies={[{ app: dependency, capability: capability.value }]}
       />;
@@ -499,14 +590,14 @@ describe("SandboxedGatekeeperApp navigation", () => {
     window.dispatchEvent(new MessageEvent("message", {
       data: { type: "handshake" }, origin: "null", source: firstIframe.contentWindow, ports: [channel.port2],
     }));
-    await expect(host.listCapabilities()).resolves.toEqual([jira, zendesk]);
+    await expect(host.listCapabilities()).resolves.toEqual(expect.arrayContaining([jira, zendesk]));
 
     await act(async () => setDependencies.current!([
       { app: zendesk, capability: zendeskCapability },
       { app: jira, capability: dependencyCapability! },
     ]));
     expect(container.querySelector("iframe")).toBe(firstIframe);
-    await expect(host.listCapabilities()).resolves.toEqual([jira, zendesk]);
+    await expect(host.listCapabilities()).resolves.toEqual(expect.arrayContaining([jira, zendesk]));
     zendeskCapability[Symbol.dispose]();
   });
 

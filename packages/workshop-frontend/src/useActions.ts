@@ -16,6 +16,7 @@ type Store = {
   subscription: RpcStub<{}> | null
   generation: number
   notifyScheduled: boolean
+  error: unknown | null
 }
 
 const stores = new WeakMap<RpcStub<Overseer>, Store>()
@@ -33,6 +34,7 @@ function getStore(overseer: RpcStub<Overseer>): Store {
       subscription: null,
       generation: 0,
       notifyScheduled: false,
+      error: null,
     }
     stores.set(overseer, store)
   }
@@ -46,8 +48,10 @@ function notify(store: Store) {
 function scheduleNotify(store: Store) {
   if (store.notifyScheduled) return
   store.notifyScheduled = true
+  const generation = store.generation
 
   window.requestAnimationFrame(() => {
+    if (store.generation !== generation) return
     store.notifyScheduled = false
     store.actionsById = new Map(store.pendingActionsById)
     notify(store)
@@ -59,6 +63,8 @@ function openSubscription(overseer: RpcStub<Overseer>, store: Store) {
   store.actionsById = new Map()
   store.pendingActionsById = new Map()
   store.isReady = false
+  store.error = null
+  store.notifyScheduled = false
 
   class ActionsSubscriberImpl extends RpcTarget implements ActionsSubscriber {
     entry(record: ActionLogEntry): void {
@@ -95,7 +101,10 @@ function openSubscription(overseer: RpcStub<Overseer>, store: Store) {
       store.subscription = sub
     } catch (err) {
       if (store.generation === generation) {
-        store.isReady = true
+        ++store.generation
+        store.notifyScheduled = false
+        store.isReady = false
+        store.error = err
         notify(store)
         console.error('Failed to subscribe to actions:', err)
       }
@@ -110,6 +119,8 @@ function closeSubscription(store: Store) {
   store.actionsById = new Map()
   store.pendingActionsById = new Map()
   store.isReady = false
+  store.error = null
+  store.notifyScheduled = false
 }
 
 function acquire(overseer: RpcStub<Overseer>): Store {
@@ -127,13 +138,15 @@ function release(overseer: RpcStub<Overseer>) {
   store.refCount--
   if (store.refCount <= 0) {
     closeSubscription(store)
-    stores.delete(overseer)
+    // Keep the store identity while the stub is reachable: useSyncExternalStore's
+    // listener cleanup and Activity's passive cleanup can run in either order.
   }
 }
 
 export type UseActionsResult = {
   actionsById: Map<number, ActionLogEntry>
   isReady: boolean
+  error: unknown | null
 }
 
 const EMPTY_MAP: Map<number, ActionLogEntry> = new Map()
@@ -163,8 +176,10 @@ export function useActions(overseer: RpcStub<Overseer> | null): UseActionsResult
 
   const actionsById = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
   const isReady = useSyncExternalStore(subscribe, getIsReady, getIsReady)
+  const getError = useCallback(() => overseer ? stores.get(overseer)?.error ?? null : null, [overseer])
+  const error = useSyncExternalStore(subscribe, getError, getError)
 
-  return { actionsById, isReady }
+  return { actionsById, isReady, error }
 }
 
 /**

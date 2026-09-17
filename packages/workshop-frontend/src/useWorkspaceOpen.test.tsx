@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, type ReactNode } from 'react'
+import { Activity, act, useEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { RpcStub } from 'capnweb'
+import { RpcStub, RpcTarget } from 'capnweb'
 import {
   createOpenGadgetError,
   OPEN_GADGET_ERROR_CODES,
@@ -76,6 +76,68 @@ describe('useWorkspaceOpen', () => {
     container?.remove()
     document.title = ''
     vi.restoreAllMocks()
+  })
+
+  it('never republishes a disposed real stub when Activity reveals with the same API', async () => {
+    const ready = deferred<void>()
+    const disposed = vi.fn<(epoch: number) => void>()
+    const reads = vi.fn<(epoch: number) => void>()
+    const received: string[] = []
+    let attempt = 0
+    class Target extends RpcTarget {
+      constructor(private epoch: number) { super() }
+      async subscribeToMetadata(callback: (metadata: GadgetMetadata) => void) {
+        callback(METADATA)
+        if (this.epoch === 2) await ready.promise
+        return new RpcTarget()
+      }
+      getMetadata() { reads(this.epoch); return METADATA }
+      [Symbol.dispose]() { disposed(this.epoch) }
+    }
+    const authenticatedApi = {
+      openGadget: () => new RpcStub(new Target(++attempt)),
+    } as unknown as RpcStub<AuthenticatedApi>
+    function Probe() {
+      const state = useWorkspaceOpen({ id: 'workspace-1', authenticatedApi,
+        onMetadata: () => {}, onInvalidShareKey: () => {}, onShareKeyConsumed: () => {} })
+      useEffect(() => {
+        if (state.overseer) void state.overseer.stub.getMetadata().then(
+          () => received.push('live'), () => received.push('disposed'))
+      }, [state.overseer])
+      return <p>{state.overseer ? 'published' : 'pending'}</p>
+    }
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root!.render(<Activity mode="visible"><Probe /></Activity>))
+    expect(container.textContent).toBe('published')
+    await act(async () => root!.render(<Activity mode="hidden"><Probe /></Activity>))
+    expect(disposed).toHaveBeenCalledWith(1)
+    await act(async () => root!.render(<Activity mode="visible"><Probe /></Activity>))
+    expect(container.textContent).toBe('pending')
+    expect(received).toEqual(['live'])
+    await act(async () => ready.resolve())
+    expect(container.textContent).toBe('published')
+    expect(received).toEqual(['live', 'live'])
+    expect(reads.mock.calls).toEqual([[1], [2]])
+  })
+
+  it('ignores old metadata callbacks after replacement', async () => {
+    let oldCallback!: (metadata: GadgetMetadata) => void
+    const make = (title: string, capture = false) => api(disposableStub({
+      subscribeToMetadata: async (callback: (metadata: GadgetMetadata) => void) => {
+        if (capture) oldCallback = callback
+        callback({ ...METADATA, title })
+        return disposableStub({})
+      },
+    }) as unknown as RpcStub<Overseer>)
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root!.render(<WorkspaceProbe authenticatedApi={make('old', true)} />))
+    await act(async () => root!.render(<WorkspaceProbe authenticatedApi={make('new')} />))
+    await act(async () => oldCallback({ ...METADATA, title: 'stale' }))
+    expect(container.textContent).toBe('new')
   })
 
   it('disposes a metadata subscription that resolves after its load attempt is cleaned up', async () => {
