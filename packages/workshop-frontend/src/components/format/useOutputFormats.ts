@@ -2,6 +2,7 @@
 // offers them, so "what happens when you pick a format" is decided once.
 
 import { useCallback, useEffect, useState } from 'react'
+import { negotiateEditing } from '../../features/workspace/editingProtocol'
 import { useNavigate } from '@tanstack/react-router'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
@@ -74,6 +75,7 @@ export async function createFromFormat(
       {},
       originHubId ? blueprintCreationOrigin(originHubId) : undefined,
     )
+    await negotiateEditing(overseer)
     const { id } = await overseer.getMetadata()
     navigate({ to: '/workspace/$id', params: { id } })
   } catch (err) {

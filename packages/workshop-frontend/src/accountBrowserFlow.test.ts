@@ -7,13 +7,14 @@ import { accountBrowserFlows } from './accountBrowserFlow'
 const runtime = {
   kind: 'web',
   openOAuthTrampoline: vi.fn<WorkshopRuntime['openOAuthTrampoline']>(async () => {}),
+  writePendingNativeLoginFlow: vi.fn<WorkshopRuntime['writePendingNativeLoginFlow']>(async () => {}),
 } as unknown as WorkshopRuntime
 
 vi.mock('./runtime', () => ({ getWorkshopRuntime: () => runtime }))
 
 function api(overrides: Partial<AuthenticatedApi> = {}) {
   return {
-    connectAccount: vi.fn<AuthenticatedApi['connectAccount']>(async () => ({ url: 'https://oauth.example/connect' })),
+    connectAccount: vi.fn<AuthenticatedApi['connectAccount']>(async () => ({ url: 'https://oauth.example/connect', nonce: 'a'.repeat(64) })),
     reconnectAccount: vi.fn<AuthenticatedApi['reconnectAccount']>(async () => ({ url: 'https://oauth.example/reconnect' })),
     ensureAccountResources: vi.fn<AuthenticatedApi['ensureAccountResources']>(async () => ({ url: 'https://oauth.example/grant' })),
     getNativeAccountFlowStatus: vi.fn<AuthenticatedApi['getNativeAccountFlowStatus']>(async () => ({ status: 'completed' as const })),
@@ -27,6 +28,7 @@ describe('accountBrowserFlows', () => {
       location: { href: '', replace: vi.fn<(url?: string) => void>() },
       close: vi.fn<() => void>(),
       opener: null,
+      sessionStorage: { setItem: vi.fn<(key: string, value: string) => void>() },
     } as unknown as Window)
   })
 
@@ -37,12 +39,15 @@ describe('accountBrowserFlows', () => {
     vi.mocked(runtime.openOAuthTrampoline).mockClear()
   })
 
-  it('preserves direct web popup behavior', async () => {
+  it('opens a disowned web popup carrying the new handoff nonce', async () => {
     const authenticatedApi = api()
     await accountBrowserFlows.connect(authenticatedApi as any, 'github')
 
     expect(authenticatedApi.connectAccount).toHaveBeenCalledWith('github')
-    expect(window.open).toHaveBeenCalledWith('https://oauth.example/connect', '_blank', 'noopener,noreferrer')
+    expect(window.open).toHaveBeenCalledWith('', expect.stringMatching(/^gadgets-connect-/), 'popup,width=520,height=680')
+    const popup = vi.mocked(window.open).mock.results.at(-1)!.value!
+    expect(popup.sessionStorage.setItem).toHaveBeenCalledWith('gadgets.handoff', JSON.stringify({ kind: 'connect', nonce: 'a'.repeat(64) }))
+    expect(popup.location.replace).toHaveBeenCalledWith('https://oauth.example/connect')
     expect(runtime.openOAuthTrampoline).not.toHaveBeenCalled()
   })
 

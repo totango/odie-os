@@ -1,6 +1,8 @@
 import { logRpcFailure } from "./rpcErrors";
+import { requireCompatibleChat, requireEditingReady, useEditingState, editingMessage, recordEditingFailure } from './features/workspace/editingProtocol';
 import {
   Fragment,
+  isValidElement,
   memo,
   useState,
   useEffect,
@@ -8,11 +10,13 @@ import {
   useRef,
   useMemo,
   useCallback,
+  type ComponentPropsWithoutRef,
   type ReactNode,
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { reportIssue } from "./errorReporting";
 import {
+  Dialog,
   DropdownMenu,
   Popover,
   Tooltip,
@@ -38,6 +42,7 @@ import {
   ArrowsClockwise,
   Lightning,
   Copy,
+  Clipboard as ClipboardIcon,
   WarningCircle,
   Code,
   PencilSimple,
@@ -48,13 +53,12 @@ import {
   Question,
   ArrowUpRight,
   Blueprint,
+  GitBranch,
 } from "@phosphor-icons/react";
 import { RpcStub, RpcTarget } from "capnweb";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import * as Y from "yjs";
 import styles from "./ChatInterface.module.css";
-import { ChatInput } from "./ChatInput";
 import {
   getStoredSelectedModel,
   persistSelectedModel,
@@ -75,12 +79,17 @@ import {
   SlashCommandRequest,
   ChatAttachmentHandle,
   ChatAttachmentRef,
+  ChatCodeBase,
   WorkpieceId,
   BlueprintOutput,
   MessageFormatRef,
 } from "@gadgets/workshop-shared/api";
+import { composeCodeChange, type CodeChange } from "@gadgets/workshop-shared/code-change";
+import type { ChatChangeRow } from "./otClient";
 import { ActionKind } from "@gadgets/workshop-shared/gatekeeper";
-import { useSlashCommandChoice, type OverseerSource } from "./components/chat/slash-command-catalog";
+import {
+  useSlashCommandChoice, type OverseerSource,
+} from "./components/chat/slash-command-catalog";
 import { GatekeeperIcon } from "./components/GatekeeperIcon";
 import { formatOf, FORMAT_ICONS } from "./components/format/formats";
 import { ChatComponents } from "./components/chat/ChatComponents";
@@ -91,7 +100,7 @@ import DeleteConfirmationDialog from "./components/DeleteConfirmationDialog";
 import AutoApproveConfirmDialog from "./components/AutoApproveConfirmDialog";
 import { AlwaysApproveButton, ResolveButton } from "./components/ResolveButton";
 import { WorkshopButton, WorkshopIconButton, WorkshopInput } from "./components/WorkshopControls";
-import { useActionEntries } from "./useActions";
+import { actionLogResumed, useActionEntries } from "./useActions";
 import { useAlwaysApproveTag } from "./useAlwaysApproveTag";
 import { useResolveAction } from "./useResolveAction";
 import { safeExternalUrl } from "./utils/safeExternalUrl";
@@ -103,16 +112,111 @@ import { copyToClipboard } from "./clipboard";
 import WorkItemDrawer from "./WorkItemDrawer";
 import { useGatekeeperApps } from "./useGatekeeperApps";
 import { workItemTargetFromUrl, type WorkItemTarget } from "./workItemNavigation";
-import { composerDraftStorageKey } from "./composerDraft";
 
 /** Chooses the outer chat layout so an open Work Item reflows beside chat in every chat-list mode. */
 export function chatInterfaceLayoutDirection(sidebarMode: boolean, workItemOpen: boolean): "flex-row" | "flex-col" {
   return sidebarMode || workItemOpen ? "flex-row" : "flex-col";
 }
+import { isImeComposing } from "./keyboardEvent";
+import { formatAttachmentSize } from "./features/chat/attachmentFormatting";
+import { ChatComposer } from "./features/chat/composer/ChatComposer";
+import { composerDraftStorageKey } from "./features/chat/composer/draft/composerDraft";
 
-export interface StreamingProposedChanges {
-  updates: Uint8Array[];
-  count: number;
+/**
+ * The selected chat's live (accepted but not yet materialized) change row stream, delivered via
+ * AiChatSubscriber.changeApplied() and buffered per chat. `subscribe` replays the currently
+ * retained rows and then delivers each new row as it arrives -- synchronously from the
+ * subscription callback, *before* the materialization watermark that absorbs it can prune the
+ * buffer. That ordering is load-bearing: the server broadcasts a row and the "changes" message
+ * that materializes it in the same step (e.g. at the live-window size cap), so a consumer fed
+ * asynchronously would routinely miss the final row of each materialized batch. Rows a
+ * consumer subscribes too late to see are covered by the durable snapshot's watermark instead
+ * (see ChatCodeChanges.rowsThrough). Replay can redeliver rows a consumer has already seen;
+ * consumers dedupe by stream position (the OT client does).
+ */
+export interface ChatLiveChangeRows {
+  /** Which chat this stream belongs to (see ChatCodeChanges.chatId). */
+  chatId: number;
+  /** Subscribe to the row stream; returns the unsubscribe function. */
+  subscribe(listener: (row: ChatChangeRow) => void): () => void;
+}
+
+/**
+ * One event of the selected chat's edit-preview stream: the writeFile/editFile content the agent
+ * is still generating (see AiChatStreamEvent's editPreviewStart for the model). `start` opens a
+ * preview of the named call -- ending the previous call's delta stream, though *that* preview
+ * stays displayed until its durable row or `clear` resolves it (tool calls execute only after
+ * the whole model response streams, so several previews can finish before any row exists).
+ * `delta` appends streamed text to the named call's preview; `clear` withdraws a preview whose
+ * call will produce no row (it may name any call of the response, not just the streaming one);
+ * `reset` is the mop-up that drops all preview state (turn ended, stream lost). The consumer
+ * additionally resolves each preview when its durable change row arrives (see
+ * GadgetCodeInterface), which is the ordinary end of a successful one.
+ */
+export type EditPreviewEvent = {
+  kind: "start";
+  toolCallId: string;
+  workpieceId: WorkpieceId;
+  filename: string;
+  /** editFile's replaced text; absent for writeFile (the streamed text replaces the whole file). */
+  textToReplace?: string;
+} | {
+  kind: "delta";
+  toolCallId: string;
+  delta: string;
+} | {
+  kind: "clear";
+  toolCallId: string;
+} | {
+  kind: "reset";
+};
+
+/**
+ * The selected chat's live edit-preview stream (see EditPreviewEvent), fed synchronously from
+ * the chat subscription's stream events. `subscribe` replays the currently *streaming* preview
+ * (as a start plus one delta) so a consumer attaching mid-stream still shows it; previews that
+ * already finished streaming are not replayable -- a late joiner picks their content up from the
+ * durable rows instead.
+ */
+export interface ChatLiveEditPreviews {
+  /** Which chat this stream belongs to (see ChatCodeChanges.chatId). */
+  chatId: number;
+  /** Subscribe to the preview event stream; returns the unsubscribe function. */
+  subscribe(listener: (event: EditPreviewEvent) => void): () => void;
+}
+
+// The currently-streaming preview retained per chat, for subscribe-time replay only (see
+// ChatLiveEditPreviews.subscribe).
+type StreamingEditPreview = {
+  toolCallId: string;
+  workpieceId: WorkpieceId;
+  filename: string;
+  textToReplace?: string;
+  text: string;
+};
+
+/**
+ * The selected chat's durable code-branch state, as one consistent snapshot: the chat's current
+ * ChatCodeBase (pins, generation, epoch -- `codeBase` absent when the chat has none yet, which
+ * reads as `{pins: [], generation: 0, revision: 0}`) together with the current epoch's
+ * non-reverted "changes" messages composed into one change. The two are always derived together
+ * -- the code view builds the chat's content as pin base trees + `epochChange` + live rows, and
+ * pairing a stale epoch's changes with a fresh epoch's pins (or vice versa) would transiently
+ * build nonsense. `rowsThrough` is the current generation's revision the composed changes'
+ * watermarks reach: rows at or below it are already inside `epochChange`, and only later rows
+ * still apply on top (see AiChatMessageBody.watermark). `undefined` while no chat is selected or
+ * its metadata/history hasn't loaded; `epochChange` absent when the chat has recorded no code
+ * changes this epoch.
+ */
+export interface ChatCodeChanges {
+  /**
+   * Which chat this snapshot describes: parent-owned state updates lag a chat switch by a
+   * render, so consumers must ignore a snapshot whose chatId doesn't match their selection.
+   */
+  chatId: number;
+  codeBase?: ChatCodeBase;
+  epochChange?: CodeChange;
+  rowsThrough: number;
 }
 
 type CreatedGadgetCardInfo = {
@@ -184,15 +288,18 @@ export type ActiveFileTarget = {
   filename: string;
 };
 
-type DraftUpdateEntry = {
-  timestamp: Date;
-  author: AiChatAuthorInfo;
-  update: Uint8Array;
-};
-
-type DraftChatState = {
-  entries: DraftUpdateEntry[];
-  latestAuthor: AiChatAuthorInfo | null;
+// One chat's buffered live change rows (see ChatLiveChangeRows): append-only `rows` with `seen`
+// keys for dedupe (subscribe-replay redelivers retained rows). Pruning -- dropping rows a
+// materialization watermark covered or a destructive generation bump erased -- replaces `rows`
+// wholesale so consumers' cursors know to restart.
+type ChatChangeRowBuffer = {
+  rows: ChatChangeRow[];
+  seen: Set<string>;
+  // For the draft banner, which describes *human* draft edits only (rows carrying a
+  // `submission`, i.e. produced by submitCodeChange -- agent edits flow through the same stream
+  // but have their own streaming UI): when the newest such row arrived (rows don't carry
+  // timestamps on the wire; arrival time is close enough for display).
+  lastUserEditAt: Date | null;
 };
 
 type ChatListScope = "direct" | "agents" | "all";
@@ -223,53 +330,26 @@ function persistShowThinkingTraces(show: boolean): void {
   }
 }
 
-function refreshDraftLatestAuthor(state: DraftChatState) {
-  state.latestAuthor =
-    state.entries.length > 0 ? state.entries[state.entries.length - 1].author : null;
-}
-
-function pruneDraftEntriesBefore(
-  drafts: Map<number, DraftChatState>,
+// Prune a chat's row buffer to the rows `keep` selects, replacing the array (a new identity
+// tells consumers to re-read from the start). Returns whether anything was dropped.
+function pruneChatChangeRows(
+  buffers: Map<number, ChatChangeRowBuffer>,
   chatId: number,
-  cutoff: Date,
-) {
-  let state = drafts.get(chatId);
-  if (!state) {
-    return false;
-  }
-
-  const cutoffTime = cutoff.getTime();
-  const nextEntries = state.entries.filter(
-    (entry) => entry.timestamp.getTime() > cutoffTime,
-  );
-  if (nextEntries.length === state.entries.length) {
-    return false;
-  }
-
-  if (nextEntries.length === 0) {
-    drafts.delete(chatId);
+  keep: (row: ChatChangeRow) => boolean,
+): boolean {
+  const buffer = buffers.get(chatId);
+  if (!buffer) return false;
+  const kept = buffer.rows.filter(keep);
+  if (kept.length === buffer.rows.length) return false;
+  if (kept.length === 0) {
+    buffers.delete(chatId);
     return true;
   }
-
-  state.entries = nextEntries;
-  refreshDraftLatestAuthor(state);
+  buffer.rows = kept;
+  buffer.seen = new Set(kept.map(row => `${row.generation}:${row.revision}`));
   return true;
 }
 
-function getOrCreateDraftChatState(
-  drafts: Map<number, DraftChatState>,
-  chatId: number,
-): DraftChatState {
-  let state = drafts.get(chatId);
-  if (!state) {
-    state = {
-      entries: [],
-      latestAuthor: null,
-    };
-    drafts.set(chatId, state);
-  }
-  return state;
-}
 
 const CAPSULE_LINK_PREFIX = "/__gadgets_capsule__/";
 const CAPSULE_TOKEN_PREFIX = "GADGETS_CAPSULE_";
@@ -512,6 +592,8 @@ function getToolCallSummary(
       const output = outputOf?.(tc);
       return { verb: `Created ${output?.noun ?? "gadget"}`, target: tc.input.title };
     }
+    case "createWorktree":
+      return { verb: "Created worktree", target: tc.input.title };
     case "executeCode": {
       // Prefer the first non-empty line as a preview. `code` may be absent while the tool call's
       // input is still streaming in, so guard against undefined.
@@ -616,6 +698,8 @@ function describeToolCallCount(toolName: AiToolCall["toolName"], count: number):
       return `Saved ${pluralize(count, "resource")}`;
     case "createGadget":
       return `Created ${pluralize(count, "gadget")}`;
+    case "createWorktree":
+      return `Created ${pluralize(count, "worktree")}`;
     case "observeUserChanges":
       return `Observed ${pluralize(count, "change set")}`;
     case "giveUp":
@@ -655,6 +739,8 @@ function getToolIcon(
       return LinkSimple;
     case "createGadget":
       return Plus;
+    case "createWorktree":
+      return GitBranch;
     case "listBlueprints":
       return Blueprint;
     case "observeUserChanges":
@@ -684,6 +770,8 @@ function getProvisionalToolLabel(toolName: AiToolCall["toolName"] | null | undef
       return "Saving resource";
     case "createGadget":
       return "Creating gadget";
+    case "createWorktree":
+      return "Creating worktree";
     case "executeCode":
       return "Running code";
     case "webFetch":
@@ -712,6 +800,7 @@ function getProvisionalToolVerb(toolName: AiToolCall["toolName"]): string {
     case "setGadgetBinding": return "Wiring up";
     case "saveCapsuleAsBinding": return "Saving";
     case "createGadget": return "Creating gadget";
+    case "createWorktree": return "Creating worktree";
     case "executeCode": return "Running code";
     case "webFetch": return "Fetching";
     case "observeUserChanges": return "Observing user changes";
@@ -738,6 +827,7 @@ function describeProvisionalToolCount(toolName: AiToolCall["toolName"], count: n
     case "setGadgetBinding": return `Wiring up ${pluralize(count, "binding")}`;
     case "saveCapsuleAsBinding": return `Saving ${pluralize(count, "resource")}`;
     case "createGadget": return `Creating ${pluralize(count, "gadget")}`;
+    case "createWorktree": return `Creating ${pluralize(count, "worktree")}`;
     case "observeUserChanges": return `Observing ${pluralize(count, "change set")}`;
     case "giveUp": return "Stopping";
     case "listBlueprints": return "Listing blueprints";
@@ -993,11 +1083,34 @@ function FormatMention({ format }: { format: MessageFormatRef }) {
   );
 }
 
+function CodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
+  const code = isValidElement<{ children?: ReactNode }>(children) &&
+      typeof children.props.children === "string"
+    ? children.props.children.replace(/\n$/, "")
+    : "";
+
+  return (
+    <div className={styles.codeBlock}>
+      <pre {...props}>{children}</pre>
+      <button
+        type="button"
+        className={styles.codeCopyButton}
+        onClick={() => void copyToClipboard(code)}
+        aria-label="Copy code"
+        title="Copy code"
+      >
+        <ClipboardIcon size={16} />
+      </button>
+    </div>
+  );
+}
+
 function getMarkdownComponents(
   mentionsByToken?: Map<string, Mention>,
   onOpenWorkItem?: (target: WorkItemTarget) => void,
 ): Components {
   return {
+    pre: ({ node: _node, ...props }) => <CodeBlock {...props} />,
     table: ({ node: _node, children, ...props }) => (
       <div className={styles.markdownTableWrapper}>
         <table {...props}>{children}</table>
@@ -1094,13 +1207,6 @@ export const MarkdownMessage = memo(function MarkdownMessage(
     </ReactMarkdown>
   );
 });
-
-function formatAttachmentSize(size: number | undefined): string | null {
-  if (size === undefined) return null;
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 // Build a temporary object URL for inlined attachment bytes, revoking it when no longer needed.
 function useAttachmentObjectUrl(content: Uint8Array | undefined, mimeType: string): string | null {
@@ -1634,6 +1740,7 @@ const ToolGroupRow = memo(function ToolGroupRow({
   );
 });
 
+
 // Helper to compute the state of messages (merged/reverted status and active changes)
 interface MessageState {
   // Map from sequence number to status for change messages
@@ -1644,9 +1751,9 @@ interface MessageState {
   revertTimestamps: Map<number, Date>; // sequence -> timestamp of reverted-from message
 
   // The accumulated unmerged/unreverted changes (for the proposed changes view). An entry's
-  // `update` is absent for batches that record only gadget creations/binding additions; such
+  // `change` is absent for batches that record only gadget creations/binding additions; such
   // batches still count as proposed changes (they are accepted and reverted like code edits).
-  activeChanges: { sequence: number; update?: Uint8Array }[];
+  activeChanges: { sequence: number; change?: CodeChange }[];
 }
 
 type ChatDisplayEntry =
@@ -1926,6 +2033,11 @@ export function buildChatDisplayEntries(
   const isVisibleSavedChangesMessage = (msg: AiChatMessage): msg is ChangeChatMessage =>
     msg.type === "changes" &&
     msg.author.type === "user" &&
+    // A conversion boundary is the git-storage migration's bookkeeping, not a user action (see
+    // AiChatMessageBody.conversionBoundary), so it never displays. Its content still reaches
+    // the proposed-changes views, and the "Pending changes" banner's discard-all is the way to
+    // discard it.
+    msg.conversionBoundary !== true &&
     (changeStatus.get(msg.sequence) ?? "pending") === "pending";
 
   for (let i = 0; i < messages.length; ) {
@@ -2153,27 +2265,27 @@ export function computeMessageStates(
   const mergeTimestamps = new Map<number, Date>();
   const revertTimestamps = new Map<number, Date>();
 
-  // Track active updates as we scan (for proposed changes computation)
-  let updates: { sequence: number; update?: Uint8Array }[] = [];
+  // Track active changes as we scan (for proposed changes computation)
+  let updates: { sequence: number; change?: CodeChange }[] = [];
 
-  // The boundary carries the still-proposed pre-boundary changes merged into one update. Fold it
+  // The boundary carries the still-proposed pre-boundary changes composed into one change. Fold it
   // in at the last pre-boundary sequence, so it counts as proposed and a later merge or revert
   // reaching across the boundary still resolves it. Skipped once the page before the boundary has
   // loaded, since its own "changes" messages would then count the same edits again.
   //
-  // Only the bytes appear here, because that is all these entries are read for: reconstructing the
-  // proposed code. A prefix that only created gadgets carries none, and stays reachable through the
-  // server's own cut -- see the accept-changes banner.
+  // Only the change appears here, because that is all these entries are read for: reconstructing
+  // the proposed code. A prefix that only created gadgets carries none, and stays reachable
+  // through the server's own cut -- see the accept-changes banner.
   if (
-    compacted?.proposedChanges !== undefined &&
+    compacted?.proposedChange !== undefined &&
     (messages.length === 0 || messages[0].sequence >= compacted.to)
   ) {
-    updates.push({ sequence: compacted.to - 1, update: compacted.proposedChanges });
+    updates.push({ sequence: compacted.to - 1, change: compacted.proposedChange });
   }
 
   for (let msg of messages) {
     if (msg.type === "changes") {
-      updates.push({ sequence: msg.sequence, update: msg.update });
+      updates.push({ sequence: msg.sequence, change: msg.change });
       changeStatus.set(msg.sequence, "pending");
     } else if (msg.type === "merge") {
       // Mark changes as merged and drop from active set
@@ -2208,6 +2320,62 @@ export function computeMessageStates(
     mergeTimestamps,
     revertTimestamps,
     activeChanges: updates,
+  };
+}
+
+/**
+ * The durable part of a chat's uncommitted code state (see ChatCodeChanges): the current
+ * epoch's non-reverted "changes" messages composed into one change, plus the generation revision
+ * their watermarks reach. `codeBase` is the chat's current ChatCodeBase; only messages at or
+ * after its `epoch` participate ("at" matters for a migrated chat, whose epoch points at its own
+ * conversionBoundary changes message) -- accepting changes resets the chat's code base, so
+ * earlier epochs' changes are composed over pins that no longer exist. Keying the cutoff on the
+ * metadata's epoch rather than on loaded merge messages keeps this consistent with the pin set
+ * the code view reads from the same metadata.
+ *
+ * The oldest loaded compaction boundary stands in for the pages before it -- its proposedChange
+ * blob, unless a loaded revert reached across the boundary -- and drops out once those pages
+ * load, exactly like computeMessageStates' active-changes seeding. The blob folds in at
+ * sequence `to - 1`, so an epoch past that excludes it like any other pre-epoch content.
+ */
+export function computeChatEpochChanges(
+  messages: AiChatMessage[],
+  compacted?: CompactionBoundary,
+  codeBase?: ChatCodeBase,
+): { epochChange?: CodeChange; rowsThrough: number } {
+  const { changeStatus } = computeMessageStates(messages, compacted);
+  const epoch = codeBase?.epoch;
+  const generation = codeBase?.generation ?? 0;
+  const changes: CodeChange[] = [];
+  let rowsThrough = 0;
+
+  if (compacted && (messages.length === 0 || messages[0].sequence >= compacted.to) &&
+      (epoch === undefined || compacted.to - 1 >= epoch)) {
+    // The boundary's proposed-changes entry is folded in at sequence `to - 1` by
+    // computeMessageStates, so a revert reaching across the boundary marks that sequence.
+    if (compacted.proposedChange !== undefined &&
+        changeStatus.get(compacted.to - 1) !== "reverted") {
+      changes.push(compacted.proposedChange);
+    }
+  }
+
+  for (const msg of messages) {
+    if (msg.type !== "changes" || (epoch !== undefined && msg.sequence < epoch) ||
+        changeStatus.get(msg.sequence) === "reverted") {
+      continue;
+    }
+    if (msg.change !== undefined) changes.push(msg.change);
+    // Revisions restart per generation, so only the current generation's watermarks position
+    // the live-row cursor (an older generation's rows were retired by its closing bump).
+    if (msg.watermark !== undefined && msg.watermark.changesGeneration === generation) {
+      rowsThrough = Math.max(rowsThrough, msg.watermark.throughRevision);
+    }
+  }
+
+  return {
+    epochChange:
+        changes.length === 0 ? undefined : changes.reduce((a, b) => composeCodeChange(a, b)),
+    rowsThrough,
   };
 }
 
@@ -2249,13 +2417,16 @@ interface ChatInterfaceProps {
     chatId: number | null,
     options?: { replace?: boolean },
   ) => void;
-  onProposedChangesChange?: (proposedChanges: Uint8Array | undefined) => void;
-  onDraftProposedChangesChange?: (
-    updates: StreamingProposedChanges | undefined,
-  ) => void;
-  onStreamingProposedChangesChange?: (
-    updates: StreamingProposedChanges | undefined,
-  ) => void;
+  // The selected chat's code-branch snapshot (see ChatCodeChanges): its code base and the
+  // current epoch's recorded changes, delivered together so the code view always layers a
+  // consistent pair.
+  onChatChangesChange?: (changes: ChatCodeChanges | undefined) => void;
+  // The selected chat's live (unmaterialized) change rows, delivered separately from the durable
+  // snapshot so per-keystroke row arrivals don't churn it (see ChatLiveChangeRows).
+  onLiveRowsChange?: (rows: ChatLiveChangeRows | undefined) => void;
+  // The selected chat's live edit-preview stream, stable per chat like the row stream (see
+  // ChatLiveEditPreviews).
+  onLiveEditPreviewsChange?: (previews: ChatLiveEditPreviews | undefined) => void;
   onStreamingActiveFileChange?: (chatId: number, file: ActiveFileTarget | null | undefined) => void;
   pendingConsoleLogCount: number;
   consoleLogPreview: string;
@@ -2272,13 +2443,22 @@ interface ChatInterfaceProps {
   onSidebarResize?: (width: number) => void;
   renderExtraTab?: () => React.ReactNode;
   onHasAnyCodeChange?: (hasAnyCode: boolean) => void;
-  onSelectedChatHasProposedChangesChange?: (hasProposedChanges: boolean) => void;
+  // The workpieces the selected chat proposes changes to (empty when none is selected or it
+  // proposes nothing); see AiChatMetadata.proposedChangeWorkpieces.
+  onSelectedChatProposedChangesChange?: (workpieceIds: readonly WorkpieceId[]) => void;
   constrainChatWidth?: boolean;
   onOpenGadget: (gadgetId: WorkpieceId) => void;
 
   // The output format a workpiece was built as, so a created-app card can name and draw it as the
   // Document (or whatever) it is rather than a generic app.
   outputOfWorkpiece: (gadgetId: WorkpieceId) => BlueprintOutput | undefined;
+}
+
+// Whether a chat proposes changes the client can act on: the server delivers the touched
+// workpieces (worktree-only changes deliver none, deliberately -- see
+// AiChatMetadata.proposedChangeWorkpieces), so the pending-changes affordances key off this.
+function chatHasProposedChanges(meta: AiChatMetadata): boolean {
+  return (meta.proposedChangeWorkpieces?.length ?? 0) > 0;
 }
 
 // Bucket a chat's lastActive into a time grouping for the chat list.
@@ -2368,7 +2548,6 @@ type ProvisionalChatState = {
   compacting: boolean;
   toolCalls: ProvisionalToolCallState[];
   toolCallsById: Map<string, ProvisionalToolCallState>;
-  codeUpdates: Uint8Array[];
   activeEditingFile: ActiveFileTarget | null | undefined;
 };
 
@@ -2379,7 +2558,6 @@ function createProvisionalChatState(): ProvisionalChatState {
     compacting: false,
     toolCalls: [],
     toolCallsById: new Map(),
-    codeUpdates: [],
     activeEditingFile: undefined,
   };
 }
@@ -2389,13 +2567,13 @@ function clearProvisionalTextState(state: ProvisionalChatState) {
   state.reasoning = "";
   state.toolCalls = [];
   state.toolCallsById.clear();
-  // Note: This function only clears chat streaming state, not code streaming state. Chat streaming
-  // is reset when a message arrives (once per step), whereas code streaming is reset when code
-  // changes arrive (at the end of a turn).
+  // Note: This function only clears chat streaming state, not the active-file marker. Chat
+  // streaming is reset when a message arrives (once per step); the active-file marker is reset
+  // when the finalized changes arrive (at the end of a turn). (Streaming *code* needs no
+  // provisional state at all: agent edits arrive as durable change rows via changeApplied.)
 }
 
 function clearProvisionalCodeState(state: ProvisionalChatState) {
-  state.codeUpdates = [];
   state.activeEditingFile = undefined;
 }
 
@@ -2405,7 +2583,6 @@ function isProvisionalChatStateEmpty(state: ProvisionalChatState) {
     state.reasoning === "" &&
     !state.compacting &&
     state.toolCalls.length === 0 &&
-    state.codeUpdates.length === 0 &&
     state.activeEditingFile === undefined
   );
 }
@@ -2440,9 +2617,9 @@ function ChatInterface({
   overseer,
   selectedChatId,
   onNavigateToChat,
-  onProposedChangesChange,
-  onDraftProposedChangesChange,
-  onStreamingProposedChangesChange,
+  onChatChangesChange,
+  onLiveRowsChange,
+  onLiveEditPreviewsChange,
   onStreamingActiveFileChange,
   pendingConsoleLogCount,
   consoleLogPreview,
@@ -2457,7 +2634,7 @@ function ChatInterface({
   onSidebarResize,
   renderExtraTab,
   onHasAnyCodeChange,
-  onSelectedChatHasProposedChangesChange,
+  onSelectedChatProposedChangesChange,
   constrainChatWidth,
   onOpenGadget,
   outputOfWorkpiece,
@@ -2468,7 +2645,8 @@ function ChatInterface({
   const workItemsApp = useGatekeeperApps().find((app) =>
     app.composition?.kind === "work-items" && app.composition.role === undefined);
   const [openWorkItem, setOpenWorkItem] = useState<WorkItemTarget | null>(null);
-  const getOverseer = useCallback(() => overseer, [overseer]);
+  const editingState = useEditingState(overseer);
+  const getOverseer = useCallback(async () => { await requireEditingReady(overseer); return overseer; }, [overseer]);
   const cacheRef = useRef<ChatCache>({
     chats: new Map(),
     messages: new Map(),
@@ -2477,7 +2655,18 @@ function ChatInterface({
     lastMessageTimestamp: null,
   });
   const provisionalRef = useRef<Map<number, ProvisionalChatState>>(new Map());
-  const draftRef = useRef<Map<number, DraftChatState>>(new Map());
+  // Per-chat buffers of live (unmaterialized) change rows (see ChatLiveChangeRows), fed by
+  // changeApplied, pruned by materialization watermarks and generation bumps.
+  const chatChangeRowsRef = useRef<Map<number, ChatChangeRowBuffer>>(new Map());
+  // Live-row subscribers by chat, notified synchronously from changeApplied (before any pruning;
+  // see ChatLiveChangeRows.subscribe).
+  const chatChangeRowListenersRef =
+      useRef<Map<number, Set<(row: ChatChangeRow) => void>>>(new Map());
+  // Per-chat streaming edit previews (retained for subscribe-time replay; see
+  // StreamingEditPreview) and their event subscribers, fed synchronously from stream events.
+  const editPreviewsRef = useRef<Map<number, StreamingEditPreview>>(new Map());
+  const editPreviewListenersRef =
+      useRef<Map<number, Set<(event: EditPreviewEvent) => void>>>(new Map());
   // Last server-instance generation seen (survives reconnects). Used to detect a full DO restart,
   // in which case in-flight provisional streams were lost and must be discarded. See
   // AiChatSubscriber.streamGeneration.
@@ -2497,7 +2686,10 @@ function ChatInterface({
   const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
   const [updateCounter, setUpdateCounter] = useState(0); // Force re-render when cache updates
   const [proposedChangesVersion, setProposedChangesVersion] = useState(0); // Incremented only for change-affecting messages
-  const [draftChangesVersion, setDraftChangesVersion] = useState(0);
+  // Rows live in refs (chatChangeRowsRef); this state only forces re-renders of their readers (the
+  // draft banner) as rows arrive or get pruned. Subscribed consumers are fed synchronously and
+  // don't depend on it (see ChatLiveChangeRows).
+  const [_liveRowsVersion, setLiveRowsVersion] = useState(0);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState("");
   const [renamingChatId, setRenamingChatId] = useState<number | null>(null);
@@ -2514,6 +2706,10 @@ function ChatInterface({
   const [discardingChangesChatIds, setDiscardingChangesChatIds] = useState(
     () => new Set<number>(),
   );
+  // Chat whose accept came back "stale" (mainline advanced past its pins), awaiting the user's
+  // decision in the update-from-mainline dialog.
+  const [staleAcceptChatId, setStaleAcceptChatId] = useState<number | null>(null);
+  const [isUpdatingFromMainline, setIsUpdatingFromMainline] = useState(false);
 
   const [expandedToolCalls, setExpandedToolCalls] = useState<Set<string>>(
     new Set(),
@@ -2646,6 +2842,7 @@ function ChatInterface({
   refreshBoundaryRef.current = (chatId: number) => {
     void (async () => {
       try {
+        await requireCompatibleChat(overseer);
         cacheHistoryPage(chatId, await overseer.getChatHistory(chatId));
         forceUpdate();
       } catch (err) {
@@ -2762,7 +2959,7 @@ function ChatInterface({
   // Notify parent when any chat has proposed changes (code written but not merged).
   const onHasAnyCodeChangeRef = useRef(onHasAnyCodeChange);
   onHasAnyCodeChangeRef.current = onHasAnyCodeChange;
-  const anyHasProposedChanges = chatList.some(c => c.hasProposedChanges);
+  const anyHasProposedChanges = chatList.some(chatHasProposedChanges);
   useEffect(() => {
     if (chatListReady) {
       onHasAnyCodeChangeRef.current?.(anyHasProposedChanges);
@@ -2902,55 +3099,106 @@ function ChatInterface({
     }
   }, [overseer, toasts]);
 
-  const onSelectedChatHasProposedChangesChangeRef = useRef(onSelectedChatHasProposedChangesChange);
-  onSelectedChatHasProposedChangesChangeRef.current = onSelectedChatHasProposedChangesChange;
+  const onSelectedChatProposedChangesChangeRef = useRef(onSelectedChatProposedChangesChange);
+  onSelectedChatProposedChangesChangeRef.current = onSelectedChatProposedChangesChange;
+  // Keyed on the list's *content*: metadata is redelivered wholesale on every lastActive bump,
+  // and pushing a fresh (but equal) array into the parent's state each time would re-render it
+  // for nothing.
+  const currentProposedWorkpieces = currentChatMetadata?.proposedChangeWorkpieces;
+  const currentProposedWorkpiecesKey = currentProposedWorkpieces?.join(",") ?? "";
+  const metadataLoaded = currentChatMetadata !== undefined;
   useEffect(() => {
-    if (selectedChatId !== null && currentChatMetadata === undefined) {
+    if (selectedChatId !== null && !metadataLoaded) {
       return;
     }
 
-    onSelectedChatHasProposedChangesChangeRef.current?.(
-      currentChatMetadata?.hasProposedChanges === true,
-    );
-  }, [currentChatMetadata?.hasProposedChanges, currentChatMetadata, selectedChatId]);
+    onSelectedChatProposedChangesChangeRef.current?.(currentProposedWorkpieces ?? []);
+    // oxlint-disable-next-line exhaustive-deps -- currentProposedWorkpieces is covered by its key.
+  }, [currentProposedWorkpiecesKey, metadataLoaded, selectedChatId]);
 
   const currentProvisionalState =
     selectedChatId !== null
       ? (provisionalRef.current.get(selectedChatId) ?? null)
       : null;
 
-  const currentDraftState =
-    selectedChatId !== null ? (draftRef.current.get(selectedChatId) ?? null) : null;
-  const currentDraftChangesCount = currentDraftState?.entries.length ?? 0;
+  const currentRowBuffer =
+    selectedChatId !== null ? (chatChangeRowsRef.current.get(selectedChatId) ?? null) : null;
+  // Whether the live window holds *human* draft edits -- the rows the draft banner describes.
+  // Server-authored rows (agent edits, mainline merges) share the same stream but must not
+  // raise the banner: the agent's activity has its own streaming UI. Derived from the rows
+  // (rather than tracked) so pruning -- materialization watermarks, generation bumps -- can
+  // never leave it stale.
+  const currentHasUserDraftRows =
+    currentRowBuffer !== null && currentRowBuffer.rows.some(row => row.submission !== undefined);
 
   const provisionalToolCalls = currentProvisionalState?.toolCalls ?? [];
   const useConstrainedChatWidth = sidebarMode || constrainChatWidth;
 
-  const currentStreamingChanges = currentProvisionalState?.codeUpdates;
-  const currentStreamingChangesCount = currentStreamingChanges?.length ?? 0;
   const currentStreamingActiveFile = currentProvisionalState?.activeEditingFile;
-  const currentDraftChangesState = useMemo(():
-    | StreamingProposedChanges
-    | undefined => {
-    if (!currentDraftState || currentDraftChangesCount === 0) {
-      return undefined;
-    }
+  // The selected chat's live-row stream in the subscription shape the code view consumes (see
+  // ChatLiveChangeRows). Identity is stable per chat -- the subscription itself outlives row
+  // arrivals and buffer pruning -- so consumers subscribe once per chat.
+  const currentLiveRows = useMemo((): ChatLiveChangeRows | undefined => {
+    if (selectedChatId === null) return undefined;
+    const chatId = selectedChatId;
     return {
-      updates: currentDraftState.entries.map((entry) => entry.update),
-      count: currentDraftChangesCount,
+      chatId,
+      subscribe: (listener) => {
+        let listeners = chatChangeRowListenersRef.current.get(chatId);
+        if (!listeners) {
+          listeners = new Set();
+          chatChangeRowListenersRef.current.set(chatId, listeners);
+        }
+        listeners.add(listener);
+        // Replay what the buffer retains (rows arriving during the replay are impossible: this
+        // is all synchronous). The consumer dedupes, so redundancy is harmless.
+        const buffer = chatChangeRowsRef.current.get(chatId);
+        if (buffer) for (const row of buffer.rows) listener(row);
+        return () => {
+          listeners.delete(listener);
+          if (listeners.size === 0) chatChangeRowListenersRef.current.delete(chatId);
+        };
+      },
     };
-  }, [currentDraftChangesCount, currentDraftState, draftChangesVersion, selectedChatId]);
-  const currentStreamingState = useMemo(():
-    | StreamingProposedChanges
-    | undefined => {
-    if (!currentStreamingChanges || currentStreamingChangesCount === 0) {
-      return undefined;
-    }
+  }, [selectedChatId]);
+
+  // The selected chat's edit-preview stream in subscription shape (see ChatLiveEditPreviews),
+  // stable per chat like the row stream above.
+  const currentLiveEditPreviews = useMemo((): ChatLiveEditPreviews | undefined => {
+    if (selectedChatId === null) return undefined;
+    const chatId = selectedChatId;
     return {
-      updates: currentStreamingChanges,
-      count: currentStreamingChangesCount,
+      chatId,
+      subscribe: (listener) => {
+        let listeners = editPreviewListenersRef.current.get(chatId);
+        if (!listeners) {
+          listeners = new Set();
+          editPreviewListenersRef.current.set(chatId, listeners);
+        }
+        listeners.add(listener);
+        // Replay the streaming preview, if any, so a consumer subscribing mid-stream (a chat
+        // switch, an OT client rebuild) still shows the text streamed so far.
+        const streaming = editPreviewsRef.current.get(chatId);
+        if (streaming !== undefined) {
+          listener({
+            kind: "start",
+            toolCallId: streaming.toolCallId,
+            workpieceId: streaming.workpieceId,
+            filename: streaming.filename,
+            ...(streaming.textToReplace !== undefined
+              ? { textToReplace: streaming.textToReplace } : {}),
+          });
+          if (streaming.text !== "") {
+            listener({ kind: "delta", toolCallId: streaming.toolCallId, delta: streaming.text });
+          }
+        }
+        return () => {
+          listeners.delete(listener);
+          if (listeners.size === 0) editPreviewListenersRef.current.delete(chatId);
+        };
+      },
     };
-  }, [selectedChatId, currentStreamingChanges, currentStreamingChangesCount]);
+  }, [selectedChatId]);
 
   const isCompacting = currentProvisionalState?.compacting === true;
 
@@ -3017,7 +3265,6 @@ function ChatInterface({
   }, [
     currentMessages,
     hasVisibleProvisionalContent,
-    currentStreamingChangesCount,
     isAgentActive,
     scrollMessagesToBottom,
   ]);
@@ -3029,6 +3276,7 @@ function ChatInterface({
   }, [selectedChatId, scrollMessagesToBottom]);
   useEffect(() => {
     setDiscardChangesTarget(null);
+    setStaleAcceptChatId(null);
   }, [selectedChatId]);
 
   // Initialize title input when selecting a chat
@@ -3064,63 +3312,52 @@ function ChatInterface({
     selectedChatIdRef.current = selectedChatId;
   }, [selectedChatId]);
 
-  // Notify parent when proposed changes change for the selected chat.
-  // Only recomputes when proposedChangesVersion changes (i.e. a "changes", "merge",
-  // or "revert" message arrives), NOT on every message.
+  // Notify parent when the selected chat's code-branch snapshot changes (see ChatCodeChanges):
+  // its ChatCodeBase plus the current epoch's recorded changes, derived together so the code
+  // view never pairs one's stale value with the other's fresh one. Recomputes when
+  // proposedChangesVersion changes (i.e. a "changes" or "revert" message arrives, or a history
+  // page loads) or when the codeBase's *content* changes -- metadata is redelivered on every
+  // chat activity (title, lastActive, ...), so it is deduped by signature. "merge" messages bump
+  // neither directly: the epoch reset they perform arrives through the metadata's codeBase
+  // (advanced epoch, cleared pins, bumped generation), redelivered with the merge.
+  const currentCodeBaseSignature = currentChatMetadata
+    ? JSON.stringify(currentChatMetadata.codeBase ?? null) : undefined;
   useEffect(() => {
-    if (!currentChatMetadata?.hasProposedChanges) {
-      onProposedChangesChange?.(undefined);
+    if (selectedChatId === null || currentCodeBaseSignature === undefined ||
+        !cacheRef.current.messages.has(selectedChatId)) {
+      // No chat selected, or its metadata or history hasn't loaded yet -- the code view can't
+      // build the chat's doc until both have.
+      onChatChangesChange?.(undefined);
       return;
     }
 
-    // Read messages directly from the cache (always current) rather than using the
-    // memoized currentMessages, so we don't need it as a dependency.
-    const messages =
-      selectedChatId !== null
-        ? (cacheRef.current.messages.get(selectedChatId) || []).filter(
-            (msg) => msg !== undefined,
-          )
-        : [];
-    const { activeChanges } = computeMessageStates(
+    // Read messages and metadata directly from the cache (always current) rather than using the
+    // memoized currentMessages, so we don't need them as dependencies.
+    const messages = (cacheRef.current.messages.get(selectedChatId) || []).filter(
+      (msg) => msg !== undefined,
+    );
+    const codeBase = cacheRef.current.chats.get(selectedChatId)?.codeBase;
+    const { epochChange, rowsThrough } = computeChatEpochChanges(
       messages,
-      selectedChatId !== null
-        ? cacheRef.current.compacted.get(selectedChatId)?.[0]
-        : undefined,
+      cacheRef.current.compacted.get(selectedChatId)?.[0],
+      codeBase,
     );
 
-    if (activeChanges.length === 0) {
-      onProposedChangesChange?.(undefined);
-      return;
-    }
-
-    const updatePayloads = activeChanges
-      .map((c) => c.update)
-      .filter((u): u is Uint8Array => u !== undefined);
-
-    // Creation/binding-only batches carry no code update; preserve the "proposed changes exist"
-    // signal with an empty update in that case.
-    const mergedUpdate =
-      updatePayloads.length === 1
-        ? updatePayloads[0]
-        : updatePayloads.length > 0
-          ? Y.mergeUpdatesV2(updatePayloads)
-          : Y.encodeStateAsUpdateV2(new Y.Doc());
-
-    onProposedChangesChange?.(mergedUpdate);
+    onChatChangesChange?.({ chatId: selectedChatId, codeBase, epochChange, rowsThrough });
   }, [
-    currentChatMetadata?.hasProposedChanges,
     proposedChangesVersion,
     selectedChatId,
-    onProposedChangesChange,
+    currentCodeBaseSignature,
+    onChatChangesChange,
   ]);
 
   useEffect(() => {
-    onStreamingProposedChangesChange?.(currentStreamingState);
-  }, [currentStreamingState, onStreamingProposedChangesChange]);
+    onLiveRowsChange?.(currentLiveRows);
+  }, [currentLiveRows, onLiveRowsChange]);
 
   useEffect(() => {
-    onDraftProposedChangesChange?.(currentDraftChangesState);
-  }, [currentDraftChangesState, onDraftProposedChangesChange]);
+    onLiveEditPreviewsChange?.(currentLiveEditPreviews);
+  }, [currentLiveEditPreviews, onLiveEditPreviewsChange]);
 
   const onStreamingActiveFileChangeRef = useRef(onStreamingActiveFileChange);
   onStreamingActiveFileChangeRef.current = onStreamingActiveFileChange;
@@ -3129,6 +3366,19 @@ function ChatInterface({
       onStreamingActiveFileChangeRef.current?.(selectedChatId, currentStreamingActiveFile);
     }
   }, [currentStreamingActiveFile, selectedChatId]);
+
+  // Deliver one edit-preview event to a chat's subscribers. Touches only refs, so the
+  // first-render closures the subscriber instance captures stay correct.
+  const emitEditPreviewEvent = (chatId: number, event: EditPreviewEvent) => {
+    editPreviewListenersRef.current.get(chatId)?.forEach((listener) => listener(event));
+  };
+  // The turn-boundary mop-up: drop all of a chat's preview state (see EditPreviewEvent's
+  // `reset`). Emitted even when no preview is *streaming* -- finished previews awaiting their
+  // rows live in the consumer, which this tells to let go of them.
+  const resetEditPreviews = (chatId: number) => {
+    editPreviewsRef.current.delete(chatId);
+    emitEditPreviewEvent(chatId, { kind: "reset" });
+  };
 
   // Proper class implementation of AiChatSubscriber
   // This is necessary so the server receives a single stub for the object,
@@ -3144,6 +3394,9 @@ function ChatInterface({
         // re-streamed content isn't appended to it. Clearing all chats is safe: provisional state
         // is purely ephemeral display state, and idle chats already have none.
         provisionalRef.current.clear();
+        // Reset every subscribed chat's previews, not just those with a streaming entry:
+        // consumers also hold finished previews awaiting rows that were lost with the DO.
+        for (const chatId of editPreviewListenersRef.current.keys()) resetEditPreviews(chatId);
         forceUpdate();
       }
       lastStreamGenerationRef.current = generation;
@@ -3158,6 +3411,7 @@ function ChatInterface({
       const prevChat = cacheRef.current.chats.get(chat.id);
       if (prevChat?.activeAgent && !chat.activeAgent) {
         provisionalRef.current.delete(chat.id);
+        resetEditPreviews(chat.id);
       }
 
       // A revert reaching across a boundary rolls compaction back, lowering or clearing
@@ -3180,6 +3434,22 @@ function ChatInterface({
         refreshBoundaryRef.current(chat.id);
       }
 
+      // A generation bump obsoletes buffered rows: a *destructive* bump (revert / draft
+      // discard -- no `prior`) erased every row, so drop them all; a content-preserving bump
+      // (a merge's epoch reset) retires the closed generation's rows but the code view may
+      // still be draining its tail, so keep exactly the prior generation and the new one.
+      // (The buffers are advisory replay caches -- the OT client dedupes and prunes on its own
+      // stream position -- so pruning here is memory hygiene, not correctness.)
+      const codeBase = chat.codeBase;
+      if (prevChat !== undefined && codeBase !== undefined &&
+          (prevChat.codeBase?.generation ?? 0) !== codeBase.generation) {
+        const keepFrom = codeBase.prior?.generation ?? codeBase.generation;
+        if (pruneChatChangeRows(chatChangeRowsRef.current, chat.id,
+                                row => row.generation >= keepFrom)) {
+          setLiveRowsVersion((prev) => prev + 1);
+        }
+      }
+
       cacheRef.current.chats.set(chat.id, chat);
       bumpChatListVersion();
       forceUpdate();
@@ -3192,7 +3462,8 @@ function ChatInterface({
       cacheRef.current.compacted.delete(chatId);
       removeChatFromActionMessageIndex(chatId);
       provisionalRef.current.delete(chatId);
-      draftRef.current.delete(chatId);
+      editPreviewsRef.current.delete(chatId);
+      chatChangeRowsRef.current.delete(chatId);
       bumpChatListVersion();
 
       // If currently viewing this chat, go back to list
@@ -3204,37 +3475,37 @@ function ChatInterface({
       forceUpdate();
     }
 
-    draftUpdate(
+    changeApplied(
       chatId: number,
-      timestamp: Date,
+      generation: number,
+      revision: number,
       author: AiChatAuthorInfo,
-      update: Uint8Array,
+      change: CodeChange,
+      submission?: { clientId: string; seq: number },
     ) {
-      let draft = getOrCreateDraftChatState(draftRef.current, chatId);
-      let existingIndex = draft.entries.findIndex(
-        (entry) => entry.timestamp.getTime() === timestamp.getTime(),
-      );
-
-      if (existingIndex >= 0) {
-        draft.entries[existingIndex] = { timestamp, author, update };
-      } else {
-        draft.entries.push({ timestamp, author, update });
-        draft.entries.sort(
-          (left, right) => left.timestamp.getTime() - right.timestamp.getTime(),
-        );
+      let buffer = chatChangeRowsRef.current.get(chatId);
+      if (!buffer) {
+        buffer = { rows: [], seen: new Set(), lastUserEditAt: null };
+        chatChangeRowsRef.current.set(chatId, buffer);
       }
-
-      refreshDraftLatestAuthor(draft);
-      if (existingIndex >= 0) {
-        setDraftChangesVersion((prev) => prev + 1);
+      // Dedupe: subscribe-replay redelivers every retained row (see Overseer.subscribeToChat).
+      const key = `${generation}:${revision}`;
+      if (buffer.seen.has(key)) return;
+      buffer.seen.add(key);
+      const row: ChatChangeRow = {
+        generation, revision, author, change,
+        ...(submission !== undefined ? { submission } : {}),
+      };
+      buffer.rows.push(row);
+      if (submission !== undefined) {
+        // Only human submissions drive the draft banner (see ChatChangeRowBuffer).
+        buffer.lastUserEditAt = new Date();
       }
+      // Deliver to subscribers synchronously: the message that materializes this row may prune
+      // it from the buffer before any effect runs (see ChatLiveChangeRows).
+      chatChangeRowListenersRef.current.get(chatId)?.forEach((listener) => listener(row));
+      setLiveRowsVersion((prev) => prev + 1);
       scheduleUpdate();
-    }
-
-    draftCleared(chatId: number) {
-      if (draftRef.current.delete(chatId)) {
-        scheduleUpdate();
-      }
     }
 
     message(msg: AiChatMessage) {
@@ -3261,15 +3532,31 @@ function ChatInterface({
       }
 
       // Only trigger proposed-changes recomputation for message types that affect the code.
-      // "merge" is excluded: it reclassifies changes from proposed to committed but doesn't
-      // change the total code (committed + proposed). The hasProposedChanges metadata
-      // dependency handles the transition when all changes are merged.
+      // "merge" is excluded: the epoch reset it performs reaches the doc through the metadata's
+      // codeBase.epoch (redelivered with the merge), which the chat-doc effect above depends on
+      // -- recomputing here as well would race the metadata and transiently pair the old epoch's
+      // updates with the new epoch's (empty) pin set.
       if (msg.type === "changes" || msg.type === "revert") {
         setProposedChangesVersion((prev) => prev + 1);
       }
 
-      if (msg.type === "changes" && msg.author.type === "user") {
-        pruneDraftEntriesBefore(draftRef.current, msg.chatId, msg.timestamp);
+      // A "changes" message's watermark absorbs the rows it materialized; drop our copies (see
+      // AiChatMessageBody.watermark). Rows of other generations are untouched -- revisions
+      // restart per generation, so an unqualified prune could clear the wrong stream's rows.
+      if (msg.type === "changes" && msg.watermark !== undefined) {
+        const { changesGeneration, throughRevision } = msg.watermark;
+        if (pruneChatChangeRows(chatChangeRowsRef.current, msg.chatId,
+                                row => row.generation !== changesGeneration ||
+                                       row.revision > throughRevision)) {
+          setLiveRowsVersion((prev) => prev + 1);
+        }
+      }
+
+      // The turn-flush "changes" message covers every row a successful edit appended, and an
+      // error message ends the step -- either way this step's previews are over (ordinarily
+      // each previewed edit's own row already resolved it; see GadgetCodeInterface).
+      if (msg.type === "changes" || msg.type === "error") {
+        resetEditPreviews(msg.chatId);
       }
 
       const provisional = provisionalRef.current.get(msg.chatId);
@@ -3379,12 +3666,44 @@ function ChatInterface({
           toolCall.target = event.file.filename;
           break;
         }
-        case "codeReset":
-          provisional.codeUpdates = [];
+        case "editPreviewStart":
+          editPreviewsRef.current.set(chatId, {
+            toolCallId: event.toolCallId,
+            workpieceId: event.file.workpieceId,
+            filename: event.file.filename,
+            ...(event.textToReplace !== undefined
+              ? { textToReplace: event.textToReplace } : {}),
+            text: "",
+          });
+          emitEditPreviewEvent(chatId, {
+            kind: "start",
+            toolCallId: event.toolCallId,
+            workpieceId: event.file.workpieceId,
+            filename: event.file.filename,
+            ...(event.textToReplace !== undefined
+              ? { textToReplace: event.textToReplace } : {}),
+          });
           break;
-        case "codeUpdate":
-          provisional.codeUpdates.push(event.update);
+        case "editPreviewDelta": {
+          const preview = editPreviewsRef.current.get(chatId);
+          if (preview !== undefined && preview.toolCallId === event.toolCallId) {
+            preview.text += event.delta;
+          }
+          emitEditPreviewEvent(chatId,
+            { kind: "delta", toolCallId: event.toolCallId, delta: event.delta });
           break;
+        }
+        case "editPreviewClear": {
+          const preview = editPreviewsRef.current.get(chatId);
+          if (preview !== undefined && preview.toolCallId === event.toolCallId) {
+            editPreviewsRef.current.delete(chatId);
+          }
+          // Forwarded regardless of which call it names: a failed call's clear arrives at
+          // execution time, when a later call's preview may already be the streaming one, and
+          // the consumer still holds the named call's finished preview.
+          emitEditPreviewEvent(chatId, { kind: "clear", toolCallId: event.toolCallId });
+          break;
+        }
       }
 
       if (isProvisionalChatStateEmpty(provisional)) {
@@ -3404,6 +3723,8 @@ function ChatInterface({
 
     const subscribe = async () => {
       try {
+        await requireCompatibleChat(overseer);
+        if (!isMounted) return;
         // Subscribe using startAfter if we have a last message timestamp
         const startAfter = cacheRef.current.lastMessageTimestamp || undefined;
 
@@ -3463,12 +3784,55 @@ function ChatInterface({
       }
       // Note: subscriberRef.current stays alive for potential resubscription
     };
-  }, [overseer]);
+  }, [overseer, editingState === 'ready' || editingState === 'paused']);
 
   // Patch cached chat messages on action upserts.
   useActionEntries(overseer, (record) => {
     if (applyActionLogUpdateToCachedMessages(record)) scheduleUpdate();
   });
+  // On a resumed reconnect the subscription replays the gap, so the entries above cover cached
+  // cards. Otherwise (cold open, or the prior session never settled) re-fetch cached action
+  // cards whose log can still change: blank or pending cards (a resolution may have landed
+  // while we were away), and bindHook cards, which stay mutable after resolution (`enabled`
+  // toggles). Runs after useActionEntries, whose effect creates the store and its resumed flag.
+  useEffect(() => {
+    if (actionLogResumed(overseer)) return;
+    let cancelled = false;
+    const targets = [...cacheRef.current.actionMessages.values()].flatMap((locations) => {
+      const location = locations.values().next().value;
+      const msg = location && getCachedActionMessage(location)?.msg;
+      return msg && (!msg.actionLog || msg.actionLog.state === "pending" ||
+          msg.actionLog.type === "bindHook") ? [location] : [];
+    });
+
+    const refresh = async (location: { chatId: number; sequence: number }) => {
+      try {
+        await requireCompatibleChat(overseer);
+        if (cancelled) return;
+        const fetched = await overseer.getChatMessage(location.chatId, location.sequence);
+        if (cancelled || fetched?.type !== "action" || !fetched.actionLog) return;
+        // Resolution is monotonic: never regress a card another channel already resolved.
+        const current = getCachedActionMessage(location)?.msg;
+        if (fetched.actionLog.state === "pending" &&
+            current?.actionLog && current.actionLog.state !== "pending") return;
+        if (applyActionLogUpdateToCachedMessages(fetched.actionLog)) scheduleUpdate();
+      } catch (err) {
+        console.error("Failed to refresh action card:", err);
+      }
+    };
+
+    // A few at a time: a large cache refreshing all at once would flood the workspace DO.
+    let next = 0;
+    for (let i = Math.min(4, targets.length); i > 0; i--) {
+      void (async () => {
+        while (next < targets.length) {
+          if (cancelled) return;
+          await refresh(targets[next++]);
+        }
+      })();
+    }
+    return () => { cancelled = true; };
+  }, [overseer]);
 
   // Reset per-chat UI state when selectedChatId changes
   useEffect(() => {
@@ -3491,6 +3855,7 @@ function ChatInterface({
       setIsLoading(true);
       (async () => {
         try {
+          await requireCompatibleChat(overseer);
           const page = await overseer.getChatHistory(selectedChatId);
           if (cancelled) return;
 
@@ -3545,6 +3910,7 @@ function ChatInterface({
 
     setIsLoadingEarlier(true);
     try {
+      await requireCompatibleChat(overseer);
       const page = await overseer.getChatHistory(selectedChatId, oldestLoadedSequence);
       prependAnchorRef.current = messagesContainerRef.current?.scrollHeight;
       cacheHistoryPage(selectedChatId, page);
@@ -3562,7 +3928,7 @@ function ChatInterface({
 
   loadEarlierRef.current = () => { void handleShowEarlierMessages(); };
 
-  // Handle sending a message (always called from ChatInput with explicit messageText)
+  // Handle sending a message (always called from ChatComposer with explicit messageText)
   const handleSend = async (
     messageText?: string | SlashCommandRequest,
     modelId?: string | null,
@@ -3579,11 +3945,13 @@ function ChatInterface({
     try {
       if (selectedChatId === null) {
         // Create a new chat (with optional capsules).
+        await requireEditingReady(overseer);
         const newChatId = await overseer.newChat(
             message, model, capsules, attachments, formats);
         onNavigateToChatRef.current(newChatId);
       } else {
         // Send message to existing chat.
+        await requireEditingReady(overseer);
         await overseer.sendChatMessage(
           selectedChatId,
           message,
@@ -3594,6 +3962,7 @@ function ChatInterface({
         );
       }
     } catch (err) {
+      recordEditingFailure(overseer, err);
       if (!logRpcFailure("Failed to send message:", err, { reportSite: "chat.send" })) {
         toasts.add({ title: "Failed to send message", variant: "error" });
       }
@@ -3613,10 +3982,12 @@ function ChatInterface({
     if (!message && (!attachments || attachments.length === 0)) return;
     const model = modelId !== undefined ? modelId : selectedModel;
     try {
+      await requireEditingReady(overseer);
       const newChatId = await overseer.newChat(
           message, model, capsules, attachments, formats);
       onNavigateToChatRef.current(newChatId);
     } catch (err) {
+      recordEditingFailure(overseer, err);
       if (!logRpcFailure("Failed to create new chat:", err, { reportSite: "chat.new" })) {
         toasts.add({ title: "Failed to start conversation", variant: "error" });
       }
@@ -3649,6 +4020,7 @@ function ChatInterface({
     }
 
     try {
+      await requireEditingReady(overseer);
       await overseer.setChatTitle(selectedChatId, titleInput.trim());
 
       // Update the cache with the new title
@@ -3688,6 +4060,7 @@ function ChatInterface({
     if (!deleteTarget) return;
     setIsDeleting(true);
     try {
+      await requireEditingReady(overseer);
       await overseer.deleteChat(deleteTarget.id);
       toasts.add({ title: "Chat deleted successfully", variant: "success" });
     } catch (err) {
@@ -3722,6 +4095,7 @@ function ChatInterface({
     if (!trimmed || trimmed === existing?.title) return;
 
     try {
+      await requireEditingReady(overseer);
       await overseer.setChatTitle(chatId, trimmed);
       if (existing) {
         cacheRef.current.chats.set(chatId, {
@@ -3738,15 +4112,21 @@ function ChatInterface({
     }
   };
 
-  // Handle merging changes up to a specific sequence number
-  const handleMergeChanges = async (
-    mergeThrough: number | null,
-    options?: { includeDraft?: boolean },
-  ) => {
+  // Handle accepting the chat's proposed changes. A merge always takes everything the chat
+  // proposes -- live drafts are swept in and there is no partial accept (see
+  // Overseer.mergeChanges()). Accepting is only ever a fast-forward; a "stale" outcome (mainline
+  // advanced past the chat's pins) is expected control flow that opens the update-from-mainline
+  // dialog rather than an error.
+  const handleMergeChanges = async () => {
     if (selectedChatId === null) return;
 
     try {
-      await overseer.mergeChanges(selectedChatId, mergeThrough, options);
+      await requireEditingReady(overseer);
+      const result = await overseer.mergeChanges(selectedChatId);
+      if (result.outcome === "stale") {
+        setStaleAcceptChatId(selectedChatId);
+        return;
+      }
       toasts.add({ title: "Changes accepted", variant: "success" });
     } catch (err) {
       console.error("Failed to accept changes:", err);
@@ -3754,10 +4134,44 @@ function ChatInterface({
     }
   };
 
+  // Merge mainline commits that landed after this chat's pins into the chat's uncommitted state
+  // (see Overseer.updateChatFromMainline()). Offered when an accept comes back stale. Conflicts
+  // are left inline as 3-way markers for the user (or their agent) to resolve; once the chat is
+  // clean, accepting again is a plain fast-forward.
+  const handleUpdateFromMainline = async () => {
+    if (staleAcceptChatId === null) return;
+    const chatId = staleAcceptChatId;
+    setIsUpdatingFromMainline(true);
+    try {
+      await requireEditingReady(overseer);
+      const { conflictPaths } = await overseer.updateChatFromMainline(chatId);
+      setStaleAcceptChatId(null);
+      if (conflictPaths.length > 0) {
+        toasts.add({
+          title: `Updated this draft with the gadget's latest changes. ` +
+            `${conflictPaths.length} ${conflictPaths.length === 1 ? "file has" : "files have"} ` +
+            `conflicts marked in the code -- resolve them (or ask the agent to), then accept again.`,
+          variant: "warning",
+        });
+      } else {
+        toasts.add({
+          title: "Updated this draft with the gadget's latest changes. Review and accept again.",
+          variant: "success",
+        });
+      }
+    } catch (err) {
+      console.error("Failed to update from mainline:", err);
+      toasts.add({ title: "Failed to bring in the latest changes", variant: "error" });
+    } finally {
+      setIsUpdatingFromMainline(false);
+    }
+  };
+
   const handleFinalizeDraftChanges = async () => {
     if (selectedChatId === null) return;
 
     try {
+      await requireEditingReady(overseer);
       await overseer.finalizeChatDraft(selectedChatId);
       toasts.add({ title: "Changes saved", variant: "success" });
     } catch (err) {
@@ -3770,9 +4184,10 @@ function ChatInterface({
     if (selectedChatId === null) return;
 
     try {
+      // The destructive generation bump this causes prunes the buffered rows when its
+      // metadata arrives (see the metadata handler).
+      await requireEditingReady(overseer);
       await overseer.discardChatDraftChanges(selectedChatId);
-      draftRef.current.delete(selectedChatId);
-      forceUpdate();
       toasts.add({ title: "Changes discarded", variant: "success" });
     } catch (err) {
       console.error("Failed to discard changes:", err);
@@ -3786,21 +4201,23 @@ function ChatInterface({
     const target = discardChangesTarget;
     setDiscardingChangesChatIds((chatIds) => new Set(chatIds).add(target.chatId));
     try {
-      // Rewind durable checkpoints first. If discarding the live editor draft then fails, the user
-      // still retains those edits rather than losing both layers after a partial operation.
+      // One call covers everything: live change rows are strictly newer than every materialized
+      // message, so revertChanges(0) erases them along with the recorded batches (and a
+      // rows-only revert degenerates to a draft discard server-side).
+      await requireEditingReady(overseer);
       await overseer.revertChanges(target.chatId, 0);
-      if ((draftRef.current.get(target.chatId)?.entries.length ?? 0) > 0) {
-        await overseer.discardChatDraftChanges(target.chatId);
-        draftRef.current.delete(target.chatId);
-        forceUpdate();
-      }
       setDiscardChangesTarget((current) =>
         current?.chatId === target.chatId ? null : current,
       );
       toasts.add({ title: "Pending changes discarded", variant: "success" });
     } catch (err) {
       console.error("Failed to discard pending changes:", err);
-      toasts.add({ title: "Failed to discard pending changes", variant: "error" });
+      // See handleRevertChanges: the server's refusals are instructive, so surface them.
+      toasts.add({
+        title: err instanceof Error && err.message
+          ? err.message : "Failed to discard pending changes",
+        variant: "error",
+      });
     } finally {
       setDiscardingChangesChatIds((chatIds) => {
         const next = new Set(chatIds);
@@ -3810,21 +4227,29 @@ function ChatInterface({
     }
   };
 
+  // Resolves an actionMessages location to the cached action message it points at (with its
+  // containing message array, for copy-on-write patches). Undefined if the cache no longer holds
+  // an action message there.
+  const getCachedActionMessage = (location: { chatId: number; sequence: number }) => {
+    const messages = cacheRef.current.messages.get(location.chatId);
+    const msg = messages?.[location.sequence];
+    return msg?.type === "action" ? { messages: messages!, msg } : undefined;
+  };
+
   const applyActionLogUpdateToCachedMessages = (record: ActionLogEntry): boolean => {
     let changed = false;
     const locations = cacheRef.current.actionMessages.get(record.id);
     if (!locations) return false;
 
     for (const [key, location] of locations) {
-      const messages = cacheRef.current.messages.get(location.chatId);
-      const msg = messages?.[location.sequence];
-      if (msg?.type !== "action" || msg.actionId !== record.id) {
+      const cached = getCachedActionMessage(location);
+      if (!cached || cached.msg.actionId !== record.id) {
         locations.delete(key);
         continue;
       }
 
-      const nextMessages = [...messages!];
-      nextMessages[location.sequence] = { ...msg, actionLog: record };
+      const nextMessages = [...cached.messages];
+      nextMessages[location.sequence] = { ...cached.msg, actionLog: record };
       cacheRef.current.messages.set(location.chatId, nextMessages);
       changed = true;
     }
@@ -3839,17 +4264,16 @@ function ChatInterface({
     if (!locations) return false;
 
     for (const [key, location] of locations) {
-      const messages = cacheRef.current.messages.get(location.chatId);
-      const msg = messages?.[location.sequence];
-      if (msg?.type !== "action" || msg.actionId !== actionId || !msg.actionLog) {
+      const cached = getCachedActionMessage(location);
+      if (!cached || cached.msg.actionId !== actionId || !cached.msg.actionLog) {
         locations.delete(key);
         continue;
       }
 
-      const nextMessages = [...messages!];
+      const nextMessages = [...cached.messages];
       nextMessages[location.sequence] = {
-        ...msg,
-        actionLog: { ...msg.actionLog, state, appliedAt: new Date() },
+        ...cached.msg,
+        actionLog: { ...cached.msg.actionLog, state, appliedAt: new Date() },
       };
       cacheRef.current.messages.set(location.chatId, nextMessages);
       changed = true;
@@ -3865,17 +4289,16 @@ function ChatInterface({
     if (!locations) return false;
 
     for (const [key, location] of locations) {
-      const messages = cacheRef.current.messages.get(location.chatId);
-      const msg = messages?.[location.sequence];
-      if (msg?.type !== "action" || msg.actionId !== actionId || msg.actionLog?.type !== "bindHook") {
+      const cached = getCachedActionMessage(location);
+      if (!cached || cached.msg.actionId !== actionId || cached.msg.actionLog?.type !== "bindHook") {
         locations.delete(key);
         continue;
       }
 
-      const nextMessages = [...messages!];
+      const nextMessages = [...cached.messages];
       nextMessages[location.sequence] = {
-        ...msg,
-        actionLog: { ...msg.actionLog, enabled },
+        ...cached.msg,
+        actionLog: { ...cached.msg.actionLog, enabled },
       };
       cacheRef.current.messages.set(location.chatId, nextMessages);
       changed = true;
@@ -3890,11 +4313,17 @@ function ChatInterface({
     if (selectedChatId === null) return;
 
     try {
+      await requireEditingReady(overseer);
       await overseer.revertChanges(selectedChatId, revertFrom);
       toasts.add({ title: "Draft rewound", variant: "success" });
     } catch (err) {
       console.error("Failed to rewind draft:", err);
-      toasts.add({ title: "Failed to rewind draft", variant: "error" });
+      // The server's refusals here are instructive (e.g. a still-proposed update-from-mainline
+      // batch can't be reverted), so surface them rather than a generic failure.
+      toasts.add({
+        title: err instanceof Error && err.message ? err.message : "Failed to rewind draft",
+        variant: "error",
+      });
     }
   }, [overseer, selectedChatId, toasts]);
 
@@ -3920,8 +4349,10 @@ function ChatInterface({
     if (applyOptimisticHookEnabled(actionId, enabled)) forceUpdate();
     try {
       if (enabled) {
+        await requireEditingReady(overseer);
         await overseer.enableHook(hookId);
       } else {
+        await requireEditingReady(overseer);
         await overseer.disableHook(hookId);
       }
     } catch (err) {
@@ -3961,6 +4392,7 @@ function ChatInterface({
     setProcessingConnections((prev) => new Set(prev).add(accept.requestId));
     try {
       const id = await gk.getId();
+      await requireEditingReady(overseer);
       await overseer.acceptConnectionRequest(accept.requestId, {
         gatekeeperId: id,
       });
@@ -3981,6 +4413,7 @@ function ChatInterface({
   const handleDenyConnection = async (requestId: string) => {
     setProcessingConnections((prev) => new Set(prev).add(requestId));
     try {
+      await requireEditingReady(overseer);
       await overseer.denyConnectionRequest(requestId);
       // If the accept modal happens to be open for this same request, close it.
       if (connectionAcceptRef.current?.requestId === requestId) {
@@ -4065,6 +4498,7 @@ function ChatInterface({
     }
 
     try {
+      await requireEditingReady(overseer);
       await overseer.retryAgent(selectedChatId, selectedModel);
     } catch (err) {
       console.error("Failed to retry agent:", err);
@@ -4128,6 +4562,14 @@ function ChatInterface({
     return latest;
   }, [completedAgentTurnMessageSeqs]);
 
+  // The current epoch's opening sequence (see ChatCodeBase.epoch), zero when the epoch spans the
+  // whole chat. A *pending* changes message before it exists only in chats converted from
+  // pre-git storage -- its content rides the conversion boundary's collapsed change, and the
+  // server refuses to revert it individually -- so no per-message discard affordance is offered
+  // below the epoch. (In merge-opened epochs every pre-epoch change is already merged, so the
+  // cutoff changes nothing there.)
+  const chatEpoch = currentChatMetadata?.codeBase?.epoch ?? 0;
+
   const pendingChangeByTurnItemSeq = useMemo(() => {
     const out = new Map<number, PendingTurnChanges>();
     let lastAgentMessageSeq: number | null = null;
@@ -4184,6 +4626,7 @@ function ChatInterface({
       if (
         m.type === "changes" &&
         m.author.type !== "user" &&
+        m.sequence >= chatEpoch &&
         (messageStates.changeStatus.get(m.sequence) ?? "pending") === "pending"
       ) {
         const createdTitles = (m.createdGadgets ?? []).map((g) => g.title);
@@ -4199,7 +4642,7 @@ function ChatInterface({
     }
 
     return out;
-  }, [currentMessages, messageStates]);
+  }, [currentMessages, messageStates, chatEpoch]);
 
   // Accepted creations remain in the transcript; reverted ones disappear.
   const createdGadgetsByTurnItemSeq = useMemo(() => {
@@ -4741,6 +5184,7 @@ function ChatInterface({
                             onChange={(e) => setRenamingInput(e.target.value)}
                             onClick={(e) => e.stopPropagation()}
                             onKeyDown={(e) => {
+                              if (isImeComposing(e)) return;
                               if (e.key === "Enter") {
                                 e.preventDefault();
                                 handleSaveListRename(chat.id);
@@ -4767,7 +5211,7 @@ function ChatInterface({
                             <span className="h-1.5 w-1.5 rounded-full bg-kumo-brand animate-pulse" />
                             Working
                           </span>
-                        ) : !isRenaming && chat.hasProposedChanges ? (
+                        ) : !isRenaming && chatHasProposedChanges(chat) ? (
                           <Tooltip content="This conversation has pending changes" asChild>
                             <span className="inline-flex flex-shrink-0 cursor-pointer items-center gap-1 text-[11px] leading-4 font-medium text-kumo-warning">
                               <span className="h-1.5 w-1.5 rounded-full bg-kumo-warning" />
@@ -4844,19 +5288,20 @@ function ChatInterface({
         )}
       </div>
 
-      {/* New chat input — pinned to bottom. ChatInput supplies its own
+      {/* New chat input — pinned to bottom. ChatComposer supplies its own
           horizontal padding, so the wrapper just adds the top divider; no
           extra p-4 (which would shrink the input vs. the in-chat composer). */}
       <div className="flex-shrink-0 border-t border-kumo-line">
         <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
           {/* Attachments and pending resource operations belong to this workspace's composer. */}
-          <ChatInput
+          <ChatComposer
             key={workspaceId}
-            createCapsuleGatekeeper={(accountId, url) =>
-              overseer.newGatekeeper(accountId, url)
+            createCapsuleGatekeeper={async (accountId, url) =>
+              (await getOverseer()).newGatekeeper(accountId, url)
             }
             getOverseer={getOverseer}
             onSend={handleNewChatSend}
+            blockedReason={editingState === 'ready' ? undefined : editingMessage(editingState)}
             isAgentActive={false}
             models={availableModels}
             selectedModel={selectedModel}
@@ -4966,6 +5411,7 @@ function ChatInterface({
                         value={titleInput}
                         onChange={(e) => setTitleInput(e.target.value)}
                         onKeyDown={(e) => {
+                          if (isImeComposing(e)) return;
                           if (e.key === "Enter") handleSaveChatTitle();
                           if (e.key === "Escape") handleCancelTitleEdit();
                         }}
@@ -5152,14 +5598,29 @@ function ChatInterface({
                         // createdGadgets over a no-op update, so label it as a creation rather
                         // than as saved edits.
                         const createdGadgets = entry.message.createdGadgets ?? [];
-                        const label = createdGadgets.length > 0
+                        // An update-from-mainline batch merged other chats' accepted work into
+                        // this draft (see Overseer.updateChatFromMainline()); label it as such,
+                        // including how many files still carry conflict markers.
+                        const mainlineMerge = entry.message.mainlineMerge;
+                        const conflictCount = mainlineMerge?.conflictPaths.length ?? 0;
+                        const label = mainlineMerge
+                          ? `${actor} brought the gadget's latest changes into this draft${
+                              conflictCount > 0
+                                ? ` — ${conflictCount} ${conflictCount === 1 ? "file has" : "files have"} conflicts marked in the code`
+                                : ""}`
+                          : createdGadgets.length > 0
                           ? `${actor} created ${createdGadgets.length === 1 ? "gadget" : "gadgets"} ${
                               createdGadgets.map((g) => `“${g.title}”`).join(", ")}`
                           : `${actor} saved edits`;
-                        const discardLabel = getSavedEditsDiscardLabel(
-                          entry.message.sequence === lastDurablePendingChange?.sequence,
-                          createdGadgets.map((g) => g.title),
-                        );
+                        // A still-proposed mainline merge can't be reverted: it advanced the
+                        // chat's pins, and erasing it would let a later accept silently overwrite
+                        // the mainline content it brought in (the server refuses too).
+                        const discardLabel = mainlineMerge
+                          ? "This update can't be discarded: it brought in changes already accepted elsewhere. Edit the files instead."
+                          : getSavedEditsDiscardLabel(
+                              entry.message.sequence === lastDurablePendingChange?.sequence,
+                              createdGadgets.map((g) => g.title),
+                            );
                         return (
                           <div key={entry.key} className={`${entryTopClass} group/savedChanges max-w-[860px] py-1 text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle`}>
                             <div className="flex items-center gap-3 px-1.5 py-1">
@@ -5170,10 +5631,14 @@ function ChatInterface({
                                 {label}
                               </span>
                               <div className="flex flex-shrink-0 items-center gap-1 opacity-100 transition-opacity duration-150 ease-out sm:opacity-0 sm:group-hover/savedChanges:opacity-100 sm:group-focus-within/savedChanges:opacity-100">
+                                {/* Edits from before the current epoch (i.e. before the chat's
+                                    conversion to git-backed storage) can't be discarded
+                                    individually -- only the banner's discard-all covers them. */}
+                                {entry.message.sequence >= chatEpoch && (
                                 <Tooltip content={discardLabel} asChild>
                                   <button
                                     type="button"
-                                    disabled={isAgentActive}
+                                    disabled={isAgentActive || mainlineMerge !== undefined}
                                     onClick={() => handleRevertChanges(entry.message.sequence)}
                                     className="flex cursor-pointer items-center rounded-md p-1 text-kumo-inactive transition-[color,opacity,transform] duration-150 ease-out hover:text-kumo-default focus-visible:text-kumo-default focus-visible:outline-none active:scale-[0.96] disabled:cursor-not-allowed disabled:opacity-40"
                                     aria-label={discardLabel}
@@ -5181,6 +5646,7 @@ function ChatInterface({
                                     <ArrowUUpLeft size={15} />
                                   </button>
                                 </Tooltip>
+                                )}
                                 <Tooltip content={formatFullTimestamp(entry.message.timestamp)} asChild>
                                   <span className="px-1 font-mono text-[11px] leading-4 text-kumo-inactive">
                                     {entry.message.timestamp.toLocaleTimeString([], {
@@ -5599,14 +6065,21 @@ function ChatInterface({
 
                         {msg.type === "agentCallback" && (
                           <div className="max-w-[860px] text-[14px] leading-5 tracking-[-0.25px] text-kumo-subtle">
-                            <div className="flex items-center gap-3 px-1.5 py-1">
-                              <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
-                                <Code size={16} />
-                              </span>
-                              <span className="min-w-0 truncate font-mono text-[13px]">
-                                self.{msg.methodName}()
-                              </span>
-                            </div>
+                            <Tooltip content={`Call received at ${formatFullTimestamp(msg.timestamp)}`} asChild>
+                              <div className="flex items-center gap-3 px-1.5 py-1">
+                                <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-kumo-inactive" aria-hidden="true">
+                                  <Code size={16} />
+                                </span>
+                                <span className="min-w-0 truncate font-mono text-[13px]">
+                                  {msg.methodName}()
+                                </span>
+                                {msg.bindingName !== undefined && (
+                                  <span className="min-w-0 flex-shrink truncate font-mono text-[12px] leading-4 text-kumo-inactive">
+                                    env.{msg.bindingName}
+                                  </span>
+                                )}
+                              </div>
+                            </Tooltip>
                             {msg.argsSummary && (
                               <div className="ml-8 mt-1">
                                 <pre className="max-h-24 overflow-auto rounded-xl border border-kumo-line/70 bg-kumo-base p-3 font-mono text-[12px] leading-[18px] text-kumo-subtle whitespace-pre-wrap">
@@ -5620,19 +6093,8 @@ function ChatInterface({
                       );
                     })}
 
-                    {currentDraftState && currentDraftState.entries.length > 0 && (() => {
-                      const latestAuthor = currentDraftState.latestAuthor;
-                      const isUserAuthored = latestAuthor?.type === "user";
-                      const title = isUserAuthored
-                        ? "Draft changes pending"
-                        : "Draft changes in progress";
-                      const description = isUserAuthored
-                        ? "Your edits are still a live draft."
-                        : `${latestAuthor?.name ?? "The agent"} is editing changes for this gadget.`;
-                      const lastDraftEntry =
-                        currentDraftState.entries[
-                          currentDraftState.entries.length - 1
-                        ];
+                    {currentRowBuffer && currentHasUserDraftRows && (() => {
+                      const lastEditedAt = currentRowBuffer.lastUserEditAt;
                       const lastEntry = displayEntries[displayEntries.length - 1] ?? null;
                       const draftTopClass = !lastEntry
                         ? ""
@@ -5648,11 +6110,11 @@ function ChatInterface({
                               <Pencil size={16} />
                             </span>
                             <Tooltip
-                              content={`${description} Last edited ${formatFullTimestamp(lastDraftEntry.timestamp)}`}
+                              content={`Your edits are still a live draft.${lastEditedAt !== null ? ` Last edited ${formatFullTimestamp(lastEditedAt)}` : ''}`}
                               asChild
                             >
                               <span className="font-medium text-kumo-subtle">
-                                {title}
+                                Draft changes pending
                               </span>
                             </Tooltip>
                             <div className="flex flex-wrap items-center gap-2 text-[13px] leading-4">
@@ -5825,11 +6287,11 @@ function ChatInterface({
               <div className={`flex-shrink-0 bg-kumo-base ${sidebarMode ? "" : "border-t border-kumo-line"}`}>
                 <div className={useConstrainedChatWidth ? "mx-auto w-full max-w-[920px]" : ""}>
                   {/* Remount all transient composer state when the conversation changes. */}
-                  <ChatInput
+                  <ChatComposer
                     key={`${workspaceId}:${selectedChatId}`}
                     chatKey={selectedChatId}
-                    createCapsuleGatekeeper={(accountId, url) =>
-                      overseer.newGatekeeper(accountId, url)
+                    createCapsuleGatekeeper={async (accountId, url) =>
+                      (await getOverseer()).newGatekeeper(accountId, url)
                     }
                     getOverseer={getOverseer}
                     onSend={handleSend}
@@ -5852,35 +6314,24 @@ function ChatInterface({
                         )
                       : undefined}
                     blockedReason={
-                      hasPendingConnectionRequest
+                      editingState !== 'ready' ? editingMessage(editingState) : hasPendingConnectionRequest
                         ? "Set up or deny the connection request above to continue."
                         : hasPendingAwaitedAction
                           ? "Approve or reject the pending action above to continue."
                           : undefined
                     }
                     draftUpdateBanner={(() => {
-                      if (!currentChatMetadata?.hasProposedChanges) return null;
+                      if (!currentChatMetadata ||
+                          !chatHasProposedChanges(currentChatMetadata)) return null;
 
-                      // Accept through the newest still-proposed batch, but never below the cut the
-                      // server seeds the compacted prefix at. That prefix is accepted as a unit, so
-                      // addressing anything under it drains nothing -- which is reachable both when
-                      // it only created gadgets (no Yjs bytes, hence no entry here) and when paging
-                      // backward leaves the newest loaded batch below the boundary. Discard-all uses
-                      // sequence zero because compacted batches retain their original, earlier
-                      // sequences; the synthetic prefix sequence is only meaningful when merging.
-                      const { activeChanges } = messageStates;
-                      const cuts = [
-                        ...(activeChanges.length > 0
-                          ? [activeChanges[activeChanges.length - 1].sequence] : []),
-                        ...(currentChatMetadata.compactedTo !== undefined
-                          ? [currentChatMetadata.compactedTo - 1] : []),
-                      ];
-                      if (cuts.length === 0) return null;
-                      const mergeThrough = Math.max(...cuts);
+                      // Accepting always merges everything the chat proposes (drafts swept in,
+                      // no partial accepts -- see Overseer.mergeChanges()), so the banner needs
+                      // no accept cut of its own. Discard-all still uses sequence zero, which
+                      // covers every batch including the compacted prefix's.
                       const isDiscardingChanges = discardingChangesChatIds.has(
                         currentChatMetadata.id,
                       );
-                      const changesActionsDisabled = isAgentActive || isDiscardingChanges;
+                      const changesActionsDisabled = editingState !== 'ready' || isAgentActive || isDiscardingChanges;
                       return (
                         <div className="themed-surface-inset relative flex items-center gap-2 overflow-hidden rounded-t-[calc(1rem-1px)] border-b border-kumo-line bg-kumo-elevated px-3.5 py-2">
                           <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-kumo-brand/40 to-transparent" aria-hidden="true" />
@@ -5906,9 +6357,7 @@ function ChatInterface({
                               : "Keep this draft and make it the gadget's current version."} asChild>
                             <WorkshopButton
                               disabled={changesActionsDisabled}
-                              onClick={() =>
-                                handleMergeChanges(mergeThrough, { includeDraft: true })
-                              }
+                              onClick={() => handleMergeChanges()}
                               tone="primary"
                               className="!h-7 !cursor-pointer !rounded-md !border-transparent !shadow-none gap-1 text-[12px]"
                             >
@@ -5946,6 +6395,67 @@ function ChatInterface({
           onClose={() => setOpenWorkItem(null)}
         />
       )}
+      {/* An accept came back stale: mainline advanced past this chat's pins, so the changes can
+          only land after merging the gadget's current version into the chat first. */}
+      <Dialog.Root
+        open={staleAcceptChatId !== null}
+        onOpenChange={(nextOpen) => {
+          if (!isUpdatingFromMainline && !nextOpen) setStaleAcceptChatId(null);
+        }}
+      >
+        <Dialog
+          className="!z-[1000] !w-[min(440px,calc(100vw-32px))] overflow-hidden bg-kumo-base p-0 !top-[20%] !-translate-y-0"
+          size="sm"
+        >
+          <div className="flex items-start justify-between gap-4 border-b border-kumo-line px-5 py-4">
+            <div className="min-w-0">
+              <Dialog.Title className="text-[15px] leading-5 font-medium tracking-[-0.3px] text-kumo-default">
+                The gadget changed since this draft started
+              </Dialog.Title>
+              <Dialog.Description className="mt-1 text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                Someone else&apos;s changes were accepted in the meantime, so this draft&apos;s
+                changes can&apos;t be applied as-is. Bring the latest changes into this draft
+                first; any conflicts will be marked in the code for you (or the agent) to resolve
+                before accepting again.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close
+              render={(props) => (
+                <WorkshopIconButton
+                  {...props}
+                  className="!h-7 !w-7"
+                  disabled={isUpdatingFromMainline}
+                  aria-label="Close"
+                >
+                  <X size={16} />
+                </WorkshopIconButton>
+              )}
+            />
+          </div>
+
+          <div className="flex items-center justify-end gap-2 border-t border-kumo-line bg-kumo-base px-5 py-3">
+            <Dialog.Close
+              render={(props) => (
+                <WorkshopButton
+                  {...props}
+                  className="!h-9"
+                  disabled={isUpdatingFromMainline}
+                >
+                  Not now
+                </WorkshopButton>
+              )}
+            />
+            <WorkshopButton
+              tone="primary"
+              onClick={() => { void handleUpdateFromMainline(); }}
+              disabled={isUpdatingFromMainline}
+              className="!h-9 min-w-[64px]"
+            >
+              {isUpdatingFromMainline ? "Updating..." : "Bring in latest changes"}
+            </WorkshopButton>
+          </div>
+        </Dialog>
+      </Dialog.Root>
 
       <DeleteConfirmationDialog
         open={deleteTarget !== null}

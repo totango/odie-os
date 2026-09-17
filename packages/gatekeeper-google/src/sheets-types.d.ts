@@ -55,8 +55,8 @@ export type SpreadsheetRange = {
   values: SpreadsheetCellValue[][];
 };
 
-/** Access to one selected Google spreadsheet. */
-export interface GoogleSpreadsheetSession {
+/** Read-only access to one Google spreadsheet. */
+export interface GoogleSpreadsheetReadSession {
   /** Return spreadsheet metadata and its worksheet list. */
   getSpreadsheet(): Promise<SpreadsheetInfo>;
 
@@ -78,7 +78,10 @@ export interface GoogleSpreadsheetSession {
     ranges: string[],
     options?: { valueMode?: SpreadsheetValueMode },
   ): Promise<SpreadsheetRange[]>;
+}
 
+/** Read and write access to one directly selected Google spreadsheet. */
+export interface GoogleSpreadsheetSession extends GoogleSpreadsheetReadSession {
   /**
    * Replace the cells in a bounded A1 range with the provided rows of values. The value grid must
    * fit inside the range. Use `null` to write a blank cell.

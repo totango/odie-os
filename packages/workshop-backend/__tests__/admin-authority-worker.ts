@@ -2,6 +2,9 @@
 export * from "../src/server";
 export { AdminAuthorizationEntrypoint } from "../src/admin-authority";
 export { default } from "../src/server";
+// Retain upstream runtime fixtures alongside the fork's authority fixtures.
+export { OverseerDurableObject, AgentSelfLoopback, GatekeeperLoopback, GadgetTailLoopback,
+  TestConnectCallback, TestLoginCallback, FakeGatekeeperAccount, TestNativeLoginCallback } from "./test-worker";
 export { ContextCollectionDurableObject } from "../../gatekeeper-context/src/context-collection";
 export { UserLibraryDurableObject } from "../../gatekeeper-context/src/user-library";
 export { LibraryRegistryDurableObject } from "../../gatekeeper-context/src/registry-do";
@@ -10,13 +13,14 @@ export { JarvisPolicy } from "../../gatekeeper-jarvis/src/policy";
 import type { AdminClaim } from "../src/admin-authority";
 import type { AppUiContext, AuthorizedAppUiContext, GatekeeperUiFrame, GatekeeperVendor } from "@gadgets/workshop-shared/gatekeeper";
 import type { CodingSessionOwner, CodingSessionsService, RequestBuildExecutionReceipt, RequestBuildGitHubRead, RequestBuildGitHubWrite, RequestBuildIntent, RequestBuildNotifier, RequestBuildNotification, RequestBuildNotificationResult, RequestBuildNotifierReadiness, RequestBuildPolicy, RequestBuildReadiness } from "@gadgets/workshop-shared/coding-sessions";
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { validateRpc } from "capnweb-validate";
 import { RpcStub, RpcTarget } from "capnweb";
 import { ContextApiImpl } from "../../gatekeeper-context/src/context-api";
 import { JarvisPolicyApi } from "../../gatekeeper-jarvis/src/policy";
 import type { ContextApi, ContextCollectionMetadata } from "../../gatekeeper-context/src/context-types";
 import { domainName } from "../../gatekeeper-context/src/domain";
+import { NativeBrowserFlow } from "../src/auth/native-browser-flow";
 
 /** Typed test bridge avoids merging unrelated Worker Env programs; only real owners attest. */
 export class ContextFenceVendor extends WorkerEntrypoint<Cloudflare.Env, {sharingDomain: string}> {
@@ -59,7 +63,21 @@ class LegacyJarvisChild extends RpcTarget {
 }
 
 /** Exercises real native issuance and actual provider consumers, without external providers. */
-export class AdminProviderTestHooks extends DurableObject<Cloudflare.Env> {
+export class AdminProviderTestHooks extends NativeBrowserFlow {
+  async expire() {
+    const record = await this.ctx.storage.get<import("../src/auth/native-browser-flow").NativeBrowserFlowRecord>("record");
+    if (!record) throw new Error("No flow");
+    await this.ctx.storage.put("record", {...record, expiresAt: 0});
+  }
+  loginCallback(pendingId: string, flowHandle?: string, vendorId = "test") {
+    return this.ctx.exports.TestNativeLoginCallback({props: {pendingId, flowHandle, vendorId}});
+  }
+  handoffAccount(name: string, legacyHandoff = false) {
+    return this.ctx.exports.FakeGatekeeperAccount({props: {name, legacyHandoff}});
+  }
+  accountCallback(userId: string, accountId: number, flowHandle?: string) {
+    return this.ctx.exports.TestConnectCallback({props: {userId, accountId, flowHandle, vendorId: "test"}});
+  }
   /** Same native ctx.exports mint path as AuthenticatedApi, with test-owned runtime claims. */
   mint(claim: AdminClaim) { return this.ctx.exports.AdminAuthorizationEntrypoint({props: {claim}}); }
   /** Retain old argument shapes while using the current authoritative collection owner. */

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, type ReactNode } from 'react'
+import { Activity, act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
@@ -76,6 +76,37 @@ describe('useWorkspaceOpen', () => {
     container?.remove()
     document.title = ''
     vi.restoreAllMocks()
+  })
+
+  it('retains metadata through Activity reveal but never republishes a disposed overseer', async () => {
+    const pending = deferred<RpcStub<{}>>()
+    const disposed = vi.fn<() => void>()
+    const first = disposableStub({ subscribeToMetadata: async (callback: (value: GadgetMetadata) => void) => {
+      callback(METADATA)
+      return disposableStub({})
+    } }, disposed)
+    const second = disposableStub({ subscribeToMetadata: () => pending.promise })
+    const authenticatedApi = { openGadget: vi.fn<() => object>().mockReturnValueOnce(first).mockReturnValueOnce(second) } as unknown as RpcStub<AuthenticatedApi>
+    const published: unknown[] = []
+    const Probe = () => {
+      const state = useWorkspaceOpen({ id: 'workspace-1', authenticatedApi,
+        onMetadata: () => {}, onShareKeyConsumed: () => {}, onInvalidShareKey: () => {} })
+      published.push(state.overseer?.stub)
+      return <p>{state.metadata?.title}:{state.overseer ? 'connected' : 'reconnecting'}</p>
+    }
+    container = document.createElement('div')
+    document.body.append(container)
+    root = createRoot(container)
+    await act(async () => root!.render(<Activity mode="visible"><Probe /></Activity>))
+    expect(container.textContent).toBe('Quarterly planning:connected')
+    await act(async () => root!.render(<Activity mode="hidden"><Probe /></Activity>))
+    expect(disposed).toHaveBeenCalledOnce()
+    published.length = 0
+    await act(async () => root!.render(<Activity mode="visible"><Probe /></Activity>))
+    expect(container.textContent).toBe('Quarterly planning:reconnecting')
+    expect(published).not.toContain(first)
+    await act(async () => pending.resolve(disposableStub({}) as RpcStub<{}>))
+    expect(published.at(-1)).toBe(second)
   })
 
   it('disposes a metadata subscription that resolves after its load attempt is cleaned up', async () => {

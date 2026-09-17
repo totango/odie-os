@@ -5,6 +5,7 @@ import {
   stripTrailingSlashes,
   type AccountDescription,
   type AvatarImage,
+  type ConnectHandoff,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperUser,
@@ -15,6 +16,9 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { acknowledgeHandoff, connectHandoffPageHtml, htmlResponse, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
+import type { GatekeeperConnectOptions as HandoffConnectOptions, GatekeeperConnectResult as HandoffLaunch, GatekeeperReconnectOptions as HandoffOptions } from "@gadgets/workshop-shared/gatekeeper";
+import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import INSTANCE_CONFIGURATOR_HTML from "./generated/instance-configurator-ui.txt";
 import AREA_CONFIGURATOR_HTML from "./generated/area-configurator-ui.txt";
 import LABEL_CONFIGURATOR_HTML from "./generated/label-configurator-ui.txt";
@@ -237,16 +241,6 @@ const CONNECT_FORM_HTML = (params: { actionUrl: string; error?: string }) => `<!
 </body>
 </html>`;
 
-const SELF_CLOSING_HTML = `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><title>Connected</title></head>
-<body style="font-family: system-ui, sans-serif; padding: 2rem; text-align: center;">
-  <script>window.close();</script>
-  <h2 style="color: #03a9f4;">Connected!</h2>
-  <p>Home Assistant has been linked to Cloudflare OS. You may close this tab.</p>
-</body>
-</html>`;
-
 const INVALID_LINK_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Link Expired</title></head>
@@ -339,9 +333,7 @@ export default {
             { headers: { "Content-Type": "text/html; charset=utf-8" }, status: 400 },
           );
         }
-        return new Response(SELF_CLOSING_HTML, {
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
+        return htmlResponse(connectHandoffPageHtml(result.handoff));
       }
     }
 
@@ -367,11 +359,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>, options?: HandoffConnectOptions): Promise<HandoffLaunch> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const nonce = generateNonce();
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, nonce);
-    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${nonce}` };
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${nonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(userObjectId).acknowledgeHandoff(options) };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -395,14 +387,27 @@ interface StoredCredentials {
 interface StoredNonce {
   value: string;
   expiresAt: number;
+  /**
+   * Set when this flow reconnects an existing account, so its grant is staged rather than made
+   * live. The mode travels with the flow instead of living on the account: committing one
+   * reconnect while another is in flight must not change how that other flow lands.
+   */
+  reconnect?: true;
+  /**
+   * Set while a submission is being validated against Home Assistant, so a concurrent submission
+   * cannot pass the same nonce; cleared again when validation fails so the user can resubmit.
+   */
+  connecting?: true;
 }
 
 type CompleteConnectionResult =
-  | { kind: "ok" }
+  | { kind: "ok"; handoff: ConnectHandoff }
   | { kind: "invalid_nonce" }
   | { kind: "error"; message: string };
 
 export class UserAccount extends DurableObject<Env> {
+  /** Records supported launch intent; callback agreement is checked before completion. */
+  acknowledgeHandoff(options?: HandoffOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string): Promise<void> {
     if (!this.ctx.storage.kv.get<StoredCredentials>("credentials")) {
       await this.ctx.storage.setAlarm(Date.now() + 3600 * 1000);
@@ -415,15 +420,18 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(nonce: string): Promise<void> {
-    this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: nonce,
       expiresAt: Date.now() + NONCE_LIFETIME_MS,
+      reconnect: true,
     });
   }
 
-  /** Validates the nonce but does not consume it (so the user can resubmit if validation fails). */
+  /**
+   * Validates the nonce without claiming it, for the GET preview of the form. A submission that
+   * fails validation releases its claim (see completeConnection), so the user can resubmit.
+   */
   async verifyNonceWithoutConsuming(nonce: string): Promise<boolean> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || Date.now() >= stored.expiresAt) return false;
@@ -436,9 +444,14 @@ export class UserAccount extends DurableObject<Env> {
     token: string,
   ): Promise<CompleteConnectionResult> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
-    if (!stored || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, nonce)) {
+    if (!stored || stored.connecting || Date.now() >= stored.expiresAt
+        || !constantTimeEqual(stored.value, nonce)) {
       return { kind: "invalid_nonce" };
     }
+    // Claim the nonce before the first await. The Durable Object's input gate does not cover the
+    // outbound ping, so a second submission arriving meanwhile would otherwise validate the same
+    // nonce, complete the connection a second time, and later revoke the account this one activated.
+    this.ctx.storage.kv.put<StoredNonce>("nonce", { ...stored, connecting: true });
 
     // Validate that the URL+token can actually talk to HA.
     const creds: HomeAssistantCredentials = { baseUrl, token };
@@ -446,6 +459,7 @@ export class UserAccount extends DurableObject<Env> {
       const rest = new HomeAssistantRest(creds);
       await rest.ping();
     } catch (e: any) {
+      this.#releaseNonceClaim(nonce);
       const msg = e instanceof HomeAssistantError
         ? e.message
         : `Unable to reach Home Assistant: ${e?.message ?? e}`;
@@ -455,28 +469,31 @@ export class UserAccount extends DurableObject<Env> {
     // Consume the nonce now that we've validated.
     this.ctx.storage.kv.delete("nonce");
 
-    this.ctx.storage.kv.put<StoredCredentials>("credentials", { baseUrl, token });
-    this.ctx.storage.kv.put("expiredNotified", false);
-
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) {
       // Callback evicted — should not normally happen.
-      this.ctx.storage.kv.delete("credentials");
       return { kind: "error", message: "Connection callback expired. Please restart." };
     }
 
-    const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
-    if (reconnecting) {
-      this.ctx.storage.kv.delete("reconnecting");
+    const protocol = await requireBrowserHandoff(callback, this.ctx.storage.kv);
+    let handoff: ConnectHandoff;
+    if (stored.reconnect) {
+      // The reconnect URL is a bearer capability, so the new credentials are only staged until the
+      // Workshop has confirmed the browser that finished the flow is the owner's (see
+      // commitReconnect). Bound gadgets keep reading the current token meanwhile.
+      const stageId = stageCredentials<StoredCredentials>(
+          this.ctx.storage.kv, { baseUrl, token }, Date.now());
       try {
-        await callback.credentialsRestored();
+        handoff = requireConnectHandoff(await callback.reconnectComplete(stageId), protocol);
       } catch (e: any) {
         return { kind: "error", message: `Failed to notify workshop: ${e?.message ?? e}` };
       }
     } else {
+      this.ctx.storage.kv.put<StoredCredentials>("credentials", { baseUrl, token });
+      this.ctx.storage.kv.put("expiredNotified", false);
       try {
         const props: HomeAssistantUserImplProps = { userObjectId: this.ctx.id.toString() };
-        await callback.complete(this.ctx.exports.HomeAssistantUserImpl({ props }));
+        handoff = requireConnectHandoff(await callback.complete(this.ctx.exports.HomeAssistantUserImpl({ props })), protocol);
       } catch (e: any) {
         this.ctx.storage.kv.delete("credentials");
         return { kind: "error", message: `Failed to notify workshop: ${e?.message ?? e}` };
@@ -484,7 +501,24 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     await this.ctx.storage.deleteAlarm();
-    return { kind: "ok" };
+    return { kind: "ok", handoff };
+  }
+
+  // Releases a failed submission's claim without reopening a nonce that another flow replaced while
+  // this request was suspended. Synchronous storage makes the check and put one step.
+  #releaseNonceClaim(nonce: string): void {
+    const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    if (!stored || !stored.connecting || !constantTimeEqual(stored.value, nonce)) return;
+    const { connecting: _, ...released } = stored;
+    this.ctx.storage.kv.put<StoredNonce>("nonce", released);
+  }
+
+  /** Makes the credentials staged under `stageId` live; see GatekeeperUser.commitReconnect. */
+  async commitReconnect(stageId: string): Promise<void> {
+    const creds = commitStagedCredentials<StoredCredentials>(this.ctx.storage.kv, Date.now(), stageId);
+    if (!creds) throw new Error("No reconnect is awaiting confirmation. Please try again.");
+    this.ctx.storage.kv.put<StoredCredentials>("credentials", creds);
+    this.ctx.storage.kv.put("expiredNotified", false);
   }
 
   getCredentials(): HomeAssistantCredentials {
@@ -675,11 +709,15 @@ export class HomeAssistantUserImpl
     await this.#userAccount().revoke();
   }
 
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: HandoffOptions): Promise<HandoffLaunch> {
     const id = this.ctx.exports.UserAccount.idFromString(this.ctx.props.userObjectId);
     const nonce = generateNonce();
     await this.ctx.exports.UserAccount.get(id).prepareReconnect(nonce);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${nonce}` };
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${nonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(id).acknowledgeHandoff(options) };
+  }
+
+  async commitReconnect(stageId: string): Promise<void> {
+    await this.#userAccount().commitReconnect(stageId);
   }
 
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{url?: string}> {

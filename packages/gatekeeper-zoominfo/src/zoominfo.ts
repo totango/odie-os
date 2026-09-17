@@ -4,6 +4,7 @@ import {
   ApprovalQueue,
   stripTrailingSlashes,
   type AccountDescription,
+  type ConnectHandoff,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
@@ -15,6 +16,9 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { acknowledgeHandoff, connectHandoffPageHtml, htmlResponse, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
+import type { GatekeeperConnectResult as HandoffLaunch, GatekeeperReconnectOptions as HandoffOptions } from "@gadgets/workshop-shared/gatekeeper";
+import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import {
   ZoomInfoApi,
   ZoomInfoApiError,
@@ -95,11 +99,26 @@ type StoredNonce = {
   value: string;
   expiresAt: number;
   stage: "initiation" | "oauth";
+  /**
+   * Set when this flow reconnects an existing account, so its grant is staged rather than made
+   * live. The mode travels with the flow instead of living on the account: committing one
+   * reconnect while another is in flight must not change how that other flow lands.
+   */
+  reconnect?: true;
 };
 
 type StoredIdentity = {
   displayName?: string;
   uniqueName?: string;
+};
+
+/** The values a token grant is persisted as; staged whole during a reconnect (see commitReconnect). */
+type StoredGrant = {
+  refreshToken: string;
+  accessToken: string;
+  accessTokenExpiresAt: number;
+  scopes: string[];
+  identity: StoredIdentity;
 };
 
 type ZoomInfoGatekeeperImplProps = {
@@ -152,14 +171,6 @@ const SUPPORTED_RESOURCES: SupportedResource[] = [ACCOUNT_RESOURCE];
 // Canonical URL for the connected account. ZoomInfo has no per-user public profile URL, so we use
 // the app home; the binding is whole-account regardless.
 const ACCOUNT_URL = "https://app.zoominfo.com/";
-
-const SELF_CLOSING_HTML = `<!DOCTYPE html>
-<html lang="en">
-  <body>
-    <script type="text/javascript">window.close();</script>
-    <p>Authorization complete. You may close this tab and return to Cloudflare OS.</p>
-  </body>
-</html>`;
 
 const INVALID_LINK_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -305,12 +316,12 @@ export default {
       const stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(
         ctx.exports.UserAccount.idFromString(doId),
       );
-      const accepted = await stub.acceptAuthCode(code, oauthNonce);
-      if (!accepted) {
+      const handoff = await stub.acceptAuthCode(code, oauthNonce);
+      if (!handoff) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
 
-      return new Response(SELF_CLOSING_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      return htmlResponse(connectHandoffPageHtml(handoff));
     }
 
     return new Response("Not Found", { status: 404 });
@@ -339,12 +350,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
-    _options?: GatekeeperConnectOptions,
-  ): Promise<{ url: string }> {
+    options?: GatekeeperConnectOptions,
+  ): Promise<HandoffLaunch> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(userObjectId).acknowledgeHandoff(options) };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -361,6 +372,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // tokens (persisting rotated refresh tokens).
 
 export class UserAccount extends DurableObject<Env> {
+  /** Records supported launch intent; callback agreement is checked before exchange. */
+  acknowledgeHandoff(options?: HandoffOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string): Promise<void> {
     if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       await this.ctx.storage.setAlarm(Date.now() + CONNECT_TIMEOUT_MS);
@@ -374,12 +387,12 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string): Promise<void> {
-    this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
+      reconnect: true,
     });
   }
 
@@ -402,19 +415,24 @@ export class UserAccount extends DurableObject<Env> {
       value: oauthNonce,
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
+      reconnect: stored.reconnect,
     });
     this.ctx.storage.kv.put("codeVerifier", codeVerifier);
     return { oauthNonce, codeChallenge };
   }
 
-  async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
+  /**
+   * Finishes the OAuth code exchange and returns the handoff for the page the browser lands on, or
+   * null when the callback's nonce doesn't match.
+   */
+  async acceptAuthCode(code: string, oauthNonce: string): Promise<ConnectHandoff | null> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "oauth" || Date.now() >= stored.expiresAt ||
         !constantTimeEqual(stored.value, oauthNonce)) {
-      return false;
+      return null;
     }
     const codeVerifier = this.ctx.storage.kv.get<string>("codeVerifier");
-    if (!codeVerifier) return false;
+    if (!codeVerifier) return null;
     this.ctx.storage.kv.delete("nonce");
     this.ctx.storage.kv.delete("codeVerifier");
 
@@ -425,6 +443,7 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     const oauth = resolveOAuthConfig(this.env);
+    const protocol = await requireBrowserHandoff(callback, this.ctx.storage.kv);
     const grant = await exchangeAuthCode(
       code,
       codeVerifier,
@@ -437,21 +456,26 @@ export class UserAccount extends DurableObject<Env> {
       throw new Error("ZoomInfo did not return a refresh token.");
     }
 
-    this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
-    this.ctx.storage.kv.put("accessToken", grant.accessToken);
-    this.ctx.storage.kv.put("accessTokenExpiresAt", Date.now() + grant.expiresIn * 1000);
-    this.ctx.storage.kv.put("scopes", grant.scopes);
-    this.ctx.storage.kv.put<StoredIdentity>("identity", parseIdTokenClaims(grant.idToken));
-    this.ctx.storage.kv.put("expiredNotified", false);
+    const storedGrant: StoredGrant = {
+      refreshToken: grant.refreshToken,
+      accessToken: grant.accessToken,
+      accessTokenExpiresAt: Date.now() + grant.expiresIn * 1000,
+      scopes: grant.scopes,
+      identity: parseIdTokenClaims(grant.idToken),
+    };
 
-    const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
-    if (reconnecting) {
-      this.ctx.storage.kv.delete("reconnecting");
-      await callback.credentialsRestored();
+    let handoff: ConnectHandoff;
+    if (stored.reconnect) {
+      // The reconnect URL is a bearer capability, so the new grant is only staged until the Workshop
+      // has confirmed the browser that finished the flow is the owner's (see commitReconnect). Bound
+      // gadgets keep reading the current token meanwhile.
+      const stageId = stageCredentials(this.ctx.storage.kv, storedGrant, Date.now());
+      handoff = await callback.reconnectComplete(stageId);
     } else {
+      this.#writeGrant(storedGrant);
       try {
         const props: ZoomInfoGatekeeperImplProps = { userObjectId: this.ctx.id.toString() };
-        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
+        handoff = requireConnectHandoff(await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props })), protocol);
       } catch (err) {
         this.ctx.storage.kv.delete("refreshToken");
         this.ctx.storage.kv.delete("accessToken");
@@ -460,7 +484,23 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     await this.ctx.storage.deleteAlarm();
-    return true;
+    return requireConnectHandoff(handoff, protocol);
+  }
+
+  /** Makes the grant staged under `stageId` live; see GatekeeperUser.commitReconnect. */
+  async commitReconnect(stageId: string): Promise<void> {
+    const grant = commitStagedCredentials<StoredGrant>(this.ctx.storage.kv, Date.now(), stageId);
+    if (!grant) throw new Error("No reconnect is awaiting confirmation. Please try again.");
+    this.#writeGrant(grant);
+  }
+
+  #writeGrant(grant: StoredGrant): void {
+    this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
+    this.ctx.storage.kv.put("accessToken", grant.accessToken);
+    this.ctx.storage.kv.put("accessTokenExpiresAt", grant.accessTokenExpiresAt);
+    this.ctx.storage.kv.put("scopes", grant.scopes);
+    this.ctx.storage.kv.put<StoredIdentity>("identity", grant.identity);
+    this.ctx.storage.kv.put("expiredNotified", false);
   }
 
   async getAccessToken(): Promise<string> {
@@ -577,10 +617,14 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().revoke();
   }
 
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: HandoffOptions): Promise<HandoffLaunch> {
     const initiationNonce = generateNonce();
     await this.#userAccount().prepareReconnect(initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}`, handoffProtocol: await this.#userAccount().acknowledgeHandoff(options) };
+  }
+
+  async commitReconnect(stageId: string): Promise<void> {
+    await this.#userAccount().commitReconnect(stageId);
   }
 
   /**

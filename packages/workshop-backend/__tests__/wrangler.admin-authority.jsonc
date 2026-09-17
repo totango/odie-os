@@ -2,7 +2,7 @@
 {
   "name": "admin-authority-tests",
   "main": "admin-authority-worker.ts",
-  "compatibility_date": "2026-02-02",
+  "compatibility_date": "2026-09-04",
   "compatibility_flags": [
     "experimental",
     "nodejs_compat",
@@ -17,6 +17,10 @@
       {
         "name": "TEST_USER",
         "class_name": "UserDurableObject"
+      },
+      {
+        "name": "TEST_USER_DIRECTORY",
+        "class_name": "UserDirectoryDurableObject"
       },
       {
         "name": "TEST_ADMIN",
@@ -53,6 +57,10 @@
       {
         "name": "TEST_PENDING_LOGIN",
         "class_name": "PendingLogin"
+      },
+      {
+        "name": "TEST_NATIVE_BROWSER_FLOW",
+        "class_name": "NativeBrowserFlow"
       }
     ]
   },
@@ -62,6 +70,7 @@
       "new_sqlite_classes": [
         "OverseerDurableObject",
         "UserDurableObject",
+        "UserDirectoryDurableObject",
         "AdminSettings",
         "AdminAuthority",
         "AdminProviderTestHooks",
@@ -70,7 +79,8 @@
         "LibraryRegistryDurableObject",
         "JarvisPolicy",
         "CommunityRequests",
-        "PendingLogin"
+        "PendingLogin",
+        "NativeBrowserFlow"
       ]
     }
   ],

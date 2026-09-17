@@ -134,6 +134,8 @@ function makeApi() {
     connectAccount: typeof connectAccount
   }
   const overseer = {
+    negotiateEditingProtocol: async () => ({ protocol: 'git-ot-v1', state: 'ready' }),
+    getEditingProtocol: async () => ({ protocol: 'git-ot-v1', state: 'ready' }),
     newGatekeeper,
   } as unknown as RpcStub<Overseer> & { newGatekeeper: typeof newGatekeeper }
   return { api, overseer, startResourceConfigurator, newGatekeeper }

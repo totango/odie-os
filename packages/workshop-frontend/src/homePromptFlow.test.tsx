@@ -13,6 +13,8 @@ const testState = vi.hoisted(() => {
     async () => {},
   );
   const overseer = {
+    negotiateEditingProtocol: async () => ({ protocol: 'git-ot-v1', state: 'ready' }),
+    getEditingProtocol: async () => ({ protocol: 'git-ot-v1', state: 'ready' }),
     getMetadata: vi.fn<() => Promise<{ id: string }>>(async () => ({ id: "workspace-1" })),
     newChat: vi.fn<() => Promise<number>>(async () => 7),
     [Symbol.dispose]: vi.fn<() => void>(),
@@ -60,8 +62,8 @@ vi.mock("./AuthContext", () => ({
   }),
 }));
 
-vi.mock("./ChatInput", () => ({
-  ChatInput: ({ seedText, seedNonce, draftStorageKey, onSend, onInputIntent, sendingStatusLabel, getOverseer }: {
+vi.mock("./features/chat/composer/ChatComposer", () => ({
+  ChatComposer: ({ seedText, seedNonce, draftStorageKey, onSend, onInputIntent, sendingStatusLabel, getOverseer }: {
     seedText?: string;
     seedNonce?: number;
     draftStorageKey?: string;

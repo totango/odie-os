@@ -81,17 +81,18 @@ sibling was about to be blamed for.
 
 ### wrangler and workerd versions are coupled
 
-The public repo pins `workerd` through a root `overrides` entry, which collapses every transitive
-request to one version. A newer `wrangler` brings a newer `miniflare` that demands a newer `workerd`
-than the override yields, and the harness then fails to boot:
+Wrangler, Miniflare and workerd must be upgraded together. The workspace catalog selects Wrangler;
+the pool-specific overrides in `pnpm-workspace.yaml` align its Wrangler and Miniflare dependencies.
+A newer Wrangler can bring a Miniflare that demands a newer workerd, otherwise the harness fails:
 
 ```
 The Workers runtime failed to start ... requires compatibility date "2026-07-08",
 but the newest date supported by this server binary is "2026-06-30".
 ```
 
-So the public package pins `wrangler` to `~4.104.0` — the release whose bundled `workerd` matches the
-override. Bumping it means bumping the override in step.
+Use the versions resolved in `pnpm-lock.yaml`, and verify both the native integration harness and
+the Vitest Workers pool after changing these pins. A frozen install alone does not prove runtime
+compatibility.
 
 ### A consumer in another repo can end up with two copies of capnweb
 

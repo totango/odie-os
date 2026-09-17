@@ -18,6 +18,7 @@ const BASE_CONFIG: ServerConfig = {
   passwordAuthEnabled: true,
   cloudflareLimitsEnabled: false,
   signupsEnabled: true,
+  userSearchEnabled: false,
   siteName: 'Original',
   siteLogo: { url: '/api/site-logo?v=old' },
   announcement: '',

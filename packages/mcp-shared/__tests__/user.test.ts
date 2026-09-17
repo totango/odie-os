@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import type { McpGatekeeperUserAccount } from "../src/user.js";
 
 import {
   McpGatekeeperUserBase,
@@ -15,6 +16,7 @@ const server = {
 
 class TestUser extends McpGatekeeperUserBase<object> {
   revoked = false;
+  committed: string | undefined;
   reconnectNonce: string | undefined;
 
   protected [mcpGatekeeperUserContext]() {
@@ -22,9 +24,11 @@ class TestUser extends McpGatekeeperUserBase<object> {
       avatar: { url: "data:image/svg+xml,test" },
       baseUrl: "https://workshop.example/gatekeeper/mcp",
       account: {
+        acknowledgeHandoff: async (...[options]: Parameters<McpGatekeeperUserAccount["acknowledgeHandoff"]>) => options?.handoffProtocol ?? "browser-bound-v1",
         getServer: async () => server,
         revoke: async () => { this.revoked = true; },
         prepareReconnect: async (nonce: string) => { this.reconnectNonce = nonce; },
+        commitReconnect: async (stageId: string) => { this.committed = stageId; },
       },
     };
   }
@@ -53,6 +57,9 @@ it("provides the common MCP account lifecycle", async () => {
     `https://workshop.example/gatekeeper/mcp/account-id/${subject.reconnectNonce}`,
   );
   expect(subject.reconnectNonce).toHaveLength(64);
+
+  await subject.commitReconnect("5".repeat(64));
+  expect(subject.committed).toBe("5".repeat(64));
 });
 
 it("does not expose connector hooks as string-named methods", () => {

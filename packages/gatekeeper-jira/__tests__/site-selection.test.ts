@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker, { JiraProjectGatekeeperImpl, JiraSiteGatekeeperImpl, UserAccount } from "../src/jira";
+import { connectCallback, HANDOFF } from "./connect-callback";
 
 const ONE = { id: "cloud-1", name: "One", url: "https://one.atlassian.net", scopes: ["read:jira-work"] };
 const TWO = { id: "cloud-2", name: "Two", url: "https://two.atlassian.net", scopes: ["read:jira-work"] };
@@ -45,7 +46,7 @@ describe("Jira site selection during the OAuth browser flow", () => {
     stubAtlassian([ONE]);
     const { kv, callback, connect } = makeAccount();
 
-    await expect(connect()).resolves.toEqual({ returnUrl: undefined });
+    await expect(connect()).resolves.toEqual({ handoff: HANDOFF });
 
     expect(kv.get("selectedSite")).toEqual({ cloudId: "cloud-1", url: "https://one.atlassian.net", name: "One" });
     expect(callback.complete).toHaveBeenCalledTimes(1);
@@ -67,7 +68,7 @@ describe("Jira site selection during the OAuth browser flow", () => {
 
     const chosen = await account.selectSite("cloud-2", offered!.selection!.nonce);
 
-    expect(chosen).toEqual({ returnUrl: undefined });
+    expect(chosen).toEqual({ handoff: HANDOFF });
     expect(kv.get("selectedSite")).toEqual({ cloudId: "cloud-2", url: "https://two.atlassian.net", name: "Two" });
     expect(kv.get("grant")).toMatchObject({ accessToken: "access", refreshToken: "refresh" });
     expect(kv.has("pendingSelection")).toBe(false);
@@ -95,7 +96,7 @@ describe("Jira site selection during the OAuth browser flow", () => {
     await expect(account.selectSite("cloud-1", OTHER_NONCE)).resolves.toBeNull();
     expect(kv.has("pendingSelection")).toBe(true);
 
-    await expect(account.selectSite("cloud-1", nonce)).resolves.toEqual({ returnUrl: undefined });
+    await expect(account.selectSite("cloud-1", nonce)).resolves.toEqual({ handoff: HANDOFF });
     await expect(account.selectSite("cloud-2", nonce)).resolves.toBeNull();
     expect(kv.get("selectedSite")).toMatchObject({ cloudId: "cloud-1" });
   });
@@ -119,7 +120,7 @@ describe("Jira site selection during the OAuth browser flow", () => {
 
     const offered = await connect(returnUrl);
 
-    await expect(account.selectSite("cloud-1", offered!.selection!.nonce)).resolves.toEqual({ returnUrl });
+    await expect(account.selectSite("cloud-1", offered!.selection!.nonce)).resolves.toEqual({ handoff: HANDOFF });
   });
 });
 
@@ -149,7 +150,7 @@ describe("Jira legacy connection migration", () => {
 
   it("lets a legacy multi-site connection choose through reconnect", async () => {
     stubAtlassian([ONE, TWO]);
-    const { account, kv } = makeAccount();
+    const { account, kv, callback } = makeAccount();
     kv.set("grant", { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: Date.now() + 3600_000 });
     kv.set("sites", [ONE, TWO]);
 
@@ -161,13 +162,83 @@ describe("Jira legacy connection migration", () => {
     expect(kv.get("grant")).toMatchObject({ accessToken: "old-access" });
 
     await account.selectSite("cloud-2", offered!.selection!.nonce);
-
+    expect(kv.has("selectedSite")).toBe(false);
+    expect(kv.get("grant")).toMatchObject({ accessToken: "old-access" });
+    await account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]);
     expect(kv.get("selectedSite")).toMatchObject({ cloudId: "cloud-2" });
     expect(kv.get("grant")).toMatchObject({ accessToken: "access" });
   });
 });
 
 describe("Jira reconnect site preservation", () => {
+  it("does not restore a connection revoked during handoff negotiation", async () => {
+    stubAtlassian([ONE]);
+    const { account, kv, callback, connect } = makeAccount();
+    callback.getHandoffProtocol.mockImplementationOnce(async () => "browser-bound-v1");
+    callback.getHandoffProtocol.mockImplementationOnce(async () => {
+      await account.revoke();
+      return "browser-bound-v1";
+    });
+    await expect(connect()).rejects.toThrow(/superseded or revoked/);
+    expect(kv.size).toBe(0);
+    expect(callback.complete).not.toHaveBeenCalled();
+  });
+
+  it("refuses a stage if the selected site changes before redemption", async () => {
+    stubAtlassian([ONE]);
+    const { account, kv, callback } = makeAccount();
+    kv.set("grant", { accessToken: "old-access", expiresAt: Date.now() + 3600_000 });
+    kv.set("selectedSite", { cloudId: ONE.id, url: ONE.url, name: ONE.name });
+    await reconnect(account);
+    kv.set("selectedSite", { cloudId: TWO.id, url: TWO.url, name: TWO.name });
+    await expect(account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]))
+      .rejects.toThrow(/connection changed/);
+    expect(kv.get("grant")).toMatchObject({ accessToken: "old-access" });
+  });
+
+  it.each(["missing", "unknown", "failure"])("rejects a mixed native callback before exchanging credentials: %s", async mode => {
+    const { account, kv, callback } = makeAccount();
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    kv.set("callback", {
+      complete: callback.complete,
+      ...(mode === "missing" ? {} : { getHandoffProtocol: async () => {
+        if (mode === "failure") throw new Error("RPC unavailable");
+        return "legacy";
+      } }),
+    });
+    await account.prepareReconnect(NONCE, "https://workshop.example/native/oauth-return/abcdefghijklmnopqrstuvwxyz012345");
+    const begun = await account.beginOAuthFlow(NONCE);
+    await expect(account.acceptAuthCode("code", begun!.oauthNonce)).rejects.toThrow(/start a new connection/);
+    await expect(account.acceptAuthCode("code", begun!.oauthNonce)).resolves.toBeNull();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(callback.complete).not.toHaveBeenCalled();
+    expect(kv.has("grant")).toBe(false);
+    expect(kv.has("stagedCredentials")).toBe(false);
+  });
+
+  it.each(["revoke", "expire", "replace"])("refuses a staged reconnect after %s", async change => {
+    stubAtlassian([ONE]);
+    const { account, kv, callback } = makeAccount();
+    kv.set("grant", { accessToken: "old-access", refreshToken: "old-refresh", expiresAt: Date.now() + 3600_000 });
+    kv.set("selectedSite", { cloudId: "cloud-1", url: ONE.url, name: ONE.name });
+    await reconnect(account);
+    const stageId = callback.reconnectComplete.mock.calls[0][0];
+    await expect(account.commitReconnect("wrong-stage")).rejects.toThrow(/No reconnect/);
+    expect(kv.get("grant")).toMatchObject({ accessToken: "old-access" });
+    if (change === "revoke") await account.revoke();
+    if (change === "replace") {
+      await reconnect(account);
+      expect(callback.reconnectComplete.mock.calls[1][0]).not.toBe(stageId);
+    }
+    const clock = change === "expire" ? vi.spyOn(Date, "now").mockReturnValue(Date.now() + 24 * 60 * 60 * 1000) : undefined;
+    try {
+      await expect(account.commitReconnect(stageId)).rejects.toThrow(/No reconnect/);
+    } finally { clock?.mockRestore(); }
+    if (change !== "revoke") expect(kv.get("grant")).toMatchObject({ accessToken: "old-access" });
+    else expect(kv.has("grant")).toBe(false);
+  });
+
   it("keeps the selected site across reconnect without asking again", async () => {
     stubAtlassian([ONE, TWO]);
     const { account, kv, callback } = makeAccount();
@@ -175,11 +246,15 @@ describe("Jira reconnect site preservation", () => {
     kv.set("sites", [ONE]);
     kv.set("selectedSite", { cloudId: "cloud-1", url: "https://one.atlassian.net", name: "One" });
 
-    await expect(reconnect(account)).resolves.toEqual({ returnUrl: undefined });
+    await expect(reconnect(account)).resolves.toEqual({ handoff: HANDOFF });
+    expect(kv.get("grant")).toMatchObject({ accessToken: "old-access" });
+    await account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]);
+    await expect(account.commitReconnect(callback.reconnectComplete.mock.calls[0][0])).rejects.toThrow(/No reconnect/);
 
     expect(kv.get("selectedSite")).toMatchObject({ cloudId: "cloud-1" });
     expect(kv.get("grant")).toMatchObject({ accessToken: "access" });
-    expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
+    expect(callback.reconnectComplete).toHaveBeenCalledTimes(1);
+    expect(callback.credentialsRestored).not.toHaveBeenCalled();
   });
 
   it("fails clearly instead of switching sites when reconnect drops the selected site", async () => {
@@ -258,7 +333,7 @@ describe("Jira browser-flow selection endpoint", () => {
   });
 
   it("only accepts POST with well-formed single-use state on the selection callback", async () => {
-    const selectSite = vi.fn(async () => ({ returnUrl: undefined }));
+    const selectSite = vi.fn(async () => ({ handoff: HANDOFF }));
 
     const rejectedMethod = await fetchWorker("https://workshop.example/gatekeeper/jira/select", { selectSite });
     expect(rejectedMethod.status).toBe(405);
@@ -341,7 +416,7 @@ async function reconnect(account: UserAccount) {
 function makeAccount() {
   const account = new UserAccount();
   const kv = new Map<string, unknown>();
-  const callback = { complete: vi.fn(), credentialsRestored: vi.fn(), credentialsExpired: vi.fn() };
+  const callback = connectCallback();
   Object.assign(account, {
     env: ENV,
     ctx: {

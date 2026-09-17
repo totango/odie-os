@@ -20,6 +20,10 @@ export interface NativeBrowserFlowRecord {
   expiresAt: number;
   status: NativeBrowserFlowStatus;
   loginToken?: string;
+  /** Private rendezvous for ticket-confirmed login; never returned to the browser or app. */
+  pendingLoginId?: string;
+  /** Private user-DO nonce, redeemable only after the native verifier and ticket arrive together. */
+  accountNonce?: string;
   errorMessage?: string;
 }
 
@@ -40,6 +44,8 @@ export function createNativeBrowserFlowRecord(input: {
   clientVerifierHash: string;
   providerInitiationUrl: string;
   userId?: string;
+  pendingLoginId?: string;
+  accountNonce?: string;
   now?: number;
 }): NativeBrowserFlowRecord {
   const now = input.now ?? Date.now();
@@ -53,6 +59,8 @@ export function createNativeBrowserFlowRecord(input: {
     clientVerifierHash: input.clientVerifierHash,
     providerInitiationUrl: providerUrl.toString(),
     userId: input.userId,
+    pendingLoginId: input.pendingLoginId,
+    accountNonce: input.accountNonce,
     createdAt: now,
     expiresAt: now + NATIVE_BROWSER_FLOW_TTL_MS,
     status: "pending",
@@ -84,22 +92,11 @@ export class NativeBrowserFlow extends DurableObject<Cloudflare.Env> {
   }
 
   async completeLogin(token: string): Promise<void> {
-    const record = await this.#record();
-    await this.#assertNotExpired(record);
-    if (record.kind !== "login") throw new Error("Native browser flow is not a login flow.");
-    if (record.status !== "pending") return;
-    record.status = "completed";
-    record.loginToken = token;
-    await this.#put(record);
+    throw new Error("Native login requires a completion ticket. Start a new flow.");
   }
 
   async completeAccount(): Promise<void> {
-    const record = await this.#record();
-    await this.#assertNotExpired(record);
-    if (record.kind === "login") throw new Error("Native browser flow is not an account flow.");
-    if (record.status !== "pending") return;
-    record.status = "completed";
-    await this.#put(record);
+    throw new Error("Native account completion requires a ticket. Start a new flow.");
   }
 
   async fail(message: string): Promise<void> {
@@ -111,7 +108,7 @@ export class NativeBrowserFlow extends DurableObject<Cloudflare.Env> {
     await this.#put(record);
   }
 
-  async consumeLoginResult(clientVerifierHash: string): Promise<NativeLoginConsumeResult> {
+  async consumeLoginResult(clientVerifierHash: string, ticket?: string): Promise<NativeLoginConsumeResult> {
     const record = await this.#record();
     if (!constantTimeEqual(record.clientVerifierHash, clientVerifierHash)) return { status: "verifier-mismatch" };
     if (record.kind !== "login") throw new Error("Native browser flow is not a login flow.");
@@ -124,12 +121,48 @@ export class NativeBrowserFlow extends DurableObject<Cloudflare.Env> {
     }
     if (status === "failed") return { status: "failed", message: record.errorMessage ?? "Native login failed." };
     if (status === "consumed") return { status: "consumed" };
-    if (status !== "completed" || !record.loginToken) return { status: "pending" };
-    const token = record.loginToken;
+    // Pre-cutover callbacks delivered directly to this object. Never release those results through
+    // verifier-only polling: that would let the initiator of a phished launch URL sign in as its victim.
+    if (!record.pendingLoginId) {
+      delete record.loginToken;
+      record.status = "failed";
+      record.errorMessage = "Native login requires an upgraded provider. Start a new flow.";
+      await this.#put(record);
+      return {status: "failed", message: record.errorMessage};
+    }
+    if (!ticket) return {status: "pending"};
+    const pending = this.ctx.exports.PendingLogin.get(
+        this.ctx.exports.PendingLogin.idFromString(record.pendingLoginId));
+    await pending.confirm(ticket);
+    const token = await pending.receive();
+    if (!token) return {status: "pending"};
+    if (Date.now() >= record.expiresAt) {
+      record.status = "expired";
+      await this.#put(record);
+      return {status: "expired"};
+    }
     record.status = "consumed";
     delete record.loginToken;
     await this.#put(record);
     return { status: "completed", token };
+  }
+
+  /** Native account activation still redeems through the initiating user's ordinary ticket store. */
+  async completeAccountHandoff(clientVerifierHash: string, ticket: string, userId: string): Promise<void> {
+    const record = await this.#record();
+    this.#assertVerifier(record, clientVerifierHash);
+    await this.#assertNotExpired(record);
+    if (record.kind === "login" || record.userId !== userId || record.status !== "pending" || !record.accountNonce) {
+      throw new Error("Native account flow is not redeemable.");
+    }
+    const nonce = record.accountNonce;
+    delete record.accountNonce;
+    record.status = "consumed";
+    await this.#put(record);
+    const users = this.ctx.exports.UserDurableObject;
+    await users.get(users.idFromString(userId)).completeConnectHandoff(ticket, nonce);
+    record.status = "completed";
+    await this.#put(record);
   }
 
   async getAccountStatus(clientVerifierHash: string, userId?: string): Promise<NativeAccountFlowStatusResult> {

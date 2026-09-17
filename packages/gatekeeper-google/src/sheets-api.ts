@@ -2,6 +2,7 @@ import type {
   SpreadsheetCellValue, SpreadsheetInfo, SpreadsheetInputMode, SpreadsheetRange, SpreadsheetValueMode,
 } from "./sheets-types";
 import { AccessTokenProvider, fetchWithAuthRetry } from "./auth-retry";
+import { readGoogleJson } from "./google-response";
 
 const API_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const MAX_RANGES = 20;
@@ -9,15 +10,10 @@ const MAX_TOTAL_CELLS = 50_000;
 const MAX_RANGE_LENGTH = 500;
 // Bound the encoded JSON before decoding and parsing.
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
-const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_WRITE_ROWS = 5_000;
 const MAX_WRITE_CELLS = 50_000;
 const MAX_SHEET_TITLE_LENGTH = 100;
-
-type GoogleErrorResponse = {
-  error?: { message?: string };
-};
 
 type RestSpreadsheet = {
   spreadsheetId: string;
@@ -170,83 +166,16 @@ function normalizeRange(rest: RestValueRange, requested: ValidatedRange): Spread
   });
   return { range: rest.range ?? requested.range, values };
 }
-
-async function readResponseText(response: Response, maxBytes: number): Promise<string> {
-  let contentLength = response.headers.get("Content-Length");
-  if (contentLength !== null) {
-    let declaredBytes = Number(contentLength);
-    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-      await response.body?.cancel().catch(() => {});
-      throw new Error(`Google Sheets response exceeded the ${maxBytes}-byte limit.`);
-    }
-  }
-
-  if (!response.body) return "";
-  let reader = response.body.getReader();
-  let chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-  try {
-    while (true) {
-      let { done, value } = await reader.read();
-      if (done) break;
-      if (totalBytes + value.byteLength > maxBytes) {
-        await reader.cancel().catch(() => {});
-        throw new Error(`Google Sheets response exceeded the ${maxBytes}-byte limit.`);
-      }
-      chunks.push(value);
-      totalBytes += value.byteLength;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  let bytes = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (let chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
-}
-
 export class GoogleSheetsApi {
   constructor(private getAccessToken: AccessTokenProvider) {}
 
-  async #request<T>(url: URL, init: RequestInit = {}): Promise<T> {
+  async #request<T>(url: URL, operation: string, init: RequestInit = {}): Promise<T> {
     let response = await fetchWithAuthRetry(
       url.toString(), init, this.getAccessToken, { timeoutMs: REQUEST_TIMEOUT_MS },
     );
-
-    let text: string;
-    try {
-      text = await readResponseText(
-        response, response.ok ? MAX_RESPONSE_BYTES : MAX_ERROR_RESPONSE_BYTES,
-      );
-    } catch (error) {
-      if (!response.ok) {
-        throw new Error(
-          `Google Sheets request failed [http=${response.status}]`, { cause: error },
-        );
-      }
-      throw error;
-    }
-
-    let body: unknown;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      if (!response.ok) {
-        throw new Error(`Google Sheets request failed [http=${response.status}]`);
-      }
-      throw new Error("Google Sheets returned an invalid JSON response.");
-    }
-
-    if (!response.ok) {
-      let errorBody = body as GoogleErrorResponse;
-      let detail = errorBody?.error?.message ? `: ${errorBody.error.message}` : "";
-      throw new Error(`Google Sheets request failed [http=${response.status}]${detail}`);
-    }
-    return body as T;
+    return readGoogleJson<T>(response, {
+      provider: "Google Sheets", operation, maxBytes: MAX_RESPONSE_BYTES,
+    });
   }
 
   async getSpreadsheet(spreadsheetId: string): Promise<SpreadsheetInfo> {
@@ -256,7 +185,7 @@ export class GoogleSheetsApi {
       "spreadsheetId,properties(title,locale,timeZone)," +
       "sheets(properties(sheetId,title,index,hidden,gridProperties(rowCount,columnCount)))",
     );
-    let result = await this.#request<RestSpreadsheet>(url);
+    let result = await this.#request<RestSpreadsheet>(url, "get spreadsheet");
     return {
       id: result.spreadsheetId,
       title: result.properties?.title ?? "Untitled spreadsheet",
@@ -289,7 +218,10 @@ export class GoogleSheetsApi {
     url.searchParams.set("valueRenderOption", valueRenderOption(valueMode));
     if (valueMode === "raw") url.searchParams.set("dateTimeRenderOption", "SERIAL_NUMBER");
 
-    let result = await this.#request<{ valueRanges?: RestValueRange[] }>(url);
+    let result = await this.#request<{ valueRanges?: RestValueRange[] }>(
+      url,
+      "read ranges",
+    );
     let returned = result.valueRanges ?? [];
     return validated.map((range, index) => normalizeRange(returned[index] ?? {}, range));
   }
@@ -306,7 +238,7 @@ export class GoogleSheetsApi {
       `${API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}`,
     );
     url.searchParams.set("valueInputOption", valueInputOption(inputMode));
-    await this.#request(url, {
+    await this.#request(url, "update range", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ majorDimension: "ROWS", values: writeValues }),
@@ -326,7 +258,7 @@ export class GoogleSheetsApi {
     );
     url.searchParams.set("valueInputOption", valueInputOption(inputMode));
     url.searchParams.set("insertDataOption", "INSERT_ROWS");
-    await this.#request(url, {
+    await this.#request(url, "append rows", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ majorDimension: "ROWS", values: writeRows }),
@@ -338,7 +270,7 @@ export class GoogleSheetsApi {
     let url = new URL(
       `${API_BASE}/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:clear`,
     );
-    await this.#request(url, {
+    await this.#request(url, "clear range", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({}),

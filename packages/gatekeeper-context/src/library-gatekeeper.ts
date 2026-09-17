@@ -202,6 +202,9 @@ export class ContextAccount
   reconnect(): never {
     throw new Error("The Context Library is a singleton gatekeeper; it has no connect flow.");
   }
+  commitReconnect(_stageId: string): never {
+    throw new Error("The Context Library is a singleton gatekeeper; it has no connect flow.");
+  }
   async getAuthenticatedEmail(): Promise<string | null> {
     return null;
   }
@@ -334,6 +337,7 @@ export class ContextGatekeeper
     };
   }
 
+  /** Catalog metadata can reveal private collections and must retain observer authorization. */
   async getAgentCatalog(
       authorizer: NativeRpcStub<ObservationAuthorizer>): Promise<AgentCatalog> {
     let domain = this.ctx.props.sharingDomain;

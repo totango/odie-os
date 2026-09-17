@@ -27,9 +27,27 @@ import { RpcTarget, RpcStub, newMessagePortRpcSession } from "data:text/javascri
 
 let gadget;  // RPC stub to the gadget's server-side Durable Object.
 {
-  let {port1, port2} = new MessageChannel();
-  window.parent.postMessage("handshake", "*", [port2]);
-  gadget = newMessagePortRpcSession(port1);
+  let session;
+  const connect = () => {
+    const {port1, port2} = new MessageChannel();
+    const previous = session;
+    session = newMessagePortRpcSession(port1);
+    window.parent.postMessage("handshake", "*", [port2]);
+    previous?.[Symbol.dispose]();
+  };
+  // Only top-level calls are redirected. Escaped child capabilities and subscriptions must
+  // handle their own disconnection; replaying them could repeat an application write.
+  gadget = new RpcStub(new Proxy(new RpcTarget(), {
+    get: (target, property, receiver) => {
+      if (typeof property === 'symbol' || property in target) return Reflect.get(target, property, receiver);
+      return session[property];
+    },
+  }));
+  window.addEventListener('message', event => {
+    if (event.source === window.parent && event.data?.type === 'gadgets:reconnect' &&
+        event.data.version === 1) connect();
+  });
+  connect();
 }
 
 // Monkey-patch console to forward logs to the parent frame.
@@ -140,6 +158,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [bridgeError, setBridgeError] = useState<string | null>(null)
   const [hasLoaded, setHasLoaded] = useState(false)
   const [isInvalidated, setIsInvalidated] = useState(false)
   const [iframeGeneration, setIframeGeneration] = useState(0)
@@ -207,7 +226,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   useEffect(() => {
     if (!rpcSessionRef.current) {
       if (handshakePendingRef.current !== null) {
-        reloadIframe(new Error('Gadget changed during RPC handshake.'))
+        resetConnection(new Error('Gadget connection superseded.'))
+        iframeRef.current?.contentWindow?.postMessage({ type: 'gadgets:reconnect', version: 1 }, '*')
       }
       return
     }
@@ -232,17 +252,25 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
         if (!isCurrent()) return
         const oldStub = gadgetStubRef.current
         installGadgetStub(replacementStub)
+        setBridgeError(null)
         pendingStub.resolve(replacementStub)
         if (pendingGadgetStubRef.current === pendingStub) pendingGadgetStubRef.current = null
         oldStub?.[Symbol.dispose]?.()
       } catch (caught) {
-        if (isCurrent()) reloadIframe(caught)
+        if (isCurrent()) {
+          ++connectionGenerationRef.current
+          pendingStub.reject(caught)
+          gadgetStubRef.current?.[Symbol.dispose]?.()
+          gadgetStubRef.current = null
+          setBridgeError('Connection interrupted. Your view is preserved. Nested connections may need to be reopened.')
+        }
       } finally {
         if (timeout !== undefined) clearTimeout(timeout)
       }
     }
     void reconnect()
-  }, [gadget, chatId])
+    return () => { ++connectionGenerationRef.current }
+  }, [gadget, chatId, retryNonce])
 
   // Effect to handle reloadTrigger changes (code changes). If the gadget UI is visible, never
   // refresh the iframe automatically: the app may contain in-progress form edits that only exist in
@@ -360,7 +388,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
             port.close()
             return
           }
-          installGadgetStub(gadgetStub)
+           installGadgetStub(gadgetStub)
+           setBridgeError(null)
           // Redirectable target: swapping gadgetStubRef reconnects top-level calls without reloading.
           const forwardingTarget = new Proxy(new RpcTarget() as any, {
             get: (target, property, receiver) => {
@@ -379,7 +408,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
           port.close()
           if (!isCurrent()) return
           console.error('Failed to establish RPC connection:', caught)
-          setError('Failed to connect gadget to server')
+           setBridgeError('Failed to connect gadget to server. Your view is preserved.')
         } finally {
           if (handshakePendingRef.current === generation) handshakePendingRef.current = null
         }
@@ -395,8 +424,15 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     }
 
     window.addEventListener('message', handleMessage)
+    // Activity retains the document but destroys effects/ports. The versioned bootstrap
+    // replaces its port without evaluating application code again.
+    iframeRef.current?.contentWindow?.postMessage({ type: 'gadgets:reconnect', version: 1 }, '*')
+    const reconnectTimeout = iframeRef.current ? setTimeout(() => {
+      if (!rpcSessionRef.current) setBridgeError('This view could not reconnect. Your input is preserved; you can retry or reload when ready.')
+    }, RECONNECT_TIMEOUT_MS) : undefined
     return () => {
       cancelled = true
+      clearTimeout(reconnectTimeout)
       window.removeEventListener('message', handleMessage)
       resetConnection(new Error('Gadget RPC session was closed.'))
     }
@@ -496,6 +532,14 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
 
   return (
     <div className="relative" style={{ height, width: '100%' }}>
+      {bridgeError && <div role="status" className="absolute inset-x-3 bottom-3 z-10 rounded border border-kumo-line bg-kumo-base p-3 text-kumo-default">
+        {bridgeError}
+        <button type="button" onClick={() => {
+          if (rpcSessionRef.current) setRetryNonce(n => n + 1)
+          else iframeRef.current?.contentWindow?.postMessage({ type: 'gadgets:reconnect', version: 1 }, '*')
+        }}>Reconnect</button>
+        <button type="button" onClick={loadPendingUiUpdate}>Reload when ready</button>
+      </div>}
       {isInvalidated && (
         <div className="absolute inset-x-3 top-3 z-10 flex justify-center pointer-events-none">
           <div

@@ -3,6 +3,9 @@ import { providerFixtureClaim } from './__tests__/admin-authority-fixture';
 // Resolve the installed pool's own public Miniflare API, without adding/upgrading a dependency.
 const require = createRequire(import.meta.resolve('@cloudflare/vitest-pool-workers'));
 const { kCurrentWorker } = require('miniflare');
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import type { Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import capnwebValidate from 'capnweb-validate/vite'
@@ -14,6 +17,27 @@ const EXPECTED_RPC_REJECTIONS = new Set([
   // Losing concurrent decision in suspended-agent-resume.test.ts (also asserted by the caller).
   'Action is not pending: 99',
 ])
+// Wrangler ships `*.txt` imports as Text modules (its default module rules; see
+// src/text-modules.d.ts), but this config drives the pool from inline miniflare settings, and
+// vite's own fallback would resolve them as asset URLs. Mirror the Text-module behavior so code
+// under test (e.g. describeBinding's worktree-binding.txt) sees the real content. Like wrangler,
+// match on the *import path*: resolving here keeps vite from realpathing the id, which for a
+// symlinked .txt (the binding .txts are symlinks to their .d.ts) would dodge the load hook
+// below and fall through to the TypeScript pipeline.
+const textModules: Plugin = {
+  name: 'text-modules',
+  enforce: 'pre',
+  resolveId(source, importer) {
+    if (source.endsWith('.txt') && importer !== undefined) {
+      return path.resolve(path.dirname(importer), source)
+    }
+  },
+  load(id) {
+    if (id.endsWith('.txt')) {
+      return `export default ${JSON.stringify(readFileSync(id, 'utf-8'))};`
+    }
+  },
+}
 
 /**
  * Tests run inside workerd (via vitest-pool-workers) so they exercise the same runtime APIs as
@@ -23,6 +47,7 @@ const EXPECTED_RPC_REJECTIONS = new Set([
  */
 export default defineConfig({
   plugins: [
+    textModules,
     capnwebValidate({ tsconfig: 'tsconfig.admin-authority-tests.json',
       include: ['src/**/*.ts', '__tests__/admin-authority-worker.ts'] }),
     // Actual provider consumers participate in the native-authority harness. Each transformer
@@ -34,11 +59,12 @@ export default defineConfig({
     cloudflareTest({
       main: './__tests__/admin-authority-worker.ts',
       miniflare: {
-        compatibilityDate: '2026-02-02',
+        compatibilityDate: '2026-09-04',
         // Production already permits storing native account references. The authority tests
         // persist actual accounts; revocation is enforced by current checks, not serialization.
         compatibilityFlags: ['experimental', 'nodejs_compat', 'allow_irrevocable_stub_storage'],
         bindings: {
+          PUBLIC_BASE_URL: 'https://workshop.example/',
           ADMINS: ['authority_admin_one', 'authority_admin_two', 'authority_admin_three', 'authority_admin_four'],
           TEAM_PI_CODEX_BASE_URL: 'https://team-pi.example/proxy',
           TEAM_PI_CODEX_HMAC_SECRET: 'team-pi-secret',
@@ -57,8 +83,11 @@ export default defineConfig({
           TEST_REQUEST_BUILD_NOTIFIER: {name: kCurrentWorker, entrypoint: 'RequestBuildNotifierFixture'},
         },
         kvNamespaces: ['BLUEPRINTS', 'CONTEXT_COLLECTIONS'],
+        // The overseer loads gadget code through this, so a test can run a real gadget facet.
+        workerLoaders: { LOADER: {} },
         durableObjects: {
           TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
+          TEST_NATIVE_BROWSER_FLOW: { className: 'NativeBrowserFlow', useSQLite: true },
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
           TEST_USER: { className: 'UserDurableObject', useSQLite: true },
           TEST_ADMIN: { className: 'AdminSettings', useSQLite: true },
@@ -69,6 +98,10 @@ export default defineConfig({
           TEST_LIBRARY_REGISTRIES: { className: 'LibraryRegistryDurableObject', useSQLite: true },
           TEST_JARVIS_POLICY: { className: 'JarvisPolicy', useSQLite: true },
           TEST_COMMUNITY_REQUESTS: { className: 'CommunityRequests', useSQLite: true },
+          // Never addressed by name: a binding is what puts the class in `ctx.exports`, from
+          // which the overseer instantiates it (with props) as one of its own facets.
+          TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
+          TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
         },
       },
     }),
@@ -76,7 +109,7 @@ export default defineConfig({
   test: {
     include: ['__tests__/*.test.ts'],
     // Asserts the pool actually started, rather than trusting a green run to mean workerd.
-    setupFiles: ['../../scripts/assert-workerd.ts'],
+    setupFiles: ['@gadgets/scripts/assert-workerd'],
     // Cap'n Web reports a rejected future capability independently from the awaited RPC promise.
     // The policy tests assert these exact denials; unrelated unhandled errors remain fatal.
     onUnhandledError(error) {

@@ -3,9 +3,7 @@
 
 import { act, type ButtonHTMLAttributes } from 'react'
 import { createRoot } from 'react-dom/client'
-import * as Y from 'yjs'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import type { CodeSubscriber } from '@gadgets/workshop-shared/api'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -53,26 +51,17 @@ describe('editor import failures', () => {
     document.body.append(container)
     const caught = vi.fn<() => void>()
     const root = createRoot(container, { onCaughtError: caught })
-    const doc = new Y.Doc()
-    const files = doc.getMap<Y.Text>('files')
-    files.set('client.js', new Y.Text('client'))
-    files.set('server.js', new Y.Text('server'))
-    const dispose = vi.fn<() => void>()
-    let subscriber!: CodeSubscriber
+    let commitId = `error-${kind}`
+    const files = new Map([['client.js', 'client'], ['server.js', 'server']])
     const overseer = {
-      subscribeToCode: vi.fn<(next: CodeSubscriber) => Promise<Disposable>>(async (next) => {
-        subscriber = next
-        next.update({ version: 1, timestamp: new Date(), update: Y.encodeStateAsUpdateV2(doc) })
-        next.ready()
-        return { [Symbol.dispose]: dispose }
-      }),
-      updateCode: vi.fn<() => Promise<void>>(),
+      getCodeAtCommit: vi.fn<() => Promise<{ files: [string, string][] }>>(async () => ({ files: [...files] })),
     }
     const hasCode = vi.fn<(value: boolean) => void>()
     const render = (isVisible: boolean) => act(async () => {
       root.render(<>
         <button>Workspace chat</button>
-        <GadgetCodeInterface overseer={overseer as never} filesRoot="files" isAgentActive={false}
+        <GadgetCodeInterface overseer={overseer as never} workpieceId={1} headCommitId={commitId} isAgentActive={false}
+          chatChanges={kind === 'diff' ? { chatId: 7, rowsThrough: 0 } : undefined}
           selectedChatId={kind === 'diff' ? 7 : null} isVisible={isVisible} onHasCodeChange={hasCode} />
       </>)
     })
@@ -95,7 +84,6 @@ describe('editor import failures', () => {
       expect(container.textContent).toContain('Reloading may lose unsent messages and unsaved changes.')
       expect(container.querySelector('button')).toBe(chat)
       expect(container.querySelector('nav')).toBe(sidebar)
-      expect(dispose).not.toHaveBeenCalled()
 
       await act(async () => {
         sidebar!.querySelectorAll('button')[1].click()
@@ -105,20 +93,16 @@ describe('editor import failures', () => {
       expect(container.querySelector('[role="alert"]')).not.toBeNull()
       expect(imports[kind].loads).toBe(1)
 
-      await act(async () => {
-        files.set('incoming.js', new Y.Text('still syncing'))
-        subscriber.update({ version: 2, timestamp: new Date(), update: Y.encodeStateAsUpdateV2(doc) })
-      })
-      expect(sidebar!.textContent).toContain('incoming.js')
+      files.set('incoming.js', 'still syncing')
+      commitId += '-next'
+      await render(true)
+      expect(container.querySelector('nav')!.textContent).toContain('incoming.js')
       expect(hasCode).toHaveBeenLastCalledWith(true)
-      expect(overseer.subscribeToCode).toHaveBeenCalledTimes(1)
-      expect(dispose).not.toHaveBeenCalled()
+      expect(overseer.getCodeAtCommit).toHaveBeenCalledTimes(2)
       await act(async () => root.render(null))
-      expect(dispose).toHaveBeenCalledTimes(1)
     } finally {
       act(() => root.unmount())
       container.remove()
-      doc.destroy()
     }
   })
 })

@@ -16,6 +16,9 @@
   "workers_dev": false,
   "preview_urls": false,
   "vars": {
+    // WORKSHOP_EDITING_PAUSED is intentionally unset for normal operation. Only the coordinated
+    // Git/OT cutover sets it to the string "true"; remove it to resume. This is deployment-owned,
+    // not an admin UI setting (the optional type lives in src/env.d.ts).
     // Finance access remains deployment-owned and independent of managed Workshop administration.
     "FINANCE_OPERATORS": [
       "jacob.beck@heyodie.ai",
@@ -72,7 +75,8 @@
     // Preserve the tag applied by the production-native gateway rollout.
     { "tag": "v3" },
     { "tag": "v4-community-requests", "new_sqlite_classes": ["CommunityRequests"] },
-    { "tag": "v5-admin-authority", "new_sqlite_classes": ["AdminAuthority"] }
+    { "tag": "v5-admin-authority", "new_sqlite_classes": ["AdminAuthority"] },
+    { "tag": "v6-user-directory", "new_sqlite_classes": ["UserDirectoryDurableObject"] }
   ],
   "kv_namespaces": [
     { "binding": "BLUEPRINTS", "id": "882e6c6dfdf9466f999b8084ed3cd637" },

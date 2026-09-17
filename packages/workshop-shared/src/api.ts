@@ -32,6 +32,7 @@ import type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicR
 /** Public request-build control and safe projection contracts. */
 export type { StartRequestBuild, CancelRequestBuild, PublicRequestBuild, PublicRequestBuildReadiness } from "./request-build-publication.js";
 import type { CreateCommunityRequest, CommunityRequest, CommunityRequestQuery, CommunityRequestPage, CommunityRequestPageOptions, CommunityRequestDetail, CommunityRequestDetailPage, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, CommunityRequestPrivateDiagnostics, ModerateCommunityRequest } from "./community-requests.js";
+import type { CodeChange } from "./code-change.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "./product-feedback.js";
 
@@ -40,16 +41,35 @@ export const SERVICE_SALT = new Uint8Array([
 ]);
 
 /**
+ * How a connect, reconnect, ensure-resources or sign-in flow starts, as returned by
+ * `AuthenticatedApi.connectAccount()` and its siblings. `url` is the gatekeeper's flow URL, which
+ * the Workshop opens as a disowned popup. `nonce` is a 64-lowercase-hex secret minted for this
+ * flow, which the Workshop writes into that popup's own sessionStorage before navigating it and
+ * nowhere else: sessionStorage is per top-level browsing context and per origin, so it survives the
+ * trip through the gatekeeper and the provider and is readable again once the popup is back on the
+ * Workshop's origin. When the flow finishes, the popup lands on the Workshop's /connect/handoff
+ * page, which presents the ticket from its URL fragment together with the nonce
+ * (`AuthenticatedApi.completeConnectHandoff()` / `PublicApi.confirmLogin()`). A handoff page opened
+ * any other way holds no nonce and redeems nothing. The nonce is single-use and dies with the flow:
+ * a connect's after CONNECT_FLOW_LIFETIME_MS (30 minutes, server-side), a sign-in's with its
+ * `PendingLogin` attempt.
+ */
+export type ConnectFlowStart = { url: string; nonce: string };
+
+/**
  * A pending gatekeeper sign-in attempt, returned by `PublicApi.startGatekeeperLogin()`. Holding this
  * stub is the capability to receive the resulting session token; dispose it to abandon the attempt.
  */
 export interface LoginAttempt extends RpcTarget {
   /**
-   * Resolves with a session token (to store and pass to `authenticate()`, same format as `login()`)
-   * once the gatekeeper popup completes, or rejects if the attempt fails or is abandoned. Safe to
-   * call immediately after `startGatekeeperLogin()`.
+   * The session token (same format as `login()`; store it and pass it to `authenticate()`) once the
+   * sign-in popup has confirmed the attempt's ticket via `PublicApi.confirmLogin()`; null until
+   * then, so the caller polls. Throws with a user-facing message once the attempt has expired, the
+   * gatekeeper reported a failure, or the token was already received. Holding this stub alone never
+   * yields a token: the sign-in URL is a bearer capability, and only the popup this browser opened
+   * holds the nonce that confirms it.
    */
-  wait(): Promise<string>;
+  receive(): Promise<string | null>;
 }
 
 /** Browser-flow return modes supported by login/connect OAuth initiation APIs. */
@@ -104,17 +124,32 @@ export interface PublicApi extends RpcTarget {
 
   /**
    * Begin a sign-in via an authentication gatekeeper (e.g. "google", "github", "cloudflare").
-   * Returns a `url` the client opens in a new tab (the gatekeeper's OAuth popup, which self-closes)
-   * and an `attempt` stub whose `wait()` resolves once the popup completes. The vendor must be
-   * auth-capable and allowlisted (see ServerConfig.authVendors); throws otherwise.
+   * Returns the `url` the client opens as a disowned popup, the `nonce` it writes into that popup's
+   * sessionStorage before navigating it (see `ConnectFlowStart`), and an `attempt` stub the client
+   * polls with `receive()` for the session token. When the flow finishes, the popup lands on the
+   * Workshop's own /connect/handoff page, which calls `confirmLogin(ticket, nonce)`. The vendor must
+   * be auth-capable and allowlisted (see ServerConfig.authVendors); throws otherwise.
    *
-   * Dispose `attempt` to abandon the sign-in (e.g. the user closed the popup); this cancels the wait
-   * server-side.
+   * Dispose `attempt` to abandon the sign-in (e.g. the user closed the popup). Nothing is cancelled
+   * server-side: the browser just stops polling, and an unreceived token expires on its own.
    */
-  startGatekeeperLogin(vendorId: string, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { attempt?: RpcStub<LoginAttempt> }>;
+  startGatekeeperLogin(vendorId: string, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { nonce?: string; attempt?: RpcStub<LoginAttempt> }>;
 
-  /** Consumes a completed native login flow; terminal non-completed statuses clear native pending state. */
-  consumeNativeLoginFlow(flowHandle: string, clientVerifier: string): Promise<NativeLoginConsumeResult>;
+  /**
+   * Confirm a finished sign-in flow. Called by the /connect/handoff page in the sign-in popup, which
+   * has no session: `ticket` is the handoff ticket from the page's URL fragment and `nonce` the one
+   * `startGatekeeperLogin()` returned for the same flow, read from the popup's own sessionStorage.
+   * Marks the attempt's delivered result as confirmed, so that `LoginAttempt.receive()` releases the
+   * token to whoever holds the attempt stub; the popup itself never sees a token. Throws with a
+   * user-facing message when the attempt is unknown, expired, or failed, or the ticket is not the
+   * attempt's.
+   */
+  confirmLogin(ticket: string, nonce: string): Promise<void>;
+
+  /** Redeem the completion ticket delivered to the app link with the independently held verifier.
+   * Omitting the ticket only polls; it never releases a token. Invalid tickets do not consume a
+   * legitimate pending result. Preserve the verifier while the result is pending. */
+  consumeNativeLoginFlow(flowHandle: string, clientVerifier: string, ticket?: string): Promise<NativeLoginConsumeResult>;
 
   /** Authenticates the user using an auth token read from the runtime-specific session store. */
   authenticate(token: string): Promise<AuthenticatedApi>;
@@ -214,8 +249,8 @@ export type ConnectedAccountsFilter = GatekeeperVendorFilter & {
  * Identifies a workpiece within a workspace. A workpiece is a numbered thing the user (or agent)
  * is working on inside the workspace -- currently a gadget or a gatekeeper (connection), with
  * more types expected later. All workpiece types share one sequential per-workspace ID namespace,
- * so a bare number unambiguously identifies a workpiece of any type, and derived names (Yjs file
- * roots, facet names) can never collide across types.
+ * so a bare number unambiguously identifies a workpiece of any type, and derived names (facet
+ * names) can never collide across types.
  */
 export type WorkpieceId = number;
 
@@ -795,6 +830,21 @@ export const createAuthError = authErrors.create;
 /** Reads the machine-readable code from an authentication failure. */
 export const getAuthErrorCode = authErrors.getCode;
 
+/**
+ * One user as listed in the deployment-wide user directory (see
+ * `AuthenticatedApi.searchUsers`).
+ */
+export type UserDirectoryRecord = {
+  /**
+   * Canonical user identifier: email for Access / sign-in accounts, username
+   * for password accounts.
+   */
+  id: string;
+
+  /** The user's current display name. */
+  name: string;
+};
+
 /** Top-level API exposed to the user after they have authenticated. */
 export interface AuthenticatedApi extends RpcTarget {
   /** Publish authored public text to the signed-in deployment board; never starts legacy automation. */
@@ -839,6 +889,21 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /** Set the user's own display name, seen in chats, etc. */
   setOwnDisplayName(name: string): Promise<void>;
+
+  /**
+   * Find other users of this deployment by a case-insensitive substring of
+   * their display name or id, for inviting collaborators. Excludes the caller
+   * and every user named by `excludeIds`. Returns at most 10 records, earliest
+   * substring match first.
+   *
+   * Rejects a `query` longer than 1000 characters or containing a line break,
+   * and more than 1000 distinct ids to exclude, the caller's own included.
+   *
+   * Returns no records while the admin has user search turned off
+   * (`ServerConfig.userSearchEnabled`); inviting by exact username/email via
+   * `Overseer.addCollaborator()` still works then.
+   */
+  searchUsers(query: string, excludeIds: string[]): Promise<UserDirectoryRecord[]>;
 
   /**
    * Change the user's password, if using password-based authentication.
@@ -1126,10 +1191,12 @@ export interface AuthenticatedApi extends RpcTarget {
   getRequiredConnectionStatuses(): Promise<RequiredConnectionStatus[]>;
 
   /**
-   * Connect this account to a specific account on a third-party service. Returns the URL which
-   * should be opened in a new tab in the user's browser to complete the authorization. When the
-   * authorization flow completes, the account will be added to the list, which can be observed
-   * through subscribeConnectedAccounts().
+   * Connect this account to a specific account on a third-party service. Returns the URL which the
+   * Workshop opens as a disowned popup to complete the authorization, plus the flow's nonce (see
+   * `ConnectFlowStart`). When the flow finishes, the popup lands on the Workshop's own
+   * /connect/handoff page, which redeems the handoff with completeConnectHandoff() over its own
+   * session; only then is the account added to the list, which can be observed through
+   * subscribeConnectedAccounts().
    *
    * `resourceUrlPatterns`, if given, limits the connection to the authorization needed for those
    * grantable resource types (those with `grantable`; see `SupportedResource`). If omitted,
@@ -1138,15 +1205,29 @@ export interface AuthenticatedApi extends RpcTarget {
    * caller connects an account for a non-resource purpose (e.g. billing) without asking the user to
    * grant data access it will never use.
    */
-  connectAccount(vendorId: string, resourceUrlPatterns?: string[], options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart>;
+  connectAccount(vendorId: string, resourceUrlPatterns?: string[], options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { nonce?: string }>;
+
+  /**
+   * Redeem a finished connect flow's handoff. Called by the Workshop's own /connect/handoff page
+   * running in the popup, over the popup's session, which is the initiating user's (the SPA
+   * authenticates as any Workshop tab does: from the shared localStorage token, or from the
+   * Cloudflare Access identity in an Access deployment). `ticket` is the handoff ticket from the
+   * page's URL fragment; `nonce` must be the one connectAccount() / reconnectAccount() /
+   * ensureAccountResources() returned for the flow that produced the ticket, read from the popup's
+   * own sessionStorage. Both are single-use. Activates the pending connect / reconnect /
+   * ensure-resources grant, after which the account (or its restored credentials) appears via
+   * subscribeConnectedAccounts(). Throws with a user-facing message if the ticket or nonce is
+   * unknown to this user, already used, or expired, or they belong to different flows.
+   */
+  completeConnectHandoff(ticket: string, nonce: string): Promise<void>;
 
   /**
    * Ensure the authorization for the listed grantable resource types (by `urlPattern`) is granted
-   * on a connected account, expanding if needed. Returns a URL to open in a new tab to authorize
-   * them, or no url if nothing was needed. The updated grant is observable via
-   * subscribeConnectedAccounts().
+   * on a connected account, expanding if needed. Returns a flow to open as a disowned popup (as for
+   * connectAccount()) to authorize them, or null if nothing was needed. Completion is redeemed via
+   * completeConnectHandoff(); the updated grant is then observable via subscribeConnectedAccounts().
    */
-  ensureAccountResources(accountId: number, resourceUrlPatterns: string[], options?: { flow?: BrowserFlowOptions }): Promise<Partial<BrowserFlowStart>>;
+  ensureAccountResources(accountId: number, resourceUrlPatterns: string[], options?: { flow?: BrowserFlowOptions }): Promise<(BrowserFlowStart & { nonce?: string }) | null>;
 
   /**
    * List the auto-provisioning ("ambient") gatekeepers the user can opt into right now: those set to
@@ -1275,13 +1356,18 @@ export interface AuthenticatedApi extends RpcTarget {
 
   /**
    * Re-authenticate a connected account whose credentials have expired (or may be about to
-   * expire). Returns the URL to open in a new tab. When the OAuth flow completes, the account
-   * is updated and subscribers are notified with credentialsValid: true.
+   * expire). Returns a flow to open as a disowned popup (as for connectAccount()). Once the OAuth
+   * flow completes and the popup's /connect/handoff page redeems the handoff via
+   * completeConnectHandoff(), the account is updated and subscribers are notified with
+   * credentialsValid: true.
    */
-  reconnectAccount(accountId: number, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart>;
+  reconnectAccount(accountId: number, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { nonce?: string }>;
 
   /** Returns durable status for a native account connect/reconnect/grant flow. */
   getNativeAccountFlowStatus(flowHandle: string, clientVerifier: string): Promise<NativeLoginFlowStatus>;
+  /** Activate a native account handoff with its return-link ticket and app-held verifier.
+   * Requires the initiating user's authenticated session; status polling never activates a grant. */
+  completeNativeAccountFlow(flowHandle: string, clientVerifier: string, ticket: string): Promise<void>;
 
   // --- Gatekeeper management apps ---
 
@@ -1621,6 +1707,8 @@ export type FinanceHubRepairResult = {
 export type AdminSettingsView = {
   /** Whether new account signups are allowed. */
   signupsEnabled: boolean;
+  /** Whether users may search the user directory to find collaborators. */
+  userSearchEnabled: boolean;
   /** Site name shown next to the top-bar logo ("" falls back to DEFAULT_SITE_NAME). */
   siteName: string;
   /** Custom deployment logo, or undefined to use the default Cloudflare OS mark. */
@@ -1677,8 +1765,8 @@ export type AdminFormat = {
   missing: boolean;
 
   /**
-   * The blueprint ships with the deployment (see format-blueprints/ and the FORMAT_BLUEPRINTS the
-   * build generates from it), so an upgrade can replace its contents. Curation stays the admin's: an upgrade never re-promotes something they
+   * The blueprint ships with the deployment (see packages/bundled-blueprints and the
+   * BUNDLED_BLUEPRINTS the backend's build generates from it), so an upgrade can replace its contents. Curation stays the admin's: an upgrade never re-promotes something they
    * removed, nor resets their overrides.
    */
   bundled: boolean;
@@ -1742,6 +1830,12 @@ export interface AdminApi {
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
+
+  /**
+   * Enable or disable user directory search. The directory itself is maintained
+   * either way, and this switch just controls user access.
+   */
+  setUserSearchEnabled(enabled: boolean): Promise<void>;
 
   /**
    * Set the site name shown next to the top-bar logo. Pass "" to reset to DEFAULT_SITE_NAME.
@@ -1892,6 +1986,13 @@ export type ServerConfig = {
   signupsEnabled: boolean;
 
   /**
+   * Whether users may search the user directory to find collaborators. When not explicitly
+   * configured, this defaults to the opposite of `signupsEnabled`. When false the share UI offers
+   * only an exact username/email field.
+   */
+  userSearchEnabled: boolean;
+
+  /**
    * Site name shown next to the top-bar logo (admin-configurable). Empty falls back to
    * DEFAULT_SITE_NAME.
    */
@@ -2028,10 +2129,7 @@ type SuggestedModel = {
  * `outputLimit`, when present, is both the requested response cap and the space reserved for it,
  * leaving the remainder as the prompt budget context compaction sizes against.
  */
-export const SUGGESTED_MODELS: Record<
-  AiModelProvider,
-  Record<string, SuggestedModel>
-> = {
+const SUGGESTED_MODEL_CATALOG = {
   "cloudflare": {
     "@cf/moonshotai/kimi-k2.7-code": {
       name: "Kimi K2.7 Code (Workers AI)", contextWindow: 262144,
@@ -2039,6 +2137,14 @@ export const SUGGESTED_MODELS: Record<
     },
     "@cf/zai-org/glm-5.2": {
       name: "GLM 5.2 (Workers AI)", contextWindow: 262144, outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
+    "@cf/zai-org/glm-5.3-flash": {
+      name: "GLM 5.3 Flash (Workers AI)", contextWindow: 1048576,
+      outputLimit: WORKERS_AI_OUTPUT_LIMIT,
+    },
+    "@cf/deepseek-ai/deepseek-v4-pro-0813": {
+      name: "DeepSeek V4 Pro 0813 (Workers AI)", contextWindow: 1048576,
+      outputLimit: WORKERS_AI_OUTPUT_LIMIT,
     },
   },
   "anthropic": {
@@ -2076,7 +2182,35 @@ export const SUGGESTED_MODELS: Record<
   },
   "ollama": {
   },
-};
+} satisfies Record<
+  AiModelProvider,
+  Record<string, SuggestedModel>
+>;
+
+/** Models offered in the picker, including deployment pricing and output limits. */
+export const SUGGESTED_MODELS: Record<
+  AiModelProvider,
+  Record<string, SuggestedModel>
+> = SUGGESTED_MODEL_CATALOG;
+
+/** A model ID listed in SUGGESTED_MODELS, optionally narrowed to one provider's catalog. */
+export type SuggestedModelId<P extends AiModelProvider = AiModelProvider> =
+  { [K in P]: keyof (typeof SUGGESTED_MODEL_CATALOG)[K] & string }[P];
+
+/**
+ * Providers whose pi API adapter refuses a custom fetch, so their inference cannot ride the
+ * Workers AI binding and needs CF_AI_GATEWAY_API_TOKEN over HTTPS. pi's Google adapter throws
+ * "Custom fetch is not supported by the Google Generative AI adapter" whenever the fetch it is
+ * given is not globalThis.fetch, and the client it builds on offers no hook to route around that:
+ * @google/genai's `GoogleGenAI` takes only `httpOptions`, whose knobs are
+ * baseUrl/apiVersion/headers/timeout/extraBody/retryOptions.
+ * https://github.com/earendil-works/pi/blob/v0.84.2/packages/ai/src/api/google-generative-ai.ts#L80
+ *
+ * pi's Vertex adapter throws the same way, so a google-vertex provider would belong here too; it
+ * is absent only because this deployment has no such provider.
+ * https://github.com/earendil-works/pi/blob/v0.84.2/packages/ai/src/api/google-vertex.ts#L98
+ */
+export const HTTPS_ONLY_PROVIDERS: ReadonlySet<string> = new Set<AiModelProvider>(["google"]);
 
 /**
  * Metadata about a workspace (one Overseer DO and everything in it). Includes everything needed
@@ -2123,10 +2257,14 @@ export type GadgetMetadata = {
   originHubId?: DeploymentHubId;
 
   /**
-   * True when the gadget has observed data marked as share-prohibited. Such gadgets can no longer
-   * be shared with additional users or links.
+   * True when the gadget has observed data marked `containsRestrictedData` (see
+   * `ObservationDescription`). It can still be shared, with collaborators verified per
+   * gatekeeper, but can no longer perform actions or fetch from the public web.
    */
-  sharingProhibited?: boolean;
+  containsRestrictedData?: boolean;
+
+  /** Owner-only lockdown recorded by private connectors; blocks additional sharing. */
+  prohibitAllSharing?: boolean;
 
   /**
    * Various objects in the API specify a gadgetId, but make the property optional. When omitted,
@@ -2308,42 +2446,39 @@ export type UiBundle = {
   // libraries should be loaded.
 };
 
-/** Represents an incremental update to the code. */
-export type CodeUpdate = {
-  /** Version number of the code AFTER this update has been applied. */
-  version: number;
+/**
+ * A git author/committer identity, as recorded in commits in a workspace's git object store.
+ * Derived from the committing user's profile: the display name becomes `name` and the profile ID
+ * the `email` (profile IDs that aren't email addresses get an `@localhost` placeholder appended).
+ */
+export type CommitIdentity = {
+  /** Human-readable name, e.g. "Kenton Varda". */
+  name: string;
 
-  /** Original timestamp of this update. */
+  /** Email address, e.g. "kenton@cloudflare.com" or "kenton@localhost". */
+  email: string;
+};
+
+/**
+ * Metadata of one commit in a workspace's git object store, as returned by
+ * Overseer.getCommitLog(). Commits are immutable, so results may be cached by oid.
+ */
+export type CommitInfo = {
+  /** The commit's oid (40-hex SHA-1), as found in e.g. WorkpieceSummary.commitId. */
+  oid: string;
+
+  /** Parent commit oids; empty for a root commit. */
+  parents: string[];
+
+  /** The commit message, as stored (git normalization gives it a trailing newline). */
+  message: string;
+
+  /** The commit author. */
+  author: CommitIdentity;
+
+  /** The author timestamp. */
   timestamp: Date;
-
-  /**
-   * Yjs encoded update blob, encoding at least all changes since the previous version that the
-   * client is known to already have.
-   *
-   * All encoded updates use V2 format.
-   */
-  update: Uint8Array;
-}
-
-/** Callback interface used to receive code updates from the server. */
-export interface CodeSubscriber {
-  /**
-   * Called any time the version on the server is newer than what the subscriber has.
-   *
-   * When the subscriber is multiple versions behind, the server may choose to send multiple
-   * incremental updates or one big update. The server may make several calls in rapid succession
-   * without waiting for previous calls to return. Cap'n Web guarantees that the calls will be
-   * delivered in order, but it is important that the subscriber either applies the updates or
-   * places them in some sort of queue synchronously to maintain ordering.
-   */
-  update(up: CodeUpdate): void;
-
-  /**
-   * Called the first time the subscriber is up-to-date with the latest version known to the
-   * server.
-   */
-  ready(): void;
-}
+};
 
 /**
  * Specifies the state of an action in the action log:
@@ -2424,8 +2559,9 @@ export type BoundHookInfo = {
  * create new agents, that is, start new agent chat threads, which appear in the gadget's agent
  * chat UI as new conversations. Agents created this way don't typically edit the gadget code, but
  * rather use the `executeCode` tool to directly invoke the gadget's bindings to perform tasks.
- * Each agent can additionally be provide "props" which may include additional RPC stubs
- * representing specific resources or callbacks relevant to that agent session.
+ * Beyond the bindings configured here, a gadget hands an agent per-task capabilities -- RPC stubs
+ * representing specific resources or callbacks relevant to that agent session -- as the arguments
+ * of calls made on the stub that the binding's `spawnCallable()` returns.
  *
  * For example, a gadget that responds to emails might invoke an agent for each email message that
  * arrives, with an RPC stub that allows it to reply to that email -- but prohibits the agent from
@@ -2438,8 +2574,8 @@ export type AgentSpawnerConfig = {
 
   /**
    * Model ID to run, of the gadget owner's available models. Can be `null` to just create a chat
-   * that doesn't actually run an agent -- the chat will be notified that the chat needs attention,
-   * same as for an agent chat where the agent fails to mark the task complete.
+   * that doesn't actually run an agent -- the prompt, or the calls made on a callable agent, are
+   * appended to the chat for a human to pick up.
    */
   modelId: string | null,
 
@@ -2452,17 +2588,41 @@ export type AgentSpawnerConfig = {
    *
    * The entries are deliberately not limited to bindings held by the gadget that owns the
    * spawner: a spawner may define bindings of its own, with its own names and targets.
+   *
+   * Once a gadget binds the spawner, every env target joins each "use" collaborator's
+   * verification scope transitively: spawning is reachable from the gadget UI, and the spawned
+   * agent reads these bindings with the spawner creator's authority.
    */
   env: Record<string, WorkpieceId>,
 };
 
+/** Editing wire contract accepted by this release. Runtime gadget RPC is versioned independently. */
+export const WORKSHOP_EDITING_PROTOCOL = "git-ot-v1";
+
+/** Negotiation never reloads a client or discards its input. Reads remain governed by normal roles. */
+export type EditingProtocolStatus = {
+  /** The exact wire version required for editing. */
+  protocol: typeof WORKSHOP_EDITING_PROTOCOL;
+  /** `paused` is a deployment cutover gate; `upgrade-required` includes unversioned clients. */
+  state: "ready" | "upgrade-required" | "paused" | "read-only";
+};
+
 /**
  * Interface to a workspace's Overseer, used to display the Gadget Workshop shell UI around that
- * workspace. Workspace-level concerns live here: the gadget registry, code sync (one Yjs doc for
- * the whole workspace), chats, actions/hooks, sharing, and blueprint listing. Per-gadget
- * operations live on the GadgetClient sub-capability (see createGadget()/getGadget()).
+ * workspace. Workspace-level concerns live here: the gadget registry, committed code (git
+ * commits in the workspace's shared object store, each gadget's head recorded in
+ * WorkpieceSummary.commitId), per-chat uncommitted changes (a revisioned stream of code changes per
+ * chat, applied on top of commits; see ChatCodeBase), chats, actions/hooks, sharing, and
+ * blueprint listing. Per-gadget operations live on the GadgetClient sub-capability (see
+ * createGadget()/getGadget()). Editing negotiation is scoped to this capability, not the user.
  */
 export interface Overseer extends RpcTarget {
+  /** Read current negotiation/cutover state without changing it or interrupting runtime gadgets. */
+  getEditingProtocol(): Promise<EditingProtocolStatus>;
+  /** Negotiate before editing or starting an agent. Repeat on each fresh workspace capability.
+   * On mismatch preserve input and offer recovery export; never automatically reload or replay writes.
+   * A pause overrides a matching version. No negotiation upgrades the caller's authorization role. */
+  negotiateEditingProtocol(protocol: string): Promise<EditingProtocolStatus>;
   /** Get metadata describing this workspace. */
   getMetadata(): Promise<GadgetMetadata>;
 
@@ -2518,7 +2678,8 @@ export interface Overseer extends RpcTarget {
    * made with a chat open: a `changes` message records it in the chat log (see
    * `createdGadgets`), and the gadget remains pending (see WorkpieceSummary.chatId) until
    * the user accepts the chat's changes through that message (merging deletes the pending marker;
-   * reverting deletes the gadget). Without `chatId` the gadget is created permanently.
+   * reverting deletes the gadget). Without `chatId` the gadget is created permanently, with an
+   * empty initial commit as its head (see WorkpieceSummary.commitId).
    *
    * `bindingName` is the name under which the gadget appears in chat envs and the workspace
    * default binding list (see validateBindingName()). When absent, the server chooses one from
@@ -2537,27 +2698,78 @@ export interface Overseer extends RpcTarget {
   getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>>;
 
   /**
-   * Subscribe to code updates.
+   * Read the full contents of a commit in the workspace's git object store: one
+   * `[path, content]` entry per file, with nested trees flattened to `/`-joined paths. Paths are
+   * unique; entry order carries no meaning. (`files` is a list of pairs rather than a path-keyed
+   * object so that file names like `__proto__`, which RPC deserialization drops from object
+   * keys, survive in transit -- see CodeChange in `@gadgets/workshop-shared/code-change`.)
    *
-   * Code is represented as a single Yjs doc shared by the whole workspace. Each workpiece that
-   * owns files has its own root Y.Map (mapping file names to Y.Text instances) within the doc,
-   * named per WorkpieceSummary.filesRoot. Updates are whole-doc and may span workpieces.
-   *
-   * `subscriber` will receive updates whenever it becomes out-of-date. `fromVersion` is the
-   * version the subscriber already has before the subscription starts. To download the code from
-   * scratch, omit the version (or pass zero).
-   *
-   * Disposing the returned `RpcStub` will cancel the subscription.
+   * Commits are immutable, so responses are cacheable client-side by commit ID. Use this to view
+   * committed code (outside any chat, or for a gadget the open chat has no pin for) and to fetch
+   * the base content of a chat's pins (see ChatCodeBase).
    */
-  subscribeToCode(subscriber: RpcStub<CodeSubscriber>, fromVersion?: number): Promise<RpcStub<{}>>;
+  getCodeAtCommit(commitId: string): Promise<{files: [path: string, content: string][]}>;
 
   /**
-   * Send a Yjs update to the server.
-   *
-   * If `chatId` is omitted, the update applies to the committed mainline code. If `chatId`
-   * is provided, the update is recorded as a live draft edit for that chat's branch.
+   * Walk the commit graph from `fromCommit` (that commit first, then its ancestry), returning up
+   * to `depth` commits' metadata -- all reachable commits when `depth` is omitted. Traversal
+   * order for merge commits follows git log's default (reverse chronological). Like
+   * getCodeAtCommit(), results are immutable and cacheable.
    */
-  updateCode(update: Uint8Array, chatId?: number): Promise<void>;
+  getCommitLog(fromCommit: string, depth?: number): Promise<CommitInfo[]>;
+
+  /**
+   * Submit one code change on a chat's branch. This is the only way to edit code: committed code
+   * cannot be written directly -- gadget heads only advance when a chat's changes are accepted
+   * (see mergeChanges()).
+   *
+   * `submission.change` is expressed against the chat's content as of
+   * `(submission.generation, submission.revision)` -- that is, the submitter has applied every
+   * accepted change of that generation's stream up to and including that revision (see
+   * ChatCodeBase). The server transforms the change over any changes accepted since, validates it,
+   * appends it to the stream, and broadcasts it (AiChatSubscriber.changeApplied()); the returned
+   * `(generation, revision)` is where it landed.
+   *
+   * `submission.pins` must carry one declaration per *permanent* gadget the change touches that is
+   * not yet pinned in the chat, each naming the head commit the client's content derives from.
+   * The server checks that each declared base is the gadget's current head, or a parent of it
+   * (tolerating a race with one concurrent merge), and establishes the pin atomically with the
+   * change. A declaration identical to the existing pin is accepted idempotently; one naming a
+   * different `baseCommit` (a race between two first editors) throws. Exception: a gadget still
+   * pending in this chat has no head commit to pin (see WorkpieceSummary.commitId), so its changes
+   * carry no declaration and build its content up from nothing (see ChatCodeBase).
+   *
+   * Retries: `submission.clientId` names the client's editing session and `submission.seq`
+   * numbers its submissions from 1. The server remembers each session's last accepted seq and
+   * where it landed -- independently of the changes themselves, so recognition survives
+   * materialization, epoch resets, and destructive generation bumps -- and answers a retry of
+   * that seq with the recorded result instead of applying it twice. A transport failure must
+   * therefore be retried with the *same* seq and an identical payload, never renumbered or
+   * re-composed (OT, unlike a CRDT, does not tolerate double-application); a same-seq
+   * submission whose content differs is a client bug and is rejected. A seq one past the last
+   * accepted (or 1 from a new session) is the next change; anything else is rejected -- discard
+   * local edits and rebuild under a fresh clientId. Only the last submission is remembered, so
+   * keep at most one in flight.
+   *
+   * While an agent turn is active, the call throws a retryable error: keep the queued change and
+   * resubmit after the turn ends. (The UI already locks editing during turns; this backstops
+   * races.)
+   *
+   * A submission still rooted in the *previous* generation, when that generation was closed by
+   * a merge (a content-preserving bump; see ChatCodeBase.generation), is transformed across the
+   * boundary and lands in the current generation, so typing straight through someone's accept
+   * is seamless. Such a submission's pin declarations are ignored (they describe pre-merge
+   * heads; the server derives the new pins itself), and it is rejected if it touches a gadget
+   * in ChatCodeBase.prior.discontinuousGadgets (the merge visibly changed that gadget's
+   * content) or a gadget that has since been re-pinned at a different base.
+   *
+   * Every other rejection means the client's local state is unusable: a generation ended by a
+   * destructive bump (revert, draft discard, turn abort), a revision older than the server's
+   * retained transform window, or an invalid change all mean the client must discard its local
+   * edits and rebuild from fresh metadata.
+   */
+  submitCodeChange(chatId: number, submission: CodeChangeSubmission)
+      : Promise<{generation: number, revision: number}>;
 
   /** Get an existing gatekeeper by workpiece ID. Throws if the ID doesn't exist. */
   getGatekeeperById(id: WorkpieceId): Promise<GatekeeperClient<any>>;
@@ -2587,10 +2799,17 @@ export interface Overseer extends RpcTarget {
   newAgentSpawnerGatekeeper(config: AgentSpawnerConfig): Promise<GatekeeperClient<any>>;
 
   /**
-   * List history of actions.
-   * TODO: This should be paginated.
+   * Fetch one page of action history, newest first by id (creation order). "all" (the default)
+   * pages every record and a record type pages that type — pending records included, each at its
+   * creation position; `filter: "pending"` pages only the currently-pending records — the query
+   * half of the query-for-state/subscribe-for-deltas contract (see subscribeToActions()).
+   *
+   * Page size is a server constant. Pages are full until the last: absence of `nextBeforeId`
+   * means the history is exhausted; otherwise it is the id of the last returned entry, to pass
+   * as `beforeId` for the next-older page.
    */
-  listActions(): Promise<ActionLogEntry[]>;
+  listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
+      : Promise<ActionHistoryPage>;
 
   /**
    * Approve an action that is currently in the "pending" state. The action will be performed on
@@ -2665,7 +2884,23 @@ export interface Overseer extends RpcTarget {
 
   /**
    * Subscribe to action adds/updates. Dispose the returned stub to unsubscribe.
-   * If `startAfter` is set, replay actions changed after that timestamp.
+   *
+   * The subscription delivers live deltas only — nothing pre-existing is replayed. Query for
+   * state, subscribe for deltas: fetch the current pending set via
+   * listActions({filter: "pending"}) and resolved history via the other filters. As with
+   * subscribeToChat(), initiate the subscribe call before those reads — there is no need to
+   * await its return, only to start it first — so nothing can slip between the snapshot the
+   * pages reflect and the stream.
+   *
+   * The `startAfter` parameter is intended to be used when resubscribing after a disconnect:
+   * specify the time of the last action seen, in order to ensure no actions were missed during
+   * the disconnect. The bound is inclusive -- records last changed at exactly that time are
+   * re-delivered (entries are upserts) -- and the replay arrives in change-time order, not
+   * creation order. If not specified, the subscription starts from the current time.
+   *
+   * Do NOT use `startAfter` as a way to enumerate historical data. Use `listActions()` instead.
+   * To ensure no holes between a subscription and historical data, call `subscribeToActions()`
+   * immediately before `listActions()`, similar to `subscribeToChat()`.
    */
   subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date): Promise<RpcStub<{}>>;
 
@@ -2772,29 +3007,87 @@ export interface Overseer extends RpcTarget {
   setChatTitle(chatId: number, title: string): Promise<void>;
 
   /**
-   * Indicates that the user has requested that proposed changes through the given sequence number
-   * in the chat thread be merged into the mainline.
+   * Indicates that the user has requested that the chat's proposed changes be merged into the
+   * mainline. Always merges *everything* the chat proposes -- changes not yet materialized into a
+   * `changes` message are swept in first, and there is no way to accept only a subset.
    *
-   * If `options.includeDraft` is true, any current live draft for the chat is first materialized
-   * into one durable `changes` message and included in the merge.
+   * Accepting is only ever a fast-forward: every gadget touched by the merged changes must have
+   * its chat pin equal to the gadget's current head commit (see
+   * ChatGadgetPinState.mergedCommit). If mainline has advanced past any pin, nothing at all is
+   * merged and the call returns a "stale" outcome (an expected result, not an exception; see
+   * MergeChangesResult): call updateChatFromMainline(), resolve any conflicts, and retry.
+   *
+   * A successful merge closes the chat's current **epoch**: all merged content now lives in
+   * commits, so the chat's code base resets to empty (every pin is dropped, the change stream
+   * restarts at revision 0 under a new generation, and the merge message records
+   * `epochBoundary`). Subsequent edits re-pin lazily against the new heads. The generation bump
+   * is content-preserving: ChatCodeBase.prior describes the closed stream, and in-flight
+   * submissions rooted in it are transformed onto the new generation rather than discarded (see
+   * submitCodeChange()), so a client typing through someone's accept loses nothing.
    */
-  mergeChanges(
-      chatId: number, mergeThrough: number | null,
-      options?: { includeDraft?: boolean }): Promise<void>;
+  mergeChanges(chatId: number): Promise<MergeChangesResult>;
+
+  /**
+   * Merge mainline commits that landed after this chat's pins into the chat's uncommitted state.
+   *
+   * Only *pinned* gadgets participate: an unpinned gadget's code was never modified in this
+   * chat, so it tracks mainline head live and there is nothing to merge into. For each pinned
+   * gadget whose ChatGadgetPinState.mergedCommit is behind the gadget's current head, the server
+   * computes a 3-way text merge (base = the last merged commit, ours = the head, theirs = the
+   * chat's current files) and applies the result to the chat as an ordinary change -- broadcast via
+   * AiChatSubscriber.changeApplied(), so concurrent editors transform against it like any other
+   * remote change -- recorded in a `changes` message carrying `mainlineMerge`, advancing the pin to
+   * head. Conflicting hunks are left inline as 3-way conflict markers
+   * (`<<<<<<<`/`|||||||`/`=======`/`>>>>>>>`) for the user or their agent to clean up; the
+   * affected paths, each qualified by its gadget's binding name (`GADGET_NAME/path`), are
+   * returned in sorted order and also recorded on the message. An empty `conflictPaths` means
+   * every file merged cleanly (or there was nothing to merge).
+   *
+   * Once the chat is up to date (and mainline hasn't moved again), mergeChanges() succeeds as a
+   * plain fast-forward.
+   *
+   * Whenever any pin advances, a `changes` message carrying `mainlineMerge` is recorded -- even
+   * when the chat's content already matched mainline and there is no change to deliver -- so the
+   * chat log always accounts for the advancement (see the revert restriction on
+   * AiChatMessageBody.mainlineMerge).
+   */
+  updateChatFromMainline(chatId: number): Promise<{conflictPaths: string[]}>;
 
   /**
    * Indicates that the user has requested that proposed changes starting from the given sequence
    * number in the chat thread be reverted.
+   *
+   * Throws if the range covers a still-proposed mainline merge (see
+   * AiChatMessageBody.mainlineMerge for why such a message cannot be erased), or if the range
+   * erases the chat's conversion boundary while keeping an earlier still-proposed batch (see
+   * AiChatMessageBody.conversionBoundary; a revert covering everything, `revertFrom` 0, always
+   * satisfies this).
+   *
+   * Pins declared by reverted messages are removed from ChatCodeBase (a pin survives a revert
+   * iff its declaring message survives), and changes not yet materialized into a message are erased
+   * along with the reverted range. Erasing already-applied changes invalidates every client's local
+   * state -- content they may have transformed against is gone -- so ChatCodeBase.generation is
+   * bumped destructively: in-flight submitCodeChange() calls fail and clients rebuild instead of
+   * corrupting the chat.
    */
   revertChanges(chatId: number, revertFrom: number): Promise<void>;
 
   /**
-   * Materialize the current live draft for the chat into one durable `changes` message without
-   * merging it into the mainline.
+   * Materialize the chat's changes not yet covered by a durable `changes` message into one, without
+   * merging anything into the mainline. (Materialization also happens automatically: at agent
+   * turn start, at accept, and when the un-materialized changes grow past a size/age threshold. It
+   * invalidates nothing -- the message's `watermark` tells clients which changes it absorbed.)
    */
   finalizeChatDraft(chatId: number): Promise<void>;
 
-  /** Discard the current live draft for the chat without affecting any durable `changes` messages. */
+  /**
+   * Discard the chat's changes not yet materialized into a durable `changes` message, without
+   * affecting any messages. Pins those changes established (and no materialized message declared)
+   * are removed with them, and ChatCodeBase.generation is bumped destructively, exactly as with
+   * revertChanges(): clients' content contains the erased changes, so they must rebuild. A late
+   * retry of an erased change is still recognized rather than applied as new (see
+   * submitCodeChange()).
+   */
   discardChatDraftChanges(chatId: number): Promise<void>;
 
   /** Delete a chat thread. */
@@ -2977,11 +3270,19 @@ export type AiChatMetadata = {
   activeAgent?: AiChatAuthorInfo,
 
   /**
-   * If true, this chat thread has proposed changes which have not been accepted yet,
-   * including any live draft edits that have not yet been materialized into a durable
-   * `changes` message.
+   * The workpieces to which this chat has proposed changes that have not been accepted yet
+   * (including changes not yet materialized into a durable `changes` message): gadgets whose
+   * code the chat modified, gadgets it provisionally created, and gadgets it added a binding to.
+   * Absent (or empty) when the chat proposes nothing -- the pending-changes accept/discard
+   * affordances and per-gadget draft previews key off this list. Derived server-side and
+   * delivered on metadata updates; never submitted by clients.
+   *
+   * Worktrees never appear here for now: the UI has no worktree surface yet, so worktree-only
+   * changes must not prompt the user to accept or discard changes they cannot see. (This
+   * replaces the earlier `hasProposedChanges` boolean; values of that retired field may linger
+   * in stored metadata but are never delivered as truth.)
    */
-  hasProposedChanges?: boolean;
+  proposedChangeWorkpieces?: WorkpieceId[];
 
   /** If this was started from an agent spawner, the spawner's display name. */
   spawnerName?: string;
@@ -3000,6 +3301,206 @@ export type AiChatMetadata = {
    * checkpoint; those messages remain in canonical history but no longer drive current-state reads.
    */
   compactedTo?: number;
+
+  /**
+   * The chat's code-branch state for its *current epoch*: which gadgets are pinned (and where),
+   * plus the stream position and generation that submitCodeChange() validates against. Delivered
+   * via AiChatSubscriber.metadata(), and re-delivered when its shape changes -- a pin
+   * established or advanced, a generation bump -- but not on every accepted change: clients track
+   * `revision` live via AiChatSubscriber.changeApplied().
+   *
+   * Absent until something first needs it; an absent record means
+   * `{pins: [], generation: 0, revision: 0}`, and both sides use that reading -- a new chat's
+   * first submitCodeChange() simply passes `generation: 0, revision: 0`.
+   */
+  codeBase?: ChatCodeBase;
+};
+
+/**
+ * A chat's code-branch state (see AiChatMetadata.codeBase). A chat behaves like a branch: its
+ * uncommitted changes are one revisioned stream of code changes (see
+ * `@gadgets/workshop-shared/code-change`) applied on top of pinned commits, and accepting the
+ * changes fast-forwards each touched gadget's head (see Overseer.mergeChanges()). A gadget
+ * joins the stream only when its code is first *modified* in the chat -- at that moment it is
+ * pinned at a commit, whose tree its changes apply on top of. Unpinned gadgets always track
+ * mainline head, live, and are read via Overseer.getCodeAtCommit(). One exception: a gadget
+ * created within this chat and still pending has no head commit to pin, so it stays unpinned
+ * while its changes build its content up from nothing (every file starts with a `set`); the merge
+ * that makes it permanent ends the epoch anyway, and in later epochs it pins like any other
+ * gadget.
+ *
+ * Clients derive the chat's content themselves: for each pin, fetch the base tree
+ * (Overseer.getCodeAtCommit(baseCommit)); apply the current epoch's non-reverted `changes`
+ * messages' changes in log order; then apply the changes not yet materialized into a message,
+ * delivered in revision order via AiChatSubscriber.changeApplied(). Accepting changes ends the
+ * epoch: the pin set resets to empty and the change stream restarts.
+ */
+export type ChatCodeBase = {
+  /** Per-gadget pins: every permanent gadget whose code has been modified in the current epoch. */
+  pins: ChatGadgetPinState[];
+
+  /**
+   * Identifies the chat's current change stream. submitCodeChange() validates against this; it is
+   * bumped by every operation that invalidates the stream clients are rooted in. Bumps come in
+   * two classes. **Content-preserving** (a merge's epoch reset): the stream identity changes
+   * but the content carries over -- `prior` describes the closed stream, and in-flight
+   * submissions are transformed onto the new generation (see submitCodeChange()). **Destructive**
+   * (a revert, draft discard, or agent turn abort erased already-applied changes): content other
+   * clients may have transformed against is gone, so they must discard local state and rebuild.
+   * Pin additions and updateChatFromMainline() do *not* bump -- they only append changes.
+   */
+  generation: number;
+
+  /**
+   * Sequence number of the message that opened the current epoch: an `epochBoundary` merge
+   * message, or a migrated chat's `conversionBoundary` changes message. Absent when the epoch
+   * runs from the start of the chat. Only `changes` messages after this point contribute to the
+   * chat's current content.
+   */
+  epoch?: number;
+
+  /**
+   * Revision of the most recently accepted change of the current generation's stream (changes are
+   * numbered sequentially from 1; 0 means none yet). Restarts with each generation, so
+   * `(generation, revision)` identifies a point in the chat's uncommitted-change stream. This
+   * field is a snapshot as of this metadata delivery; clients track the live position via
+   * AiChatSubscriber.changeApplied().
+   */
+  revision: number;
+
+  /**
+   * Present after a content-preserving generation bump (a merge's epoch reset): describes the
+   * closed generation so clients can hand off to the new one without losing anything. A client
+   * still processing generation `prior.generation` first applies its remaining changeApplied()
+   * deliveries -- that stream is complete once seen through `finalRevision` -- and then
+   * switches. Content is identical across the boundary for every gadget except those listed in
+   * `discontinuousGadgets`, which must be rebuilt from head (dropping pending local changes that
+   * touch them; the server would reject those anyway). Absent after a destructive bump, whose
+   * closed stream is unusable anyway.
+   */
+  prior?: {
+    /** The closed generation. */
+    generation: number;
+
+    /** The closed generation's terminal revision: its stream is complete through here. */
+    finalRevision: number;
+
+    /**
+     * Gadgets whose chat content did not carry across the epoch reset: the pin was dropped
+     * while the chat's content for the gadget differed from the new head (it was pinned but had
+     * no net change to commit, and mainline had moved past its pin). Usually empty.
+     */
+    discontinuousGadgets: WorkpieceId[];
+  };
+};
+
+/**
+ * One gadget's pin within a chat (see ChatCodeBase): the record that the gadget's code was
+ * modified for the first time in the chat's current epoch, fixing the commit its uncommitted
+ * changes apply on top of. A pin is established by that first modification -- a
+ * submitCodeChange() pin declaration, or the agent's first write, which pins at the then-current
+ * head -- and lasts until the epoch ends or the declaring message is reverted.
+ *
+ * This same shape is both the declaration a client submits with a first modification
+ * (CodeChangeSubmission.pins) and the permanent record of it in the chat log (the `pins` field of
+ * a "changes" message) and in compaction checkpoints. The log record is what a closed epoch's
+ * content is reconstructed from: start from `baseCommit`'s tree, then apply the epoch's changes
+ * in order. Nothing here ever changes once recorded; a pin's mutable state lives in
+ * ChatGadgetPinState.
+ */
+export type ChatGadgetPin = {
+  /** The pinned gadget. */
+  gadgetId: WorkpieceId;
+
+  /**
+   * The commit whose tree the chat's uncommitted changes for this gadget apply on top of.
+   * Immutable for the life of the pin: every change recorded for this gadget since is expressed
+   * against content rooted here, so the base moving would invalidate them all. (Mainline movement
+   * is merged into the chat as ordinary changes, advancing ChatGadgetPinState.mergedCommit --
+   * never this.)
+   */
+  baseCommit: string;
+};
+
+/**
+ * A pin's current state within a chat (see ChatCodeBase.pins): the immutable ChatGadgetPin the
+ * epoch recorded, plus how far mainline has been merged into the chat since. That addition is
+ * live state rather than history, which is why it is absent from the declaration a client submits
+ * and from the record the chat log keeps.
+ */
+export type ChatGadgetPinState = ChatGadgetPin & {
+  /**
+   * The most recent mainline commit whose content has been merged into the chat for this gadget.
+   * Starts equal to baseCommit and advances on updateChatFromMainline(). Accepting the chat's
+   * changes requires this to equal the gadget's current head (WorkpieceSummary.commitId); a
+   * difference means the chat is stale and the UI should offer updating from mainline.
+   */
+  mergedCommit: string;
+};
+
+/**
+ * One client code-change submission (see Overseer.submitCodeChange() for the full validation and
+ * retry contract).
+ */
+export type CodeChangeSubmission = {
+  /**
+   * The generation of the chat's change stream the submission is rooted in (see
+   * ChatCodeBase.generation).
+   */
+  generation: number;
+
+  /**
+   * The revision within `generation` the change is expressed against: the submitter has applied
+   * every accepted change up to and including this revision (0 = none). The server transforms the
+   * change over any changes accepted since.
+   */
+  revision: number;
+
+  /**
+   * Identifies the client's editing session: a client-generated random token (e.g. a UUID),
+   * minted fresh each time the client builds or rebuilds its local editing state and never
+   * shared between concurrent sessions (two tabs are two clients). Together with `seq` this
+   * makes submissions idempotent: the server remembers each session's last accepted submission
+   * and recognizes retries. Sessions are scoped to the authenticated user, so the token only
+   * needs to be unique among that user's own sessions. See Overseer.submitCodeChange() for the full
+   * contract.
+   */
+  clientId: string;
+
+  /**
+   * This submission's sequence number within the client session, starting at 1 and incrementing
+   * by 1 per change. Retry a transport failure with the same seq and an identical payload -- never
+   * renumber or re-compose a submitted change; the server rejects a reused seq whose content
+   * differs. Because the server remembers only the last accepted seq per session, at most one
+   * submission may be in flight at a time (see Overseer.submitCodeChange()).
+   */
+  seq: number;
+
+  /**
+   * Pin declarations, one per permanent gadget this change touches that is not yet pinned in the
+   * chat (a gadget still pending in the chat is never pinned or declared). The same shape is
+   * what the chat log keeps permanently; see Overseer.submitCodeChange() for the validation
+   * rules.
+   */
+  pins?: ChatGadgetPin[];
+
+  /** The change itself. */
+  change: CodeChange;
+};
+
+/**
+ * Result of Overseer.mergeChanges(). A stale chat is an expected outcome of the accept flow --
+ * someone else's accept can land at any time -- so it is reported as a value for ordinary
+ * control flow, not thrown as an error.
+ */
+export type MergeChangesResult = {
+  /**
+   * "merged": the changes were accepted; every touched gadget's head fast-forwarded (also the
+   * outcome when there was nothing to merge). "stale": nothing was merged -- mainline advanced
+   * past one of the chat's pins, so the accept could not fast-forward; call
+   * updateChatFromMainline(), resolve any conflicts, and retry.
+   */
+  outcome: "merged" | "stale";
 };
 
 /**
@@ -3022,11 +3523,54 @@ export type AiChatHistoryPage = {
     summary: string;
 
     /**
-     * Changes still proposed before `to`, merged into one update, so the client can show pending
-     * changes without loading the messages that recorded them.
+     * Changes still proposed before `to`, composed into one code change, so the client can show
+     * pending changes without loading the messages that recorded them. Composes over the base
+     * trees of the pins the compacted messages established (which remain in ChatCodeBase.pins),
+     * before any later messages' changes.
      */
-    proposedChanges?: Uint8Array;
+    proposedChange?: CodeChange;
   };
+};
+
+/**
+ * Filter for listActions(): "all" for every record, one specific record type, or "pending" for
+ * only the currently-pending records (of any type). Pending records appear in the type views and
+ * "all" too, so history shows everything the agent has attempted.
+ */
+export type ActionHistoryFilter = "all" | "pending" | ActionLogEntry["type"];
+
+/**
+ * Whether a record passes an ActionHistoryFilter. Used by the client's live-merge; the server's
+ * listActions() answers the same question from its byHistoryFilter index, whose key derivation
+ * must stay in lockstep with this function so the two ends of the wire can't drift.
+ */
+export function matchesActionHistoryFilter(
+    record: {type: ActionLogEntry["type"], state: ActionState},
+    filter: ActionHistoryFilter): boolean {
+  return filter === "pending"
+      ? record.state === "pending"
+      : filter === "all" || record.type === filter;
+}
+
+/**
+ * A record's last state-change time: appliedAt once a mutation has stamped it, else createdAt.
+ * The server's byLastChanged resume index keys on this (actionLastChangedKey in overseer.ts) and
+ * the client's resume watermark must reproduce it exactly — derive it only through this helper.
+ */
+export function actionChangeTime(record: Pick<ActionLogEntry, "appliedAt" | "createdAt">): Date {
+  return record.appliedAt ?? record.createdAt;
+}
+
+/** One page of action history from listActions(). */
+export type ActionHistoryPage = {
+  /** Matching records, descending id (creation order, newest first). */
+  entries: ActionLogEntry[];
+
+  /**
+   * Id of the last returned entry; pass as `beforeId` for the next-older page. Absent when the
+   * page reached the start of the history.
+   */
+  nextBeforeId?: number;
 };
 
 export type AiChatAuthorInfo = {
@@ -3123,28 +3667,75 @@ export type AiChatMessageBody = {
   type: "changes";
 
   /**
-   * The code changes themselves, as a Yjs-encoded (V2) update against the workspace code Y.Doc.
-   * Absent when the batch records only gadget creations and/or binding additions with no
-   * accompanying code edits.
+   * The code changes themselves, composed from the changes this batch materialized (see
+   * `watermark`). Applies to the chat content produced by the current epoch's earlier messages,
+   * with this message's own `pins` established first (see ChatGadgetPin). Absent when the
+   * batch records only gadget creations and/or binding additions with no accompanying code
+   * edits, and on pre-conversion messages (see `conversionBoundary`).
    */
-  update?: Uint8Array;
+  change?: CodeChange;
 
   /**
-   * The workspace code version that `update` was built against. Once an agent session observes
-   * the code at some version, the chat stays locked to that version (see
-   * AiToolCall.observedCodeVersion), so history replay must learn each update's base version
-   * *before* it reconstructs the session's code state. Present whenever `update` is, except in
-   * messages persisted before this field existed. For user-authored batches this records the
-   * mainline base at the time the user's edits were captured, which may legitimately differ
-   * from the version an agent session is locked to (the user can accept changes -- advancing
-   * mainline -- and keep editing); such stamps seed a session's version lock but are never
-   * checked against it.
+   * Obsolete. Before the git-storage migration this recorded the code version the message's
+   * changes were built against. It survives only as stored data on old messages and drives
+   * nothing.
    */
   observedCodeVersion?: number;
 
   /**
+   * Pins this batch establishes: for each gadget listed, this message's `change` contains the
+   * epoch's first modification of that gadget's code, applied on top of the pinned commit's
+   * tree. Content reconstruction establishes each listed pin's base before applying the change (see
+   * ChatGadgetPin).
+   */
+  pins?: ChatGadgetPin[];
+
+  /**
+   * The span of the change stream this batch materialized: this message's `change` is the
+   * composition of generation `changesGeneration`'s changes from just past the previous
+   * materialization's watermark through `throughRevision`. On receiving the message, clients drop
+   * their local copies of the covered changes -- and a client that already applied them must not
+   * apply `change` on top: the message re-records content those changes already delivered, it does
+   * not add to it. The generation is included because revisions restart per generation; a delayed
+   * message must never clear another generation's changes. Absent when the batch materialized no
+   * changes (e.g. it records only creations/bindings), and on pre-conversion messages.
+   */
+  watermark?: {changesGeneration: number, throughRevision: number};
+
+  /**
+   * Present when this batch was produced by Overseer.updateChatFromMainline(): `change` merges
+   * mainline commits into the chat. `conflictPaths` lists the files whose 3-way merge was not
+   * clean, in sorted order, each qualified by its gadget's binding name
+   * (`GADGET_NAME/path/to/file`); their merged contents carry inline conflict markers (or, for
+   * delete-vs-modify, the surviving side's content) for the user or their agent to resolve.
+   * `change` is absent when the chat's content already matched the merged mainline commits;
+   * the batch then records only that the pins advanced.
+   *
+   * A batch carrying this cannot be reverted while still proposed (Overseer.revertChanges()
+   * refuses): the merge advanced the chat's pins, and erasing its content while keeping the
+   * advanced pins would let a later accept silently overwrite the mainline changes it
+   * delivered.
+   */
+  mainlineMerge?: {conflictPaths: string[]};
+
+  /**
+   * Present on the synthetic message that converted this chat from the pre-git-storage
+   * representation: its `change` collapses every uncommitted edit the chat had at migration time
+   * into one diff against the chat's pinned commits. It acts as an epoch boundary: messages
+   * before it are text-only history whose code payloads are no longer available. Present even
+   * when the chat had nothing to convert (then with no `change` and no `pins`), because
+   * ChatCodeBase.epoch needs a message to point at. The conversion change is all-or-nothing:
+   * Overseer.revertChanges() refuses a range that erases this message while keeping any earlier
+   * still-proposed batch (those batches' content was collapsed into this one and cannot survive
+   * it), so the boundary and the pre-migration batches it collapsed are only ever discarded
+   * together. Clients never display this message: the user took no action, and the migration it
+   * records is not theirs to action.
+   */
+  conversionBoundary?: true;
+
+  /**
    * Gadgets created as part of this batch of changes (by the agent's `createGadget` tool, or by
-   * the user via Overseer.createGadget() with a chat open -- in the latter case `update` is
+   * the user via Overseer.createGadget() with a chat open -- in the latter case `change` is
    * omitted). Like the code changes themselves, the creations are provisional: a merge
    * through this message makes them permanent, and a revert covering it deletes them. Titles are
    * denormalized for display, since a reverted creation's registry record is gone. `bindingName`
@@ -3155,9 +3746,39 @@ export type AiChatMessageBody = {
   createdGadgets?: {gadgetId: WorkpieceId, title: string, bindingName: string}[];
 
   /**
+   * Worktrees created as part of this batch of changes (by the agent's `createWorktree` tool).
+   * Deliberately separate from `createdGadgets` so a client can never mistake a worktree for a
+   * gadget creation. Like gadget creations, they are provisional -- a merge through this message
+   * makes the record permanent (it stays private to this chat), and a revert covering it deletes
+   * it. The batch's `pins` include the worktree's birth pin `{gadgetId: worktreeId, baseCommit}`,
+   * which is what content reconstruction roots the worktree's changes at. `bindingName` is the
+   * name in the creating chat's env, recorded so replay can pick it back up.
+   *
+   * Worktree *content* is stripped from every client delivery: clients receive `change` payloads
+   * without worktree entries and `pins` without worktree pins (revision numbering preserved), so
+   * ids in this field are the only worktree trace a client sees. There is no worktree UI yet;
+   * without the stripping, a delivered worktree pin would make the code-sync client fetch an
+   * entire repository tree as a base commit.
+   */
+  createdWorktrees?: {worktreeId: WorkpieceId, title: string, bindingName: string}[];
+
+  /**
+   * Explicit worktree commits made as part of this batch: the agent's `commit()` calls on the
+   * Worktree binding, each advancing the worktree's head from `previousHead` to `commit` (the
+   * new head; also the call's return value). This is the durable, sequence-bearing record of the
+   * advancement: the worktree registry record's head is updated in the same synchronous step
+   * this message is written, and a revert covering this message rolls each affected worktree's
+   * head back to its earliest reverted entry's `previousHead` (entries are ordered within the
+   * message and messages by sequence, so multiple commits per step or per reverted range
+   * compose). The commit objects themselves always remain -- content-addressed, and merely
+   * dangling after a rollback -- so a queued push naming a rolled-back commit stays valid.
+   */
+  worktreeCommits?: {worktreeId: WorkpieceId, commit: string, previousHead: string}[];
+
+  /**
    * Binding edges added to gadgets as part of this batch of changes (by the agent's
    * setGadgetBinding tool, or by the user binding a connection with a chat open -- in the latter
-   * case `update` is omitted). Like `createdGadgets`, the additions are
+   * case `change` is omitted). Like `createdGadgets`, the additions are
    * provisional: the edge is visible only from this chat until a merge through this message
    * makes it permanent, and a revert covering it deletes the edge. `name` is the binding's name
    * within the gadget identified by `gadgetId`; `target` is the bound workpiece.
@@ -3166,22 +3787,56 @@ export type AiChatMessageBody = {
 } | {
   /**
    * Indicates that at this point in the chat, the user chose to merge all (non-reverted) changes
-   * in this chat up to and including the given sequence number.
+   * in this chat up to and including the given sequence number. `mergeThrough` is
+   * server-computed: always the last sequence recorded before this message, since merges accept
+   * everything (see Overseer.mergeChanges()).
    */
   type: "merge";
   mergeThrough: number;
 
   /**
-   * Code version at which the merge was applied. (A merge covering only gadget creations /
-   * binding additions writes no new code version; this then records the bumped version counter.)
+   * Obsolete: the workspace-wide code version at which a pre-git-storage merge was applied.
+   * Merges now record `commits` instead.
    */
-  version: number;
+  version?: number;
+
+  /**
+   * The commits this merge created: each touched gadget's new head (see
+   * WorkpieceSummary.commitId). Empty when the merge created no commits (e.g. it covered only
+   * gadget creations / binding additions, with no code changes). Present on every merge
+   * message, including pre-migration ones: the git-storage migration synthesized a commit for
+   * each historical merge and backfilled this field.
+   */
+  commits: {gadgetId: WorkpieceId, commitId: string}[];
+
+  /**
+   * This merge closed the chat's epoch: the chat's code base reset to empty and its change stream
+   * restarted under a new generation, so content reconstruction starts fresh here (see
+   * ChatCodeBase). Present on every merge message except pre-migration ones, which predate
+   * epochs.
+   */
+  epochBoundary?: true;
+
+  /**
+   * The chat's worktree re-pins across this merge's epoch reset, present when the chat had live
+   * worktrees. The reset evaporates every pin, but a worktree's uncommitted content must survive
+   * an accept, so the merge re-pins each worktree in the new generation at `baseCommit`: a fresh
+   * local auto-commit capturing its uncommitted overlay when the closed epoch left it dirty,
+   * else its unchanged base. Auto-commits are internal bookkeeping, squashed out of explicit
+   * history -- the worktree's reported head is untouched, and a later explicit commit parents on
+   * that head, never on an auto-commit. This field is the durable record the re-pins are
+   * reconstructed from: content reconstruction and compaction checkpoints re-root worktree
+   * content here, since `pins` on "changes" messages only cover in-epoch establishment. Worktree
+   * *content* is stripped from client deliveries, but this field is not a content-fetch trigger
+   * (unlike a `pins` entry) and rides along untouched.
+   */
+  worktreePins?: {worktreeId: WorkpieceId, baseCommit: string}[];
 } | {
   /**
    * Indicates that at this point in the chat, the user chose to revert all changes starting at the
    * given sequence number through the end of the chat as of that time. These changes are
-   * completely erased from the Yjs history. Subsequent changes will be based only on what existed
-   * before this point, and any later merge will not include the reverted changes.
+   * completely erased from the chat's uncommitted state. Subsequent changes will be based only on
+   * what existed before this point, and any later merge will not include the reverted changes.
    */
   type: "revert";
   revertFrom: number;
@@ -3219,23 +3874,29 @@ export type AiChatMessageBody = {
   code?: string;
 } | {
   /**
-   * Indicates that a callback was received on the agent's `self` object. When the agent uses
-   * `executeCode`, the executed code receives a `self` parameter. Calling any method on `self`
-   * (e.g., `self.onUpdate(data)`) delivers a callback message back to this chat thread and
-   * activates the agent to respond.
+   * Indicates that a call was delivered to the agent: a method was called on its `self` object
+   * (which code run by the agent's `executeCode` tool receives, and may pass along or store) or on
+   * the stub an agent spawner's `spawnCallable()` returned. The call activates the agent to
+   * respond; nothing is returned to the caller.
    */
   type: "agentCallback";
 
-  /** The method name that was called on `self`. */
+  /** The method name that was called. */
   methodName: string;
 
   /** A depth-limited summary string of the arguments for the agent's context window. */
   argsSummary: string;
+
+  /**
+   * Name under which the arguments appear in the agent's `env`. Absent on messages from before
+   * callable agents became durable, whose arguments are no longer available.
+   */
+  bindingName?: string;
 } | {
   /**
-   * A system-generated nudge message sent to the agent when it tries to end its turn while
-   * agent callbacks are still unresolved. This is displayed as a user message to the LLM
-   * so it can be prompted to continue.
+   * **Obsolete.** A system-generated nudge message that was sent to the agent when it tried to
+   * end its turn while agent callbacks were still unresolved. No longer emitted since callable
+   * agents stopped returning values; retained so older chat logs remain readable.
    */
   type: "agentNudge";
   text: string;
@@ -3362,11 +4023,10 @@ export type AiToolCall = {
   toolCallId: string;
 
   /**
-   * If present, this tool observed the code at the given version number.
-   *
-   * Note that generally once the agent observes code at a particular version, the server tries
-   * to stay at that version for the rest of the thread, to avoid confusing the agent. ("changes"
-   * messages record the base version of their code updates the same way; see AiChatMessageBody.)
+   * Obsolete. Before the git-storage migration this recorded the code version the tool call
+   * observed. Its *presence* still marks the call as pre-migration -- history replay elides
+   * such calls' observed content, which is no longer available -- but the value itself drives
+   * nothing.
    */
   observedCodeVersion?: number;
 
@@ -3380,6 +4040,16 @@ export type AiToolCall = {
    */
   toolName: "readFile";
   input: {workpiece?: string, filename: string};
+
+  /**
+   * Present when the read was served from committed code rather than the chat's uncommitted
+   * content: the workpiece was not pinned in the chat (see ChatGadgetPin), so the agent read the
+   * file at the mainline head commit recorded here. History replay uses this to detect
+   * staleness: if the file has since changed, the read's content is elided from the model's
+   * context and the agent is told to re-read. Reads of pinned workpieces come from the chat's
+   * content, which cannot go stale within an epoch, and carry no stamp.
+   */
+  observedCommit?: string;
 } | {
   toolName: "writeFile";
   input: {
@@ -3426,10 +4096,10 @@ export type AiToolCall = {
   };
 
   /**
-   * The added binding edge as resolved when the tool ran, recorded so crash recovery can re-adopt
-   * an addition whose "changes" message never flushed (see `addedBindings`), mirroring
-   * createGadget's recorded output. `changeId` is the change number of the batch that records the
-   * addition. Absent only when the call failed (`error` is set).
+   * The added binding edge as resolved when the tool ran -- the durable record of what the call
+   * did, which history replay reproduces instead of re-running the tool, mirroring createGadget's
+   * recorded output. `changeId` is the change number of the batch that records the addition (see
+   * `addedBindings`). Absent only when the call failed (`error` is set).
    */
   output?: {gadgetId: WorkpieceId, name: string, target: WorkpieceId, changeId: number};
 } | {
@@ -3478,6 +4148,44 @@ export type AiToolCall = {
    */
   output?: {gadgetId: WorkpieceId, changeId?: number, blueprintNotes?: string};
 } | {
+  /**
+   * Create a new worktree workpiece: a file tree rooted at a git commit, private to the creating
+   * chat, whose files the agent then reads and edits with the regular file tools. Unlike a
+   * gadget, a worktree has no output, no bindings, and cannot execute; its name lives only in
+   * the chat's binding map, never in the workspace default binding list.
+   */
+  toolName: "createWorktree";
+  input: {
+    /** Human-readable title for the new worktree. Required, like a gadget's. */
+    title: string;
+
+    /**
+     * Name under which the worktree appears in the chat's env (see validateBindingName()). The
+     * chat's binding map is the only namespace a worktree name occupies.
+     */
+    bindingName: string;
+
+    /**
+     * The git commit to root the worktree at: a full 40-hex oid or an unambiguous prefix,
+     * resolved against the workspace's local git store and its gatekeeper-provided metadata
+     * (never a remote lookup -- remote refs resolve through gatekeeper APIs first).
+     */
+    commitId: string;
+  };
+
+  /**
+   * The created worktree's workpiece ID, recorded when the worktree was actually created; like
+   * createGadget's output, replay returns this recorded result instead of re-creating.
+   *
+   * `changeId` is the change number of the "changes" batch that records the creation (see
+   * `createdWorktrees` on the "changes" message body), like createGadget's.
+   *
+   * `baseCommit` is the full oid `input.commitId` resolved to -- the commit the worktree is
+   * rooted (and born pinned) at. Recorded because replay needs it to serve reads of untouched
+   * files lazily from the base tree, and the input may be a prefix.
+   */
+  output?: {worktreeId: WorkpieceId, changeId?: number, baseCommit: string};
+} | {
   toolName: "executeCode";
   input: {
     code: string;
@@ -3486,6 +4194,11 @@ export type AiToolCall = {
   /** Output, if the code actually ran. (Otherwise, `error` should be present.) */
   output?: string;
 } | {
+  /**
+   * **Obsolete.** Rejected all of the agent's outstanding callbacks with an error. No longer
+   * emitted since callable agents stopped returning values; retained so older chat logs remain
+   * readable.
+   */
   toolName: "giveUp";
   input: {
     error: string;
@@ -3839,9 +4552,9 @@ export type AiChatStreamEvent = {
   toolName: AiToolCall["toolName"];
 } | {
   /**
-   * For the executeCode tool specifically, we stream the code as the AI writes it. (For all other
-   * tool calls, the tool inputs are not streamed -- though writeFile and editFile separately
-   * stream codeUpdate messages.)
+   * For the executeCode tool specifically, we stream the code as the AI writes it. (writeFile and
+   * editFile stream their in-progress content through the editPreview* events below instead; other
+   * tool calls' inputs are not streamed.)
    */
   type: "toolCodeDelta";
   toolCallId: string;
@@ -3868,6 +4581,56 @@ export type AiChatStreamEvent = {
   file: { workpieceId: WorkpieceId, filename: string };
 } | {
   /**
+   * Opens a live preview of a writeFile/editFile call whose content the model is still
+   * generating: the streamed value (delivered by editPreviewDelta events) progressively replaces
+   * a span of the target file, so the user watches the edit appear as it is written. Emitted
+   * once the call's input has streamed far enough to identify the target (which happens when the
+   * content/replacement field begins, since it is the input's final field).
+   *
+   * The event carries no base content: the client locates the span in its own copy of the file
+   * -- the chat's content, or the committed head for a gadget the chat doesn't cover -- which
+   * mirrors the content the agent computes its edit against (both are the same change stream).
+   * The preview is display-only provisional state, never entering the client's own change
+   * tracking.
+   *
+   * At most one preview is *streaming* at a time (a new editPreviewStart ends the previous
+   * call's delta stream), but a preview outlives its streaming: tool calls execute only after
+   * the whole model response has streamed, so several previews can finish before any of their
+   * durable rows exists. The client must keep displaying each finished preview's final text --
+   * a call's edits would otherwise vanish until its row lands -- until the preview resolves,
+   * which happens in one of two ways: the completed call's change row arrives via
+   * AiChatSubscriber.changeApplied() carrying the same final content (the ordinary end), or an
+   * editPreviewClear withdraws it because no row will come. Since rows arrive in call order,
+   * per-file previews resolve oldest-first. As with all provisional state, the client should
+   * also discard whatever remains when the agent stops running.
+   */
+  type: "editPreviewStart";
+  toolCallId: string;
+  file: { workpieceId: WorkpieceId, filename: string };
+  /**
+   * For editFile: the exact text being replaced. The client finds its unique match in the file
+   * (skipping the preview if there isn't exactly one -- the call itself will then fail). Absent
+   * for writeFile, whose streamed content replaces the whole file.
+   */
+  textToReplace?: string;
+} | {
+  /** Appends newly decoded characters to the streaming edit preview's content. */
+  type: "editPreviewDelta";
+  toolCallId: string;
+  delta: string;
+} | {
+  /**
+   * Withdraws an edit preview whose tool call will produce no change row -- its input failed to
+   * parse or validate, the call failed, or the edit turned out to be a no-op. May name any call
+   * of the current response, not just the one currently streaming (failures surface at
+   * execution, after later calls' previews may have started). The client restores the previewed
+   * file to its real content. (Successful calls emit no clear: the durable changeApplied row
+   * supersedes the preview instead.)
+   */
+  type: "editPreviewClear";
+  toolCallId: string;
+} | {
+  /**
    * Streaming createGadget output format, used by the UI before the finalized tool call arrives.
    * Has the deployment's overrides applied, so it matches what the gadget is stamped with.
    */
@@ -3878,16 +4641,18 @@ export type AiChatStreamEvent = {
   type: "toolOutputDelta";
   toolCallId: string;
   delta: string;
-} | {
-  type: "codeReset";
-} | {
-  type: "codeUpdate";
-  update: Uint8Array;
 };
 
 /** Interface implemented by the client to receive action-log upserts. */
 export interface ActionsSubscriber {
   entry(record: ActionLogEntry): void;
+
+  /**
+   * @deprecated Fires after the subscription has caught up to the current time. However, this is
+   * only a useful signal when a subscription is being used to enumerate past actions using a
+   * distant-past `startAfter`. This is not the correct way to use `subscribeToActions()`; use
+   * `listActions()` instead.
+   */
   ready(): void;
 }
 
@@ -3916,14 +4681,28 @@ export interface AiChatSubscriber {
   message(msg: AiChatMessage): void;
 
   /**
-   * Delivers one persisted live-draft update for a chat branch. Subscriptions replay all currently
-   * stored draft updates for a chat so newly-joined clients can reconstruct the editable branch
-   * state without a separate fetch.
+   * Delivers one accepted change of a chat's change stream: a human submitCodeChange(), an agent
+   * tool edit (broadcast when the tool call completes, superseding the provisional editPreview*
+   * stream of its in-progress content -- see AiChatStreamEvent), or an updateChatFromMainline()
+   * merge. Changes must be applied in
+   * revision order within a generation; a gap means events were lost and the client should
+   * rebuild from fresh metadata and history. On a generation switch, first finish the old
+   * generation's remaining changes -- complete once seen through
+   * ChatCodeBase.prior.finalRevision -- before re-basing onto the new stream (see
+   * ChatCodeBase.prior), and ignore stray events only for generations fully left behind.
+   * Subscriptions replay each chat's not-yet-materialized changes, so newly-joined clients can
+   * reconstruct uncommitted state without a separate fetch; changes a `changes` message has since
+   * absorbed are dropped via the message's `watermark` instead (there is no separate "cleared"
+   * event).
+   *
+   * Changes produced by submitCodeChange() echo the submitter's identity as `submission` (the
+   * CodeChangeSubmission's clientId and seq), so the submitting client recognizes its own change
+   * -- in the live feed and in subscribe-replay alike, without depending on ack/broadcast
+   * ordering -- and drops its in-flight buffer instead of re-applying. The echo is informational
+   * only; server-authored changes (agent edits, mainline merges) omit it.
    */
-  draftUpdate(chatId: number, timestamp: Date, author: AiChatAuthorInfo, update: Uint8Array): void;
-
-  /** Indicates that all persisted live-draft updates for the given chat were cleared. */
-  draftCleared(chatId: number): void;
+  changeApplied(chatId: number, generation: number, revision: number, author: AiChatAuthorInfo,
+                change: CodeChange, submission?: {clientId: string, seq: number}): void;
 
   /** Delivers one provisional streaming event. Clients may ignore event types they don't support. */
   stream(chatId: number, event: AiChatStreamEvent): void;
@@ -3976,11 +4755,14 @@ export type WorkpieceSummary = {
   output?: BlueprintOutput;
 
   /**
-   * The name of the Y.Doc root map that holds this workpiece's files, if it owns files (see
-   * Overseer.subscribeToCode). For most gadgets this is the decimal workpiece ID; the gadget
-   * migrated from before multi-gadget support keeps the legacy unnamed root "".
+   * The gadget's head commit (40-hex hash) in the workspace's git object store -- i.e. its
+   * committed mainline code, readable via Overseer.getCodeAtCommit()/getCommitLog(). Advances
+   * when a chat's changes are accepted; subscribeToWorkpieces() delivers a fresh entry()
+   * whenever it does. Absent only while the gadget is still pending in a chat (see `chatId`):
+   * every permanent gadget has a head, even before it has any code (an empty initial commit),
+   * so a chat's first edit always has a commit to pin (see ChatGadgetPin).
    */
-  filesRoot?: string;
+  commitId?: string;
 
   /**
    * Monotonic workspace code version when this workpiece's rendered UI may need to refresh. Clients

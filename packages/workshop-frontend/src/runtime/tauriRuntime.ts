@@ -88,11 +88,13 @@ export function createTauriRuntime(): WorkshopRuntime {
     },
     async subscribeDeepLinks(callback: (event: DeepLinkEvent) => void): Promise<Unsubscribe> {
       const deepLink = await importTauriDeepLink()
-      const current = await deepLink.getCurrent().catch(() => null)
-      for (const url of current ?? []) callback({ url })
-      return await deepLink.onOpenUrl((urls) => {
+      // Register first: a return arriving during getCurrent() must not fall into a listener gap.
+      const unsubscribe = await deepLink.onOpenUrl((urls) => {
         for (const url of urls) callback({ url })
       })
+      const current = await deepLink.getCurrent().catch(() => null)
+      for (const url of current ?? []) callback({ url })
+      return unsubscribe
     },
     async readSessionSecret() {
       return await readNativeSecret(SESSION_SECRET_KEY)

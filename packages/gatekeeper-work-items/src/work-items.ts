@@ -125,6 +125,8 @@ export class WorkItemsUser extends WorkerEntrypoint<Cloudflare.Env, AccountProps
   async ensureResources(_resourceUrlPatterns: string[]): Promise<{ url?: string }> { return {}; }
   async revoke(): Promise<void> { await this.#account().revoke(); }
   reconnect(): Promise<{ url: string }> { throw new Error("Work Items shell is auto-provisioned and has no connect flow."); }
+  /** Auto-provisioned accounts have no browser credentials to commit. */
+  commitReconnect(_stageId: string): never { throw new Error("Work Items shell has no browser reconnect flow."); }
   async getAuthenticatedEmail(): Promise<string | null> { return null; }
   async getConnectionStatus(): Promise<{ state: "healthy"; message: string }> { return { state: "healthy", message: "Work Items shell is ready." }; }
   async getSingletonGatekeeperClass(): Promise<DurableObjectClass<Gatekeeper<WorkItemsSession>>> { return this.ctx.exports.WorkItemsGatekeeper({ props: this.ctx.props }); }

@@ -4,6 +4,19 @@ The account session (`ZENDESK`) supports ticket creation. A single-ticket bindin
 (`ZENDESK_TICKET`) still only reads and updates its ticket; it cannot create others.
 Agent sessions never expose the management UI's direct-write methods.
 
+## Browser and native OAuth handoff
+
+The provider acknowledges exactly the requested `browser-bound-v1` or `native-verifier-v1`
+protocol at launch and checks it again before exchanging a code. Browser flows return to
+`/connect/handoff#<ticket>`; native flows to `/native/oauth-return/<handle>#<ticket>` using the
+callback-issued handle. Missing or incompatible callback protocols fail closed; a native return URL
+does not itself confirm the connection, and the app must redeem with its independent verifier.
+
+Reconnect grants remain staged until the initiating Workshop session redeems its ticket and calls
+`commitReconnect` with the exact stage ID. Live credentials and cached identity remain unchanged
+before that commit. Expired, replaced, consumed, and revoked stages are rejected. Reauthorization
+must use the account's original Zendesk subdomain, including when its old grant is absent.
+
 ## Create, then edit
 
 Native API:

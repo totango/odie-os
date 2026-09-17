@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, type ReactNode } from 'react'
+import { Activity, act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { newMessagePortRpcSession, RpcStub, RpcTarget } from 'capnweb'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -345,7 +345,7 @@ describe('GadgetUI RPC recovery', () => {
     expect(subscribeCount).toBe(2)
   })
 
-  it('reloads after a replacement timeout and disposes the late capability', async () => {
+  it('preserves the iframe after a replacement timeout and disposes the late capability', async () => {
     const first = fakeGadget('first', 'document.body.textContent = "first"')
     await act(async () => {
       root.render(<GadgetUI gadget={first.stub} height="100px" />)
@@ -367,7 +367,8 @@ describe('GadgetUI RPC recovery', () => {
     await act(async () => vi.advanceTimersByTimeAsync(5_000))
     vi.useRealTimers()
     await expect(read).rejects.toBeDefined()
-    expect(container.querySelector('iframe')).not.toBe(iframe)
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(container.textContent).toContain('Your view is preserved')
 
     const disposed = vi.fn<() => void>()
     connection.resolve(
@@ -375,6 +376,30 @@ describe('GadgetUI RPC recovery', () => {
     )
     await connection.promise
     await vi.waitFor(() => expect(disposed).toHaveBeenCalledOnce())
+  })
+
+  it('re-handshakes after real Activity teardown without replacing the document', async () => {
+    const gadget = fakeGadget('current', 'document.body.textContent = "current"')
+    const render = (mode: 'visible' | 'hidden') => root.render(
+      <Activity mode={mode}><GadgetUI gadget={gadget.stub} height="100px" /></Activity>,
+    )
+    await act(async () => render('visible'))
+    const iframe = container.querySelector('iframe')!
+    const child = connectIframe(iframe)
+    await expect(child.read()).resolves.toBe('current')
+    const post = vi.spyOn(iframe.contentWindow!, 'postMessage')
+    const input = iframe.contentDocument!.createElement('input')
+    iframe.contentDocument!.body.append(input)
+    input.value = 'unsaved form'
+    await act(async () => render('hidden'))
+    await act(async () => render('visible'))
+    expect(container.querySelector('iframe')).toBe(iframe)
+    expect(input.value).toBe('unsaved form')
+    expect(post).toHaveBeenCalledWith({ type: 'gadgets:reconnect', version: 1 }, '*')
+    // jsdom does not execute srcDoc; deliver the bootstrap's response using real MessagePorts.
+    const replacement = connectIframe(iframe)
+    await expect(replacement.read()).resolves.toBe('current')
+    expect(gadget.getUiBundle).toHaveBeenCalledOnce()
   })
 
   it('ignores a superseded replacement connection', async () => {
@@ -488,7 +513,7 @@ describe('GadgetUI RPC recovery', () => {
     await act(async () => {
       root.render(<GadgetUI gadget={replacement.stub} height="100px" />)
     })
-    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBe(firstIframe))
+    expect(container.querySelector('iframe')).toBe(firstIframe)
 
     const disposed = vi.fn<() => void>()
     await act(async () => {

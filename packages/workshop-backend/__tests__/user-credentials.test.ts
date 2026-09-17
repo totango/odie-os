@@ -28,7 +28,7 @@ describe("connected account credential expiry", () => {
   it("ignores legacy Slack access-token expiry", async () => {
     const { user, ensureResources } = makeUser("slack");
 
-    await expect(user.ensureAccountResources(7, [])).resolves.toEqual({});
+    await expect(user.ensureAccountResources(7, [])).resolves.toBeNull();
     expect(ensureResources).toHaveBeenCalledOnce();
   });
 
@@ -66,7 +66,7 @@ describe("native account browser flows", () => {
   }
 
   it("passes the native return URL and verifier-bound callback through connectAccount", async () => {
-    const connectAccount = vi.fn(async () => ({ url: "https://provider.example/oauth" }));
+    const connectAccount = vi.fn(async () => ({ url: "https://provider.example/oauth", handoffProtocol: "native-verifier-v1" }));
     const callbacks: unknown[] = [];
     const storage = makeStorage();
     const user = Object.create(UserDurableObject.prototype) as UserDurableObject;
@@ -78,14 +78,16 @@ describe("native account browser flows", () => {
       },
       storage,
       vendors: new Map([["google", { connectAccount } as unknown as GatekeeperVendor]]),
+      openConnectFlow: vi.fn(async () => "private-nonce"),
     });
 
     await expect(user.connectAccount("google", ["resource"], nativeFlow))
-      .resolves.toEqual({ url: "https://provider.example/oauth" });
+      .resolves.toEqual({ url: "https://provider.example/oauth", nonce: "private-nonce" });
 
     expect(connectAccount).toHaveBeenCalledWith(callbacks[0], {
       resourceUrlPatterns: ["resource"],
       returnUrl: nativeFlow.returnUrl,
+      handoffProtocol: "native-verifier-v1",
     });
     expect(callbacks[0]).toEqual({
       props: { userId: "user-1", accountId: 7, vendorId: "google", flowHandle: nativeFlow.flowHandle },
@@ -94,8 +96,8 @@ describe("native account browser flows", () => {
 
   it("records pending native reconnect and grant flows only when a provider URL is returned", async () => {
     const account = {
-      reconnect: vi.fn(async () => ({ url: "https://provider.example/reconnect" })),
-      ensureResources: vi.fn(async (patterns: string[]) => patterns.length ? { url: "https://provider.example/grant" } : {}),
+      reconnect: vi.fn(async () => ({ url: "https://provider.example/reconnect", handoffProtocol: "native-verifier-v1" })),
+      ensureResources: vi.fn(async (patterns: string[]) => patterns.length ? { url: "https://provider.example/grant", handoffProtocol: "native-verifier-v1" } : {}),
     } as unknown as Fetcher<GatekeeperUser>;
     const record = { id: 7, account, description: { avatar: { url: "" } }, vendorId: "google", credentialsExpired: false };
     const storage = makeStorage(record);
@@ -103,39 +105,43 @@ describe("native account browser flows", () => {
     Object.assign(user, {
       env: { BLUEPRINTS: { get: async () => null } },
       storage,
+      openConnectFlow: vi.fn(async () => "private-nonce"),
     });
 
-    await expect(user.reconnectAccount(7, nativeFlow)).resolves.toEqual({ url: "https://provider.example/reconnect" });
-    expect(account.reconnect).toHaveBeenCalledWith({ returnUrl: nativeFlow.returnUrl });
+    await expect(user.reconnectAccount(7, nativeFlow)).resolves.toEqual({ url: "https://provider.example/reconnect", nonce: "private-nonce" });
+    expect(account.reconnect).toHaveBeenCalledWith({ returnUrl: nativeFlow.returnUrl, handoffProtocol: "native-verifier-v1" });
     expect(storage.saved).toMatchObject({ pendingNativeFlow: { flowHandle: nativeFlow.flowHandle, kind: "reconnect" } });
 
-    await expect(user.ensureAccountResources(7, ["resource"], nativeFlow)).resolves.toEqual({ url: "https://provider.example/grant" });
-    expect(account.ensureResources).toHaveBeenCalledWith(["resource"], { returnUrl: nativeFlow.returnUrl });
+    await expect(user.ensureAccountResources(7, ["resource"], nativeFlow)).resolves.toEqual({ url: "https://provider.example/grant", nonce: "private-nonce" });
+    expect(account.ensureResources).toHaveBeenCalledWith(["resource"], { returnUrl: nativeFlow.returnUrl, handoffProtocol: "native-verifier-v1" });
     expect(storage.saved).toMatchObject({ pendingNativeFlow: { flowHandle: nativeFlow.flowHandle, kind: "grant" } });
 
-    await expect(user.ensureAccountResources(7, [], nativeFlow)).resolves.toEqual({});
+    await expect(user.ensureAccountResources(7, [], nativeFlow)).resolves.toBeNull();
     expect(storage.connectedAccounts.put).toHaveBeenCalledTimes(2);
   });
 
-  it("completes native connect callbacks only after the connected account is persisted", async () => {
+  it("stages native connect callbacks without persisting or completing the account", async () => {
     const calls: string[] = [];
     const completeAccount = vi.fn(async () => {});
     completeAccount.mockImplementation(async () => { calls.push("completeAccount"); });
     const putConnectedAccount = vi.fn(async () => { calls.push("putConnectedAccount"); });
+    const handoff = {targetOrigin: "https://workshop.example", ticket: "ticket", nativeFlowHandle: nativeFlow.flowHandle};
+    const stagePendingConnect = vi.fn(async () => { calls.push("stagePendingConnect"); return handoff; });
     const account = { describe: vi.fn(async () => ({ avatar: { url: "" } })) } as unknown as Fetcher<GatekeeperUser>;
     const callback = Object.create(GatekeeperConnectCallbackImpl.prototype) as GatekeeperConnectCallbackImpl;
     Object.assign(callback, {
       ctx: {
         props: { userId: "user-1", accountId: 7, vendorId: "google", flowHandle: nativeFlow.flowHandle },
         exports: {
-          UserDurableObject: { idFromString: (id: string) => id, get: () => ({ putConnectedAccount }) },
+          UserDurableObject: { idFromString: (id: string) => id, get: () => ({ putConnectedAccount, stagePendingConnect }) },
           NativeBrowserFlow: { idFromName: (id: string) => id, get: () => ({ completeAccount, fail: vi.fn() }) },
         },
       },
     });
 
-    await expect(callback.complete(account)).resolves.toBeUndefined();
-    expect(calls).toEqual(["putConnectedAccount", "completeAccount"]);
+    await expect(callback.complete(account)).resolves.toEqual(handoff);
+    expect(calls).toEqual(["stagePendingConnect"]);
+    expect(stagePendingConnect).toHaveBeenCalledWith(7, account, "google", undefined, nativeFlow.flowHandle);
   });
 
   it("fails native callback flows when persistence cannot complete", async () => {
@@ -145,7 +151,7 @@ describe("native account browser flows", () => {
       ctx: {
         props: { userId: "user-1", accountId: 7, vendorId: "google", flowHandle: nativeFlow.flowHandle },
         exports: {
-          UserDurableObject: { idFromString: (id: string) => id, get: () => ({ putConnectedAccount: vi.fn(async () => { throw new Error("storage unavailable"); }) }) },
+          UserDurableObject: { idFromString: (id: string) => id, get: () => ({ stagePendingConnect: vi.fn(async () => { throw new Error("storage unavailable"); }) }) },
           NativeBrowserFlow: { idFromName: (id: string) => id, get: () => ({ completeAccount: vi.fn(), fail }) },
         },
       },
@@ -153,10 +159,10 @@ describe("native account browser flows", () => {
     const account = { describe: vi.fn(async () => ({ avatar: { url: "" } })) } as unknown as Fetcher<GatekeeperUser>;
 
     await expect(callback.complete(account)).rejects.toThrow("storage unavailable");
-    expect(fail).toHaveBeenCalledWith("Account connection failed. Please try again.");
+    expect(fail).not.toHaveBeenCalled();
   });
 
-  it("completes and fails pending reconnect/grant native flows from credential callbacks", async () => {
+  it("refuses legacy credential callbacks as proof of native reconnect/grant completion", async () => {
     const completeAccount = vi.fn(async () => {});
     const fail = vi.fn(async () => {});
     const account = { describe: vi.fn(async () => ({ avatar: { url: "updated" } })) } as unknown as Fetcher<GatekeeperUser>;
@@ -174,13 +180,14 @@ describe("native account browser flows", () => {
       storage,
     });
 
-    await expect(user.markCredentialsRestored(7)).resolves.toBeUndefined();
-    expect(completeAccount).toHaveBeenCalledOnce();
-    expect(storage.saved).not.toHaveProperty("pendingNativeFlow");
+    await expect(user.markCredentialsRestored(7)).rejects.toThrow("requires its completion ticket");
+    expect(completeAccount).not.toHaveBeenCalled();
+    expect(storage.connectedAccounts.put).not.toHaveBeenCalled();
 
     record.pendingNativeFlow = { flowHandle: nativeFlow.flowHandle, kind: "grant" };
     account.describe = vi.fn(async () => { throw new Error("describe failed"); }) as typeof account.describe;
-    await expect(user.markCredentialsRestored(7)).rejects.toThrow("describe failed");
-    expect(fail).toHaveBeenCalledWith("Account reconnection failed. Please try again.");
+    await expect(user.markCredentialsRestored(7)).rejects.toThrow("requires its completion ticket");
+    expect(fail).not.toHaveBeenCalled();
+    expect(account.describe).not.toHaveBeenCalled();
   });
 });

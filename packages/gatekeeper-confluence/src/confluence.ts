@@ -19,6 +19,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import {
   type AccountDescription,
   type ApprovalQueue,
+  type ConnectHandoff,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
@@ -31,6 +32,9 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { acknowledgeHandoff, connectHandoffPageHtml, htmlResponse, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
+import type { GatekeeperConnectResult as HandoffLaunch, GatekeeperReconnectOptions as HandoffOptions } from "@gadgets/workshop-shared/gatekeeper";
+import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import {
   CONFLUENCE_SCOPES,
   ConfluenceApi,
@@ -128,7 +132,17 @@ type Env = Cloudflare.Env & {
   CLIENT_SECRET?: string;
 };
 
-type StoredNonce = { value: string; expiresAt: number; stage: "initiation" | "oauth" };
+type StoredNonce = {
+  value: string;
+  expiresAt: number;
+  stage: "initiation" | "oauth";
+  /**
+   * Set when this flow reconnects an existing account, so its grant is staged rather than made
+   * live. The mode travels with the flow instead of living on the account: committing one
+   * reconnect while another is in flight must not change how that other flow lands.
+   */
+  reconnect?: true;
+};
 type StoredGrant = { accessToken: string; refreshToken?: string; expiresAt: number };
 
 const getBaseUrl = (env: Env): string => env.BASE_URL || "http://localhost:8787/gatekeeper/confluence";
@@ -164,13 +178,6 @@ const PAGE_RESOURCE: SupportedResource = {
   description: "Read and edit a specific Confluence page or blog post (and its child pages).",
 };
 const SUPPORTED_RESOURCES = [SITE_RESOURCE, SPACE_RESOURCE, PAGE_RESOURCE];
-
-const htmlResponse = (body: string): Response =>
-  new Response(body, { headers: { "Content-Type": "text/html; charset=utf-8" } });
-
-const SELF_CLOSING_HTML = `<!DOCTYPE html>
-<html lang="en"><body><script>window.close();</script>
-<p>Authorization complete. You may close this tab and return to Cloudflare OS.</p></body></html>`;
 
 const page = (title: string, color: string, message: string): string => `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>${title}</title></head>
@@ -225,8 +232,9 @@ export default {
       if (colonIdx < 0) return new Response("Error: malformed state",
         { headers: { "content-type": "text/plain; charset=utf-8" } });
       const stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(state.slice(0, colonIdx)));
-      if (!await stub.acceptAuthCode(code, state.slice(colonIdx + 1))) return htmlResponse(INVALID_LINK_HTML);
-      return htmlResponse(SELF_CLOSING_HTML);
+      const handoff = await stub.acceptAuthCode(code, state.slice(colonIdx + 1));
+      if (!handoff) return htmlResponse(INVALID_LINK_HTML);
+      return htmlResponse(connectHandoffPageHtml(handoff));
     }
     return new Response("Not Found", { status: 404 });
   },
@@ -252,12 +260,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async connectAccount(
-    callback: Fetcher<GatekeeperConnectCallback>, _options?: GatekeeperConnectOptions,
-  ): Promise<{ url: string }> {
+    callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions,
+  ): Promise<HandoffLaunch> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(userObjectId).acknowledgeHandoff(options) };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -273,6 +281,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // UserAccount DO — OAuth credential management (multi-site, rotating refresh tokens).
 
 export class UserAccount extends DurableObject<Env> {
+  /** Records supported launch intent; callback agreement is checked before exchange. */
+  acknowledgeHandoff(options?: HandoffOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string) {
     if (!this.ctx.storage.kv.get<StoredGrant>("grant")) {
       this.ctx.storage.setAlarm(Date.now() + CONNECT_TIMEOUT_MS);
@@ -284,9 +294,11 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string) {
-    this.ctx.storage.kv.put<boolean>("reconnecting", true);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
-      value: initiationNonce, expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS, stage: "initiation",
+      value: initiationNonce,
+      expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
+      stage: "initiation",
+      reconnect: true,
     });
   }
 
@@ -298,16 +310,23 @@ export class UserAccount extends DurableObject<Env> {
     }
     const oauthNonce = generateNonce();
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
-      value: oauthNonce, expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS, stage: "oauth",
+      value: oauthNonce,
+      expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
+      stage: "oauth",
+      reconnect: stored.reconnect,
     });
     return { oauthNonce };
   }
 
-  async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
+  /**
+   * Finishes the OAuth code exchange and returns the handoff for the page the browser lands on, or
+   * null when the callback's nonce doesn't match.
+   */
+  async acceptAuthCode(code: string, oauthNonce: string): Promise<ConnectHandoff | null> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "oauth" || Date.now() >= stored.expiresAt ||
         !constantTimeEqual(stored.value, oauthNonce)) {
-      return false;
+      return null;
     }
     this.ctx.storage.kv.delete("nonce");
 
@@ -317,24 +336,37 @@ export class UserAccount extends DurableObject<Env> {
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) throw new Error("Took too long to complete the authorization. Please try again.");
 
+    const protocol = await requireBrowserHandoff(callback, this.ctx.storage.kv);
     const grant = await exchangeAuthCode(
       code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, getBaseUrl(this.env) + "/oauth");
-    this.#storeGrant(grant);
-    await this.#refreshSitesAndIdentity(grant.accessToken);
 
-    if (this.ctx.storage.kv.get<boolean>("reconnecting")) {
-      this.ctx.storage.kv.delete("reconnecting");
-      await callback.credentialsRestored(new Date(grant.expiresAt));
+    let handoff: ConnectHandoff;
+    if (stored.reconnect) {
+      // The reconnect URL is a bearer capability, so the new grant is only staged until the Workshop
+      // has confirmed the browser that finished the flow is the owner's (see commitReconnect). Bound
+      // gadgets keep reading the current token meanwhile.
+      const stageId = stageCredentials(this.ctx.storage.kv, grant, Date.now());
+      handoff = await callback.reconnectComplete(stageId, new Date(grant.expiresAt));
     } else {
+      this.#storeGrant(grant);
+      await this.#refreshSitesAndIdentity(grant.accessToken);
       try {
         const props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
-        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }), new Date(grant.expiresAt));
+        handoff = requireConnectHandoff(await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }), new Date(grant.expiresAt)), protocol);
       } catch (err) {
         this.ctx.storage.kv.delete("grant");
         throw err;
       }
     }
-    return true;
+    return requireConnectHandoff(handoff, protocol);
+  }
+
+  /** Makes the grant staged under `stageId` live; see GatekeeperUser.commitReconnect. */
+  async commitReconnect(stageId: string): Promise<void> {
+    const grant = commitStagedCredentials<StoredGrant>(this.ctx.storage.kv, Date.now(), stageId);
+    if (!grant) throw new Error("No reconnect is awaiting confirmation. Please try again.");
+    this.#storeGrant(grant);
+    await this.#refreshSitesAndIdentity(grant.accessToken);
   }
 
   #storeGrant(grant: StoredGrant) {
@@ -494,10 +526,14 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().revoke();
   }
 
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: HandoffOptions): Promise<HandoffLaunch> {
     const initiationNonce = generateNonce();
     await this.#userAccount().prepareReconnect(initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}`, handoffProtocol: await this.#userAccount().acknowledgeHandoff(options) };
+  }
+
+  async commitReconnect(stageId: string): Promise<void> {
+    await this.#userAccount().commitReconnect(stageId);
   }
 
   @skipRpcValidation()
@@ -568,7 +604,7 @@ function makeApi(ctx: { exports: Cloudflare.Env }, props: BaseProps): Confluence
 @validateRpc()
 export class ConfluenceSiteGatekeeperImpl extends DurableObject<Env, SiteGatekeeperProps>
     implements Gatekeeper<ConfluenceSiteSession> {
-  #store() { return new ConfluenceStore(this.ctx.storage.kv, makeApi(this.ctx, this.ctx.props)); }
+  #store() { return new ConfluenceStore(this.ctx.storage, makeApi(this.ctx, this.ctx.props)); }
   #tracker() { return new ConfluenceObserverTracker(this.ctx.storage.kv, this.ctx.props.cloudId); }
 
   async describe(): Promise<ResourceDescription> {
@@ -617,7 +653,7 @@ export class ConfluenceSiteGatekeeperImpl extends DurableObject<Env, SiteGatekee
 @validateRpc()
 export class ConfluenceSpaceGatekeeperImpl extends DurableObject<Env, SpaceGatekeeperProps>
     implements Gatekeeper<ConfluenceSpaceSession> {
-  #store() { return new ConfluenceStore(this.ctx.storage.kv, makeApi(this.ctx, this.ctx.props)); }
+  #store() { return new ConfluenceStore(this.ctx.storage, makeApi(this.ctx, this.ctx.props)); }
   #tracker() { return new ConfluenceObserverTracker(this.ctx.storage.kv, this.ctx.props.cloudId); }
 
   async describe(): Promise<ResourceDescription> {
@@ -663,7 +699,7 @@ export class ConfluenceSpaceGatekeeperImpl extends DurableObject<Env, SpaceGatek
 @validateRpc()
 export class ConfluenceContentGatekeeperImpl extends DurableObject<Env, ContentGatekeeperProps>
     implements Gatekeeper<ConfluenceContentSession> {
-  #store() { return new ConfluenceStore(this.ctx.storage.kv, makeApi(this.ctx, this.ctx.props)); }
+  #store() { return new ConfluenceStore(this.ctx.storage, makeApi(this.ctx, this.ctx.props)); }
   #tracker() { return new ConfluenceObserverTracker(this.ctx.storage.kv, this.ctx.props.cloudId); }
 
   async describe(): Promise<ResourceDescription> {
@@ -1137,14 +1173,16 @@ class ContentSessionImpl extends RpcTarget implements ConfluenceContentSession {
   }
 
   async uploadAttachment(options: UploadAttachmentOptions): Promise<Attachment> {
+    // Staging deletes the action, and its file with it, if approval submission fails.
+    const file = await this.#store.captureAttachment(options.data);
     await this.#stage({
       type: "uploadAttachment", contentId: this.#contentId,
-      filename: options.filename, mediaType: options.mediaType, data: options.data, comment: options.comment,
+      filename: options.filename, mediaType: options.mediaType, file, comment: options.comment,
     });
     // Reflect the pending upload optimistically (it isn't applied until approved). Use a fresh
     // provisional id (like createContent) so concurrent pending uploads don't share one id.
     return { id: this.#store.nextProvisionalId(), title: options.filename, mediaType: options.mediaType,
-      fileSize: options.data.byteLength, version: 1, createdAt: new Date() };
+      fileSize: file.size, version: 1, createdAt: new Date() };
   }
 
   async trash(): Promise<void> {

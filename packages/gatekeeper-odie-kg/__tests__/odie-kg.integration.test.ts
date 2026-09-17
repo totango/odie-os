@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { McpSessionBase } from "@gadgets/mcp-shared/session";
 import {
   connect,
@@ -25,6 +25,8 @@ const ODIE_KG_DIR = new URL("..", import.meta.url).pathname;
 const ODIE_KG_BINDING = "ODIE_KG";
 const MCP_ENDPOINT = ODIE_KG_EU_ENDPOINT;
 const AUTH_ISSUER = "https://auth.test";
+const WORKSHOP_ORIGIN = "https://workshop.example";
+const PROVIDER_BASE = `${WORKSHOP_ORIGIN}/gatekeeper/odie-kg`;
 type JsonRpcRequest = {
   id?: number | string | null;
   method?: string;
@@ -129,14 +131,14 @@ function odieOauthAndMcpHandler(seen: string[]): Handler {
     if (url.href === `${AUTH_ISSUER}/register` && method === "POST") {
       expect(await request.json()).toMatchObject({
         client_name: "Odie OS E2E",
-        redirect_uris: ["http://localhost:8787/gatekeeper/odie-kg/oauth"],
+        redirect_uris: [`${PROVIDER_BASE}/oauth`],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
         token_endpoint_auth_method: "none",
       });
       return json({
         client_id: "odie-test-client",
-        redirect_uris: ["http://localhost:8787/gatekeeper/odie-kg/oauth"],
+        redirect_uris: [`${PROVIDER_BASE}/oauth`],
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
         token_endpoint_auth_method: "none",
@@ -146,7 +148,7 @@ function odieOauthAndMcpHandler(seen: string[]): Handler {
       const body = new URLSearchParams(await request.text());
       expect(body.get("grant_type")).toBe("authorization_code");
       expect(body.get("code")).toBe("authorization-code");
-      expect(body.get("redirect_uri")).toBe("http://localhost:8787/gatekeeper/odie-kg/oauth");
+      expect(body.get("redirect_uri")).toBe(`${PROVIDER_BASE}/oauth`);
       expect(body.get("code_verifier")).toMatch(/^[A-Za-z0-9._~-]{43,128}$/);
       return json({
         access_token: "access-token",
@@ -164,8 +166,12 @@ let interceptor: NetworkInterceptor;
 let seenNetwork: string[];
 
 beforeAll(async () => {
+  // Vite supplies BASE_URL="/" in the test process; Wrangler prefers it over an inline var.
+  // Native launch records require HTTPS, so pin the fixture's origins in both input paths.
+  vi.stubEnv("BASE_URL", PROVIDER_BASE);
+  vi.stubEnv("PUBLIC_BASE_URL", WORKSHOP_ORIGIN);
   seenNetwork = [];
-  interceptor = new NetworkInterceptor([odieOauthAndMcpHandler(seenNetwork)]);
+  interceptor = new NetworkInterceptor({ handlers: [odieOauthAndMcpHandler(seenNetwork)] });
   interceptor.install();
   harness = await startHarness({
     gatekeepers: [{
@@ -176,6 +182,7 @@ beforeAll(async () => {
           ...config.vars,
           ODIE_KG_MCP_URL: MCP_ENDPOINT,
           MCP_CLIENT_NAME: "Odie OS E2E",
+          BASE_URL: PROVIDER_BASE,
         };
       },
     }],
@@ -183,6 +190,7 @@ beforeAll(async () => {
       config.vars = {
         ...config.vars,
         REQUIRED_HEALTHY_CONNECTIONS: VENDOR_ID,
+        PUBLIC_BASE_URL: WORKSHOP_ORIGIN,
       };
     },
   });
@@ -193,6 +201,7 @@ afterAll(async () => {
   await harness?.server.close();
   interceptor.uninstall();
   interceptor.reset();
+  vi.unstubAllEnvs();
   expect(unmocked).toEqual([]);
 }, 30_000);
 
@@ -206,16 +215,23 @@ async function withSession<T>(body: (api: PublicApiStub) => Promise<T>): Promise
 }
 
 async function connectOdieKgAccount(api: AuthenticatedApiStub) {
-  const { url: connectUrl } = await api.connectAccount(VENDOR_ID);
+  const { url: connectUrl, nonce } = await api.connectAccount(VENDOR_ID);
+  expect(connectUrl).toMatch(/^https:\/\/workshop\.example\/gatekeeper\/odie-kg\//);
+  if (!nonce) throw new Error("Expected browser-bound connect nonce");
   const connectResponse = await harness.fetchWorker(
     "gatekeeper-odie-kg", connectUrl, { redirect: "manual" });
   expect(connectResponse.status).toBe(302);
   const authorizationUrl = new URL(connectResponse.headers.get("location")!);
-  const callbackUrl = new URL("http://localhost:8787/gatekeeper/odie-kg/oauth");
+  const callbackUrl = new URL(`${PROVIDER_BASE}/oauth`);
   callbackUrl.searchParams.set("code", "authorization-code");
   callbackUrl.searchParams.set("state", authorizationUrl.searchParams.get("state")!);
   const callbackResponse = await harness.fetchWorker("gatekeeper-odie-kg", callbackUrl.toString());
-  expect(callbackResponse.status).toBe(200);
+  const html = await callbackResponse.text();
+  expect(callbackResponse.status, html).toBe(200);
+  const ticket = /var ticket = "([0-9a-f]+)";/.exec(html)?.[1];
+  if (!ticket) throw new Error("Expected connect handoff ticket");
+  expect((await listConnectedAccounts(api)).some(account => account.vendorId === VENDOR_ID)).toBe(false);
+  await api.completeConnectHandoff(ticket, nonce);
   const account = await waitFor("the ODIE MCP account to be connected", async () => {
     const accounts = await listConnectedAccounts(api);
     return accounts.find(candidate => candidate.vendorId === VENDOR_ID) ?? null;
@@ -224,6 +240,44 @@ async function connectOdieKgAccount(api: AuthenticatedApiStub) {
 }
 
 describe("ODIE MCP integration", () => {
+  it.each(["connect", "reconnect"] as const)("completes native %s only with its verifier and fragment ticket", async kind => {
+    remoteScenario = {};
+    await withSession(async publicApi => {
+      using api = await signUp(publicApi, nextUsernames("odienative")[0]);
+      const connected = kind === "reconnect" ? await connectOdieKgAccount(api) : undefined;
+      const verifier = "native-verifier-" + "v".repeat(43);
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+      const clientVerifierHash = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+      const options = { flow: { returnMode: "native-verified-link" as const, clientVerifierHash } };
+      const started = connected ? await api.reconnectAccount(connected.account.id, options) :
+        await api.connectAccount(VENDOR_ID, undefined, options);
+      if (!started.flowHandle) throw new Error("Expected native flow handle");
+      const launch = await harness.fetchWorker("workshop-backend", started.url, { redirect: "manual" });
+      expect(launch.status).toBe(302);
+      const provider = await harness.fetchWorker("gatekeeper-odie-kg", launch.headers.get("location")!, { redirect: "manual" });
+      expect(provider.status).toBe(302);
+      const authorizationUrl = new URL(provider.headers.get("location")!);
+      const callbackUrl = new URL(`${PROVIDER_BASE}/oauth`);
+      callbackUrl.searchParams.set("code", "authorization-code");
+      callbackUrl.searchParams.set("state", authorizationUrl.searchParams.get("state")!);
+      const response = await harness.fetchWorker("gatekeeper-odie-kg", callbackUrl.toString());
+      const html = await response.text();
+      expect(response.status, html).toBe(200);
+      expect(html).toContain(`/native/oauth-return/${encodeURIComponent(started.flowHandle)}#`);
+      expect(html).not.toContain("/connect/handoff#");
+      const ticket = /var ticket = "([0-9a-f]{64})";/.exec(html)?.[1];
+      if (!ticket) throw new Error("Expected native fragment ticket");
+      expect(await api.getNativeAccountFlowStatus(started.flowHandle, verifier)).toEqual({ status: "pending" });
+      if (!connected) expect(await listConnectedAccounts(api)).toEqual([]);
+      await expect(api.completeNativeAccountFlow(started.flowHandle, "wrong-verifier", ticket)).rejects.toThrow();
+      expect(await api.getNativeAccountFlowStatus(started.flowHandle, verifier)).toEqual({ status: "pending" });
+      await api.completeNativeAccountFlow(started.flowHandle, verifier, ticket);
+      expect(await api.getNativeAccountFlowStatus(started.flowHandle, verifier)).toEqual({ status: "completed" });
+      expect((await listConnectedAccounts(api)).filter(account => account.vendorId === VENDOR_ID)).toHaveLength(1);
+      await expect(api.completeNativeAccountFlow(started.flowHandle, verifier, ticket)).rejects.toThrow();
+    });
+  });
+
   it("connects through OAuth and declares the tenant-bound ambient singleton", async () => {
     remoteScenario = {};
     await withSession(async publicApi => {

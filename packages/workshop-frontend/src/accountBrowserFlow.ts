@@ -1,10 +1,11 @@
 import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi, BrowserFlowOptions, BrowserFlowStart, NativeLoginFlowStatus } from '@gadgets/workshop-shared/api'
 import { getWorkshopRuntime } from './runtime'
+import { HANDOFF_KEY, openConnectWindow } from './connectHandoff'
 
 const NATIVE_ACCOUNT_FLOW_POLL_MS = 1_000
 
-type FlowStart = (options?: { flow?: BrowserFlowOptions }) => Promise<Partial<BrowserFlowStart>>
+type FlowStart = (options?: { flow?: BrowserFlowOptions }) => Promise<(Partial<BrowserFlowStart> & { nonce?: string }) | null>
 
 export interface AccountBrowserFlowOptions {
   signal?: AbortSignal
@@ -102,9 +103,10 @@ export async function runAccountBrowserFlow(
     const started = await start({
       flow: { returnMode: 'native-verified-link', clientVerifierHash: await sha256Hex(verifier) },
     })
-    if (!started.url) return {}
+    if (!started?.url) return {}
     if (!started.flowHandle) throw new Error('Native account browser flow did not return a handle.')
     throwIfAborted(options.signal)
+    await runtime.writePendingNativeLoginFlow({ purpose: 'account', flowHandle: started.flowHandle, verifier, expiresAt: started.expiresAt })
     await runtime.openOAuthTrampoline(started.url)
     const nativeStatus = await pollNativeAccountFlow(authenticatedApi, started.flowHandle, verifier, options.signal)
     return { url: started.url, nativeStatus }
@@ -114,25 +116,26 @@ export async function runAccountBrowserFlow(
   if (options.webPopup === 'preopen') {
     popup = window.open(options.webPreopenUrl ?? 'about:blank', '_blank')
     if (popup) popup.opener = null
-    else if (options.requireWebPopup) return { popupBlocked: true }
+    else return { popupBlocked: true }
   }
   try {
     const started = await start()
-    const url = started.url
+    const url = started?.url
     if (!url || options.webPopup === 'none') {
       popup?.close()
       return { url }
     }
+    if (!started?.nonce) throw new Error('Connection requires an updated server. Please try again after upgrading.')
     if (options.webPopup === 'preopen') {
       if (popup) {
+        popup.sessionStorage.setItem(HANDOFF_KEY, JSON.stringify({ kind: 'connect', nonce: started.nonce }))
         if (options.webNavigate === 'replace') popup.location.replace(url)
         else popup.location.href = url
       }
-      else if (options.webFallback === 'manual') return { url, popupBlocked: true }
-      else window.location.assign(url)
+      else throw new Error('Pop-up blocked. Please allow pop-ups and try again.')
       return { url, popupBlocked: !popup }
     }
-    window.open(url, '_blank', 'noopener,noreferrer')
+    openConnectWindow({ url, nonce: started.nonce })
     return { url }
   } catch (error) {
     popup?.close()

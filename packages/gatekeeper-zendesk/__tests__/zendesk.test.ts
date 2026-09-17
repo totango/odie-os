@@ -45,7 +45,7 @@ function makeTestStorage() {
       },
       setAlarm: vi.fn(),
       deleteAlarm: vi.fn(),
-      deleteAll: vi.fn(),
+      deleteAll: vi.fn(async () => { kv.clear(); }),
     },
   };
 }
@@ -779,9 +779,13 @@ describe("Zendesk token lifecycle regressions", () => {
     const { kv, storage } = makeTestStorage();
     kv.set("subdomain", "acme");
     kv.set("grant", grant);
-    const callback = { credentialsExpired: vi.fn(), credentialsRestored: vi.fn() };
+    const callback = {
+      getHandoffProtocol: vi.fn(async () => "browser-bound-v1" as const),
+      reconnectComplete: vi.fn(async (_stageId: string) => ({ targetOrigin: "https://workshop.example", ticket: "1".repeat(64) })),
+      credentialsExpired: vi.fn(), credentialsRestored: vi.fn(),
+    };
     kv.set("callback", callback);
-    const account = new ZendeskAccount({ storage } as never, env as never);
+    const account = new ZendeskAccount({ storage, facets: { delete: vi.fn() } } as never, env as never);
     return { account, kv, callback };
   }
 
@@ -848,9 +852,72 @@ describe("Zendesk token lifecycle regressions", () => {
     const begun = await account.beginOAuth("nonce", "acme");
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ access_token: "new" })));
     await account.acceptAuthCode("code", begun!.oauthNonce);
-    expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
+    expect(callback.reconnectComplete).toHaveBeenCalledTimes(1);
+    expect(callback.credentialsRestored).not.toHaveBeenCalled();
+    expect(kv.get("grant")).toMatchObject({ accessToken: "old" });
+    expect(kv.get("identity")).toEqual({ id: 1 });
+    expect(kv.get("expiredNotified")).toBe(true);
+    const stageId = callback.reconnectComplete.mock.calls[0][0];
+    await expect(account.commitReconnect("wrong-stage")).rejects.toThrow(/No reconnect/);
+    await account.commitReconnect(stageId);
+    expect(kv.get("grant")).toMatchObject({ accessToken: "new" });
+    await expect(account.commitReconnect(stageId)).rejects.toThrow(/No reconnect/);
     expect(kv.get("identity")).toBeUndefined();
     expect(kv.get("expiredNotified")).toBeUndefined();
+  });
+
+  it.each(["missing", "unknown", "failure"])("refuses mixed native callbacks before token exchange: %s", async mode => {
+    const { account, kv, callback } = await accountWithGrant({ accessToken: "old", expiresAt: 0 });
+    kv.set("callback", {
+      reconnectComplete: callback.reconnectComplete,
+      ...(mode === "missing" ? {} : { getHandoffProtocol: async () => {
+        if (mode === "failure") throw new Error("RPC unavailable");
+        return "legacy";
+      } }),
+    });
+    await account.prepareReconnect("nonce", "https://workshop.example/native/oauth-return/abcdefghijklmnopqrstuvwxyz012345");
+    const begun = await account.beginOAuth("nonce", "acme");
+    const fetcher = vi.fn();
+    vi.stubGlobal("fetch", fetcher);
+    await expect(account.acceptAuthCode("code", begun!.oauthNonce)).rejects.toThrow(/start a new connection/);
+    await expect(account.acceptAuthCode("code", begun!.oauthNonce)).resolves.toBeNull();
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(callback.reconnectComplete).not.toHaveBeenCalled();
+    expect(kv.get("grant")).toMatchObject({ accessToken: "old" });
+    expect(kv.has("stagedCredentials")).toBe(false);
+  });
+
+  it("restores an expired account only on its original subdomain after redemption", async () => {
+    const { account, kv, callback } = await accountWithGrant({ accessToken: "old", expiresAt: 0 });
+    kv.delete("grant");
+    await account.prepareReconnect("nonce");
+    await expect(account.beginOAuth("nonce", "other")).rejects.toThrow(/original Zendesk subdomain/);
+    const begun = await account.beginOAuth("nonce", "acme");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ access_token: "replacement" })));
+    await account.acceptAuthCode("code", begun!.oauthNonce);
+    expect(kv.has("grant")).toBe(false);
+    await account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]);
+    expect(kv.get("grant")).toMatchObject({ accessToken: "replacement" });
+  });
+
+  it.each(["revoke", "expire", "replace"])("refuses staged credentials after %s", async change => {
+    const { account, kv, callback } = await accountWithGrant({ accessToken: "old", expiresAt: 0 });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ access_token: "new" })));
+    const stage = async () => {
+      await account.prepareReconnect("nonce");
+      const begun = await account.beginOAuth("nonce", "acme");
+      await account.acceptAuthCode("code", begun!.oauthNonce);
+    };
+    await stage();
+    const stageId = callback.reconnectComplete.mock.calls[0][0];
+    if (change === "revoke") await account.revoke();
+    if (change === "replace") await stage();
+    const clock = change === "expire" ? vi.spyOn(Date, "now").mockReturnValue(Date.now() + 24 * 60 * 60 * 1000) : undefined;
+    try {
+      await expect(account.commitReconnect(stageId)).rejects.toThrow(/No reconnect/);
+    } finally { clock?.mockRestore(); }
+    if (change !== "revoke") expect(kv.get("grant")).toMatchObject({ accessToken: "old" });
+    else expect(kv.has("grant")).toBe(false);
   });
 });
 
@@ -941,7 +1008,7 @@ describe("Zendesk native OAuth return URLs", () => {
   it("stores a validated native return URL for new connections", async () => {
     const { GatekeeperVendor } = await import("../src/zendesk");
     const accountId = "1".repeat(64);
-    const account = { setCallback: vi.fn() };
+    const account = { setCallback: vi.fn(), acknowledgeHandoff: vi.fn(async () => "native-verifier-v1") };
     const vendor = new GatekeeperVendor({
       exports: {
         ZendeskAccount: {
@@ -951,7 +1018,8 @@ describe("Zendesk native OAuth return URLs", () => {
       },
     } as never, env as never);
 
-    const result = await vendor.connectAccount({} as never, { returnUrl: validReturnUrl });
+    const result = await vendor.connectAccount({} as never, { returnUrl: validReturnUrl, handoffProtocol: "native-verifier-v1" });
+    expect(result.handoffProtocol).toBe("native-verifier-v1");
 
     expect(result.url).toMatch(new RegExp(`^${env.BASE_URL}/connect/${accountId}/[0-9a-f]{64}$`));
     expect(account.setCallback).toHaveBeenCalledWith(expect.anything(), expect.stringMatching(/^[0-9a-f]{64}$/), validReturnUrl);
@@ -959,7 +1027,7 @@ describe("Zendesk native OAuth return URLs", () => {
 
   it("threads reconnect native return URL into nonce state", async () => {
     const { ZendeskUserImpl } = await import("../src/zendesk");
-    const account = { prepareReconnect: vi.fn() };
+    const account = { prepareReconnect: vi.fn(), acknowledgeHandoff: vi.fn(async () => "native-verifier-v1") };
     const user = new ZendeskUserImpl({
       props: { accountId: "2".repeat(64), subdomain: "acme" },
       exports: {
@@ -970,17 +1038,24 @@ describe("Zendesk native OAuth return URLs", () => {
       },
     } as never, env as never);
 
-    const result = await user.reconnect({ returnUrl: validReturnUrl });
+    const result = await user.reconnect({ returnUrl: validReturnUrl, handoffProtocol: "native-verifier-v1" });
+    expect(result.handoffProtocol).toBe("native-verifier-v1");
 
     expect(result.url).toMatch(new RegExp(`^${env.BASE_URL}/connect/${"2".repeat(64)}/[0-9a-f]{64}$`));
     expect(account.prepareReconnect).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{64}$/), validReturnUrl);
   });
 
-  it("renders validated native completion URL and consumes the OAuth nonce once", async () => {
+  it.each(["browser-bound-v1", "native-verifier-v1"] as const)("negotiates %s and consumes the OAuth nonce once", async handoffProtocol => {
     const zendesk = await import("../src/zendesk");
     const { kv, storage: accountStorage } = makeTestStorage();
     const accountId = "3".repeat(64);
-    const callback = { complete: vi.fn(), credentialsRestored: vi.fn(), credentialsExpired: vi.fn() };
+    const callback = {
+      getHandoffProtocol: vi.fn(async () => handoffProtocol),
+      complete: vi.fn(async () => ({ targetOrigin: "https://workshop.example", ticket: "1".repeat(64),
+        ...(handoffProtocol === "native-verifier-v1" ? { nativeFlowHandle: "a".repeat(32) } : {}),
+      })),
+      credentialsRestored: vi.fn(), credentialsExpired: vi.fn(),
+    };
     const account = new zendesk.ZendeskAccount({
       id: { toString: () => accountId },
       storage: accountStorage,
@@ -989,6 +1064,7 @@ describe("Zendesk native OAuth return URLs", () => {
       },
     } as never, env as never);
     await account.setCallback(callback as never, "4".repeat(64), validReturnUrl);
+    await expect(account.acknowledgeHandoff({ handoffProtocol })).resolves.toBe(handoffProtocol);
     const begun = await account.beginOAuth("4".repeat(64), "acme");
     expect(begun).not.toBeNull();
     let tokenRequests = 0;
@@ -1016,7 +1092,9 @@ describe("Zendesk native OAuth return URLs", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
     expect(response.headers.get("Content-Security-Policy")).toBe("default-src 'none'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'");
-    expect(body).toContain(validReturnUrl);
+    expect(body).not.toContain(validReturnUrl);
+    expect(body).toContain(handoffProtocol === "native-verifier-v1" ? `/native/oauth-return/${"a".repeat(32)}#` : '/connect/handoff#');
+    expect(callback.getHandoffProtocol).toHaveBeenCalledOnce();
     expect(body).toContain("location.replace");
     expect(callback.complete).toHaveBeenCalledOnce();
     expect(kv.get("nonce")).toBeUndefined();

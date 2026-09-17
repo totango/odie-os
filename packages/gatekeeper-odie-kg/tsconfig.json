@@ -6,11 +6,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "types": ["@cloudflare/workers-types", "./worker-configuration.d.ts"],
-    "outDir": "./dist",
-    "declaration": true,
-    "sourceMap": true,
-    "noEmit": false,
-    "baseUrl": ".",
+    "rootDir": "../..",
+    "noEmit": true,
     "paths": {
       "@gadgets/mcp-shared/*": ["../mcp-shared/src/*"],
       "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"]

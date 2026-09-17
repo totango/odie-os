@@ -19,6 +19,7 @@ import { useGatekeeperApps } from '../../useGatekeeperApps'
 import { useHub } from '../../HubContext'
 import { isSupportCuratedAsset, isSupportOrigin, rankForSelectedHub } from '../../supportCuration'
 import { CREATE_JIRA_ISSUE_PROMPT } from '../../createJiraIssuePrompt'
+import { isImeComposing } from '../../keyboardEvent'
 
 // A ⌘K command palette: jump to a workspace or a primary destination. Because it's keyboard-driven
 // and opened many times a day, it deliberately has *no* open/close animation (instant feels faster
@@ -352,6 +353,7 @@ export default function CommandPalette({
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (isImeComposing(e)) return
       if (e.key === 'ArrowDown') {
         e.preventDefault()
         setActiveIndex((i) => (flat.length ? (i + 1) % flat.length : 0))

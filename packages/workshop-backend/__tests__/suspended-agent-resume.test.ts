@@ -118,6 +118,10 @@ function makeHarness(messages: object[], actions = new Map<number, ActionRecord>
   let impl: any = {
     ownerId: OWNER_USER_ID,
     ownerProfileId: OWNER_PROFILE_ID,
+    env: {},
+    joinSession: () => () => {},
+    assertGatekeeperUsable: () => {},
+    gitCache: {clearPushMarks: vi.fn()},
     isWorkspaceDeleting: () => false,
     withWorkspaceMutation: <T>(operation: () => Promise<T>) => operation(),
     logger: { warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() },
@@ -135,6 +139,7 @@ function makeHarness(messages: object[], actions = new Map<number, ActionRecord>
       },
     },
     storage: {
+      transaction: <T>(operation: () => T) => operation(),
       ownerId: { put: vi.fn() },
       title: { get: () => "Workspace" },
       prohibitAllSharing: { get: () => options.sensitive ?? false },
@@ -247,8 +252,10 @@ function makeHarness(messages: object[], actions = new Map<number, ActionRecord>
 }
 
 async function openOwnerClient(harness: ReturnType<typeof makeHarness>) {
-  return await harness.overseer.open(
+  const client = await harness.overseer.open(
       OWNER_USER_ID, OWNER_PROFILE_ID, new NativeRpcStub<() => void>(() => {}));
+  await client.negotiateEditingProtocol("git-ot-v1");
+  return client;
 }
 
 describe("suspended agent resume identity", () => {

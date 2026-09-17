@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatAttachmentHandle, Overseer } from "@gadgets/workshop-shared/api";
 import { ChatInput } from "./ChatInput";
-import { readComposerDraft, writeComposerDraft } from "./composerDraft";
+import { readComposerDraft, writeComposerDraft } from "./features/chat/composer/draft/composerDraft";
 
 const mocks = vi.hoisted(() => ({
   authenticatedApi: {},
@@ -34,10 +34,13 @@ vi.mock("./AuthContext", () => ({ useAuthenticatedApi: () => ({ authenticatedApi
 vi.mock("./useVendorBranding", () => ({ useVendorBranding: () => new Map() }));
 vi.mock("./errorReporting", () => ({ reportIssue: vi.fn<() => void>() }));
 vi.mock("./CapsuleOverlay", () => ({ default: () => null, CAPSULE_OVERLAY_GAP: 8 }));
-vi.mock("./components/chat/SlashCommandPicker", () => ({
+vi.mock("./features/chat/composer/slash-commands/SlashCommandPicker", () => ({
   useSlashCommandPicker: () => ({ open: false, popup: null, status: "" }),
 }));
 vi.mock("./components/format/formatIconImage", () => ({ formatIconDataUrl: mocks.formatIcon }));
+vi.mock("./features/chat/composer/ComposerAddMenu", () => ({
+  default: ({ onAddConnection }: { onAddConnection: () => void }) => <button onClick={onAddConnection}>Add resource</button>,
+}));
 vi.mock("./components/format/ComposerFormatMenuItems", () => ({
   default: ({ onSelect }: ComponentProps<typeof import("./components/format/ComposerFormatMenuItems").default>) => (
     <button onClick={() => onSelect({

@@ -1,6 +1,7 @@
 import { logRpcFailure } from './rpcErrors'
+import { requireEditingReady } from './features/workspace/editingProtocol'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Dialog, useKumoToastManager, type PortalContainer } from '@cloudflare/kumo'
+import { Dialog, useKumoToastManager } from '@cloudflare/kumo'
 import {
   CaretDown,
   CaretLeft,
@@ -36,6 +37,7 @@ import { reportIssue } from './errorReporting'
 import { accountBrowserFlows } from './accountBrowserFlow'
 import { useSiteName } from './ServerConfigContext'
 import { AccountsSubscriberAdapter } from './accountsSubscriber'
+import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
 
 export interface GatekeeperModalProps {
   open: boolean
@@ -217,7 +219,7 @@ export default function GatekeeperModal({
   const footerRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const scrollContentRef = useRef<HTMLDivElement>(null)
-  const [selectPortalContainer, setSelectPortalContainer] = useState<PortalContainer>(null)
+  const selectPortalContainer = useDialogSelectPortalContainer()
 
   const [spawnerDisplayName, setSpawnerDisplayName] = useState('')
   const [spawnerModelId, setSpawnerModelId] = useState<string | null>(null)
@@ -233,18 +235,6 @@ export default function GatekeeperModal({
   const configuratorCollectResourceUrlRef = useRef<(() => Promise<string>) | null>(null)
   const nextConfiguratorFrameKeyRef = useRef(0)
   const autoAttachedSingletonRef = useRef<string | null>(null)
-
-  useEffect(() => {
-    const el = document.createElement('div')
-    el.style.position = 'relative'
-    el.style.zIndex = '1100'
-    document.body.appendChild(el)
-    setSelectPortalContainer(el)
-    return () => {
-      setSelectPortalContainer(null)
-      el.remove()
-    }
-  }, [])
 
   const updateConfiguratorFrameState = (next: ConfiguratorFrameState | null) => {
     const previous = configuratorFrameRef.current
@@ -644,8 +634,8 @@ export default function GatekeeperModal({
       if (result.url) {
         toasts.add({ title: 'Grant the additional access in the new tab.', variant: 'success' })
       }
-      // The new grant arrives via subscribeConnectedAccounts(); the account's flag then clears and
-      // the configurator loads automatically.
+      // The popup redeems the ticket itself; the new grant arrives via subscribeConnectedAccounts(),
+      // the account's flag then clears and the configurator loads automatically.
     } catch (error) {
       console.error('Failed to request additional access:', error)
       reportIssue('gatekeeper.resource-grant', error, {
@@ -683,6 +673,7 @@ export default function GatekeeperModal({
     let transferred = false
     try {
       const overseer = await getOverseer()
+      await requireEditingReady(overseer)
       gatekeeper = await overseer.newAiModelGatekeeper(selectedModelId)
       if (gatekeeper) {
         await onCreated(gatekeeper)
@@ -720,6 +711,7 @@ export default function GatekeeperModal({
     let transferred = false
     try {
       const overseer = await getOverseer()
+      await requireEditingReady(overseer)
       gatekeeper = await overseer.newAgentSpawnerGatekeeper(config)
       if (gatekeeper) {
         await onCreated(gatekeeper)
@@ -757,6 +749,7 @@ export default function GatekeeperModal({
         : await configuratorCollectResourceUrlRef.current?.()
       if (!resourceUrl) throw new Error('Configurator did not provide a resource URL.')
       const overseer = await getOverseer()
+      await requireEditingReady(overseer)
       gatekeeper = await overseer.newGatekeeper(selectedAccountId, resourceUrl)
       if (gatekeeper) {
         await onCreated(gatekeeper)

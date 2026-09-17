@@ -9,7 +9,9 @@ import type {
   Overseer,
 } from '@gadgets/workshop-shared/api'
 import { reportIssue } from './errorReporting'
+import { linkActionLog } from './useActions'
 import { useDocumentTitle } from './useDocumentTitle'
+import { negotiateEditing } from './features/workspace/editingProtocol'
 import {
   classifyWorkspaceOpenFailure,
   type WorkspaceOpenFailureKind,
@@ -42,7 +44,10 @@ export function useWorkspaceOpen({
   onShareKeyConsumed,
   onInvalidShareKey,
 }: Options) {
-  const [overseer, setOverseer] = useState<{ stub: RpcStub<Overseer> } | null>(null)
+  const [overseer, setOverseer] = useState<{
+    stub: RpcStub<Overseer>; api: RpcStub<AuthenticatedApi>; id: string;
+    lifetime: { active: boolean };
+  } | null>(null)
   const [metadata, setMetadata] = useState<GadgetMetadata | null>(null)
   const [error, setError] = useState<WorkspaceLoadError | null>(null)
   const [connectionLost, setConnectionLost] = useState(false)
@@ -56,6 +61,7 @@ export function useWorkspaceOpen({
   useDocumentTitle(error ? '' : metadata?.title)
 
   useEffect(() => {
+    const lifetime = { active: true }
     let overseerStub: RpcStub<Overseer> | null = null
     let metadataSubscription: RpcStub<{}> | null = null
     let configureObservers: RpcStub<ObserverConfigCallback> | null = null
@@ -63,6 +69,7 @@ export function useWorkspaceOpen({
     const hadOpenWorkspace = id !== undefined && openWorkspaceIdRef.current === id
 
     const disposeAttempt = () => {
+      lifetime.active = false
       metadataSubscription?.[Symbol.dispose]()
       overseerStub?.[Symbol.dispose]()
       configureObservers?.[Symbol.dispose]()
@@ -116,6 +123,9 @@ export function useWorkspaceOpen({
         configureObservers = new RpcStub(configureObserversTarget)
 
         overseerStub = authenticatedApi.openGadget(id, shareKey, configureObservers)
+        await negotiateEditing(overseerStub)
+        if (cancelled) return
+        linkActionLog(overseerStub, id)
 
         const resolvedSubscription = await overseerStub.subscribeToMetadata((nextMetadata) => {
           if (cancelled) return
@@ -128,7 +138,7 @@ export function useWorkspaceOpen({
         }
         metadataSubscription = resolvedSubscription
 
-        setOverseer({ stub: overseerStub })
+        setOverseer({ stub: overseerStub, api: authenticatedApi, id, lifetime })
         openWorkspaceIdRef.current = id
         setError(null)
         if (connectionLost) setConnectionLost(false)
@@ -173,12 +183,14 @@ export function useWorkspaceOpen({
         pendingObserverRejectRef.current = null
       }
       setObserverConfig(null)
+      setOverseer(null)
       disposeAttempt()
     }
   }, [id, authenticatedApi, reloadNonce])
 
   return {
-    overseer,
+    overseer: overseer?.lifetime.active && overseer.api === authenticatedApi && overseer.id === id
+      ? overseer : null,
     metadata,
     error,
     connectionLost,

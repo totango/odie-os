@@ -18,6 +18,12 @@ export interface PendingNativeLoginFlow {
   flowHandle: string
   verifier: string
   expiresAt?: string
+  /** Return-link ticket, kept in the same protected vault for interrupted redemption. */
+  ticket?: string
+  /** The single pending browser flow is either sign-in or an authenticated account grant. */
+  purpose?: 'login' | 'account'
+  /** An account activation with an uncertain acknowledgement is reconciled by status, not replay. */
+  activationAttempted?: boolean
 }
 
 export interface SystemNotificationOptions {
