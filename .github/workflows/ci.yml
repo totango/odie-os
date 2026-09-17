@@ -13,6 +13,36 @@ env:
   NODE_VERSION: "24.19.0"
 
 jobs:
+  browser-continuity:
+    name: Browser continuity (Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Set up Vite+, Node.js and dependencies
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: false
+          run-install: true
+      - name: Install Chromium and system dependencies
+        run: pnpm --filter @gadgets/workshop-frontend exec playwright install --with-deps chromium
+      - name: Run real-browser continuity regressions
+        run: pnpm --filter @gadgets/workshop-frontend test:browser:continuity
+      - name: Preserve browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-continuity-failures
+          path: packages/workshop-frontend/browser/test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
   # Parallel to `test` so lint and test failures surface on the same run. Package type checking
   # lives in Build; `scripts/` is checked here instead, because it is deliberately kept off
   # `pnpm build`'s hot path (see AGENTS.md) and this is the cheap job.
