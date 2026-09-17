@@ -91,43 +91,56 @@ export function CommunityAttachmentPicker({ drafts, onChange, disabled = false }
   </section>
 }
 
-export function CommunityAttachmentList({ requestId, attachments, includeHidden = false }: {
+export function CommunityAttachmentList({ requestId, attachments, onDeleted }: {
   requestId: string
   attachments: CommunityRequestAttachment[]
-  includeHidden?: boolean
+  onDeleted?: (attachmentId: string) => void
 }) {
   if (!attachments.length) return null
   return <ul className="space-y-2" aria-label="Attachments">{attachments.map(attachment =>
     <CommunityAttachmentItem key={attachment.id} requestId={requestId}
-      attachment={attachment} includeHidden={includeHidden} />)}</ul>
+      attachment={attachment} onDeleted={onDeleted} />)}</ul>
 }
 
-function CommunityAttachmentItem({ requestId, attachment, includeHidden }: {
+function CommunityAttachmentItem({ requestId, attachment, onDeleted }: {
   requestId: string
   attachment: CommunityRequestAttachment
-  includeHidden: boolean
+  onDeleted?: (attachmentId: string) => void
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const [url, setUrl] = useState<string>()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState(false)
   const generation = useRef(0)
   useEffect(() => {
     const current = ++generation.current
-    setUrl(undefined); setLoading(false); setError(false)
+    setUrl(undefined); setLoading(false); setError(false); setConfirming(false); setDeleting(false); setDeleteError(false)
     return () => { if (generation.current === current) generation.current++ }
-  }, [authenticatedApi, attachment.id, includeHidden, requestId])
+  }, [authenticatedApi, attachment.id, requestId])
   useEffect(() => () => { if (url) URL.revokeObjectURL(url) }, [url])
   async function load() {
     if (loading || url) return
     const current = generation.current
     setLoading(true); setError(false)
     try {
-      const result = await authenticatedApi.getCommunityRequestAttachment(requestId, attachment.id, includeHidden)
+      const result = await authenticatedApi.getCommunityRequestAttachment(requestId, attachment.id)
       if (current !== generation.current) return
       setUrl(URL.createObjectURL(new Blob([new Uint8Array(result.content)], { type: result.attachment.mimeType })))
     } catch { if (current === generation.current) setError(true) }
     finally { if (current === generation.current) setLoading(false) }
+  }
+  async function remove() {
+    if (deleting) return
+    const current = generation.current
+    setDeleting(true); setDeleteError(false)
+    try {
+      await authenticatedApi.deleteCommunityRequestAttachment(requestId, attachment.id)
+      if (current === generation.current) onDeleted?.(attachment.id)
+    } catch { if (current === generation.current) setDeleteError(true) }
+    finally { if (current === generation.current) setDeleting(false) }
   }
   const preview = attachment.mimeType.startsWith('image/') ? url &&
     <img src={url} alt={attachment.name} className="mt-2 max-h-80 max-w-full rounded-lg object-contain" /> :
@@ -141,10 +154,21 @@ function CommunityAttachmentItem({ requestId, attachment, includeHidden }: {
       {!url && <Button type="button" variant="secondary" disabled={loading} onClick={() => void load()}>
         {loading ? 'Loading…' : attachment.mimeType.startsWith('image/') || attachment.mimeType.startsWith('video/') ? 'Load preview' : 'Prepare download'}
       </Button>}
-      {url && <a href={url} download={attachment.name} className="text-kumo-brand hover:underline">Download</a>}
+      {url && <Button type="button" variant="secondary" onClick={() => {
+        const download = document.createElement('a')
+        download.href = url
+        download.download = attachment.name
+        download.click()
+      }}>Download</Button>}
+      {attachment.isOwn && !confirming && <Button type="button" variant="secondary" disabled={deleting} onClick={() => setConfirming(true)}><Trash size={15} /> Delete attachment</Button>}
     </div>
     {preview}
     {error && <p role="alert" className="mt-2 text-kumo-danger">Attachment unavailable. Try again.</p>}
+    {attachment.isOwn && confirming && <div role="group" aria-live="polite" aria-label="Confirm attachment deletion" className="mt-3 space-y-2 rounded-lg border border-kumo-danger/30 bg-kumo-danger/10 p-3">
+      <p>Delete this attachment? It will be removed from the board and future Auto-Build approvals. A build already approved keeps its frozen copy.</p>
+      {deleteError && <p role="alert" className="text-kumo-danger">Could not delete this attachment. Retry or cancel.</p>}
+      <div className="flex flex-wrap gap-2"><Button autoFocus type="button" variant="secondary" disabled={deleting} onClick={() => { setConfirming(false); setDeleteError(false) }}>Cancel</Button><Button type="button" variant="primary" disabled={deleting} onClick={() => void remove()}>{deleting ? 'Deleting…' : 'Confirm attachment deletion'}</Button></div>
+    </div>}
   </li>
 }
 

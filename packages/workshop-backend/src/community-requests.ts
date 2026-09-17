@@ -148,6 +148,10 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
         createdAt INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS details_listing ON details(requestId, createdAt, id);
+      CREATE TABLE IF NOT EXISTS detailDeletions (
+        detailId TEXT PRIMARY KEY, requestId TEXT NOT NULL, owner TEXT NOT NULL, deletedAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS detailDeletions_request ON detailDeletions(requestId);
       CREATE TABLE IF NOT EXISTS votes (
         requestId TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY(requestId, owner)
       );
@@ -179,6 +183,11 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       );
       CREATE INDEX IF NOT EXISTS attachments_request ON attachments(requestId, createdAt, id);
       CREATE INDEX IF NOT EXISTS attachments_detail ON attachments(detailId, createdAt, id);
+      CREATE TABLE IF NOT EXISTS attachmentAuthorDeletions (
+        attachmentId TEXT PRIMARY KEY, requestId TEXT NOT NULL, detailId TEXT, owner TEXT NOT NULL, deletedAt INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS attachmentAuthorDeletions_request ON attachmentAuthorDeletions(requestId);
+      CREATE INDEX IF NOT EXISTS attachmentAuthorDeletions_detail ON attachmentAuthorDeletions(detailId);
       CREATE TABLE IF NOT EXISTS attachmentDeletions (
         id TEXT PRIMARY KEY, notBefore INTEGER NOT NULL
       );
@@ -425,8 +434,15 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
         if (!detail || detail.owner !== owner) throw new Error("Attachments require an authored public detail.");
       } else if (request.owner !== owner) throw new Error("Only the request owner can attach files to the request.");
       const prior = this.#receipt(owner, "attachment", input.idempotencyKey, payload);
-      if (prior) return this.ctx.storage.sql.exec<AttachmentRow>(
-        "SELECT * FROM attachments WHERE id=?", prior).one();
+      if (prior) {
+        const existing = this.ctx.storage.sql.exec<AttachmentRow>(
+          "SELECT * FROM attachments WHERE id=?", prior).toArray()[0];
+        if (existing) return existing;
+        if (this.ctx.storage.sql.exec(
+            "SELECT 1 FROM attachmentAuthorDeletions WHERE attachmentId=? AND requestId=? AND owner=?",
+            prior, requestId, owner).toArray().length) throw new Error("Board attachment was deleted.");
+        throw new Error("Board attachment unavailable.");
+      }
       const totals = this.ctx.storage.sql.exec<{count: number; bytes: number}>(
         "SELECT COUNT(*) AS count, COALESCE(SUM(byteLength),0) AS bytes FROM attachments WHERE requestId=?",
         requestId).one();
@@ -469,6 +485,33 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
     }
     return {id: row.id, name: row.name, mimeType: row.mimeType, byteLength: row.byteLength,
       sha256: row.sha256, createdAt: row.createdAt, isOwn: true};
+  }
+
+  /** Delete one authored attachment while preserving its parent request or detail text. */
+  deleteAttachment(owner: string, requestId: string, attachmentId: string): void {
+    id(requestId);
+    id(attachmentId);
+    this.#read(owner, () => {
+      const request = this.#require(requestId, true);
+      const attachment = this.ctx.storage.sql.exec<AttachmentRow>(
+        "SELECT * FROM attachments WHERE id=? AND requestId=?", attachmentId, requestId).toArray()[0];
+      if (!attachment) {
+        const deleted = this.ctx.storage.sql.exec<{requestId: string; owner: string}>(
+          "SELECT requestId,owner FROM attachmentAuthorDeletions WHERE attachmentId=?", attachmentId).toArray()[0];
+        if (deleted?.requestId === requestId && deleted.owner === owner) return;
+        throw new Error("Board attachment unavailable.");
+      }
+      if (attachment.owner !== owner) throw new Error("Only the attachment author can delete it.");
+      this.#mutation(owner);
+      const now = Date.now();
+      this.ctx.storage.sql.exec("INSERT INTO attachmentAuthorDeletions VALUES (?,?,?,?,?)",
+        attachmentId, requestId, attachment.detailId, owner, now);
+      this.ctx.storage.sql.exec("INSERT OR REPLACE INTO attachmentDeletions VALUES (?,?)", attachmentId, now + 60_000);
+      this.ctx.storage.sql.exec("DELETE FROM attachments WHERE id=? AND requestId=?", attachmentId, requestId);
+      this.ctx.storage.sql.exec("UPDATE requests SET updatedAt=? WHERE id=?", now, request.id);
+      this.ctx.storage.sql.exec("INSERT INTO request_revisions VALUES (?,2) ON CONFLICT(requestId) DO UPDATE SET revision=revision+1", requestId);
+    });
+    this.ctx.waitUntil(this.#armMaintenance());
   }
 
   /** Read one public attachment only while its parent request remains visible to this caller. */
@@ -558,8 +601,13 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
         "INSERT OR REPLACE INTO attachmentDeletions VALUES (?,?)", attachment.id, now + 60_000);
       this.ctx.storage.sql.exec(`DELETE FROM receipts WHERE resultId=?
         OR resultId IN (SELECT id FROM details WHERE requestId=?)
-        OR resultId IN (SELECT id FROM attachments WHERE requestId=?)`, requestId, requestId, requestId);
+        OR resultId IN (SELECT detailId FROM detailDeletions WHERE requestId=?)
+        OR resultId IN (SELECT id FROM attachments WHERE requestId=?)
+        OR resultId IN (SELECT attachmentId FROM attachmentAuthorDeletions WHERE requestId=?)`,
+        requestId, requestId, requestId, requestId, requestId);
       this.ctx.storage.sql.exec("DELETE FROM details WHERE requestId = ?", requestId);
+      this.ctx.storage.sql.exec("DELETE FROM detailDeletions WHERE requestId = ?", requestId);
+      this.ctx.storage.sql.exec("DELETE FROM attachmentAuthorDeletions WHERE requestId = ?", requestId);
       this.ctx.storage.sql.exec("DELETE FROM votes WHERE requestId = ?", requestId);
       this.ctx.storage.sql.exec("DELETE FROM privateDiagnostics WHERE requestId = ?", requestId);
       this.ctx.storage.sql.exec("DELETE FROM attachments WHERE requestId=?", requestId);
@@ -657,7 +705,15 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
     return this.#read(owner, () => {
       this.#require(requestId);
       const prior = this.#receipt(owner, "detail", input.idempotencyKey, payload);
-      if (prior) return this.#detail(this.ctx.storage.sql.exec<DetailRow>("SELECT * FROM details WHERE id = ?", prior).one(), owner);
+      if (prior) {
+        const existing = this.ctx.storage.sql.exec<DetailRow>(
+          "SELECT * FROM details WHERE id=?", prior).toArray()[0];
+        if (existing) return this.#detail(existing, owner);
+        if (this.ctx.storage.sql.exec(
+            "SELECT 1 FROM detailDeletions WHERE detailId=? AND requestId=? AND owner=?",
+            prior, requestId, owner).toArray().length) throw new Error("Public detail was deleted.");
+        throw new Error("Public detail unavailable.");
+      }
       this.#mutation(owner, "detail");
       const detailId = crypto.randomUUID(), now = Date.now();
       this.ctx.storage.sql.exec("INSERT INTO details VALUES (?, ?, ?, ?, ?, ?)", detailId, requestId, owner, body, body.toLowerCase(), now);
@@ -666,6 +722,39 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
       this.#remember(owner, "detail", input.idempotencyKey, payload, detailId);
       return { id: detailId, body, createdAt: now, isOwn: true, attachments: [] };
     });
+  }
+
+  /** Delete one authored detail, its retry receipts and attachment metadata, with durable object cleanup. */
+  deleteDetail(owner: string, requestId: string, detailId: string): void {
+    id(requestId);
+    id(detailId);
+    this.#read(owner, () => {
+      const request = this.#require(requestId, true);
+      const detail = this.ctx.storage.sql.exec<DetailRow>(
+        "SELECT * FROM details WHERE id=? AND requestId=?", detailId, requestId).toArray()[0];
+      if (!detail) {
+        const deleted = this.ctx.storage.sql.exec<{requestId: string; owner: string}>(
+          "SELECT requestId,owner FROM detailDeletions WHERE detailId=?", detailId).toArray()[0];
+        if (deleted?.requestId === requestId && deleted.owner === owner) return;
+        throw new Error("Public detail unavailable.");
+      }
+      if (detail.owner !== owner) throw new Error("Only the detail author can delete it.");
+      this.#mutation(owner);
+      const now = Date.now();
+      this.ctx.storage.sql.exec("INSERT INTO detailDeletions VALUES (?,?,?,?)", detailId, requestId, owner, now);
+      const attachments = this.ctx.storage.sql.exec<{id: string; owner: string}>(
+        "SELECT id,owner FROM attachments WHERE requestId=? AND detailId=?", requestId, detailId).toArray();
+      for (const attachment of attachments) {
+        this.ctx.storage.sql.exec("INSERT OR REPLACE INTO attachmentDeletions VALUES (?,?)", attachment.id, now + 60_000);
+        this.ctx.storage.sql.exec("INSERT OR REPLACE INTO attachmentAuthorDeletions VALUES (?,?,?,?,?)",
+          attachment.id, requestId, detailId, attachment.owner, now);
+      }
+      this.ctx.storage.sql.exec("DELETE FROM attachments WHERE requestId=? AND detailId=?", requestId, detailId);
+      this.ctx.storage.sql.exec("DELETE FROM details WHERE id=? AND requestId=?", detailId, requestId);
+      this.ctx.storage.sql.exec("UPDATE requests SET updatedAt=? WHERE id=?", now, request.id);
+      this.ctx.storage.sql.exec("INSERT INTO request_revisions VALUES (?,2) ON CONFLICT(requestId) DO UPDATE SET revision=revision+1", requestId);
+    });
+    this.ctx.waitUntil(this.#armMaintenance());
   }
 
   /** Page details only after checking request visibility, including on cursor continuation. */

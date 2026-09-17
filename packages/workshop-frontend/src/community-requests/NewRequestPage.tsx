@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from '@tanstack/react-router'
+import { useNavigate } from '@tanstack/react-router'
 import { Button } from '@cloudflare/kumo'
-import { Bug, Lightbulb, ShieldCheck } from '@phosphor-icons/react'
+import { ArrowLeft, Bug, Lightbulb, ShieldCheck } from '@phosphor-icons/react'
 import { COMMUNITY_REQUEST_LIMITS as LIMITS, type CommunityRequestKind } from '@gadgets/workshop-shared/community-requests'
 import { useAuthenticatedApi } from '../AuthContext'
 import { useDocumentTitle } from '../useDocumentTitle'
@@ -64,7 +64,7 @@ export default function NewRequestPage() {
   }
   const diagnosticCount = diagnostics.current?.length ?? productFeedbackDiagnosticsSnapshot().length
   return <main className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6 text-kumo-default sm:px-8 lg:py-10">
-    <Link to="/requests" className="text-sm font-medium text-kumo-brand hover:underline">← All feature requests</Link>
+    <Button variant="secondary" onClick={() => void navigate({ to: '/requests' })}><ArrowLeft size={16} /> All feature requests</Button>
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
       <section className="space-y-5">
         <div><h1 className="text-3xl font-semibold tracking-[-0.03em] text-kumo-strong">Submit to Feature Requests</h1><p className="mt-2 text-sm leading-6 text-kumo-subtle">Describe one clear idea or problem. You’ll review exactly what becomes public before publishing.</p></div>
