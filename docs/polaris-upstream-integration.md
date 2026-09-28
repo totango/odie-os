@@ -2,10 +2,21 @@
 
 ## Status and mandate
 
-### Upstream refresh to 687aab04 (active integration)
+### Integrated candidate and verification
 
-The original authoring status and pins below are historical. After the prior upstream/main
-integration, the coordinator started another authorized upstream merge (42 new commits). Verified:
+The integration branch includes `origin/main` at `aa485877` and `upstream/main` at
+`ef65348f` through local merge commit `96797fd2`. Both are ancestors of the committed
+code candidate. This is a code-integration candidate, **not a production cutover**.
+The final exact-tree frozen install, lint, build, test and 14 Chromium continuity tests
+passed. Independent scoped Skuld reviews closed the identified reconnect, privacy,
+cutover-validator and worktree-delivery findings; the last six upstream commits received
+a separate clean review. See `polaris-completion.md` for command evidence, decisions,
+remaining operational gates and the branch handoff.
+
+### Archived integration checkpoint: 687aab04
+
+This checkpoint and the original authoring pins below are historical. After the prior
+upstream/main integration, the coordinator merged another 42 upstream commits:
 
 | Input | Revision |
 | --- | --- |
@@ -17,9 +28,10 @@ integration, the coordinator started another authorized upstream merge (42 new c
 T owns tooling/configuration and the explicitly delegated E evals source/tasks/tests; K retains
 integration-tests source and F/C retain their runtime ownership. Preserve both the
 latest-main Playwright browser-continuity workflow and the integrated upstream/local test suites,
-dependency versions, and generated-config contracts. The merge remains uncommitted; resolving or
-staging conflicts does not establish completed merge ancestry. See `polaris-tooling-handoff.md`
-for current verification rather than the historical authoring-pass statements below.
+dependency versions, and generated-config contracts. At this checkpoint the merge was
+uncommitted; it was subsequently completed, and six newer upstream commits were also
+merged. See `polaris-completion.md` for the current verification rather than the
+historical authoring-pass statements below.
 
 #### Current loop ledger
 
@@ -33,7 +45,9 @@ an exact-count claim or an approval record. Before another loop or production co
 coordinator must reconcile the approximately-eight estimate with its actual ledger and account for
 this pass once. Independent approval and external cutover evidence are not supplied by T's checks.
 
-Hugin anchor plan, authored for independent review. **Implementation has not started; independent approval is pending.** This authoring task changes only this document. No merge, commit, dependency installation, build, test, or deployment is part of this pass.
+The sections below preserve the original Hugin planning baseline and its historical
+pins; their future-tense steps were executed in the integration worktree. The current
+candidate and verification status is recorded above.
 
 Execute the eventual implementation in `/Users/jacob_1/odie-os-polaris-upstream`. Other worktrees, including the dirty main checkout and other agents' work, are outside its write boundary.
 
@@ -178,13 +192,12 @@ real operator steps, and outstanding external evidence. No production confirmati
 passing local tests is not readiness. The original normal-unset source config is not authorization
 to enable artifact writes.
 
-Current review-ledger entry: **Skuld T P1 — first-cutover deployment bypass**; owner T; repair is the
-paused-artifact/approval gate and runbook; local root tests, 17 gate tests, scripts types and scoped
-lint pass. Independent reviewer verdict remains pending. This is a repair within the coordinator's
-existing Polaris loop, not a new/reset loop sequence. The coordinator's current global ordinal was
-not supplied to T: it must be reconciled in the authoritative ledger before release. Confirmation
-records require that actual ordinal in **1–20**, and reject >20; no fabricated count or claim of
-independent approval is recorded here.
+Historical review-ledger entry: **Skuld T P1 — first-cutover deployment bypass**;
+owner T; repaired with the paused-artifact/approval gate and runbook. The subsequent
+independent re-review closed this code finding, including the extra-review-key
+regression. The coordinator's exact global loop ordinal was not supplied to T;
+production confirmation records still require an actual ordinal in **1–20** and
+reject >20. No release approval or fabricated production evidence is recorded here.
 
 **K/F/C/T must jointly approve a compatibility contract before any dependent lane integrates or any release proceeds.** K owns backend protocol acceptance and migration fences; F owns client mismatch/recovery behavior; C owns provider callbacks and catalog provenance; T owns deployment ordering, supported-version inventory and operator instructions. Freeze the accepted protocol/version combinations, rejection behavior, recovery-export format, callback lifetime rules and mixed-version fixtures as part of S0/S2. Do not assume upstream and fork clients or providers can interoperate.
 
@@ -313,7 +326,7 @@ Inspect package task configs first: local specialized authority/request-build te
 
 Review gates:
 
-1. **Anchor:** independent reviewer checks facts versus inferences, complete upstream coverage, migration strategy, bounded session scope and lane disjointness. This file is ready for that review, not self-approved.
+1. **Anchor:** independent reviewer checks facts versus inferences, complete upstream coverage, migration strategy, bounded session scope and lane disjointness. This review was completed before implementation; the original gate is retained here as the plan's decision record.
 2. **Contract/migration:** K/F/C/T jointly approve protocol mismatch behavior, recovery/export fixtures, coordinated pause and mixed OAuth callback expiry compatibility, private catalog observations, shared APIs, commit/OT invariants and pending Yjs conversion before dependent integration. Review every kernel/shared changed line and T-owned bundled runtime behavior.
 3. **Lane review:** narrow outcome tests and preserved local contracts accompany each handoff. Reviewers do not author their own fixes; findings return to lane owners.
 4. **Final Skuld:** inspect exact final diff and broad evidence, repair confirmed findings, rerun affected checks, and re-review. Use at most 10 review iterations per Skuld invocation and **at most 20 total Polaris orchestration loops**, including repair cycles; never reset the global counter to evade the limit. At the cap, report remaining findings and evidence as blocked, not complete.
@@ -321,10 +334,9 @@ Review gates:
 
 Record each loop's target, finding, owner, repair, commands/results and reviewer verdict. If a reviewer agent is unavailable, use an available reviewer or explicitly record the manual fallback; never invent independent approval. Finish only when inventory, implementation, outcome tests and final review agree there is no remaining required work, or report a concrete blocker.
 
-## Recommended handoff
+## Current handoff
 
-Independent review target: `docs/polaris-upstream-integration.md`, pinned against local `6a00bd36` and upstream `a591fe32`. After approval and implementation authorization, start:
-
-```text
-/tyr Execute S0 and S1 of docs/polaris-upstream-integration.md in /Users/jacob_1/odie-os-polaris-upstream; preserve pinned sources and exclusive lane ownership, inventory the full upstream delta, and capture pre-Munin outcomes before implementation. Continue through the dependency DAG under Polaris semantics, with a global limit of 20 loops.
-```
+The anchor, implementation, repair loops and code review have been carried out.
+Use `polaris-completion.md` for the final code candidate and verification, and
+`polaris-production-cutover.md` for the separate, still-blocked operational cutover.
+Do not restart implementation from the historical pins in this plan.
