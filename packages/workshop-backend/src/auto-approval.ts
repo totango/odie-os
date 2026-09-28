@@ -3,8 +3,9 @@
 // concurrent drains (the DO's input gate is open across the apply await) can't double-apply the
 // same action. The apply is injected, keeping this constructible over a mock storage in tests.
 
-import type { Collection, NonUniqueIndex } from "@gadgets/typed-storage";
+import type { Collection, NonUniqueIndex, Singleton } from "@gadgets/typed-storage";
 import type { AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
+import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "./observability";
 import type { ActionRecord, AutoApproveTagRecord } from "./overseer.js";
 
@@ -15,6 +16,24 @@ export interface AutoApprovalStorage {
       & { pendingByGatekeeper: NonUniqueIndex<ActionRecord, number> };
   autoApproveTags: Collection<AutoApproveTagRecord>;
   prohibitAllSharing: { get(): boolean };
+
+  /** The restricted-data latch (see makeOverseerStorage). While set, nothing auto-approves. */
+  containsRestrictedData: Singleton<boolean>;
+}
+
+/**
+ * The single authority on whether an action may be applied without a human: the enabling rule if
+ * the author marked the action `autoApprovable`, the user enabled a rule for its `actionKind` on
+ * this gatekeeper, and the workspace has not latched restricted mode; else undefined.
+ */
+export function autoApprovalRule(
+    storage: AutoApprovalStorage, gatekeeperId: number, description: ActionDescription)
+    : AutoApproveTagRecord | undefined {
+  if (description.autoApprovable !== true) return undefined;
+  let tag = description.actionKind?.tag;
+  if (tag === undefined) return undefined;
+  if (storage.containsRestrictedData.get() || storage.prohibitAllSharing.get()) return undefined;
+  return storage.autoApproveTags.get(`${gatekeeperId}:${tag}`);
 }
 
 /**
@@ -43,7 +62,7 @@ export class AutoApprovalDrainer {
 
   /** Returns the authority that permits this action to run without a prompt. */
   approverFor(record: ActionRecord & {type: "action"}): AiChatAuthorInfo | undefined {
-    if (this.storage.prohibitAllSharing.get()) return undefined;
+    if (this.storage.prohibitAllSharing.get() || this.storage.containsRestrictedData.get()) return undefined;
     if (record.description.autoApprovable !== true) return undefined;
     let tag = record.description.actionKind?.tag;
     let rule = tag === undefined

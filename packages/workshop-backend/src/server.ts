@@ -4,12 +4,13 @@ import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, Rp
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import type { UserDirectoryRecord, ConnectFlowStart } from '@gadgets/workshop-shared/api';
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestAttachment, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
 import { COMMUNITY_REQUESTS_SINGLETON_NAME, CommunityRequests } from "./community-requests.js";
 export { CommunityRequests };
+import type { RedactedAiModelConfig } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist, accountEmailIdentities } from "./auth/config.js";
@@ -555,6 +556,9 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     this.ctx.waitUntil(indexAccountProfile(this.env.BLUEPRINTS, profile).catch(error =>
       logger.warn("failed to refresh account discovery hint", {event: "account.directory.refresh.failed", error})));
   }
+  setOwnCommitEmail(email: string | null): Promise<void> {
+    return this.#user.setOwnCommitEmail(email);
+  }
   async searchUsers(query: string, excludeIds: string[]): Promise<UserDirectoryRecord[]> {
     if (!(await this.#userSearchEnabled())) return [];
     return retryOnDoReset(() => this.ctx.exports.UserDirectoryDurableObject.getByName("")
@@ -569,8 +573,15 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   listModels(): Promise<AiChatAuthorInfo[]> {
     return retryOnDoReset(() => this.#user.listModels());
   }
-  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
-    return this.#user.addModel(profile, config);
+  addModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig,
+           copySecretsFrom?: string): Promise<void> {
+    return this.#user.addModel(profile, config, copySecretsFrom);
+  }
+  getModelConfig(id: string): Promise<{profile: AiChatAuthorInfo, config: RedactedAiModelConfig}> {
+    return retryOnDoReset(() => this.#user.getModelConfig(id));
+  }
+  updateModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig): Promise<void> {
+    return this.#user.updateModel(profile, config);
   }
   deleteModel(id: string): Promise<void> {
     return this.#user.deleteModel(id);

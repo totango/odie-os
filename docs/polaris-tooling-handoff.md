@@ -2,6 +2,84 @@
 
 Worktree: `/Users/jacob_1/odie-os-polaris-upstream`.
 
+## 687aab04 refresh — T plus delegated E handoff
+
+Verified HEAD `41a54d0b469802b215d9642105481bd3d1f540c6`, MERGE_HEAD
+`687aab049cf084030a42093c10c4dde3d9c33fb4`, merge base
+`a591fe32783a09a0d9ac34abe203a30e778345b7`, 42 incoming commits. This supersedes the earlier
+candidate statuses below. The anchor records provisional next loop **9** after the coordinator's
+approximately-eight estimate; it is not an invented exact global count, and the 20-loop cap remains.
+
+### Resolved/preserved
+
+- Reconciled all T manifest/catalog/lock conflicts. Frozen install succeeds for 39 packages.
+  `pnpm install --fix-lockfile` initially encountered duplicate mappings in the conflicted lockfile;
+  the regenerated graph was reviewed and then explicitly pinned to the upstream Wrangler stack:
+  Wrangler **4.138.0**, Miniflare **5.20260921.1-alpha**, Workers types **5.20260921.1**.
+  This avoids accidentally taking Wrangler 4.142 from the open range. `@oxlint/plugins` is **1.79.0**,
+  matching installed Vite+'s version (enforced by the root test).
+- Kept TS7 **7.0.2** for type checking and **typescript6 → 6.0.3** for compiler API consumers.
+  Remaining peer warning is `tsconfck@3.1.6` requesting TypeScript ^5; actual build/type checks pass.
+- Adopted backend Pi libraries **0.87.1**. Container `pi-image` package/runtime **0.85.1**, image
+  digests, and reviewed image/deploy workflow tool pins were not silently changed. No image build
+  or deployment was performed.
+- Reconciled `.mjs`→`.ts` builder references for Context, Scheduler and backend browser runtime.
+  Fixed Context's watch script. Dev app discovery supports migrated `.ts` **and** fork-only `.mjs`
+  builders, preferring `.ts`; the deploy-script guard checks both forms. Fork production/cutover,
+  JARVIS, Work Items, featured generator and other scripts with no upstream equivalent remain.
+- Kept production cutover code/fingerprint, paused artifact generation and reviewed-evidence gate
+  unchanged. Its 18 regression tests pass, including the extra-reviewer-key bypass regression.
+- Configurator merge retains generation-aware bootstrap plus the upstream render-failure and
+  in-flight selection checks. Initial readiness is advertised after render, not prematurely.
+  Combined upstream and fork fixture tests pass.
+- New shared UI package has source-only config, root React/browser lint coverage, consumer workspace
+  deps and Tailwind source scans for Workshop/Context. Generated authority `.d.ts` is explicitly
+  excluded like generated Worker declarations; the agent-delivered self-contained declaration rule
+  remains enabled (with the narrow Google bundling exception).
+- Bonk workflow deletions retained. The new eval comparison workflow also contained a Bonk
+  `trajectory-review` job: hard-disabled it (`if: false`) and added a root regression test. Existing
+  upstream repository-owner gates on automatic eval comparisons remain intact; no remote inference
+  or secret-bearing workflow was run.
+- E source/tasks/tests are adopted and verified. K retains integration-tests source; its temporary
+  conflict initially blocked eval imports, then resolved. The new deterministic task/comparison/
+  trajectory tooling and fail-closed eval egress are retained. No credentialed model eval is claimed.
+
+### Verification
+
+| Check | Result |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | Exit 0, 39 packages; installation owned exclusively by T. |
+| `pnpm types:scripts` | Exit 0 after typed builders/plugin adoption. |
+| Direct shared API `tsc --noEmit` | Exit 0 before broad build. |
+| `pnpm exec vp run --cache -F @gadgets/scripts test` | 407 passed plus 1 uncached trusted-launcher test before the final Bonk guard was added. |
+| Final `node --test 'scripts/**/*.test.ts'` | **409 passed, zero failed/skipped**, including the final Bonk guard. |
+| Bundled blueprints `test:run` | **285 passed / 19 files**. |
+| Shared UI `test:run` | **54 passed / 3 files**. |
+| Workshop evals `test:run` | **69 passed / 9 files**; direct evals tsc also passed. |
+| `VP_RUN_CONCURRENCY_LIMIT=2 pnpm build` | Final run exit 0: **97 tasks, 63 cache hits**. Initial run failed on F's old CodeEditor import, repaired by F before rerun. |
+| Blueprint generation in build | **8 bundled defaults** (three upstream + five local support formats); retained generator **5 support + 5 featured**. |
+| Scoped diff check | Passed. |
+
+Logs under approved temp:
+`/var/folders/5q/r1rw9tjx4pl2phchr2rhc_lm0000gp/T/opencode/`:
+`polaris-687aab04-build.log`, `polaris-687aab04-root-tests.log`, `polaris-687aab04-lint.log`.
+Runtime owners edited concurrently during this lane pass; these are command results on the working
+tree, not an assertion of an independently frozen/reviewed final candidate.
+
+### Remaining lint handoff (runtime-owned)
+
+Final `pnpm lint:check` exits 1 on six errors:
+
+- **K:** `packages/workshop-backend/src/overseer.ts:46:51` unused `isCompactionTurn` and `:69:10`
+  unused `autoApprovalRule`; `src/server.ts:7:97` unused `AiModelConfig`.
+- **F:** `packages/workshop-frontend/src/GadgetEditor.continuity.test.tsx:7:63` unused `WorkpieceSummary`.
+- **Shared UI/F:** `packages/ui/src/HierarchicalList/HierarchicalListPrimitive.test.tsx:1095:23`
+  and `:1108:51` require mock type parameters under installed oxlint. T did not weaken the rule or
+  edit those runtime tests.
+
+T-owned conflicts are staged selectively; unrelated runtime conflicts/staging remain their owners'.
+No full workspace test rerun, commit, push, deployment, image mutation, or external evidence claim.
+
 ## Skuld T P1 — production first-cutover gate
 
 Implemented paused-by-default production artifacts and a fail-closed deployment approval gate

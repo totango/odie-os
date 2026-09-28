@@ -2,23 +2,36 @@
 
 ## Status and mandate
 
-### Latest-main refresh (active integration)
+### Upstream refresh to 687aab04 (active integration)
 
-The original authoring status and pins below are historical. The coordinator has since integrated
-the pinned upstream and started an authorized latest-main merge. Verified in the target worktree:
+The original authoring status and pins below are historical. After the prior upstream/main
+integration, the coordinator started another authorized upstream merge (42 new commits). Verified:
 
 | Input | Revision |
 | --- | --- |
-| Current integration HEAD | `6e77d8ef553da4c996d8d5b080f01dcfadcb2cf1` |
-| Active latest-main MERGE_HEAD | `aa485877389515479426b6e346582244da536d5a` |
-| Merge base of those inputs | `6a00bd36a3f15cf57810d107f45312ed28fde372` |
+| Current integration HEAD | `41a54d0b469802b215d9642105481bd3d1f540c6` |
+| Active upstream MERGE_HEAD | `687aab049cf084030a42093c10c4dde3d9c33fb4` |
+| Merge base of those inputs | `a591fe32783a09a0d9ac34abe203a30e778345b7` |
 | Original upstream target (unchanged) | `a591fe32783a09a0d9ac34abe203a30e778345b7` |
 
-T resolves only tooling/configuration conflicts; F/K retain runtime ownership. Preserve both the
+T owns tooling/configuration and the explicitly delegated E evals source/tasks/tests; K retains
+integration-tests source and F/C retain their runtime ownership. Preserve both the
 latest-main Playwright browser-continuity workflow and the integrated upstream/local test suites,
 dependency versions, and generated-config contracts. The merge remains uncommitted; resolving or
 staging conflicts does not establish completed merge ancestry. See `polaris-tooling-handoff.md`
 for current verification rather than the historical authoring-pass statements below.
+
+#### Current loop ledger
+
+| Working loop | Provenance / confidence | Work and outcome |
+| --- | --- | --- |
+| Approximately 8 prior substantial loops | Coordinator estimate supplied with this merge; not independently reconstructed by T | Prior integration/review history remains in the coordinator ledger; no reset. |
+| **Provisional next loop 9** | One new integration pass after the supplied estimate; exact global ordinal requires coordinator reconciliation | Integrate 42 upstream commits; T/E resolve tooling and evals, preserve cutover/Bonk/container contracts, run frozen install, root/evals tests and build. See current handoff for actual results and remaining owner diagnostics. |
+
+The global cap remains **20 total loops**, including repair cycles. This provisional label is not
+an exact-count claim or an approval record. Before another loop or production confirmation, the
+coordinator must reconcile the approximately-eight estimate with its actual ledger and account for
+this pass once. Independent approval and external cutover evidence are not supplied by T's checks.
 
 Hugin anchor plan, authored for independent review. **Implementation has not started; independent approval is pending.** This authoring task changes only this document. No merge, commit, dependency installation, build, test, or deployment is part of this pass.
 

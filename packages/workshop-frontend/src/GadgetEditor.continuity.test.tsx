@@ -4,7 +4,7 @@ import { act, useEffect, useSyncExternalStore, type ComponentProps, type ReactNo
 import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AuthenticatedApi, GadgetClient, GadgetMetadata, WorkpieceSummary, WorkpiecesSubscriber, ActionsSubscriber } from '@gadgets/workshop-shared/api'
+import type { AuthenticatedApi, GadgetClient, GadgetMetadata, WorkpiecesSubscriber, ActionsSubscriber } from '@gadgets/workshop-shared/api'
 import GadgetEditor, { useDisplayedGadget } from './GadgetEditor'
 import { RetainedGadgetUI } from './GadgetUseView'
 
@@ -43,7 +43,7 @@ vi.mock('./WorkpiecePicker', async original => ({
 }))
 vi.mock('./ShareModal', () => ({ default: () => null }))
 vi.mock('./BlueprintModal', () => ({ default: () => null }))
-vi.mock('./GadgetCodeInterface', () => ({ default: ({ onHasCodeChange }: ComponentProps<typeof import('./GadgetCodeInterface').default>) => {
+vi.mock('./features/code/WorkpieceCodeInterface', () => ({ default: ({ onHasCodeChange }: ComponentProps<typeof import('./features/code/WorkpieceCodeInterface').default>) => {
   useEffect(() => { onHasCodeChange?.(true) }, [onHasCodeChange])
   return null
 } }))
@@ -61,7 +61,7 @@ vi.mock('./GadgetUI', () => ({ default: ({ gadget, chatId }: { gadget: RpcStub<G
   return <iframe title="running app" data-chat={chatId ?? 'main'} sandbox="" />
 } }))
 
-const gadget = (id: number, chatId?: number) => ({ id, type: 'gadget', title: `App ${id}`, chatId }) as WorkpieceSummary
+const gadget = (id: number, chatId?: number) => ({ id, type: 'gadget' as const, title: `App ${id}`, chatId })
 let root: Root
 let container: HTMLDivElement
 afterEach(() => {

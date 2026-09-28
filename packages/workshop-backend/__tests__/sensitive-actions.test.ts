@@ -26,6 +26,7 @@ type Impl = OverseerDurableObject["impl"];
 async function withWorkspace(test: (impl: Impl) => Promise<void>) {
   const stub = env.TEST_OVERSEER.getByName(crypto.randomUUID());
   await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+    instance["impl"].storage.gatekeepers.put({id: 42, resourceTitle: "Private resource", class: {} as never});
     await test(instance["impl"]);
   });
 }

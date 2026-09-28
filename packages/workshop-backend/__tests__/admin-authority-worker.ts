@@ -2,6 +2,7 @@
 export * from "../src/server";
 export { AdminAuthorizationEntrypoint } from "../src/admin-authority";
 export { default } from "../src/server";
+export { CodeModeTailLoopback } from "../src/server";
 // Retain upstream runtime fixtures alongside the fork's authority fixtures.
 export { OverseerDurableObject, AgentSelfLoopback, GatekeeperLoopback, GadgetTailLoopback,
   TestConnectCallback, TestLoginCallback, FakeGatekeeperAccount, TestNativeLoginCallback } from "./test-worker";

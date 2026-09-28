@@ -870,7 +870,10 @@ function OwnedGatekeeperModal({
         selectedAccountId !== null &&
         resourceUrlPattern &&
         configuratorAuthorityCurrent &&
-        configuratorSelectionReady !== false &&
+        configuratorFrameState?.frame &&
+        configuratorFrameState.accountId === selectedAccountId &&
+        configuratorFrameState.resourceUrlPattern === resourceUrlPattern &&
+        configuratorSelectionReady === true &&
         !hasMissingResourceGrants,
       )
     }

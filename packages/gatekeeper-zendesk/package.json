@@ -21,7 +21,7 @@
     "@gadgets/scripts": "workspace:*",
     "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "catalog:",
-    "miniflare": "5.20260911.0-alpha",
+    "miniflare": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"

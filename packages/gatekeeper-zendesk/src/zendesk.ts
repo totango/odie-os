@@ -29,6 +29,7 @@ import {
 import { acknowledgeHandoff, connectHandoffPageHtml, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
 import type { GatekeeperConnectResult as HandoffLaunch } from "@gadgets/workshop-shared/gatekeeper";
 import { stageCredentials, commitStagedCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { buildDescription } from "@gadgets/gatekeeper-kit/action-description";
 import APP_HTML from "./app.txt";
 import TICKET_CONFIGURATOR_HTML from "./generated/ticket-configurator-ui.txt";
 import TYPES_CODE from "./types.txt";
@@ -938,7 +939,14 @@ export class ZendeskGatekeeper extends DurableObject<Env, Props> implements Gate
     const id = this.#nextActionId();
     this.ctx.storage.kv.put<StoredAction>(actionKey(id), { ...action, id, status: "pending" });
     this.ctx.storage.kv.put<ZendeskActionResult>(resultKey(id), { status: "pending" });
-    try { await queue.submitAction(id, { title, description, implementsRevert: false, actionKind, ...(action.kind === "create" ? { awaitDecision: true, autoApprovable: false } : {}) }); }
+    const rendered = buildDescription("Apply the following Zendesk change.")
+      .verbatim("Summary", description).json("Action", action).finish();
+    // Upload tokens name bytes the approver has not read; showing their identifiers is not a
+    // complete description of the attached content, even when every JSON field fits.
+    if (action.kind === "comment" && action.uploadTokens.length > 0) delete rendered.descriptionIsComplete;
+    try { await queue.submitAction(id, { title,
+      ...rendered,
+      implementsRevert: false, actionKind, ...(action.kind === "create" ? { awaitDecision: true, autoApprovable: false } : {}) }); }
     catch (error) {
       // submitAction may have delivered the action before its response was lost. Never erase a claim.
       if (action.kind === "create" && this.ctx.storage.kv.get<StoredAction>(actionKey(id))?.status !== "pending") throw error;

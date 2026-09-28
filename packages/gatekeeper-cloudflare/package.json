@@ -19,8 +19,8 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",
-    "miniflare": "5.20260911.0-alpha",
     "@gadgets/scripts": "workspace:*",
+    "miniflare": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"

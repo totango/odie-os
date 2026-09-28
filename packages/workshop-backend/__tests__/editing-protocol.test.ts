@@ -66,11 +66,12 @@ describe("editing wire negotiation", () => {
     const storage = makeActionStorage();
     let writes = 0;
     const client = await openFakeOverseer(storage, {negotiate: false, impl: {
-      gitStore: {readCommitFiles: async () => new Map([["server.js", "unchanged"]])},
+      gitCache: {readFilesAtCommit: async () => [["server.js", {text: "unchanged"}]]},
       submitCodeChange: async () => { ++writes; return {generation: 0, revision: 1}; },
     }});
     await expect(client.submitCodeChange(1, submission)).rejects.toThrow("EDITING_PROTOCOL_UPGRADE_REQUIRED");
-    expect(await client.getCodeAtCommit("a".repeat(40))).toEqual({files: [["server.js", "unchanged"]]});
+    expect(await client.readFilesAtCommit("a".repeat(40), ["server.js"]))
+      .toEqual([["server.js", {text: "unchanged"}]]);
     expect(writes).toBe(0);
     await client.negotiateEditingProtocol(WORKSHOP_EDITING_PROTOCOL);
     await client.submitCodeChange(1, submission);

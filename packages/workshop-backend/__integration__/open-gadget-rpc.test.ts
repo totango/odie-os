@@ -25,6 +25,9 @@ const USER_DO_ABORT_REASON = "user-DO reset injected by test";
 const EXPECTED_MESSAGES: Record<OpenGadgetErrorCode, string> = {
   [OPEN_GADGET_ERROR_CODES.workspaceNotFound]: "Workspace not found.",
   [OPEN_GADGET_ERROR_CODES.workspaceAccessDenied]: "You don't have access to this workspace.",
+  [OPEN_GADGET_ERROR_CODES.shareLinksDisabled]:
+      "Share links are disabled for this workspace because it contains sensitive data. " +
+      "The owner must add each person directly.",
 };
 
 function username(prefix: string): string {
@@ -206,6 +209,7 @@ describe("workspace session across a user-DO-only reset", () => {
     const account = await createAccount(publicApi, "chatreset");
     using authenticated = await publicApi.authenticate(account.token);
     using workspace = await authenticated.newGadget();
+    await workspace.negotiateEditingProtocol("git-ot-v1");
 
     // Model id null: commits the message without starting an agent — the pure chat-start path.
     expect(await workspace.newChat("before the reset", null)).toEqual(expect.any(Number));
@@ -234,6 +238,7 @@ describe("workspace origin hub metadata", () => {
     const account = await createAccount(publicApi, "directgadget");
     using authenticated = await publicApi.authenticate(account.token);
     using workspace = await authenticated.newGadget("ops");
+    await workspace.negotiateEditingProtocol("git-ot-v1");
     const metadata = await workspace.getMetadata();
 
     expect((await authenticated.listGadgets()).map((g) => g.id)).not.toContain(metadata.id);
@@ -250,6 +255,7 @@ describe("workspace origin hub metadata", () => {
     const account = await createAccount(publicApi, "origin");
     using authenticated = await publicApi.authenticate(account.token);
     using workspace = await authenticated.newGadget("ops");
+    await workspace.negotiateEditingProtocol("git-ot-v1");
     const metadata = await workspace.getMetadata();
 
     await authenticated.updateProvisionalWorkspaceOrigin(metadata.id, "support");
@@ -266,6 +272,7 @@ describe("workspace origin hub metadata", () => {
     const account = await createAccount(publicApi, "legacyorigin");
     using authenticated = await publicApi.authenticate(account.token);
     using workspace = await authenticated.newGadget();
+    await workspace.negotiateEditingProtocol("git-ot-v1");
     const metadata = await workspace.getMetadata();
     await workspace.newChat("hello", null);
 

@@ -1,4 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
+
+function approvalSummary(description: ActionDescription): string {
+  const summary = description.fields?.find(field => field.label === "Summary");
+  if (!summary || summary.kind !== "text") throw new Error("Expected literal approval summary");
+  return summary.value;
+}
 import { ZendeskApi, buildAuthorizeUrl, exchangeAuthCode, normalizeSubdomain, ticketUrl } from "../src/zendesk-api";
 import { codingTools, zendeskActionResultToToolResult } from "../src/coding-session";
 import type { ZendeskAccountSession, ZendeskTicketSession } from "../src/types";
@@ -497,7 +504,7 @@ describe("Zendesk subject edits", () => {
     const first = await session.updateFields({ fields: { subject: "First pending title" } });
     const second = await session.updateFields({ fields: { subject: "Second pending title", priority: "high" } });
     expect(fetcher.mock.calls.every(([, init]) => init?.method !== "PUT")).toBe(true);
-    const description = queue.submitAction.mock.calls[1][1].description;
+    const description = approvalSummary(queue.submitAction.mock.calls[1][1]);
     expect(description).toContain("https://acme.zendesk.com/agent/tickets/123");
     expect(JSON.parse(description.split("All outbound changed fields:\n\n")[1])).toEqual({ ticket: { subject: "Second pending title", priority: "high" } });
     expect(queue.submitAction.mock.calls[1][1].actionKind.tag).toBe("zendesk.update-fields");
@@ -525,7 +532,7 @@ describe("Zendesk subject edits", () => {
     expect(tool?.description).toContain("subject");
     expect(tool?.inputSchema).toMatchObject({ properties: { fields: { properties: { subject: { type: "string", minLength: 1, maxLength: 300 } } } } });
     await expect(session.callTool("zendesk_update_fields", { id: "123", fields: { subject: "s".repeat(300) } })).resolves.toMatchObject({ status: "pending" });
-    expect(queue.submitAction.mock.calls[0][1].description).toContain("s".repeat(300));
+    expect(approvalSummary(queue.submitAction.mock.calls[0][1])).toContain("s".repeat(300));
     expect(JSON.stringify(await gatekeeper.getAgentCatalog(queue as never))).toContain("edit subjects");
   });
 
@@ -611,7 +618,7 @@ describe("Zendesk queued ticket creation", () => {
       actionKind: { tag: "zendesk.create-ticket", label: "Create Zendesk ticket" },
       autoApprovable: false, awaitDecision: true, implementsRevert: false,
     }));
-    const description = queue.submitAction.mock.calls[0][1].description;
+    const description = approvalSummary(queue.submitAction.mock.calls[0][1]);
     expect(description).toContain("https://acme.zendesk.com");
     expect(description).toContain("INTERNAL (agent-only)");
     const outbound = { ticket: { status: "open", priority: "high", type: "incident", assignee_id: 7, group_id: 9, tags: ["support"], custom_fields: [{ id: 42, value: fields.custom_42 }], subject: input.subject, comment: { body: input.comment.body, public: false }, requester_id: 8 } };
@@ -626,7 +633,7 @@ describe("Zendesk queued ticket creation", () => {
     const { gatekeeper, queue, kv } = await workflowGatekeeper();
     const session = await gatekeeper.startSession(queue as never) as ZendeskAccountSession;
     await session.callTool("zendesk_create_ticket", { ...input, comment: { body: "Customer-visible", visibility: "public" } });
-    expect(queue.submitAction.mock.calls[0][1].description).toContain("PUBLIC (customer-visible)");
+    expect(approvalSummary(queue.submitAction.mock.calls[0][1])).toContain("PUBLIC (customer-visible)");
     const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ ticket: { id: 456, url: "https://evil.example", description: "not part of result" } }, { status: 201 }));
     vi.stubGlobal("fetch", fetcher);
     const key = (kv.get("action:1") as { idempotencyKey: string }).idempotencyKey;

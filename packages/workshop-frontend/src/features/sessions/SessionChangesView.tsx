@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import CodeEditor from '../../CodeEditor'
+import CodeEditor from '../code/CodeEditor'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import type { SessionChanges } from './openCodeChanges'
 

@@ -22,20 +22,21 @@ const imports = vi.hoisted(() => {
   return { code: deferred(), diff: deferred() }
 })
 
-vi.mock('./CodeEditor', async () => {
+vi.mock('./features/code/CodeEditor', async () => {
   imports.code.loads++
   return await imports.code.promise
 })
-vi.mock('./CodeDiffEditor', async () => {
+vi.mock('./features/code/CodeDiffEditor', async () => {
   imports.diff.loads++
   return await imports.diff.promise
 })
 vi.mock('@cloudflare/kumo', () => ({
   useKumoToastManager: () => ({ add: vi.fn<() => void>() }),
 }))
-vi.mock('./FileSidebar', () => ({
-  default: ({ files, onFileSelect }: { files: string[]; onFileSelect: (filename: string) => void }) => (
-    <nav aria-label="Files">{files.map(file => <button key={file} onClick={() => onFileSelect(file)}>{file}</button>)}</nav>
+vi.mock('./features/code/FileBrowser', () => ({
+  isOpenableKind: (kind: string) => kind === 'file',
+  default: ({ tree, onFileSelect }: { tree: { leaves: ReadonlyMap<string, string> }; onFileSelect: (filename: string) => void }) => (
+    <nav aria-label="Files">{[...tree.leaves.keys()].map(file => <button key={file} onClick={() => onFileSelect(file)}>{file}</button>)}</nav>
   ),
 }))
 vi.mock('./components/WorkshopControls', () => ({
@@ -43,7 +44,7 @@ vi.mock('./components/WorkshopControls', () => ({
   WorkshopIconButton: (props: ButtonHTMLAttributes<HTMLButtonElement>) => <button {...props} />,
 }))
 
-import GadgetCodeInterface from './GadgetCodeInterface'
+import WorkpieceCodeInterface from './features/code/WorkpieceCodeInterface'
 
 describe('editor import failures', () => {
   it.each(['code', 'diff'] as const)('contains a rejected %s import without disposing code sync', async (kind) => {
@@ -54,13 +55,14 @@ describe('editor import failures', () => {
     let commitId = `error-${kind}`
     const files = new Map([['client.js', 'client'], ['server.js', 'server']])
     const overseer = {
-      getCodeAtCommit: vi.fn<() => Promise<{ files: [string, string][] }>>(async () => ({ files: [...files] })),
+      listTree: vi.fn<() => Promise<object[]>>(async () => [...files.keys()].map(name => ({ name, kind: 'file' }))),
+      readFilesAtCommit: async (_commit: string, paths: string[]) => paths.map(path => [path, { kind: 'text', text: files.get(path) }]),
     }
     const hasCode = vi.fn<(value: boolean) => void>()
     const render = (isVisible: boolean) => act(async () => {
       root.render(<>
         <button>Workspace chat</button>
-        <GadgetCodeInterface overseer={overseer as never} workpieceId={1} headCommitId={commitId} isAgentActive={false}
+        <WorkpieceCodeInterface overseer={overseer as never} summary={{ id: 1, type: 'gadget', title: 'App', commitId }} isAgentActive={false}
           chatChanges={kind === 'diff' ? { chatId: 7, rowsThrough: 0 } : undefined}
           selectedChatId={kind === 'diff' ? 7 : null} isVisible={isVisible} onHasCodeChange={hasCode} />
       </>)
@@ -98,7 +100,7 @@ describe('editor import failures', () => {
       await render(true)
       expect(container.querySelector('nav')!.textContent).toContain('incoming.js')
       expect(hasCode).toHaveBeenLastCalledWith(true)
-      expect(overseer.getCodeAtCommit).toHaveBeenCalledTimes(2)
+      expect(overseer.listTree).toHaveBeenCalledTimes(2)
       await act(async () => root.render(null))
     } finally {
       act(() => root.unmount())

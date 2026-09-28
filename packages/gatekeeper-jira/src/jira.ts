@@ -20,6 +20,7 @@ import {
 import { acknowledgeHandoff, connectHandoffPageHtml, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
 import type { GatekeeperConnectResult as HandoffLaunch } from "@gadgets/workshop-shared/gatekeeper";
 import { stageCredentials, commitStagedCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { buildDescription } from "@gadgets/gatekeeper-kit/action-description";
 import { boundAgentCatalog } from "@gadgets/workshop-shared/gatekeeper";
 import type { McpCallResult, McpToolInfo } from "@gadgets/mcp-shared/types";
 import { createLogger } from "@gadgets/backend-utils/logger";
@@ -987,7 +988,15 @@ abstract class BaseGatekeeper<Session, Props extends BaseProps = BaseProps> exte
     this.ctx.storage.kv.put("nextAction", id + 1);
     this.ctx.storage.kv.put<StagedActionState>(`action:${id}`, { state: "pending", action, createdAt: Date.now() });
     try {
-      await queue.submitAction(id, { title, description: `${description}\n\n${actionPreview(action)}`, implementsRevert: false, actionKind: { tag: action.kind === "comment" ? "jira.comment" : `jira.${action.kind}`, label: title }, autoApprovable: auto, awaitDecision: action.kind !== "comment" });
+      const preview = buildDescription("Apply the following Jira change.").verbatim("Summary", description)
+        .verbatim("Preview", actionPreview(action));
+      if (action.kind === "upload") {
+        preview.inline("Issue", action.issue).file("Attachment", {
+          name: action.filename, mediaType: action.mimeType ?? "application/octet-stream", size: action.bytes.byteLength, origin: "agent",
+        });
+      } else preview.json("Action", action);
+      await queue.submitAction(id, { title, ...preview.finish(),
+        implementsRevert: false, actionKind: { tag: action.kind === "comment" ? "jira.comment" : `jira.${action.kind}`, label: title }, autoApprovable: auto, awaitDecision: action.kind !== "comment" });
     } catch (error) {
       // submitAction may have dispatched applyAction before its response failed. Keep any
       // claimed/terminal state so the write cannot be mistaken for an unattempted action.
