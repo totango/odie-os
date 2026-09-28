@@ -56,14 +56,19 @@ function seedRestrictedObservation(impl: any, gatekeeperId: number, actionId: nu
   impl.storage.containsRestrictedData.put(true);
 }
 
+const POKE: ActionDescription = {
+  title: "Poke the thing",
+  description: "The test poked the thing.",
+  // What a real gatekeeper asserts when its text shows everything the action will send.
+  descriptionIsComplete: true,
+  implementsRevert: false,
+  actionKind: { tag: "poke", label: "Pokes" },
+};
+
 function pokeDescription(autoApprovable = false, { incomplete = false } = {}): ActionDescription {
   return {
-    title: "Poke the thing",
-    description: "The test poked the thing.",
-    // What a real gatekeeper asserts when its text shows everything the action will send.
-    ...(incomplete ? {} : { descriptionIsComplete: true }),
-    implementsRevert: false,
-    actionKind: { tag: "poke", label: "Pokes" },
+    ...POKE,
+    ...(incomplete ? { descriptionIsComplete: undefined } : {}),
     ...(autoApprovable ? { autoApprovable: true } : {}),
   };
 }
@@ -149,7 +154,7 @@ describe("submitAction under the restricted-data latch", () => {
       // Commits cannot be reviewed as text, so the claim does not count. Refused before push
       // ancestry is even checked, which is why an unproven head is fine here.
       await expect(impl.submitAction(1, 0, {
-        ...pokeDescription(),
+        ...POKE,
         pushedCommits: ["0123456789abcdef0123456789abcdef01234567"],
       }, CALLER)).rejects.toThrow(/prohibited from performing actions/i);
       expect(actionStates(impl)).toEqual([]);
@@ -164,7 +169,7 @@ describe("submitAction under the restricted-data latch", () => {
       impl.storage.gatekeepers.delete(1);
       let nextActionId = impl.storage.nextActionId.get();
 
-      await expect(impl.submitAction(1, 0, pokeDescription(), CALLER))
+      await expect(impl.submitAction(1, 0, POKE, CALLER))
           .rejects.toThrow(/has been removed from this workspace/i);
       expect(actionStates(impl)).toEqual([]);
       expect(impl.storage.nextActionId.get()).toBe(nextActionId);

@@ -4,7 +4,7 @@ import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, Rp
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import type { UserDirectoryRecord, ConnectFlowStart } from '@gadgets/workshop-shared/api';
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, WORKSHOP_EDITING_PROTOCOL, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestAttachment, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
@@ -1207,8 +1207,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
                 sanitizeBlueprintOutput(kvRecord.metadata.output)));
 
         // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
-        let metadata = await openedOverseer.getMetadata();
-        using gadget = await openedOverseer.getGadget(metadata.defaultGadgetId!);
+        // Internal setup needs a writable session, but the session returned to the caller must
+        // remain unnegotiated so an old client cannot bypass the editing-protocol handshake.
+        using setupOverseer = await this.#openGadgetInternal(id, undefined, undefined, true);
+        await setupOverseer.negotiateEditingProtocol(WORKSHOP_EDITING_PROTOCOL);
+        let metadata = await setupOverseer.getMetadata();
+        using gadget = await setupOverseer.getGadget(metadata.defaultGadgetId!);
 
         // Defensively put blueprint bindings into a map (not a raw object) until validation.
         let blueprintBindings = new Map(Object.entries(kvRecord.metadata.bindings));
@@ -1227,13 +1231,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
           gkPromises.push((async () => {
             let gk;
             if (assignment.type === "gatekeeper") {
-              gk = await openedOverseer.newGatekeeper(
+              gk = await setupOverseer.newGatekeeper(
                   assignment.accountId, assignment.resourceUrl);
               if (!gk) {
                 throw new Error(`Failed to create gatekeeper for binding "${bindingName}".`);
               }
             } else if (assignment.type === "aiModel") {
-              gk = await openedOverseer.newAiModelGatekeeper(assignment.modelId);
+              gk = await setupOverseer.newAiModelGatekeeper(assignment.modelId);
             } else {
               return;  // agent spawners are created in phase two
             }
@@ -1278,7 +1282,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
             modelId: assignment.modelId,
             env,
           };
-          using gk = await openedOverseer.newAgentSpawnerGatekeeper(config);
+          using gk = await setupOverseer.newAgentSpawnerGatekeeper(config);
           await gadget.bind(bindingName, await gk.getId());
         }
 

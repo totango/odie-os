@@ -2,6 +2,39 @@
 
 Worktree: `/Users/jacob_1/odie-os-polaris-upstream`.
 
+## ef65348f refresh — T/E results
+
+Verified HEAD `213797fe36e365dffba5c0ab22abc71a46a0c593`, MERGE_HEAD
+`ef65348fe4bceafb70d8010bdfdc958d6f3d36bd`, merge base
+`687aab049cf084030a42093c10c4dde3d9c33fb4` (six incoming commits). This is a new
+working-tree merge; the previous exact-candidate results below are historical.
+
+- Preserved the fork-deleted `bonk.yml` and `bonk-pr.yml`; resolved both modify/delete entries by
+  `git rm`. The upstream eval trajectory-review remains disabled (`if: ${{ false }}`); the root
+  regression guard continues to check all three surfaces.
+- Adopted the eval baseline's first-parent merge comparison, turn-aware failed-check denominators,
+  infrastructure-error separation and task-key refinements. The `diff3` pin is `0.0.3` in both
+  backend manifest and regenerated lockfile; frozen install passed, without updating runtime/image
+  or cutover gate artifacts.
+- Selectively staged only the owned workflow, backend manifest, lock, eval source/tests and eval
+  scripts. K owns the four remaining unresolved files in `docs/integration-testing.md`,
+  `packages/integration-tests/README.md`, backend `__integration__/open-gadget-rpc.test.ts`, and
+  backend `__tests__/restricted-actions.test.ts`.
+
+| Check | Observed result |
+| --- | --- |
+| `pnpm install --frozen-lockfile` | Exit 0; 39 workspace projects, lockfile supply-chain policy verified. |
+| `pnpm --filter @gadgets/workshop-evals test:run` | Exit 0, 9 files / **70 tests passed**; local unit tests only, not credentialed inference. |
+| `node --test --test-reporter=dot 'scripts/**/*.test.ts'` | Exit 0; direct root suite passed. |
+| `pnpm types:scripts` | Exit 0. |
+| `VP_RUN_CONCURRENCY_LIMIT=2 pnpm build` | Exit 0; **97 tasks**, 62 cache hits (63%). Log at `/var/folders/5q/r1rw9tjx4pl2phchr2rhc_lm0000gp/T/opencode/polaris-ef65348f-build.log`. |
+| Scoped staged diff check | Exit 0. |
+
+No full root `pnpm test` on this merge (K still owns unresolved test-source conflicts). No commit,
+push, deploy, image mutation or production-cutover approval issued. The coordinator must reconcile
+the existing global Polaris loop ordinal; T does not infer an exact count from this six-commit
+refresh or reset the 20-loop cap.
+
 ## 687aab04 refresh — T plus delegated E handoff
 
 Verified HEAD `41a54d0b469802b215d9642105481bd3d1f540c6`, MERGE_HEAD

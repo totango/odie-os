@@ -20,7 +20,12 @@ class Workspace extends RpcTarget {
   negotiated = false
   calls: string[] = []
   sent: string[] = []
-  constructor(readonly state: 'ready' | 'paused' | 'incompatible' | 'read-only') { super() }
+  readonly metadataSubscribed: Promise<void>
+  private resolveMetadata!: () => void
+  constructor(readonly state: 'ready' | 'paused' | 'incompatible' | 'read-only') {
+    super()
+    this.metadataSubscribed = new Promise(resolve => { this.resolveMetadata = resolve })
+  }
   negotiateEditingProtocol(protocol: string) {
     this.calls.push(`negotiate:${protocol}`)
     this.negotiated = protocol === 'git-ot-v1'
@@ -30,7 +35,11 @@ class Workspace extends RpcTarget {
     return { protocol: this.state === 'incompatible' ? 'old-wire' : 'git-ot-v1', state: this.state === 'incompatible' ? 'upgrade-required' : this.state }
   }
   getMetadata() { return { id: 'workspace', title: 'Protocol workspace', role: this.state === 'read-only' ? 'use' : 'build', provisional: false } }
-  async subscribeToMetadata(callback: (metadata: ReturnType<Workspace['getMetadata']>) => void) { await callback(this.getMetadata()); return new RpcTarget() }
+  async subscribeToMetadata(callback: (metadata: ReturnType<Workspace['getMetadata']>) => void) {
+    await callback(this.getMetadata())
+    this.resolveMetadata()
+    return new RpcTarget()
+  }
   async subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>) { await subscriber.ready(); return new RpcTarget() }
   subscribeToPresence() { return new RpcTarget() }
   subscribeToActions() { return new RpcTarget() }
@@ -105,9 +114,8 @@ describe('authenticated workspace route editing protocol', () => {
     await act(async () => root.render(<ThemeProvider><RpcContext.Provider value={{ stub: peer, connectionLost: false }}>
       <RouterProvider router={router} />
     </RpcContext.Provider></ThemeProvider>))
-    for (let attempt = 0; attempt < 30 && !container.textContent?.includes('Protocol workspace'); attempt++) {
-      await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
-    }
+    await workspace.metadataSubscribed
+    await act(async () => {})
     expect(container.textContent).toContain('Protocol workspace')
     expect(workspace.calls[0]).toBe('negotiate:git-ot-v1')
     if (state === 'ready' || state === 'paused') {

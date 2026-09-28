@@ -31,6 +31,15 @@ same transport the browser uses — and serve an `ObserverConfigCallback` the ov
 Nothing is stubbed except outbound HTTP. The consequence worth internalising: **the code under test is
 in another process.** Most of what follows falls out of that.
 
+The fork deliberately distinguishes an owner-only private observation (`ownerInvitesOnly`, which
+preserves direct invitations) from a restricted-data observation (`containsRestrictedData`, which
+also prohibits actions and public web fetches). A third persisted latch, `prohibitAllSharing`,
+denies all sharing. Public-API assertions must exercise each policy's actual effect instead of
+treating these flags as interchangeable. Build-role clients must negotiate `git-ot-v1` before
+editing; use-role clients remain read-only even after negotiation. Worktree records stay available
+to agent replay, while chat projections and non-owner commit reads exclude their private content;
+the owner can still inspect worktrees through their workpiece subscription and commit reads.
+
 ## Findings that shape the design
 
 ### Fake timers cannot work here
@@ -79,7 +88,7 @@ One corollary that is easy to get wrong: the "nothing escaped to the internet" a
 running, so it would inspect and clear state they are still using — and could discard an escape a
 sibling was about to be blamed for.
 
-### wrangler and workerd versions are coupled
+### wrangler and miniflare versions are coupled
 
 Wrangler, Miniflare and workerd must be upgraded together. The workspace catalog selects Wrangler;
 the pool-specific overrides in `pnpm-workspace.yaml` align its Wrangler and Miniflare dependencies.
