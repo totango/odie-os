@@ -4101,4 +4101,3 @@ const subscriber = () => createSubscriber<DeckCallbacks>(RpcTarget, {
     canUndo = !!s?.canUndo; canRedo = !!s?.canRedo;
     updateUndoButtons();
   } catch {}
-
