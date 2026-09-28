@@ -109,6 +109,7 @@ it.concurrent("grants and revokes a use-only collaborator", async () => {
     using collaborator = await signUp(collaboratorPublic, collaboratorName);
     using intruder = await signUp(intruderPublic, intruderName);
     using workspace = await owner.newGadget();
+    await workspace.negotiateEditingProtocol("git-ot-v1");
     const id = await activate(workspace);
 
     await expectOpenDenied(intruder, id);
@@ -152,6 +153,7 @@ it.concurrent("revokes every key and recipient of one share link", async () => {
     using first = await signUp(firstPublic, firstName);
     using second = await signUp(secondPublic, secondName);
     using workspace = await owner.newGadget();
+    await workspace.negotiateEditingProtocol("git-ot-v1");
     const id = await activate(workspace);
 
     const shareLink = await workspace.createShareLink("use", "review link");

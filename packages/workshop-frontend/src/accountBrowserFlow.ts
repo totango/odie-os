@@ -2,6 +2,7 @@ import type { RpcStub } from 'capnweb'
 import type { AuthenticatedApi, BrowserFlowOptions, BrowserFlowStart, NativeLoginFlowStatus } from '@gadgets/workshop-shared/api'
 import { getWorkshopRuntime } from './runtime'
 import { HANDOFF_KEY, openConnectWindow } from './connectHandoff'
+import { nativeFlowStore } from './runtime/nativeFlowStore'
 
 const NATIVE_ACCOUNT_FLOW_POLL_MS = 1_000
 
@@ -99,6 +100,8 @@ export async function runAccountBrowserFlow(
 ): Promise<AccountBrowserFlowResult> {
   const runtime = getWorkshopRuntime()
   if (runtime.kind === 'tauri' && typeof runtime.openOAuthTrampoline === 'function') {
+    const store = nativeFlowStore(runtime)
+    const epoch = store.begin()
     const verifier = randomVerifier()
     const started = await start({
       flow: { returnMode: 'native-verified-link', clientVerifierHash: await sha256Hex(verifier) },
@@ -106,7 +109,7 @@ export async function runAccountBrowserFlow(
     if (!started?.url) return {}
     if (!started.flowHandle) throw new Error('Native account browser flow did not return a handle.')
     throwIfAborted(options.signal)
-    await runtime.writePendingNativeLoginFlow({ purpose: 'account', flowHandle: started.flowHandle, verifier, expiresAt: started.expiresAt })
+    if (!await store.replace(epoch, { purpose: 'account', flowHandle: started.flowHandle, verifier, expiresAt: started.expiresAt }, () => throwIfAborted(options.signal))) throw abortError()
     await runtime.openOAuthTrampoline(started.url)
     const nativeStatus = await pollNativeAccountFlow(authenticatedApi, started.flowHandle, verifier, options.signal)
     return { url: started.url, nativeStatus }

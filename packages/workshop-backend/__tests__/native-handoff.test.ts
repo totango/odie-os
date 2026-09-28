@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { createNativeBrowserFlowRecord } from "../src/auth/native-browser-flow";
 import { newSecretToken, requireProviderHandoff } from "../src/connect-handoff";
 
@@ -19,7 +19,7 @@ async function rejection(call: () => PromiseLike<unknown>): Promise<string> {
   finally { clearTimeout(timeout); }
 }
 
-async function fixture(native = true, vendorId = "test") {
+async function fixture(native = true, vendorId = "test", failDescribe = false) {
   const name = crypto.randomUUID();
   const hooks = env.TEST_ADMIN_PROVIDERS.getByName(name);
   const pending = env.TEST_PENDING_LOGIN.getByName(name);
@@ -31,7 +31,7 @@ async function fixture(native = true, vendorId = "test") {
     providerInitiationUrl: "https://provider.example/authorize", pendingLoginId: pending.id.toString(),
   }));
   const callback = await hooks.loginCallback(pending.id.toString(), native ? name : undefined, vendorId);
-  const account = await hooks.handoffAccount(name);
+  const account = await hooks.handoffAccount(name, false, failDescribe);
   return {name, flow, pending, callback, account, verifier};
 }
 
@@ -53,6 +53,143 @@ async function accountFixture(legacyHandoff = false) {
 }
 
 describe("provider → backend → native redemption", () => {
+  it("cleans a conclusively uninstalled grant when provider describe rejects before effects", async () => {
+    const f = await fixture(true, "cloudflare", true);
+    const handoff = await f.callback.complete(f.account as never);
+    expect(await rejection(() => f.pending.confirm(handoff.ticket))).toContain("describe failed");
+    expect(await f.account.calls()).toContain("revoke");
+    expect(await f.pending.getLink()).toBeNull();
+    await runInDurableObject(f.pending, async instance => {
+      await instance.alarm();
+      expect(instance.ctx.storage.kv.get("result")).toBeUndefined();
+      expect(await instance.ctx.storage.getAlarm()).toBeNull();
+    });
+    const user = env.TEST_USER.getByName(`${f.name}@example.com`);
+    await runInDurableObject(user, instance => {
+      expect([...Reflect.get(instance, "storage").connectedAccounts.list()]).toEqual([]);
+    });
+  });
+
+  it.each(["not-started", "preparing", "installed"])("reconciles a persisted %s grant after DO interruption and stops its expiry alarm", async checkpoint => {
+    const f = await fixture(true, "cloudflare");
+    const handoff = await f.callback.complete(f.account as never);
+    const {hashPresentedSecret} = await import("../src/connect-handoff");
+    const grantId = (await hashPresentedSecret(handoff.ticket))!;
+    let user = env.TEST_USER.getByName(`${f.name}@example.com`);
+    if (checkpoint === "preparing") await runInDurableObject(user, instance => {
+      Reflect.get(instance, "storage").loginGrantOutcomes.put({id: grantId, state: "preparing"});
+    });
+    if (checkpoint === "installed") await user.installLoginGrant(grantId, f.account as never, "cloudflare");
+    // Persist exactly the checkpoint preceding the user-DO call, with no live confirmation task.
+    await runInDurableObject(f.pending, instance => {
+      const result = instance.ctx.storage.kv.get<Record<string, unknown>>("result")!;
+      instance.ctx.storage.kv.put("result", {...result, confirming: true});
+    });
+    await abortAllDurableObjects();
+    f.pending = env.TEST_PENDING_LOGIN.getByName(f.name);
+    f.flow = env.TEST_ADMIN_PROVIDERS.getByName(f.name);
+    f.account = await f.flow.handoffAccount(f.name);
+    user = env.TEST_USER.getByName(`${f.name}@example.com`);
+    await (f.pending as DurableObjectStub<import("./admin-authority-worker").PendingLogin>).expireDuringConfirmation();
+    if (checkpoint === "installed") {
+      expect(await f.account.calls()).not.toContain("revoke");
+      expect(await f.pending.getLink()).not.toBeNull();
+    } else {
+      expect(await f.account.calls()).toContain("revoke");
+      expect(await f.pending.getLink()).toBeNull();
+      expect(await rejection(() => user.installLoginGrant(grantId, f.account as never, "cloudflare")))
+        .toContain("LOGIN_GRANT_INSTALL_UNAVAILABLE");
+    }
+    expect(await rejection(() => f.pending.receive())).toContain("expired");
+    await runInDurableObject(f.pending, async instance => {
+      expect(instance.ctx.storage.kv.get("result")).toBeUndefined();
+      expect(await instance.ctx.storage.getAlarm()).toBeNull();
+    });
+  });
+
+  it("reconciles an installed grant after its acknowledgement is lost without revocation or replay", async () => {
+    const f = await fixture(true, "cloudflare");
+    const handoff = await f.callback.complete(f.account as never);
+    const user = env.TEST_USER.getByName(`${f.name}@example.com`);
+    let installs = 0;
+    await runInDurableObject(user, instance => {
+      const original = instance.installLoginGrant.bind(instance);
+      Object.setPrototypeOf(instance, {__proto__: Object.getPrototypeOf(instance),
+        async installLoginGrant(...args: Parameters<typeof original>) {
+          installs++;
+          await original(...args);
+          throw new Error("installed acknowledgement lost");
+        },
+      });
+    });
+    await f.pending.confirm(handoff.ticket);
+    expect(installs).toBe(1);
+    expect(await f.pending.getLink()).not.toBeNull();
+    expect(await f.account.calls()).not.toContain("revoke");
+    await (f.pending as DurableObjectStub<import("./admin-authority-worker").PendingLogin>).expireDuringConfirmation();
+    expect(await rejection(() => f.pending.receive())).toContain("expired");
+    expect(await f.account.calls()).not.toContain("revoke");
+    await runInDurableObject(f.pending, async instance => {
+      expect(instance.ctx.storage.kv.get("result")).toBeUndefined();
+      expect(await instance.ctx.storage.getAlarm()).toBeNull();
+    });
+  });
+  it.each(["before", "after"])("reconciles a %s-activation RPC fault without losing proof or replaying activation", async fault => {
+    const f = await accountFixture();
+    const handoff = await f.callback.complete(f.account as never);
+    let calls = 0;
+    await runInDurableObject(f.user, instance => {
+      const original = instance.completeConnectHandoff.bind(instance);
+      Object.setPrototypeOf(instance, {__proto__: Object.getPrototypeOf(instance),
+        async completeConnectHandoff(ticket: string, nonce: string) {
+        calls++;
+        if (calls === 1 && fault === "before") throw new Error("delivery failed before activation");
+        await original(ticket, nonce);
+        if (calls === 1 && fault === "after") throw new Error("activation acknowledgement lost");
+      }});
+    });
+    if (fault === "before") {
+      expect(await rejection(() => f.flow.completeAccountHandoff(f.verifier.hash, handoff.ticket, f.user.id.toString())))
+        .toContain("before activation");
+      expect(await f.flow.getAccountStatus(f.verifier.hash, f.user.id.toString())).toEqual({status: "pending"});
+      expect(await f.connected()).toBe(false);
+      await f.flow.completeAccountHandoff(f.verifier.hash, handoff.ticket, f.user.id.toString());
+    } else {
+      await f.flow.completeAccountHandoff(f.verifier.hash, handoff.ticket, f.user.id.toString());
+    }
+    expect(await f.connected()).toBe(true);
+    expect(await f.flow.getAccountStatus(f.verifier.hash, f.user.id.toString())).toEqual({status: "completed"});
+    expect(calls).toBe(fault === "before" ? 2 : 1);
+  });
+
+  it("expiry fences a delayed install before revoking its grant, with no stale resurrection", async () => {
+    const f = await fixture(true, "cloudflare");
+    const handoff = await f.callback.complete(f.account as never);
+    const barrier = {reached: false, released: false};
+    const user = env.TEST_USER.getByName(`${f.name}@example.com`);
+    await runInDurableObject(user, instance => {
+      const original = instance.installLoginGrant.bind(instance);
+      Object.setPrototypeOf(instance, {__proto__: Object.getPrototypeOf(instance),
+        async installLoginGrant(...args: Parameters<typeof original>) {
+        barrier.reached = true;
+        while (!barrier.released) await new Promise(resolve => setTimeout(resolve, 5));
+        return original(...args);
+      }});
+    });
+    const confirm = rejection(() => f.pending.confirm(handoff.ticket));
+    try {
+      while (!barrier.reached) await new Promise(resolve => setTimeout(resolve, 5));
+      await (f.pending as DurableObjectStub<import("./admin-authority-worker").PendingLogin>).expireDuringConfirmation();
+      expect(await f.account.calls()).toContain("revoke");
+    } finally { barrier.released = true; }
+    expect(await confirm).toContain("LOGIN_GRANT_INSTALL_UNAVAILABLE");
+    expect(await f.pending.getLink()).toBeNull();
+    await runInDurableObject(f.pending, async instance => {
+      expect(instance.ctx.storage.kv.get("result")).toBeUndefined();
+      expect(await instance.ctx.storage.getAlarm()).toBeNull();
+    });
+    expect(await rejection(() => f.pending.receive())).toContain("expired");
+  });
   it("rejects old or mismatched provider launch acknowledgements for browser and native flows", () => {
     for (const protocol of ["browser-bound-v1", "native-verifier-v1"] as const) {
       expect(() => requireProviderHandoff({url: "https://provider.example/authorize"}, protocol))

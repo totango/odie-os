@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useInsertionEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { ResourceConfiguratorFrame, ResourceConfiguratorHost, ResourceConfiguratorIframe } from '@gadgets/workshop-shared/gatekeeper'
@@ -14,6 +14,9 @@ const MIN_CONFIGURATOR_HEIGHT = 80
 // extreme values to scroll-jack the host modal.
 const SCROLL_FORWARD_MAX_DELTA = 1000
 const COLLECT_VALUES_TIMEOUT_MS = 5000
+const suspendHost = Symbol('suspendHost')
+const refreshHost = Symbol('refreshHost')
+const disposeHost = Symbol('disposeHost')
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -21,54 +24,129 @@ function clamp(value: number, min: number, max: number): number {
 
 class ResourceConfiguratorHostImpl extends RpcTarget implements ResourceConfiguratorHost {
   readonly #gatekeeper: RpcStub<RpcTarget>
+  readonly #slot: ReturnType<typeof createRateLimitedCapability>
+  #active = true
+  #closed = false
+  #generation = 0
+  readonly #readyWaiters = new Set<{ resolve: (generation: number) => void; reject: (error: Error) => void }>()
+  readonly #onResize: (height: number, layoutHeight: number) => void
+  readonly #onSelectionReady: (ready: boolean) => void
+  readonly #onScroll: (deltaX: number, deltaY: number) => void
+  readonly #getInitialResource: () => { resourceUrl: string; resourceUrlPattern: string } | null
+  readonly #authorityCurrent: () => boolean
 
   constructor(
     configurator: any,
-    private readonly onResize: (height: number, layoutHeight: number) => void,
-    private readonly onSelectionReady: (ready: boolean) => void,
-    private readonly onScroll: (deltaX: number, deltaY: number) => void,
-    private readonly getInitialResourceImpl: () => { resourceUrl: string; resourceUrlPattern: string } | null,
+    onResize: (height: number, layoutHeight: number) => void,
+    onSelectionReady: (ready: boolean) => void,
+    onScroll: (deltaX: number, deltaY: number) => void,
+    getInitialResource: () => { resourceUrl: string; resourceUrlPattern: string } | null,
+    authorityCurrent: () => boolean,
   ) {
     super()
+    this.#onResize = onResize
+    this.#onSelectionReady = onSelectionReady
+    this.#onScroll = onScroll
+    this.#getInitialResource = getInitialResource
+    this.#authorityCurrent = authorityCurrent
     // The configurator form is short-lived, so a burst past the per-minute cap is always a bug:
-    // reject rather than throttle. (No resume timer is created in reject mode, so no dispose needed.)
-    this.#gatekeeper = createRateLimitedCapability(configurator, {
+    // reject rather than throttle. Closing still rejects queued work in either mode.
+    this.#slot = createRateLimitedCapability(configurator, {
       maxConcurrency: 4,
       maxCallsPerMinute: 120,
       maxPendingCalls: 32,
       onRateLimit: 'reject',
       label: 'Resource configurator',
-    }).capability
+      assertAuthority: () => this.#assertActive(),
+    })
+    this.#gatekeeper = this.#slot.capability
+  }
+
+  #assertActive() {
+    if (!this.#active || this.#closed || !this.#authorityCurrent()) throw new Error('Configurator is no longer available.')
+  }
+  [suspendHost]() { this.#active = false; this.#generation++; this.#slot.suspend() }
+  [refreshHost](target: any) {
+    if (this.#closed) return
+    this.#slot.replace(target)
+    this.#active = true
+    // Parent layout effects publish the acquisition fence after child layout effects run.
+    queueMicrotask(() => {
+      if (!this.isReady(this.#generation)) return
+      for (const waiter of this.#readyWaiters) waiter.resolve(this.#generation)
+      this.#readyWaiters.clear()
+    })
+  }
+  [disposeHost]() {
+    this.#closed = true; this.#active = false; this.#slot.dispose()
+    for (const waiter of this.#readyWaiters) waiter.reject(new Error('Configurator is no longer available.'))
+    this.#readyWaiters.clear()
+  }
+
+  awaitReady(): Promise<number> {
+    if (this.#closed) return Promise.reject(new Error('Configurator is no longer available.'))
+    if (this.isReady(this.#generation)) return Promise.resolve(this.#generation)
+    if (this.#readyWaiters.size >= 16) return Promise.reject(new Error('Too many configurator readiness requests.'))
+    return new Promise((resolve, reject) => { this.#readyWaiters.add({ resolve, reject }) })
+  }
+
+  isReady(generation: number): boolean {
+    return !this.#closed && this.#active && generation === this.#generation && this.#authorityCurrent()
   }
 
   get gatekeeper(): RpcStub<RpcTarget> {
+    this.#assertActive()
     return this.#gatekeeper
   }
 
   async getInitialResource(): Promise<{ resourceUrl: string; resourceUrlPattern: string } | null> {
-    return this.getInitialResourceImpl()
+    this.#assertActive()
+    return this.#getInitialResource()
   }
 
   resize(height: number, layoutHeight: number): void {
-    this.onResize(height, layoutHeight)
+    this.#assertActive()
+    this.#onResize(height, layoutHeight)
   }
 
   setSelectionReady(ready: boolean): void {
-    this.onSelectionReady(ready)
+    this.#assertActive()
+    this.#onSelectionReady(ready)
   }
 
   forwardScroll(deltaX: number, deltaY: number): void {
-    this.onScroll(deltaX, deltaY)
+    this.#assertActive()
+    this.#onScroll(deltaX, deltaY)
   }
 }
 
-export default function SandboxedResourceConfigurator({
+export default function SandboxedResourceConfigurator(props: Parameters<typeof ResourceConfiguratorDocument>[0]) {
+  // The caller can supply a verified owner/account/resource identity. Without it, a new capability
+  // remains conservatively incompatible; identical HTML alone never proves equivalent authority.
+  const identity = useRef({ ui: props.frame.ui, key: 0 })
+  if (identity.current.ui !== props.frame.ui) identity.current = { ui: props.frame.ui, key: identity.current.key + 1 }
+  return <RetainedConfigurator key={JSON.stringify([props.resourceIdentity ?? identity.current.key, props.initialResourceUrl, props.resourceUrlPattern])} {...props} />
+}
+
+function RetainedConfigurator(props: Parameters<typeof ResourceConfiguratorDocument>[0]) {
+  const [html, setHtml] = useState(props.frame.iframeHtml)
+  return <>
+    {html !== props.frame.iframeHtml && <div role="status">A configurator update is available.{' '}
+      <button type="button" disabled={props.authorityAvailable === false} onClick={() => setHtml(props.frame.iframeHtml)}>Reload when ready</button>
+    </div>}
+    <ResourceConfiguratorDocument key={html} {...props} frame={{ ...props.frame, iframeHtml: html }} />
+  </>
+}
+
+function ResourceConfiguratorDocument({
   frame,
   topOffset = 0,
   onCollectResourceUrlChange,
   onSelectionReadyChange,
   initialResourceUrl,
   resourceUrlPattern,
+  authorityAvailable = true,
+  isAuthorityCurrent,
 }: {
   frame: ResourceConfiguratorFrame,
   topOffset?: number,
@@ -81,12 +159,45 @@ export default function SandboxedResourceConfigurator({
    */
   initialResourceUrl?: string,
   resourceUrlPattern?: string,
+  /** Verified owner + exact account + resource scope, supplied by the acquiring caller. */
+  resourceIdentity?: string,
+  authorityAvailable?: boolean,
+  isAuthorityCurrent?: () => boolean,
 }) {
   const { resolvedThemeMode } = useTheme()
   const placeholderRef = useRef<HTMLDivElement>(null)
   const iframeRef = useRef<HTMLIFrameElement>(null)
+  // Activity detaches refs without destroying the iframe. Its one-shot handshake can arrive then.
+  const boundWindowRef = useRef<Window | null>(null)
+  const attachIframe = useCallback((iframe: HTMLIFrameElement | null) => {
+    iframeRef.current = iframe
+    if (iframe) boundWindowRef.current = iframe.contentWindow
+  }, [])
   const rpcSessionRef = useRef<{ [Symbol.dispose]?(): void } | null>(null)
   const iframeRpcRef = useRef<RpcStub<ResourceConfiguratorIframe> | null>(null)
+  const hostRef = useRef<ResourceConfiguratorHostImpl | null>(null)
+  const activeRef = useRef(false)
+  const authorityRef = useRef(isAuthorityCurrent)
+  const epochRef = useRef(0)
+  const selectionReadyRef = useRef(onSelectionReadyChange)
+  const cleanupRef = useRef<(() => void) | null>(null)
+  useInsertionEffect(() => () => {
+    cleanupRef.current?.()
+    hostRef.current?.[disposeHost]()
+    boundWindowRef.current = null
+  }, [])
+  useLayoutEffect(() => {
+    authorityRef.current = isAuthorityCurrent
+  })
+  useLayoutEffect(() => {
+    selectionReadyRef.current = onSelectionReadyChange
+  }, [onSelectionReadyChange])
+  useLayoutEffect(() => {
+    activeRef.current = authorityAvailable
+    if (authorityAvailable) hostRef.current?.[refreshHost](frame.ui)
+    else hostRef.current?.[suspendHost]()
+    return () => { activeRef.current = false; epochRef.current++; hostRef.current?.[suspendHost]() }
+  }, [frame.ui, authorityAvailable])
   // The configurator stub is an arbitrary gatekeeper-defined capability: its method shape is
   // unknown to Workshop, so we treat it as `any` and let Cap'n Web carry calls through.
   const configuratorRef = useRef<any>(null)
@@ -141,6 +252,7 @@ export default function SandboxedResourceConfigurator({
     updateScheduledRef.current = true
     requestAnimationFrame(() => {
       updateScheduledRef.current = false
+      if (!activeRef.current) return
       const placeholder = placeholderRef.current
       const rect = placeholder?.getBoundingClientRect()
       if (!placeholder || !rect) return
@@ -198,6 +310,7 @@ export default function SandboxedResourceConfigurator({
   const connectIframe = (port: MessagePort) => {
     if (iframeConnectedRef.current) {
       iframeInvalidatedRef.current = true
+      hostRef.current?.[disposeHost]()
       port.close()
       iframeRpcRef.current?.[Symbol.dispose]?.()
       iframeRpcRef.current = null
@@ -205,13 +318,13 @@ export default function SandboxedResourceConfigurator({
       rpcSessionRef.current = null
       return
     }
-    if (iframeInvalidatedRef.current) return
+    if (iframeInvalidatedRef.current) { port.close(); return }
     if (!configuratorRef.current) {
       port.close()
       return
     }
     rpcSessionRef.current?.[Symbol.dispose]?.()
-    const iframe = newMessagePortRpcSession<ResourceConfiguratorIframe>(port, new ResourceConfiguratorHostImpl(
+    const host = new ResourceConfiguratorHostImpl(
       configuratorRef.current,
       (nextHeight, nextLayoutHeight) => {
         if (!Number.isFinite(nextHeight)) return
@@ -220,13 +333,17 @@ export default function SandboxedResourceConfigurator({
         const layoutHeight = Number.isFinite(nextLayoutHeight) ? nextLayoutHeight : nextHeight
         setLayoutHeight(clamp(Math.ceil(layoutHeight), MIN_CONFIGURATOR_HEIGHT, maxHeight))
       },
-      ready => onSelectionReadyChange?.(Boolean(ready)),
+      ready => selectionReadyRef.current?.(Boolean(ready)),
       (deltaX, deltaY) => applyForwardedScroll(
         clamp(Number(deltaX) || 0, -SCROLL_FORWARD_MAX_DELTA, SCROLL_FORWARD_MAX_DELTA),
         clamp(Number(deltaY) || 0, -SCROLL_FORWARD_MAX_DELTA, SCROLL_FORWARD_MAX_DELTA),
       ),
       () => initialResourceRef.current,
-    ))
+      () => activeRef.current && (authorityRef.current?.() ?? true),
+    )
+    hostRef.current = host
+    if (!activeRef.current) host[suspendHost]()
+    const iframe = newMessagePortRpcSession<ResourceConfiguratorIframe>(port, host)
     rpcSessionRef.current = iframe
     iframeRpcRef.current?.[Symbol.dispose]?.()
     iframeRpcRef.current = iframe.dup()
@@ -240,6 +357,7 @@ export default function SandboxedResourceConfigurator({
   const handleIframeLoad = () => {
     iframeLoadCountRef.current++
     if (iframeLoadCountRef.current > 1) {
+      hostRef.current?.[disposeHost]()
       iframeInvalidatedRef.current = true
       iframeRpcRef.current?.[Symbol.dispose]?.()
       iframeRpcRef.current = null
@@ -249,6 +367,8 @@ export default function SandboxedResourceConfigurator({
   }
 
   const collectResourceUrl = () => {
+    if (!activeRef.current || !(authorityRef.current?.() ?? true)) return Promise.reject(new Error('Configurator is no longer available.'))
+    const epoch = epochRef.current
     if (iframeInvalidatedRef.current) return Promise.reject(new Error('Configurator is no longer available.'))
     const iframe = iframeRpcRef.current
     if (!iframe || !iframeConnectedRef.current) return Promise.reject(new Error('Configurator is not ready.'))
@@ -261,7 +381,10 @@ export default function SandboxedResourceConfigurator({
           reject(new Error('Configurator did not provide its resource URL. Please try again.'))
         }, COLLECT_VALUES_TIMEOUT_MS)
       }),
-    ]).finally(() => {
+    ]).then(value => {
+      if (!activeRef.current || epoch !== epochRef.current || !(authorityRef.current?.() ?? true)) throw new Error('Configurator is no longer available.')
+      return value
+    }).finally(() => {
       if (timeout !== null) window.clearTimeout(timeout)
     })
   }
@@ -272,6 +395,7 @@ export default function SandboxedResourceConfigurator({
     if (scrollFrameRef.current !== null) return
     scrollFrameRef.current = requestAnimationFrame(() => {
       scrollFrameRef.current = null
+      if (!activeRef.current) { pendingScrollRef.current = { x: 0, y: 0 }; return }
       const deltaX = clamp(pendingScrollRef.current.x, -SCROLL_FORWARD_MAX_DELTA, SCROLL_FORWARD_MAX_DELTA)
       const deltaY = clamp(pendingScrollRef.current.y, -SCROLL_FORWARD_MAX_DELTA, SCROLL_FORWARD_MAX_DELTA)
       pendingScrollRef.current = { x: 0, y: 0 }
@@ -284,6 +408,7 @@ export default function SandboxedResourceConfigurator({
   }
 
   useLayoutEffect(() => {
+    if (cleanupRef.current) { updateFrameRect(); return }
     iframeConnectedRef.current = false
     iframeInvalidatedRef.current = false
     iframeLoadCountRef.current = 0
@@ -357,11 +482,12 @@ export default function SandboxedResourceConfigurator({
   }, [frame.iframeHtml])
 
   useEffect(() => {
+    if (cleanupRef.current) return
     const handleMessage = (event: MessageEvent) => {
-      if (event.source !== iframeRef.current?.contentWindow || event.origin !== 'null') return
+      if (!boundWindowRef.current || event.source !== boundWindowRef.current || event.origin !== 'null') return
       if (iframeInvalidatedRef.current) return
 
-      const frameWindow = iframeRef.current?.contentWindow
+      const frameWindow = boundWindowRef.current
       if (frameWindow && forwardTrustedFrameError(
         event, frameWindow, { surface: 'configurator' },
       )) return
@@ -372,10 +498,9 @@ export default function SandboxedResourceConfigurator({
     }
 
     window.addEventListener('message', handleMessage)
-    return () => {
+    cleanupRef.current = () => {
       window.removeEventListener('message', handleMessage)
       if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current)
-      onSelectionReadyChange?.(null)
       iframeRpcRef.current?.[Symbol.dispose]?.()
       iframeRpcRef.current = null
       rpcSessionRef.current?.[Symbol.dispose]?.()
@@ -387,7 +512,7 @@ export default function SandboxedResourceConfigurator({
     <>
       <div ref={placeholderRef} style={{ height: layoutHeight + topOffset }} />
       {frameRect && createPortal(<iframe
-        ref={iframeRef}
+        ref={attachIframe}
         srcDoc={frame.iframeHtml}
         onLoad={handleIframeLoad}
         sandbox="allow-scripts"

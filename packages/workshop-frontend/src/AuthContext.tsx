@@ -27,7 +27,8 @@ interface AuthProviderProps {
 export function AuthProvider({ children, authenticatedApi, onLogout, onSwitchIdentity }: AuthProviderProps) {
   const [identity, setIdentity] = useState<{ api: RpcStub<AuthenticatedApi>; user: AiChatAuthorInfo }>()
   const currentUser = identity?.api === authenticatedApi ? identity.user : null
-  const [isAdmin, setIsAdmin] = useState(false)
+  const [adminStatus, setAdminStatus] = useState<{ api: RpcStub<AuthenticatedApi>; allowed: boolean }>()
+  const isAdmin = adminStatus?.api === authenticatedApi && adminStatus.allowed
 
   useEffect(() => {
     let active = true
@@ -50,7 +51,7 @@ export function AuthProvider({ children, authenticatedApi, onLogout, onSwitchIde
   useEffect(() => {
     let cancelled = false
     authenticatedApi.amIAdmin().then((admin) => {
-      if (!cancelled) setIsAdmin(admin)
+      if (!cancelled) setAdminStatus({ api: authenticatedApi, allowed: admin })
     }).catch(() => {})
     return () => { cancelled = true }
   }, [authenticatedApi])

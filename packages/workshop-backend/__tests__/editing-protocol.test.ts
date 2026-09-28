@@ -6,6 +6,29 @@ import { makeActionStorage, openFakeOverseer } from "./fixtures";
 const submission = {generation: 0, revision: 0, clientId: "test-client", seq: 1, change: {}};
 
 describe("editing wire negotiation", () => {
+  it("fences retained gatekeeper removal without touching bindings or hooks and permits reads", async () => {
+    const environment = {WORKSHOP_EDITING_PAUSED: "false"};
+    const storage = makeActionStorage();
+    storage.gatekeepers.put({id: 1, resourceTitle: "Existing", class: {} as never});
+    let removals = 0;
+    const bindings = {RESOURCE: 1};
+    const hooks = [{id: 1, enabled: true}];
+    const client = await openFakeOverseer(storage, {negotiate: false, impl: {
+      env: environment, removeGatekeeper: () => { removals++; delete bindings.RESOURCE; hooks[0].enabled = false; },
+      getGatekeeperFacet: () => ({}),
+      recordGadgetAnalytics: () => {},
+    }});
+    using gatekeeper = await client.getGatekeeperById(1);
+    expect(await gatekeeper.getTitle()).toBe("Existing");
+    await expect(gatekeeper.remove()).rejects.toThrow("EDITING_PROTOCOL_UPGRADE_REQUIRED");
+    await client.negotiateEditingProtocol("git-ot-v1");
+    environment.WORKSHOP_EDITING_PAUSED = "true";
+    await expect(gatekeeper.remove()).rejects.toThrow("EDITING_CUTOVER_PAUSED");
+    expect(await gatekeeper.getTitle()).toBe("Existing");
+    expect(bindings).toEqual({RESOURCE: 1});
+    expect(hooks).toEqual([{id: 1, enabled: true}]);
+    expect(removals).toBe(0);
+  });
   it("keeps an old client's runtime gadget connection alive while fencing its retained editor child", async () => {
     const environment = {WORKSHOP_EDITING_PAUSED: "true"};
     const client = await openFakeOverseer(makeActionStorage(), {negotiate: false, impl: {

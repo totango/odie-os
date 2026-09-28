@@ -87,6 +87,8 @@ async function runConfiguratorRuntime(directory: string) {
     function newMessagePortRpcSession() {
       return {
         gatekeeper: {},
+        awaitReady: async () => 1,
+        isReady: async generation => generation === 1,
         getInitialResource: async () => null,
         setSelectionReady() {},
         resize() {},
@@ -258,8 +260,12 @@ describe("generated configurator error reporting", () => {
 
     assert.match(runtime, /reportFrontendIssue\("configurator\.checkbox-list-load", error\)/);
     assert.match(runtime, /reportFrontendIssue\("configurator\.autocomplete-load", error\)/);
-    assert.match(runtime, /reportFrontendIssue\("configurator\.initial-resource-load", error\)/);
-    assert.match(runtime, /reportFrontendIssue\("configurator\.initial-values-load", error\)/);
+    assert.match(runtime, /let failureSite = "configurator\.initial-resource-load"/);
+    assert.match(runtime, /failureSite = "configurator\.initial-values-load"/);
+    assert.match(runtime, /reportFrontendIssue\(failureSite, failure\.error\)/);
+    assert.ok(runtime.indexOf('if (readiness !== "legacy" && !await host.isReady(generation)) continue;') <
+      runtime.indexOf('reportFrontendIssue(failureSite, failure.error)'),
+    'suspension is retried as unfinished bootstrap, not reported as a permanent option failure');
   });
 
   it("disables reporting and removes source-map artifacts when reporting is disabled", async () => {
@@ -355,6 +361,65 @@ describe("generated configurator option sanitizing", () => {
     };
     pruneCheckboxEntries(entries, new Set(["tools:new"]));
     assert.deepEqual(entries, { "tools:new": { status: "ready", disabled: false } });
+  });
+});
+
+describe("generated configurator readiness", () => {
+  async function bootstrap(host: object) {
+    const runtime = await readRuntime(fixtureDir);
+    const source = runtime.match(/async function seedInitialValues\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.ok(source);
+    // Execute the generated bootstrap with real promise ordering, without a DOM or mocked parser.
+    // oxlint-disable-next-line no-new-func
+    return new Function("host", `
+      let ui;
+      const values = {}, queryByName = {}, failures = [];
+      const spec = { initialValuesFromResourceUrl: async ({ resourceUrl }) => ({ url: resourceUrl }) };
+      const reportFrontendIssue = (site, error) => failures.push({ site, error });
+      ${source}
+      return seedInitialValues().then(() => ({ values, queryByName, failures }));
+    `)(host);
+  }
+
+  it("discards an interrupted generation and reacquires its capability", async () => {
+    let generation = 0;
+    let disposed = 0;
+    const result = await bootstrap({
+      awaitReady: async () => ++generation,
+      isReady: async () => generation === 2,
+      get gatekeeper() { return { [Symbol.dispose]() { disposed++; } }; },
+      getInitialResource: async () => ({ resourceUrl: `epoch-${generation}` }),
+    });
+    assert.equal(generation, 2);
+    assert.equal(disposed, 1);
+    assert.deepEqual(result.values, { url: "epoch-2" });
+    assert.deepEqual(result.failures, []);
+  });
+
+  it("supports only the precise first-probe legacy missing-method response", async () => {
+    const result = await bootstrap({
+      awaitReady: async () => { throw new TypeError("'awaitReady' is not a function."); },
+      gatekeeper: {},
+      getInitialResource: async () => ({ resourceUrl: "legacy" }),
+    });
+    assert.deepEqual(result.values, { url: "legacy" });
+    await assert.rejects(bootstrap({
+      awaitReady: async () => { throw new Error("authority revoked"); },
+    }), /authority revoked/);
+  });
+
+  it("does not downgrade an established readiness protocol after suspension", async () => {
+    let calls = 0;
+    await assert.rejects(bootstrap({
+      awaitReady: async () => {
+        if (++calls === 1) return 1;
+        throw new TypeError("'awaitReady' is not a function.");
+      },
+      isReady: async () => false,
+      gatekeeper: {},
+      getInitialResource: async () => null,
+    }), /'awaitReady' is not a function/);
+    assert.equal(calls, 2);
   });
 });
 

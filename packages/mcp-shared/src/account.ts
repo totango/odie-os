@@ -13,7 +13,7 @@
 // Every nonce is single-use, time-bounded, and compared in constant time; see `connect-nonce.ts`.
 
 import { DurableObject } from "cloudflare:workers";
-import { acknowledgeHandoff, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
+import { acknowledgeHandoff, requireBrowserHandoff, requireConnectHandoff, requirePersistedHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
 import type { GatekeeperReconnectOptions } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConnectHandoff, GatekeeperConnectCallback, GatekeeperUser }
   from "@gadgets/workshop-shared/gatekeeper";
@@ -373,6 +373,7 @@ export abstract class McpAccountBase<E extends AccountEnv, P = unknown>
     const server = resolveConnectTarget(existing, target);
     const claimed = server ? this.claimSelection(initiationNonce) : null;
     if (!server || !claimed) return { kind: "invalid" };
+    requirePersistedHandoff(this.ctx.storage.kv);
     const reconnect = claimed.reconnect === true;
 
     // Every claimed attempt advances the generation before its first await, invalidating old probe,

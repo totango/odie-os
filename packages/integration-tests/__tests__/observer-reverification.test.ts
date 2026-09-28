@@ -141,6 +141,7 @@ async function shareGadgetWithBob(
   const aliceAccount = await provisionAccount(aliceApi);
 
   const overseer = await aliceApi.newGadget();
+  await overseer.negotiateEditingProtocol("git-ot-v1");
   for (const thingName of thingNames) {
     await overseer.newGatekeeper(aliceAccount.id, thingUrl(thingName));
   }
@@ -187,6 +188,7 @@ describe("observer re-verification", () => {
       using aliceApi = await signUp(publicApi, alice);
       const account = await provisionAccount(aliceApi);
       using overseer = await aliceApi.newGadget();
+      await overseer.negotiateEditingProtocol("git-ot-v1");
 
       using bound = await overseer.newGatekeeper(account.id, thingUrl("bound"));
       using unbound = await overseer.newGatekeeper(account.id, thingUrl("unbound"));
@@ -221,6 +223,7 @@ describe("observer re-verification", () => {
       const bobAccount = await provisionAccount(bobApi);
 
       const ownerWorkspace = await aliceApi.newGadget();
+      await ownerWorkspace.negotiateEditingProtocol("git-ot-v1");
       const { id: gadgetId } = await ownerWorkspace.getMetadata();
       const collaborator = await ownerWorkspace.addCollaborator(bob, "build");
       if (!collaborator) throw new Error(`Failed to share the gadget with ${bob}`);

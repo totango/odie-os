@@ -7,8 +7,11 @@ import {
   McpAccountBase, resolveConnectTarget, type AccountEnv, type ConnectedServer,
 } from "../src/account.js";
 
-function fakeContext() {
+function fakeContext(versioned = true) {
   const values = new Map<string, unknown>();
+  // Normal fixtures represent a launch acknowledged by the current provider. Upgrade fixtures
+  // opt out and seed the old stored records verbatim instead of calling current initiation code.
+  if (versioned) values.set("connectHandoffProtocol", "browser-bound-v1");
   return {
     id: { toString: () => "account-id" },
     storage: {
@@ -522,6 +525,39 @@ describe("connect initiation nonce", () => {
       ...server("https://portal.example/mcp"), auth: "none", provenance: "deployment",
     })).rejects.toThrow(/unsafe authorization URL/);
     expect(context.storage.kv.get<ConnectedServer>("server")?.auth).toBe("oauth");
+  });
+
+  it.each(["oauth", "initiation"] as const)("rejects aa485877 persisted reconnect at %s before provider I/O", async stage => {
+    const context = fakeContext(false);
+    const kv = context.storage.kv;
+    const complete = vi.fn(async () => { throw new Error("Account already connected"); });
+    const reconnectComplete = vi.fn(async () => HANDOFF);
+    const records = {
+      server: server("https://mcp.example/mcp"),
+      connected: true,
+      reconnecting: true,
+      connectionGeneration: 2,
+      expiredNotified: false,
+      tokens: { access_token: "live-access", refresh_token: "live-refresh", token_type: "Bearer", expiresAt: Date.now() + 3600_000 },
+      mcpSessionId: "live-session",
+      oauthClient: { client_id: "registered-client", issuer: "https://auth.example" },
+      oauthDiscovery: { authorizationServerUrl: "https://auth.example" },
+      oauthVerifier: "v".repeat(43),
+    };
+    for (const [key, value] of Object.entries(records)) kv.put(key, value);
+    kv.put("callback", { complete, reconnectComplete, getHandoffProtocol });
+    kv.put("nonce", { value: "a".repeat(64), expiresAt: Date.now() + 600_000, stage });
+    if (stage === "oauth") kv.put("pendingAuth", { generation: 2 });
+    const exchange = vi.fn();
+    vi.stubGlobal("fetch", exchange);
+    const account = new OAuthFlowAccount(context as never, {});
+    await expect(stage === "oauth" ? account.acceptAuthCode("authorization-code", "a".repeat(64)) :
+      account.beginConnect("a".repeat(64), null)).rejects.toThrow(/before the handoff upgrade/);
+    expect(exchange).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+    expect(reconnectComplete).not.toHaveBeenCalled();
+    for (const [key, value] of Object.entries(records)) expect(kv.get(key)).toEqual(value);
+    expect(kv.get("stagedCredentials")).toBeUndefined();
   });
 
   it.each(["browser-bound-v1", "native-verifier-v1"] as const)("completes %s OAuth after a new account instance resumes the redirect", async handoffProtocol => {

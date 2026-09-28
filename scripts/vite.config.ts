@@ -25,11 +25,24 @@
 
 import { TESTS_WITH_TIMEOUT_ENV, withTestTimeout } from "./vitest-task-vite-config.ts";
 
+const trustedLauncherTest = "trusted launcher uses only the explicitly reviewed Node path and digest";
+
 export default {
   run: {
     tasks: {
+      // Automatic file tracking reinjects DYLD_INSERT_LIBRARIES (LD_PRELOAD on Linux) into
+      // children even across env -i. The trusted launcher must reject that environment, so its
+      // actual clean-process test runs without instrumentation, never with relaxed assertions.
+      'test:trusted-launcher': {
+        command: withTestTimeout(`node --test --test-name-pattern='${trustedLauncherTest}' scripts/probe-coding-session-github-packages.test.ts`),
+        cwd: "..",
+        cache: false,
+      },
       test: {
-        command: withTestTimeout("node --test 'scripts/**/*.test.ts'"),
+        // Partition only this test into the mandatory prerequisite above; direct node --test
+        // continues to run everything. Both selectors share the name so neither can drift alone.
+        command: withTestTimeout(`node --test --test-skip-pattern='${trustedLauncherTest}' 'scripts/**/*.test.ts'`),
+        dependsOn: ['test:trusted-launcher'],
         env: TESTS_WITH_TIMEOUT_ENV,
         cwd: "..",
         // Workspace-wide, matching `cwd`: the suites read across `packages/` and the root manifests,

@@ -3,6 +3,7 @@ import { RpcStub } from 'capnweb'
 import { PublicApi, AuthVendorInfo } from '@gadgets/workshop-shared/api'
 import { Button, Banner } from '@cloudflare/kumo'
 import { getWorkshopRuntime } from '../../runtime'
+import { nativeFlowStore } from '../../runtime/nativeFlowStore'
 import { openDisownedPopup, uniquePopupName } from '../../connectHandoff'
 
 function base64Url(bytes: Uint8Array): string {
@@ -89,13 +90,17 @@ export default function OAuthButtons({ rpcStub, vendors, onSuccess }: OAuthButto
     try {
       const runtime = getWorkshopRuntime()
       if (runtime.kind === 'tauri') {
+        const store = nativeFlowStore(runtime)
+        const epoch = store.begin()
         console.info('[native-auth] creating browser flow')
         const verifier = randomVerifier()
         const started = await rpcStub.startGatekeeperLogin(vendorId, {
           flow: { returnMode: 'native-verified-link', clientVerifierHash: await sha256Hex(verifier) },
         })
         console.info('[native-auth] browser flow created')
-        await runtime.writePendingNativeLoginFlow({ flowHandle: started.flowHandle!, verifier, expiresAt: started.expiresAt })
+        if (!await store.replace(epoch, { flowHandle: started.flowHandle!, verifier, expiresAt: started.expiresAt }, () => {
+          if (!mountedRef.current) throw new Error('Sign-in was closed')
+        })) return
         console.info('[native-auth] verifier stored')
         await runtime.openOAuthTrampoline(started.url)
         console.info('[native-auth] system browser opened')

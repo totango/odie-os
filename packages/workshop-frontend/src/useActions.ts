@@ -110,8 +110,10 @@ function commit(store: Store, status: ActionsState['status'] = store.snapshot.st
 function scheduleNotify(store: Store) {
   if (store.notifyScheduled) return
   store.notifyScheduled = true
+  const generation = store.generation
 
   window.requestAnimationFrame(() => {
+    if (store.generation !== generation) return
     store.notifyScheduled = false
     commit(store)
   })
@@ -120,6 +122,7 @@ function scheduleNotify(store: Store) {
 // Bumps the generation (orphaning any in-flight callbacks) and clears the staged session state.
 function resetSession(store: Store): number {
   store.generation++
+  store.notifyScheduled = false
   store.stagedPending = new Map()
   store.stagedEntries = new Map()
   store.snapshot = EMPTY_STATE
@@ -138,10 +141,11 @@ function openSubscription(overseer: RpcStub<Overseer>, store: Store) {
   const key = storeKeys.get(overseer)
   const startAfter = key === undefined ? undefined : watermarks.get(key)
   store.resumed = startAfter !== undefined
+  let failed = false
 
   class ActionsSubscriberImpl extends RpcTarget implements ActionsSubscriber {
     entry(record: ActionLogEntry): void {
-      if (store.generation !== generation) return
+      if (store.generation !== generation || failed) return
       trackChange(store, record)
       store.stagedEntries.set(record.id, record)
       let pendingChanged: boolean
@@ -168,7 +172,6 @@ function openSubscription(overseer: RpcStub<Overseer>, store: Store) {
   }
   const subscriber = new ActionsSubscriberImpl() as unknown as RpcStub<ActionsSubscriber>
 
-  let failed = false
   const fail = (error: unknown) => {
     if (store.generation !== generation) return
     console.error('Failed to load pending actions:', error)
@@ -189,7 +192,7 @@ function openSubscription(overseer: RpcStub<Overseer>, store: Store) {
     ? subscribe(subscriber)
     : subscribe(subscriber, startAfter)
   subscribed.then(sub => {
-    if (store.generation !== generation) {
+    if (store.generation !== generation || failed) {
       sub[Symbol.dispose]()
       return
     }
@@ -250,7 +253,8 @@ function release(overseer: RpcStub<Overseer>) {
   store.refCount--
   if (store.refCount <= 0) {
     closeSubscription(overseer, store)
-    stores.delete(overseer)
+    // Activity subscription cleanup may run after passive cleanup. Preserve store identity
+    // while the capability is reachable so useSyncExternalStore does not subscribe to an orphan.
   }
 }
 
@@ -299,7 +303,7 @@ export function useActionEntries(
     const store = acquire(overseer)
     store.entryListeners.add(listener)
 
-    // Retained until `release()` drops refCount to 0 and deletes the store, so late
+    // Retained until `release()` drops refCount to 0 and clears the store, so late
     // consumers can replay already-received entries while a shared subscription is still alive.
     for (const record of store.stagedEntries.values()) {
       listener(record)

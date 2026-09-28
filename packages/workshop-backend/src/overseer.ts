@@ -5732,7 +5732,8 @@ class OverseerImpl implements AgentHooks {
   // the collaborator-facing mints, omitted for the owner's and for internal callers (see
   // GadgetClientImpl).
   async addGatekeeper(
-      cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec, joinAs?: SessionKind)
+      cls: GatekeeperClass, creationSpec?: GatekeeperCreationSpec, joinAs?: SessionKind,
+      editing?: EditingProtocolSession)
       : Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
@@ -5785,7 +5786,7 @@ class OverseerImpl implements AgentHooks {
       }
     }
 
-    return new GatekeeperClientImpl<any>(this, id, facet, undefined, joinAs);
+    return new GatekeeperClientImpl<any>(this, id, facet, undefined, joinAs, editing);
   }
 
   // Destroy a gatekeeper (connection) workpiece. Any binding edges pointing at it are severed so
@@ -11998,7 +11999,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // sessions that restart is about to sever (see #gatekeepersPendingRestart).
     this.impl.assertGatekeeperUsable(id);
     return new GatekeeperClientImpl<any>(this.impl, id, this.impl.getGatekeeperFacet(id),
-        undefined, this.#mintedCapabilityKind());
+        undefined, this.#mintedCapabilityKind(), this.#editing);
   }
 
   private async recordConnectionCreated(
@@ -12036,7 +12037,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       resourceUrl,
       typeUrlPattern,
     };
-    let result = await this.impl.addGatekeeper(cls, creationSpec, this.#mintedCapabilityKind());
+    let result = await this.impl.addGatekeeper(cls, creationSpec, this.#mintedCapabilityKind(), this.#editing);
     await this.recordConnectionCreated(result, "gatekeeper", vendorId);
     return result;
   }
@@ -12068,7 +12069,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.LanguageModelGatekeeper({props}), creationSpec,
-        this.#mintedCapabilityKind());
+        this.#mintedCapabilityKind(), this.#editing);
     await this.recordConnectionCreated(result, "ai_model");
     return result;
   }
@@ -12122,7 +12123,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.AgentSpawnerGatekeeper({props}), creationSpec,
-        this.#mintedCapabilityKind());
+        this.#mintedCapabilityKind(), this.#editing);
     await this.recordConnectionCreated(result, "agent_spawner");
     return result;
   }
@@ -13735,7 +13736,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     // The child capability counts exactly as this one does: it can outlive this object.
     return new GatekeeperClientImpl<any>(
         this.impl, edge.target, this.impl.getGatekeeperFacet(edge.target),
-        undefined, this.joinedAs);
+        undefined, this.joinedAs, this.editing);
   }
 
   async bind(name: string, target: WorkpieceId, chatId?: number): Promise<void> {
@@ -14023,7 +14024,7 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
   constructor(private impl: OverseerImpl, private id: number,
       private facet: Fetcher<Gatekeeper<Session>>,
       private caller: GatekeeperCaller = {from: "user"},
-      joinedAs?: SessionKind) {
+      joinedAs?: SessionKind, private editing?: EditingProtocolSession) {
     super();
     if (joinedAs) this.#leaveSession = impl.joinSession(joinedAs);
   }
@@ -14034,6 +14035,8 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async remove(): Promise<void> {
     let record = this.impl.storage.gatekeepers.get(this.id);
+    if (this.editing) this.editing.assertWritable();
+    else assertEditingAvailable(this.impl.env);
     this.impl.removeGatekeeper(this.id);
     this.impl.recordGadgetAnalytics({
       event_name: "connection_removed",
@@ -14059,6 +14062,8 @@ class GatekeeperClientImpl<Session extends RpcCompatible<Session>>
 
   async setTitle(title: string): Promise<void> {
     // This changes only the display title used locally within this workspace (resourceTitle is a
+    if (this.editing) this.editing.assertWritable();
+    else assertEditingAvailable(this.impl.env);
     // denormalized copy of the remote resource's title), never the remote resource.
     let record = this.#getRecord();
     record.resourceTitle = title;

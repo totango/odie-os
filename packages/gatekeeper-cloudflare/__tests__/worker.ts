@@ -5,13 +5,19 @@
 // `ctx.exports.X({props})` is only reachable through `ctx.facets`, which is the same way the overseer
 // instantiates a gatekeeper in production.
 
-import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
+import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type { GatekeeperUserVerifier, GitCache, GitObjectType, GitOid }
   from "@gadgets/workshop-shared/gatekeeper";
 import type { CloudflareObservabilityGatekeeper } from "../src/cloudflare.js";
 
 export { default } from "../src/cloudflare.js";
 export * from "../src/cloudflare.js";
+
+/** Upgraded callback must not make an old persisted reconnect safe to complete. */
+export class UpgradeTestCallback extends WorkerEntrypoint {
+  async getHandoffProtocol() { return "browser-bound-v1" as const; }
+  async complete(): Promise<never> { throw new Error("Account already connected"); }
+}
 
 type GatekeeperProps = {
   userObjectId: string;

@@ -1,13 +1,25 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act } from 'react'
+import { act, useEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { PublicApi, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
 import { setReportedUserId } from './errorReporting'
 import { useAuth } from './useAuth'
+
+const runtime = vi.hoisted(() => ({
+  readSessionSecret: vi.fn<() => Promise<string | null>>(),
+  writeSessionSecret: vi.fn<(token: string) => Promise<void>>(async () => {}),
+  clearSessionSecret: vi.fn<() => Promise<void>>(async () => {}),
+}))
+vi.mock('./runtime', () => ({
+  getWorkshopRuntime: () => ({ ...runtime, readSessionSecret: () =>
+    runtime.readSessionSecret.getMockImplementation()
+      ? runtime.readSessionSecret() : Promise.resolve(localStorage.getItem('authToken')) }),
+  addNativeLoginTokenListener: () => () => {},
+}))
 
 vi.mock('./errorReporting', () => ({
   setReportedUserId: vi.fn<(reportedUserId: string | undefined) => void>(),
@@ -71,6 +83,8 @@ describe('useAuth error reporting identity', () => {
     localStorage.clear()
     vi.unstubAllEnvs()
     vi.clearAllMocks()
+    runtime.readSessionSecret.mockReset()
+    vi.unstubAllGlobals()
   })
 
   /** Mounts an independent `useAuth` instance, returning its login/logout handles. */
@@ -146,6 +160,68 @@ describe('useAuth error reporting identity', () => {
     act(() => controls.logout())
 
     expect(setReportedUserId).toHaveBeenLastCalledWith(undefined)
+  })
+
+  it('ignores a stored-secret read rejection after a newer login succeeds', async () => {
+    let rejectRead!: (error: Error) => void
+    runtime.readSessionSecret.mockImplementation(() => new Promise((_, reject) => { rejectRead = reject }))
+    let current!: ReturnType<typeof useAuth>
+    const api = stubPublicApi(person)
+    function Consumer() {
+      const value = useAuth(api)
+      useEffect(() => { current = value })
+      return null
+    }
+    const container = document.createElement('div')
+    containers.push(container)
+    const root = createRoot(container)
+    roots.push(root)
+    await act(async () => root.render(<Consumer />))
+    await act(async () => current.login('new-login'))
+    expect(current.isAuthenticated).toBe(true)
+    await act(async () => rejectRead(new Error('old keychain failure')))
+    expect(current.isAuthenticated).toBe(true)
+    expect(current.error).toBeNull()
+  })
+
+  it('revokes CF Access locally before blocked navigation and ignores late authentication', async () => {
+    vi.stubEnv('VITE_CF_ACCESS_MODE', 'true')
+    vi.resetModules()
+    const { useAuth: accessAuth } = await import('./useAuth')
+    const navigation = vi.fn<(url: string) => void>(() => { throw new Error('navigation blocked') })
+    const browserWindow = window
+    vi.stubGlobal('window', new Proxy(browserWindow, {
+      get(target, key) { return key === 'location' ? { assign: navigation } : Reflect.get(target, key, target) },
+    }))
+    let current!: ReturnType<typeof useAuth>
+    const dispose = vi.fn<() => void>()
+    let resolveLate!: (value: AiChatAuthorInfo) => void
+    const pending = new Promise<AiChatAuthorInfo>(resolve => { resolveLate = resolve })
+    const source = { whoami: async () => person, [Symbol.dispose]: dispose }
+    const late = { whoami: () => pending, [Symbol.dispose]: vi.fn<() => void>() }
+    const api = { authenticateFromCfAccess: () => source, authenticate: () => late } as unknown as RpcStub<PublicApi>
+    function Consumer() {
+      const value = accessAuth(api)
+      useEffect(() => { current = value })
+      return null
+    }
+    const container = document.createElement('div')
+    containers.push(container)
+    const root = createRoot(container)
+    roots.push(root)
+    await act(async () => root.render(<Consumer />))
+    expect(current.isAuthenticated).toBe(true)
+    act(() => { expect(() => current.logout()).toThrow('navigation blocked') })
+    expect(dispose).toHaveBeenCalled()
+    expect(current.authenticatedApi).toBeNull()
+    expect(current.isAuthenticated).toBe(false)
+    await act(async () => current.login('late-token'))
+    act(() => { expect(() => current.logout()).toThrow('navigation blocked') })
+    await act(async () => resolveLate(person))
+    expect(current.authenticatedApi).toBeNull()
+    expect(current.isAuthenticated).toBe(false)
+    expect(late[Symbol.dispose]).toHaveBeenCalled()
+    expect(navigation).toHaveBeenCalledWith('/cdn-cgi/access/logout')
   })
 
   it('ignores a lookup that resolves after logout', async () => {

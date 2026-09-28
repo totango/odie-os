@@ -1,7 +1,8 @@
 import { type RpcStub } from 'capnweb'
-import type { PublicApi, AuthenticatedApi } from '@gadgets/workshop-shared/api'
+import type { PublicApi, AuthenticatedApi, NativeLoginConsumeResult } from '@gadgets/workshop-shared/api'
 import { parseNativeDeepLink } from './deepLinks'
 import type { WorkshopRuntime } from './WorkshopRuntime'
+import { nativeFlowStore } from './nativeFlowStore'
 
 export const NATIVE_LOGIN_TOKEN_EVENT = 'workshop:native-login-token'
 const NATIVE_LOGIN_FOREGROUND_DELAY_MS = 250
@@ -23,33 +24,36 @@ export async function consumePendingNativeLogin(
   getPublicApi: () => RpcStub<PublicApi>,
   expectedHandle?: string,
   ticket?: string,
+  assertActive: () => void = () => {},
 ): Promise<boolean> {
   if (runtime.kind !== 'tauri') return false
-  const pending = await runtime.readPendingNativeLoginFlow()
+  const store = nativeFlowStore(runtime)
+  const snapshot = await store.read()
+  const pending = snapshot?.flow
   if (!pending || pending.purpose === 'account' || (expectedHandle !== undefined && pending.flowHandle !== expectedHandle)) return false
-
-  if (ticket !== undefined) {
-    if (!/^[0-9a-f]{64}$/.test(ticket)) return false
-    await runtime.writePendingNativeLoginFlow({ ...pending, ticket })
+  if (ticket !== undefined && !/^[0-9a-f]{64}$/.test(ticket)) return false
+  const api = getPublicApi()
+  const assertAuthority = () => {
+    assertActive()
+    if (getPublicApi() !== api) throw new Error('Sign-in authority changed')
   }
   const completionTicket = ticket ?? pending.ticket
-  const result = await getPublicApi().consumeNativeLoginFlow(pending.flowHandle, pending.verifier, completionTicket)
+  const dispatched = await store.dispatch<NativeLoginConsumeResult>(snapshot, ticket ? { ...pending, ticket } : undefined,
+    assertAuthority, () => api.consumeNativeLoginFlow(pending.flowHandle, pending.verifier, completionTicket))
+  if (!dispatched) return false
+  const result = await dispatched.result
   switch (result.status) {
     case 'completed':
       // A legacy server must not turn a status-only poll into authentication.
       if (!completionTicket) return false
-      // A different sign-in may have started while this RPC was pending.
-      if ((await runtime.readPendingNativeLoginFlow())?.flowHandle !== pending.flowHandle) return false
-      await runtime.writeSessionSecret(result.token)
-      await runtime.clearPendingNativeLoginFlow()
+      if (!await store.finish(snapshot, assertAuthority, result.token)) return false
       dispatchNativeLoginToken(result.token)
       return true
     case 'expired':
     case 'consumed':
     case 'verifier-mismatch':
     case 'failed':
-      if ((await runtime.readPendingNativeLoginFlow())?.flowHandle === pending.flowHandle) await runtime.clearPendingNativeLoginFlow()
-      return true
+      return store.finish(snapshot, assertAuthority)
     case 'pending':
       return false
   }
@@ -72,38 +76,48 @@ export async function consumePendingNativeAccount(
   getApi: () => RpcStub<AuthenticatedApi>,
   expectedHandle?: string,
   ticket?: string,
+  assertActive: () => void = () => {},
 ): Promise<boolean> {
   if (runtime.kind !== 'tauri') return false
-  const pending = await runtime.readPendingNativeLoginFlow()
+  const store = nativeFlowStore(runtime)
+  const snapshot = await store.read()
+  const pending = snapshot?.flow
   if (!pending || pending.purpose !== 'account' || (expectedHandle !== undefined && expectedHandle !== pending.flowHandle)) return false
   if (ticket !== undefined && !/^[0-9a-f]{64}$/.test(ticket)) return false
-  const status = await getApi().getNativeAccountFlowStatus(pending.flowHandle, pending.verifier)
-  if (status.status !== 'pending') {
-    if ((await runtime.readPendingNativeLoginFlow())?.flowHandle === pending.flowHandle) await runtime.clearPendingNativeLoginFlow()
-    return true
+  const api = getApi()
+  const assertAuthority = () => {
+    assertActive()
+    if (getApi() !== api) throw new Error('Account authority changed')
   }
+  assertAuthority()
+  const status = await api.getNativeAccountFlowStatus(pending.flowHandle, pending.verifier)
+  // A legacy `consumed` or any unknown state does not prove that activation completed.
+  // Keep recovery material until K's confirmed terminal result is available.
+  if (status.status === 'completed' || status.status === 'expired' || status.status === 'failed') return store.finish(snapshot, assertAuthority)
+  if (status.status !== 'pending') return false
   const completionTicket = ticket ?? pending.ticket
-  if (!completionTicket || (pending.activationAttempted && completionTicket === pending.ticket)) return false
-  await runtime.writePendingNativeLoginFlow({ ...pending, ticket: completionTicket, activationAttempted: true })
-  await getApi().completeNativeAccountFlow(pending.flowHandle, pending.verifier, completionTicket)
-  if ((await runtime.readPendingNativeLoginFlow())?.flowHandle === pending.flowHandle) await runtime.clearPendingNativeLoginFlow()
-  return true
+  if (!completionTicket || pending.activationAttempted) return false
+  const dispatched = await store.dispatch(snapshot, { ...pending, ticket: completionTicket, activationAttempted: true },
+    assertAuthority, () => api.completeNativeAccountFlow(pending.flowHandle, pending.verifier, completionTicket), true)
+  if (!dispatched) return false
+  await dispatched.result
+  return store.finish(snapshot, assertAuthority)
 }
 
 export function installNativeLoginCoordinator(
   runtime: WorkshopRuntime,
   getPublicApi: () => RpcStub<PublicApi>,
 ): Promise<() => void> {
-  return installNativeFlowCoordinator(runtime, (handle, ticket) => consumePendingNativeLogin(runtime, getPublicApi, handle, ticket))
+  return installNativeFlowCoordinator(runtime, (handle, ticket, assertActive) => consumePendingNativeLogin(runtime, getPublicApi, handle, ticket, assertActive))
 }
 
 /** Runs only inside the current authenticated epoch; account grants never use the public login API. */
 export function installNativeAccountCoordinator(runtime: WorkshopRuntime, getApi: () => RpcStub<AuthenticatedApi>): Promise<() => void> {
-  return installNativeFlowCoordinator(runtime, (handle, ticket) => consumePendingNativeAccount(runtime, getApi, handle, ticket))
+  return installNativeFlowCoordinator(runtime, (handle, ticket, assertActive) => consumePendingNativeAccount(runtime, getApi, handle, ticket, assertActive))
 }
 
 async function installNativeFlowCoordinator(runtime: WorkshopRuntime,
-  consumePending: (handle?: string, ticket?: string) => Promise<boolean>,
+  consumePending: (handle: string | undefined, ticket: string | undefined, assertActive: () => void) => Promise<boolean>,
 ): Promise<() => void> {
   if (runtime.kind !== 'tauri') return () => {}
   let consuming = false
@@ -118,7 +132,7 @@ async function installNativeFlowCoordinator(runtime: WorkshopRuntime,
     try {
       const next = queuedLink
       queuedLink = undefined
-      await consumePending(next?.handle, next?.ticket)
+      await consumePending(next?.handle, next?.ticket, () => { if (closed) throw new Error('Native flow coordinator closed') })
     } catch {
       // Network/RPC failures are transient. Keep the verifier so focus, polling, or a later verified
       // link can retry after the app reconnects.

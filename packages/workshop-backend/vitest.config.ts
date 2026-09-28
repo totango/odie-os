@@ -85,6 +85,7 @@ export default defineConfig({
         kvNamespaces: ['BLUEPRINTS', 'CONTEXT_COLLECTIONS'],
         // The overseer loads gadget code through this, so a test can run a real gadget facet.
         workerLoaders: { LOADER: {} },
+        r2Buckets: ['BLUEPRINT_CONTENT'],
         durableObjects: {
           TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
           TEST_NATIVE_BROWSER_FLOW: { className: 'NativeBrowserFlow', useSQLite: true },

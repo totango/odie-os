@@ -145,6 +145,8 @@ export interface CodingSessionActivity {
 export interface CodingSessionToolHost extends WorkerEntrypoint {
   /** Reconstructs current attempt/owner/admin authority privately; never available through Workshop MCP. */
   authorizeRequestBuild(owner: CodingSessionOwner, request: RequestBuildAuthorizationRequest): Promise<RequestBuildAuthorization>;
+  /** Reads one exact frozen public attachment after reauthorizing its current request-build attempt. */
+  readRequestBuildContextFile(owner: CodingSessionOwner, request: RequestBuildAuthorizationRequest, fileId: string): Promise<Uint8Array>;
   /**
    * Revalidates startup authority for the current user and returns ephemeral OpenCode
    * customization for immediate materialization. This private control-plane call is made only by

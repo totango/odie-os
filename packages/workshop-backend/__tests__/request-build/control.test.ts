@@ -19,6 +19,8 @@ const policy: RequestBuildPolicy = {
   spendMicros: 2000,
   callChargeMicros: 1000,
   modelInputBytes: 8192,
+contextFiles: 10,
+contextBytes: 100 * 1024 * 1024,
   modelOutputTokens: 200,
   outputBytes: 8192,
   diffBytes: 4096,
@@ -316,6 +318,8 @@ describe("request-build actual backend/Sessions workerd lifecycle with mocked Gi
     const run = await call(name, "start", { claim, input });
     expect(run).toMatchObject({ state: "queued", requestRevision: 1 });
     expect(await call(name, "start", { claim, input })).toMatchObject({ runId: run.runId });
+    // Public additions committed after approval belong to a later run and do not rewrite this intent.
+    await call(name, "configure", {fields: {revision: 2}});
     expect(await call(name, "recover")).toMatchObject({
       runtime: "Cloudflare-Workers",
       slots: 1,
@@ -367,6 +371,12 @@ describe("request-build actual backend/Sessions workerd lifecycle with mocked Gi
     expect(persisted).toMatchObject({ slots: 1, keys: 1, alarm: expect.any(Number) });
     expect(persisted.runs).toHaveLength(1);
     expect(persisted.runs[0].runId).toBe(run.runId);
+  });
+  it("rejects approval when public context changes during asynchronous admission", async () => {
+    const name = "start-public-context-drift", { input } = await setup(name);
+    await call(name, "configure", { fields: { "spec-drift": true } });
+    expect(await call(name, "start", { claim, input })).toEqual({error: "BUILD_APPROVAL_UNAVAILABLE"});
+    expect(await call(name, "inspect")).toMatchObject({slots: 0, keys: 0, runs: []});
   });
   it("retains committed start on alarm failure and actually re-arms on the same-key retry", async () => {
     const name = "start-postcommit-alarm-failure", { input } = await setup(name);

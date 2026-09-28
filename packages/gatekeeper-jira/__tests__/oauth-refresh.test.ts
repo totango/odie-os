@@ -483,6 +483,7 @@ function makeAccount() {
     },
   });
   kv.set("callback", callback);
+  kv.set("connectHandoffProtocol", "browser-bound-v1");
   return { account, kv, callback, setAlarm };
 }
 

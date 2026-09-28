@@ -149,11 +149,26 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
     if (result.grant) {
       const {userId, account, vendorId, expiresAt} = result.grant;
       const users = this.ctx.exports.UserDurableObject;
-      const accountId = await users.get(users.idFromString(userId))
-          .linkConnectedAccountFromLogin(account, vendorId, expiresAt);
+      const user = users.get(users.idFromString(userId));
+      let accountId: number;
+      try {
+        accountId = await user.installLoginGrant(result.ticketHash, account, vendorId, expiresAt);
+      } catch (error) {
+        const outcome = await user.reconcileLoginGrant(result.ticketHash);
+        if (outcome.state !== "installed") {
+          await this.#clear();
+          throw error;
+        }
+        accountId = outcome.accountId;
+      }
       await this.link(userId, accountId);
     }
-    this.ctx.storage.kv.put<PendingResult>(RESULT_KEY, { ...result, confirmed: true });
+    const current = this.ctx.storage.kv.get<PendingResult>(RESULT_KEY);
+    if (!current || !("ticketHash" in current) || current.ticketHash !== result.ticketHash) {
+      throw new Error(EXPIRED_MESSAGE);
+    }
+    this.ctx.storage.kv.put<PendingResult>(RESULT_KEY, { ...current, confirmed: true });
+    if (Date.now() >= current.expiresAt) await this.#clear();
   }
 
   /**
@@ -185,13 +200,37 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
 
   async #clear(): Promise<void> {
     const result = this.ctx.storage.kv.get<PendingResult>(RESULT_KEY);
-    this.ctx.storage.kv.delete(RESULT_KEY);
-    await this.ctx.storage.deleteAlarm();
-    if (result && "grant" in result && result.grant && !result.confirmed) {
+    let installed = result && "confirmed" in result && result.confirmed;
+    if (result && "grant" in result && result.grant && !installed) {
+      const {userId} = result.grant;
+      const users = this.ctx.exports.UserDurableObject;
+      try {
+        // This atomically fences even a not-yet-delivered install. Absence alone is never treated
+        // as proof: the user DO records cancellation before permitting us to revoke the grant.
+        const outcome = await users.get(users.idFromString(userId)).reconcileLoginGrant(result.ticketHash);
+        installed = outcome.state === "installed";
+        if (outcome.state === "installed") await this.link(userId, outcome.accountId);
+      } catch (error) {
+        await this.ctx.storage.setAlarm(Date.now() + 60_000);
+        logger.warn("login grant reconciliation will retry", {event: "login.grant.reconcile.failed", error});
+        return;
+      }
+      const current = this.ctx.storage.kv.get<PendingResult>(RESULT_KEY);
+      if (!current || !("ticketHash" in current) || current.ticketHash !== result.ticketHash) return;
+    }
+    if (result && "grant" in result && result.grant && !installed) {
       try { await result.grant.account.revoke(); } catch (error) {
         logger.warn("failed to revoke unconfirmed login grant", {event: "login.grant.revoke.failed", error});
+        await this.ctx.storage.setAlarm(Date.now() + 60_000);
+        return;
       }
+      // Retain the cleanup-owned capability until revocation acknowledges. A crash can retry
+      // revocation, but cannot forget the grant or install it after the cancellation fence.
+      const current = this.ctx.storage.kv.get<PendingResult>(RESULT_KEY);
+      if (!current || !("ticketHash" in current) || current.ticketHash !== result.ticketHash) return;
     }
+    this.ctx.storage.kv.delete(RESULT_KEY);
+    await this.ctx.storage.deleteAlarm();
   }
 
   async alarm(): Promise<void> {

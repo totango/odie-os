@@ -1300,6 +1300,7 @@ export class CodingSessionRegistry extends DurableObject<Env> {
     return this.#buildExecution ??= new RequestBuildExecution(this.ctx.storage, {
       readiness: () => requestBuildReadiness(this.env),
       authorize: (owner, request) => this.env.WORKSHOP_TOOLS.authorizeRequestBuild(owner, request),
+      contextFile: (owner, request, fileId) => this.env.WORKSHOP_TOOLS.readRequestBuildContextFile(owner, request, fileId),
       sandbox: record => getSandbox(this.env.REQUEST_BUILD_SANDBOX, record.sandboxId),
       configure: record => this.#requestBuildPolicy(record).configure({
         sessionId: record.sessionId, sandboxId: record.sandboxId, generation: record.generation,

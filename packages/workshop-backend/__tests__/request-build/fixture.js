@@ -148,7 +148,13 @@ export class BuildFixture extends DurableObject {
         cancelRequestBuildExecution: (owner, key, revision) =>
           execution(owner).cancel(owner, key, revision),
         getRequestBuildArtifact: (owner, key) => execution(owner).artifact(owner, key),
-        readRequestBuildGitHub: (op) => readRequestBuildGitHub(this.env, op),
+        readRequestBuildGitHub: (op) => {
+          if (op.kind === "base" && kv.get("spec-drift")) {
+            kv.delete("spec-drift");
+            kv.put("revision", (kv.get("revision") ?? 1) + 1);
+          }
+          return readRequestBuildGitHub(this.env, op);
+        },
         writeRequestBuildGitHub: (owner, auth, op) =>
           writeRequestBuildGitHub(
             this.env,
@@ -183,12 +189,14 @@ export class BuildFixture extends DurableObject {
         changedLines: 4,
         textBytes: 4096,
       }),
+      contextFile: async () => null,
       specification: (id) =>
         kv.get("hidden") || id !== kv.get("requestId")
           ? null
           : {
               revision: kv.get("revision") ?? 1,
               specification: "feature: Fixture\n\nChange a to b",
+              contextFiles: [],
               open: true,
             },
     });

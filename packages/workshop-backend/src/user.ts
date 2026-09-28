@@ -406,6 +406,12 @@ function makeUserStorage(storage: DurableObjectStorage) {
       pendingConnectFlows: collection<PendingConnectFlow>()({
         primaryKey: "nonceHash",
       }),
+      nativeHandoffOutcomes: collection<{flowHandle: string; ticketHash: string; state: "pending" | "completed"}>()({
+        primaryKey: "flowHandle",
+      }),
+      loginGrantOutcomes: collection<{id: string; state: "preparing" | "canceled" | "installed"; accountId?: number}>()({
+        primaryKey: "id",
+      }),
       blueprints: collection<BlueprintUserRecord>()({
         primaryKey: "id",
       }),
@@ -2968,6 +2974,47 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return id;
   }
 
+  /** Install this exact backend-minted grant once. The grant ID is its PendingLogin ticket hash;
+   * retries never substitute another account under that ID. Account and outcome commit atomically. */
+  async installLoginGrant(id: string, account: Fetcher<GatekeeperUser>, vendorId: string,
+      expiresAt?: Date): Promise<number> {
+    const outcomes = this.storage.loginGrantOutcomes;
+    const prior = outcomes.get(id);
+    if (prior?.state === "installed") return prior.accountId!;
+    if (prior) throw new Error("LOGIN_GRANT_INSTALL_UNAVAILABLE");
+    outcomes.put({id, state: "preparing"});
+    // All fallible provider work precedes the atomic install. Reconciliation can cancel this
+    // exact operation while describe awaits, including after an interrupted PendingLogin call.
+    const description = await account.describe();
+    if (isRetiredGatekeeperVendor(vendorId)) throw retiredGatekeeperError(vendorId);
+    let replaced: Fetcher<GatekeeperUser> | undefined;
+    const accountId = this.ctx.storage.transactionSync(() => {
+      if (outcomes.get(id)?.state !== "preparing") throw new Error("LOGIN_GRANT_INSTALL_UNAVAILABLE");
+      const existing = description.uniqueName
+          ? this.#findConnectedAccountByIdentity(vendorId, description.uniqueName) : undefined;
+      const installedId = existing?.id ?? this.storage.nextAccountId.get();
+      if (!existing) this.storage.nextAccountId.put(installedId + 1);
+      replaced = existing?.account;
+      this.storage.connectedAccounts.put({...existing, id: installedId, account, description, vendorId,
+        credentialExpiresAt: expiresAt, credentialsExpired: false, codingSessionGeneration: crypto.randomUUID()});
+      outcomes.put({id, state: "installed", accountId: installedId});
+      return installedId;
+    });
+    if (replaced) this.ctx.waitUntil(replaced.revoke().catch(error => {
+      logger.warn("failed to revoke replaced login grant", {event: "login.grant.replaced.revoke.failed", error});
+    }));
+    return accountId;
+  }
+
+  /** Authoritative cancellation-or-receipt query. Once canceled, late delivery/describe cannot install.
+   * An installed receipt is retained even after account deletion, so cleanup never revokes it. */
+  async reconcileLoginGrant(id: string): Promise<{state: "canceled"} | {state: "installed"; accountId: number}> {
+    const outcome = this.storage.loginGrantOutcomes.get(id);
+    if (outcome?.state === "installed") return {state: "installed", accountId: outcome.accountId!};
+    this.storage.loginGrantOutcomes.put({id, state: "canceled"});
+    return {state: "canceled"};
+  }
+
   // Find an existing connected account for the given vendor + identity (uniqueName), excluding
   // `excludeId`. Skips records that fail to load, for the same reasons as subscribeConnectedAccounts():
   // a single corrupt record (e.g. one referencing a Worker binding that no longer exists) must not
@@ -3144,6 +3191,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error("This connection attempt has expired. Please try again.");
     }
 
+    if (record.nativeFlowHandle) {
+      if (this.storage.nativeHandoffOutcomes.get(record.nativeFlowHandle)) {
+        throw new Error("Native handoff requires outcome reconciliation.");
+      }
+      this.storage.nativeHandoffOutcomes.put({flowHandle: record.nativeFlowHandle,
+        ticketHash: record.ticketHash, state: "pending"});
+    }
+
     if (record.kind === "connect") {
       if (!record.connect) throw new Error("Corrupt pending connection.");
       try {
@@ -3183,6 +3238,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         accountId: record.accountId,
       });
     }
+    if (record.nativeFlowHandle) this.storage.nativeHandoffOutcomes.put({
+      flowHandle: record.nativeFlowHandle, ticketHash: record.ticketHash, state: "completed",
+    });
+  }
+
+  /** Private value-only reconciliation; a pending outcome must never replay credential activation. */
+  async nativeHandoffOutcome(flowHandle: string, ticketHash: string): Promise<"not-started" | "pending" | "completed"> {
+    const outcome = this.storage.nativeHandoffOutcomes.get(flowHandle);
+    if (!outcome) return "not-started";
+    if (outcome.ticketHash !== ticketHash) throw new Error("Native handoff ticket mismatch.");
+    return outcome.state;
   }
 
   // Drop a pending handoff that will never activate. A staged connect holds a victim's (or just an

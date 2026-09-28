@@ -70,6 +70,9 @@ const EXPECTED: Record<string, ExpectedArea> = {
   // `env: ['VITE_*']` — vite's `define` inlines any VITE_-prefixed variable, so the set this
   // package can depend on is open-ended and the wildcard is the only honest declaration.
   "packages/workshop-frontend": {
+    // Playwright's Node-side test config selects a local browser channel. The browser
+    // suite runs directly via pnpm, outside vp tasks; this is not a production build input.
+    external: ["CONTINUITY_BROWSER_CHANNEL"],
     forwarded: [
       "VITE_BACKEND_HOST",
       "VITE_CF_ACCESS_MODE",
@@ -100,6 +103,7 @@ const EXPECTED: Record<string, ExpectedArea> = {
       "GITHUB_REPOSITORY", "GITHUB_RUN_NUMBER", "GITHUB_SHA", "GITHUB_TOKEN", "PREVIEW_ADMINS", "PREVIEW_NAME",
       "PREVIEW_PR_NUMBER", "PREVIEW_WORKERS_DEV_HOST", "PREVIEW_WRANGLER", "VITE_BACKEND_HOST",
       "PUBLIC_BASE_URL",
+      "POLARIS_CUTOVER_RECORD",
       "PREVIEW_GITHUB_CLIENT_ID", "PREVIEW_GITHUB_CLIENT_SECRET",
       // Read by `vp/concurrency.ts` in the wrapper before `vp` starts, never inside a task.
       "VP_RUN_CONCURRENCY_LIMIT",

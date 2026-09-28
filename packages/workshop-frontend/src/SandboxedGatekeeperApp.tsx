@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { type CSSProperties, useCallback, useEffect, useInsertionEffect, useLayoutEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import { RpcStub, RpcTarget, newMessagePortRpcSession } from 'capnweb'
 import { useNavigate } from '@tanstack/react-router'
@@ -41,6 +41,12 @@ type OpenPrompt = (prompt: string) => void
 type RequestCodingSession = (target: WorkItemTarget, title: string) => void
 type RouteStateSetter = (value: string) => void
 
+// Lifecycle controls are host-local, not string-named methods exposed through Cap'n Web.
+const suspendHost = Symbol('suspendHost')
+const refreshHost = Symbol('refreshHost')
+const disposeHost = Symbol('disposeHost')
+const updateHostTheme = Symbol('updateHostTheme')
+
 /** One independently authorized management capability exposed to a composite gatekeeper app. */
 export type GatekeeperAppDependency = {
   app: GatekeeperAppInfo
@@ -60,12 +66,6 @@ const MAX_RESOLVED_WORKSPACES = 100
 const WORKSPACE_TITLES_TTL_MS = 10_000
 export const MAX_GATEKEEPER_APP_ROUTE_STATE_LENGTH = 2048
 
-type GatekeeperAppDependencyIdentity = {
-  id: string
-  capability: any
-  error?: string
-}
-
 export function normalizeGatekeeperAppRouteState(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   if (value.length > MAX_GATEKEEPER_APP_ROUTE_STATE_LENGTH) return undefined
@@ -80,20 +80,6 @@ function requireGatekeeperAppRouteState(value: string): string {
   const normalized = normalizeGatekeeperAppRouteState(value)
   if (normalized === undefined) throw new TypeError('Invalid gatekeeper app route state.')
   return normalized
-}
-
-function dependencyIdentities(dependencies: GatekeeperAppDependency[]): GatekeeperAppDependencyIdentity[] {
-  return dependencies
-    .map((dependency) => ({ id: dependency.app.id, capability: dependency.capability, error: dependency.error }))
-    .toSorted((a, b) => a.id.localeCompare(b.id))
-}
-
-function sameDependencyIdentities(
-  a: GatekeeperAppDependencyIdentity[],
-  b: GatekeeperAppDependencyIdentity[],
-): boolean {
-  return a.length === b.length && a.every((entry, index) =>
-    entry.id === b[index]!.id && entry.capability === b[index]!.capability && entry.error === b[index]!.error)
 }
 
 // Near the max int, so the full-viewport iframe sits above all Workshop chrome.
@@ -130,13 +116,20 @@ function iframeStyleForOverlay(overlay: OverlayState): CSSProperties {
 // RPC session. The app uses `ui` to reach the gatekeeper's own capability, which Workshop relays and
 // rate-limits. `setPresenting` stays in Workshop and only grows/restores the iframe's layout.
 class GatekeeperAppHostImpl extends RpcTarget {
+  #active = true
+  #closed = false
+  #epoch = 0
+  readonly #authorityCurrent: () => boolean
+  #rootSlot: ReturnType<typeof createRateLimitedCapability>
+  #rootTarget: any
+  #dependencyTargets = new Map<string, any>()
+  #slots = new Map<string, ReturnType<typeof createRateLimitedCapability>>()
   readonly #ui: RpcStub<RpcTarget>
   readonly #capabilities = new Map<string, {
     app: GatekeeperAppInfo
     capability: any
     error?: string
   }>()
-  readonly #disposeRateLimiters: (() => void)[] = []
   readonly #present: PresentController
   readonly #openTarget: OpenTarget
   readonly #openPrompt: OpenPrompt
@@ -171,22 +164,26 @@ class GatekeeperAppHostImpl extends RpcTarget {
     dependencies: GatekeeperAppDependency[],
     retryProviders: () => void,
     openConnectors: () => void,
+    authorityCurrent: () => boolean,
   ) {
     super()
+    this.#authorityCurrent = authorityCurrent
     this.#theme = theme
     this.#retryProviders = retryProviders
     this.#openConnectors = openConnectors
-    const { capability: ui, dispose } = createRateLimitedCapability(capability, {
+    const rootSlot = createRateLimitedCapability(capability, {
       maxConcurrency: 8,
       maxCallsPerMinute: 600,
       maxPendingCalls: 128,
       onRateLimit: 'throttle',
       label: 'Gatekeeper app',
+      assertAuthority: () => this.#assertActive(),
     })
-    this.#ui = ui
-    this.#disposeRateLimiters.push(dispose)
+    this.#rootSlot = rootSlot
+    this.#rootTarget = capability
+    this.#ui = rootSlot.capability
     for (const dependency of dependencies) {
-      if (dependency.error) {
+      if (dependency.error || !dependency.capability) {
         this.#capabilities.set(dependency.app.id, dependency)
         continue
       }
@@ -196,12 +193,14 @@ class GatekeeperAppHostImpl extends RpcTarget {
         maxPendingCalls: 128,
         onRateLimit: 'throttle',
         label: `Gatekeeper app dependency ${dependency.app.id}`,
+        assertAuthority: () => this.#assertActive(),
       })
       this.#capabilities.set(dependency.app.id, {
         app: dependency.app,
         capability: limited.capability,
       })
-      this.#disposeRateLimiters.push(limited.dispose)
+      this.#slots.set(dependency.app.id, limited)
+      this.#dependencyTargets.set(dependency.app.id, dependency.capability)
     }
     this.#present = present
     this.#openTarget = openTarget
@@ -214,27 +213,82 @@ class GatekeeperAppHostImpl extends RpcTarget {
     this.#setRouteState = setRouteState
   }
 
+  #assertActive() {
+    if (!this.#active || this.#closed || !this.#authorityCurrent()) throw new Error('Gatekeeper app is no longer available.')
+  }
+
+  [suspendHost]() {
+    this.#active = false
+    this.#rootTarget = null
+    this.#dependencyTargets.clear()
+    this.#epoch++
+    this.#rootSlot.suspend()
+    for (const slot of this.#slots.values()) slot.suspend()
+    if (this.#frameId !== null) cancelAnimationFrame(this.#frameId)
+    this.#frameId = null
+    for (const resolve of this.#pendingResolvers) resolve({ rect: null, willResize: false })
+    this.#pendingResolvers = []
+    this.#pendingActive = null
+  }
+
+  [refreshHost](capability: any, dependencies: GatekeeperAppDependency[]) {
+    if (this.#closed) return
+    if (!this.#active || this.#rootTarget !== capability) this.#rootSlot.replace(capability)
+    this.#rootTarget = capability
+    const available = new Set(dependencies.filter(d => d.capability && !d.error).map(d => d.app.id))
+    for (const [id, slot] of this.#slots) {
+      if (!available.has(id)) { slot.dispose(); this.#slots.delete(id); this.#dependencyTargets.delete(id) }
+    }
+    this.#capabilities.clear()
+    for (const dependency of dependencies) {
+      if (!available.has(dependency.app.id)) {
+        this.#capabilities.set(dependency.app.id, { ...dependency, capability: null })
+        continue
+      }
+      let slot = this.#slots.get(dependency.app.id)
+      if (slot) {
+        if (!this.#active || this.#dependencyTargets.get(dependency.app.id) !== dependency.capability) slot.replace(dependency.capability)
+      }
+      else {
+        slot = createRateLimitedCapability(dependency.capability, {
+          maxConcurrency: 8, maxCallsPerMinute: 600, maxPendingCalls: 128,
+          onRateLimit: 'throttle', label: `Gatekeeper app dependency ${dependency.app.id}`,
+          assertAuthority: () => this.#assertActive(),
+        })
+        this.#slots.set(dependency.app.id, slot)
+      }
+      this.#capabilities.set(dependency.app.id, { ...dependency, capability: slot.capability })
+      this.#dependencyTargets.set(dependency.app.id, dependency.capability)
+    }
+    this.#active = true
+  }
+
   get ui(): RpcStub<RpcTarget> {
+    this.#assertActive()
     return this.#ui
   }
 
   // Metadata carries no authority. The app must request one of the listed opaque IDs separately.
   listCapabilities(): GatekeeperAppInfo[] {
+    this.#assertActive()
     return [...this.#capabilities.values()].map(({ app }) => app)
   }
 
   getCapability(id: string): RpcStub<RpcTarget> | null {
+    this.#assertActive()
     const dependency = this.#capabilities.get(id)
     if (dependency?.error) throw new Error(dependency.error)
     return this.#capabilities.get(id)?.capability ?? null
   }
 
   openWorkItemsConnectors(): void {
+    this.#assertActive()
     if (!this.#codingSessionRequestAllowed) throw new Error('Not available to this app.')
     this.#openConnectors()
   }
 
   retryWorkItemsProviders(): void {
+    this.#assertActive()
     if (!this.#codingSessionRequestAllowed) throw new Error('Not available to this app.')
     this.#retryProviders()
   }
@@ -242,27 +296,36 @@ class GatekeeperAppHostImpl extends RpcTarget {
   // Navigate to a workspace the app knows about. The IDs are validated here because the app is
   // untrusted; navigation stays in-app rather than handing the frame a URL to follow.
   openWorkspace(workspaceId: string, gadgetId?: number): void {
+    this.#assertActive()
     this.#openTarget(parseGatekeeperAppWorkspaceTarget(workspaceId, gadgetId))
   }
 
   // Resolve live titles for workspaces the app already references, so it never renders a stale
   // snapshot. Bounded per call; unknown or no-longer-visible workspaces come back as null.
-  resolveWorkspaceTitles(ids: string[]): Promise<(string | null)[]> {
+  async resolveWorkspaceTitles(ids: string[]): Promise<(string | null)[]> {
+    this.#assertActive()
+    const epoch = this.#epoch
     if (!Array.isArray(ids) || ids.length > MAX_RESOLVED_WORKSPACES) {
       throw new TypeError('Invalid workspace title lookup.')
     }
-    return this.#resolveWorkspaceTitles(ids)
+    const result = await this.#resolveWorkspaceTitles(ids)
+    this.#assertActive()
+    if (epoch !== this.#epoch) throw new Error('Gatekeeper app authority changed.')
+    return result
   }
 
   openPrompt(prompt: string): void {
+    this.#assertActive()
     this.#openPrompt(normalizeGatekeeperAppPrompt(prompt))
   }
 
   codingSessionAvailable(): boolean {
+    this.#assertActive()
     return this.#codingSessionRequestAllowed && this.#codingSessionAvailable()
   }
 
   requestCodingSession(source: unknown, id: unknown, key: unknown, url: unknown, title: string): void {
+    this.#assertActive()
     if (!this.#codingSessionRequestAllowed || !this.#codingSessionAvailable()) {
       throw new Error('Coding-session requests are not available to this app.')
     }
@@ -273,16 +336,19 @@ class GatekeeperAppHostImpl extends RpcTarget {
   }
 
   getRouteState(): string {
+    this.#assertActive()
     return this.#getRouteState()
   }
 
   setRouteState(value: string): void {
+    this.#assertActive()
     this.#setRouteState(requireGatekeeperAppRouteState(value))
   }
 
   // The app calls this once to learn the current theme and register a receiver for later changes.
   // Apps that don't theme themselves never call it.
   subscribeTheme(receiver: RpcStub<GatekeeperAppThemeReceiver>): GatekeeperAppTheme {
+    this.#assertActive()
     this.#themeReceiver?.[Symbol.dispose]?.()
     // The argument stub is disposed when this call returns, so keep our own dup (released in dispose).
     this.#themeReceiver = receiver.dup()
@@ -296,10 +362,10 @@ class GatekeeperAppHostImpl extends RpcTarget {
   }
 
   // Push a new theme to a subscribed app; a no-op until (and unless) the app subscribes.
-  updateTheme(theme: GatekeeperAppTheme) {
+  [updateHostTheme](theme: GatekeeperAppTheme) {
     this.#theme = theme
     const receiver = this.#themeReceiver
-    if (!receiver) return
+    if (!receiver || !this.#active || this.#closed || !this.#authorityCurrent()) return
 
     try {
       Promise.resolve(receiver.setTheme(theme)).catch(() => this.#dropThemeReceiver(receiver))
@@ -310,6 +376,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   // Queue a presentation change; the latest requested state is applied on the next frame.
   setPresenting(active: boolean): Promise<PresentAck> {
+    this.#assertActive()
     return new Promise((resolve) => {
       this.#pendingActive = active
       this.#pendingResolvers.push(resolve)
@@ -319,6 +386,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
 
   // Apply the last-requested state once, resolving every caller queued this frame with the result.
   #applyPending() {
+    if (!this.#active || this.#closed || !this.#authorityCurrent()) return
     this.#frameId = null
     const active = this.#pendingActive!
     const resolvers = this.#pendingResolvers
@@ -332,8 +400,13 @@ class GatekeeperAppHostImpl extends RpcTarget {
   }
 
   // Cancel the rate limiter's pending resume timer once this host is no longer in use.
-  dispose() {
-    for (const dispose of this.#disposeRateLimiters) dispose()
+  [disposeHost]() {
+    this.#closed = true
+    this[suspendHost]()
+    this.#rootSlot.dispose()
+    for (const slot of this.#slots.values()) slot.dispose()
+    this.#slots.clear()
+    this.#capabilities.clear()
     this.#themeReceiver?.[Symbol.dispose]?.()
     this.#themeReceiver = null
     if (this.#frameId !== null) {
@@ -343,10 +416,7 @@ class GatekeeperAppHostImpl extends RpcTarget {
     for (const resolve of this.#pendingResolvers) resolve({ rect: null, willResize: false })
     this.#pendingResolvers = []
     this.#pendingActive = null
-    if (this.#presenting) {
-      this.#presenting = false
-      this.#present(false)
-    }
+    this.#presenting = false
   }
 }
 
@@ -355,7 +425,27 @@ class GatekeeperAppHostImpl extends RpcTarget {
  * talks to the gatekeeper only through the `ui` capability carried over the MessagePort RPC session.
  * The iframe fills its parent container.
  */
-export default function SandboxedGatekeeperApp({
+export default function SandboxedGatekeeperApp(props: Parameters<typeof GatekeeperAppDocument>[0]) {
+  // Authority incompatibility resets immediately; deployment code updates require explicit consent.
+  return <RetainedGatekeeperApp key={JSON.stringify([props.documentIdentity, props.gatekeeperVendorId, props.workItemHandoffs])} {...props} />
+}
+
+function RetainedGatekeeperApp(props: Parameters<typeof GatekeeperAppDocument>[0]) {
+  const [html, setHtml] = useState(props.frame.iframeHtml)
+  const changed = html !== props.frame.iframeHtml
+  return <div className="flex h-full flex-col">
+    {changed && <div role="status" className="shrink-0 px-4 py-2 text-sm">
+      An app update is available. Your current view is preserved.{' '}
+      <button type="button" className="underline" disabled={props.authorityAvailable === false}
+        onClick={() => setHtml(props.frame.iframeHtml)}>Reload when ready</button>
+    </div>}
+    <div className="min-h-0 flex-1">
+      <GatekeeperAppDocument key={html} {...props} frame={{ ...props.frame, iframeHtml: html }} />
+    </div>
+  </div>
+}
+
+function GatekeeperAppDocument({
   frame,
   gatekeeperVendorId,
   dependencies = EMPTY_DEPENDENCIES,
@@ -365,6 +455,8 @@ export default function SandboxedGatekeeperApp({
   workItemHandoffs = false,
   onRequestCodingSession,
   onRetryProviders,
+  authorityAvailable = true,
+  isAuthorityCurrent,
 }: {
   frame: GatekeeperUiFrame,
   gatekeeperVendorId: string,
@@ -375,6 +467,9 @@ export default function SandboxedGatekeeperApp({
   workItemHandoffs?: boolean,
   onRequestCodingSession?: RequestCodingSession,
   onRetryProviders?: () => void,
+  documentIdentity?: string,
+  authorityAvailable?: boolean,
+  isAuthorityCurrent?: () => boolean,
 }) {
   const navigate = useNavigate()
   const { authenticatedApi } = useAuthenticatedApi()
@@ -388,28 +483,6 @@ export default function SandboxedGatekeeperApp({
   const codingSessionAvailableRef = useRef(false)
   const requestCodingSessionRef = useRef<RequestCodingSession>(() => {})
   const retryProvidersRef = useRef(onRetryProviders)
-  retryProvidersRef.current = onRetryProviders
-  routeStateRef.current = normalizeGatekeeperAppRouteState(routeState) ?? ''
-  setRouteStateRef.current = setRouteState ?? (() => {})
-  codingSessionAvailableRef.current = codingSessionAvailable
-  requestCodingSessionRef.current = onRequestCodingSession ?? (() => {})
-  const dependencyIdentity = dependencyIdentities(dependencies)
-  const iframeReload = useRef({
-    html: frame.iframeHtml,
-    ui: frame.ui,
-    dependencies: [] as GatekeeperAppDependencyIdentity[],
-    key: 0,
-  })
-  if (iframeReload.current.html !== frame.iframeHtml || iframeReload.current.ui !== frame.ui ||
-      !sameDependencyIdentities(iframeReload.current.dependencies, dependencyIdentity)) {
-    iframeReload.current = {
-      html: frame.iframeHtml,
-      ui: frame.ui,
-      dependencies: dependencyIdentity,
-      key: iframeReload.current.key + 1,
-    }
-  }
-  const sessionIdentityKey = iframeReload.current.key
   const [overlay, setOverlay] = useState<OverlayState>(null)
   const overlayRef = useRef<OverlayState>(null)
   // Push the Workshop's resolved light/dark mode and deployment accent whenever either changes.
@@ -421,7 +494,7 @@ export default function SandboxedGatekeeperApp({
   const themeRef = useRef<GatekeeperAppTheme>({ mode: resolvedThemeMode, accentColor })
   themeRef.current = { mode: resolvedThemeMode, accentColor }
   useEffect(() => {
-    hostRef.current?.updateTheme({ mode: resolvedThemeMode, accentColor })
+    hostRef.current?.[updateHostTheme]({ mode: resolvedThemeMode, accentColor })
   }, [resolvedThemeMode, accentColor])
 
   const setOverlayPhase = useCallback((next: OverlayState) => {
@@ -479,9 +552,42 @@ export default function SandboxedGatekeeperApp({
   }, [navigate])
   // The gatekeeper capability is `any`: its method shape is gatekeeper-defined and opaque to us.
   const capabilityRef = useRef<any>(null)
-  capabilityRef.current = frame.ui
+  const liveRef = useRef({ dependencies, resolveWorkspaceTitles, openTarget, openPrompt, navigate, isAuthorityCurrent })
+  const activeRef = useRef(false)
+  const cleanupRef = useRef<(() => void) | null>(null)
+  const apiRef = useRef(authenticatedApi)
+  useInsertionEffect(() => () => {
+    cleanupRef.current?.()
+    cleanupRef.current = null
+  }, [])
 
   useLayoutEffect(() => {
+    capabilityRef.current = frame.ui
+    retryProvidersRef.current = onRetryProviders
+    routeStateRef.current = normalizeGatekeeperAppRouteState(routeState) ?? ''
+    setRouteStateRef.current = setRouteState ?? (() => {})
+    codingSessionAvailableRef.current = codingSessionAvailable
+    requestCodingSessionRef.current = onRequestCodingSession ?? (() => {})
+    liveRef.current = { dependencies, resolveWorkspaceTitles, openTarget, openPrompt, navigate, isAuthorityCurrent }
+    if (apiRef.current !== authenticatedApi) {
+      apiRef.current = authenticatedApi
+      titlesRef.current = null
+      hostRef.current?.[suspendHost]()
+    }
+    activeRef.current = authorityAvailable
+    if (authorityAvailable) hostRef.current?.[refreshHost](frame.ui, dependencies)
+    else hostRef.current?.[suspendHost]()
+  })
+  // Cosmetic callback/array churn must not cancel writes. Only hide/final teardown cleans up here;
+  // refreshHost compares exact targets by account ID before replacing an individual slot.
+  useLayoutEffect(() => () => {
+      activeRef.current = false
+      titlesRef.current = null
+      hostRef.current?.[suspendHost]()
+  }, [])
+
+  useLayoutEffect(() => {
+    if (cleanupRef.current) return
     connectedRef.current = false
     invalidatedRef.current = false
     const frameWindow = iframeRef.current?.contentWindow ?? null
@@ -493,7 +599,7 @@ export default function SandboxedGatekeeperApp({
         port.close()
         sessionRef.current?.[Symbol.dispose]?.()
         sessionRef.current = null
-        hostRef.current?.dispose()
+        hostRef.current?.[disposeHost]()
         hostRef.current = null
         setOverlayPhase(null)
         return
@@ -506,18 +612,20 @@ export default function SandboxedGatekeeperApp({
         capabilityRef.current,
         present,
         themeRef.current,
-        openTarget,
-        openPrompt,
+        (target) => liveRef.current.openTarget(target),
+        (prompt) => liveRef.current.openPrompt(prompt),
         () => codingSessionAvailableRef.current,
         workItemHandoffs,
         (target, title) => requestCodingSessionRef.current(target, title),
-        resolveWorkspaceTitles,
+        (ids) => liveRef.current.resolveWorkspaceTitles(ids),
         () => routeStateRef.current,
         (value) => setRouteStateRef.current(value),
-        dependencies,
+        liveRef.current.dependencies,
         () => retryProvidersRef.current?.(),
-        () => { void navigate({ to: '/gatekeepers' }) },
+        () => { void liveRef.current.navigate({ to: '/gatekeepers' }) },
+        () => activeRef.current && (liveRef.current.isAuthorityCurrent?.() ?? true),
       )
+      if (!activeRef.current) host[suspendHost]()
       hostRef.current = host
       sessionRef.current = newMessagePortRpcSession(port, host)
       connectedRef.current = true
@@ -538,22 +646,19 @@ export default function SandboxedGatekeeperApp({
     }
 
     window.addEventListener('message', handleMessage)
-    return () => {
+    cleanupRef.current = () => {
       window.removeEventListener('message', handleMessage)
       sessionRef.current?.[Symbol.dispose]?.()
       sessionRef.current = null
-      hostRef.current?.dispose()
+      hostRef.current?.[disposeHost]()
       hostRef.current = null
-      setOverlayPhase(null)
     }
-    // Re-establish the session if either the HTML or the `ui` capability changes, so a new frame
-    // carrying a fresh stub (even with identical HTML) never keeps talking through the stale one.
-  }, [sessionIdentityKey, gatekeeperVendorId, openPrompt, openTarget,
-      present, resolveWorkspaceTitles, setOverlayPhase, workItemHandoffs])
+    // The local session belongs to the document, not the backend transport or Activity visibility.
+    // Its final-only cleanup must not call present()/flushSync or any React state setter.
+  }, [gatekeeperVendorId, present, setOverlayPhase, workItemHandoffs])
 
   return (
     <iframe
-      key={iframeReload.current.key}
       ref={iframeRef}
       srcDoc={frame.iframeHtml}
       // allow-scripts: run the app's JS. allow-modals: its beforeunload unsaved-changes guard. Not

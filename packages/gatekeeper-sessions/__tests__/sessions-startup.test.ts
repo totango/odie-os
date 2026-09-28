@@ -3050,12 +3050,13 @@ describe("coding session asynchronous startup", () => {
 const restrictedPolicy: RequestBuildPolicy = {
   version: "fixture", runtimeVersion: "0.85.1", model: "fixture-model", wallTimeMs: 60000,
   modelCalls: 1, spendMicros: 1000, callChargeMicros: 1000, modelInputBytes: 8192,
+contextFiles: 10, contextBytes: 100 * 1024 * 1024,
   modelOutputTokens: 200, outputBytes: 8192, diffBytes: 4096, diffFiles: 2, concurrency: 1, dependencyHosts: [],
 };
 async function restrictedRecord(): Promise<RequestBuildRecord> {
   const intent: RequestBuildIntent = {
     dispatchKey: "dispatch_fixture_123", runId: "run_fixture_123456", attempt: 1,
-    specification: "fixture", specificationHash: await buildHash("fixture"), repository: "totango/odie-os",
+    specification: "fixture", specificationHash: await buildHash("fixture"), contextFiles: [], repository: "totango/odie-os",
     baseBranch: "main", baseSha: "a".repeat(40), policy: restrictedPolicy,
     policyHash: await buildHash(canonicalBuildJson(restrictedPolicy)),
   };

@@ -102,3 +102,46 @@ it('keeps the current capability when the server denies switching', async () => 
   expect(auth.current!.authenticatedApi).toBe(old)
   expect(auth.current!.identityRevision).toBeUndefined()
 })
+
+it('replaces B state when a changed token scope reconnects to base A', async () => {
+  const base = identity('A')
+  const selected = identity('B')
+  base.switchAccountIdentity.mockResolvedValue(selected)
+  await mount(apiFor(base))
+  await act(async () => auth.current!.switchIdentity('B'))
+  expect(auth.current!.identityRevision).toBe(1)
+  localStorage.setItem('authToken', 'rotated-login')
+  const nextBase = identity('A')
+  await act(async () => root.render(<Consumer api={apiFor(nextBase)} />))
+  expect(nextBase.switchAccountIdentity).not.toHaveBeenCalled()
+  expect(auth.current!.authenticatedApi).toBe(nextBase)
+  expect(auth.current!.identityRevision).toBe(2)
+})
+
+it('verifies the selected result before publishing a switch', async () => {
+  const base = identity('A')
+  let finish!: (info: { id: string; name: string; type: 'user' }) => void
+  const selected = { ...identity('B'), whoami: () => new Promise<{ id: string; name: string; type: 'user' }>(resolve => { finish = resolve }) }
+  base.switchAccountIdentity.mockResolvedValue(selected)
+  await mount(apiFor(base))
+  let switching!: Promise<void>
+  await act(async () => { switching = auth.current!.switchIdentity('B') })
+  expect(auth.current!.authenticatedApi).toBe(base)
+  expect(base[Symbol.dispose]).not.toHaveBeenCalled()
+  await act(async () => { finish({ id: 'B', name: 'B', type: 'user' }); await switching })
+  expect(auth.current!.authenticatedApi).toBe(selected)
+  expect(base[Symbol.dispose]).toHaveBeenCalled()
+})
+
+it('fences the actual restored identity, not the requested identity or base login', async () => {
+  const base = identity('A')
+  base.switchAccountIdentity.mockResolvedValue(identity('B'))
+  await mount(apiFor(base))
+  await act(async () => auth.current!.switchIdentity('B'))
+  const nextBase = identity('A')
+  const different = identity('C')
+  nextBase.switchAccountIdentity.mockResolvedValue(different)
+  await act(async () => root.render(<Consumer api={apiFor(nextBase)} />))
+  expect(auth.current!.authenticatedApi).toBe(different)
+  expect(auth.current!.identityRevision).toBe(2)
+})

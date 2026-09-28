@@ -42,7 +42,7 @@ describe('native login coordinator', () => {
     const currentApi = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(async () => ({ status: 'completed', token: 'user:token' })) }
     const getApi = vi.fn<() => any>()
       .mockReturnValueOnce(firstApi)
-      .mockReturnValueOnce(currentApi)
+      .mockReturnValue(currentApi)
 
     // Proves callers can install with one stub and consume later with the replaced/current stub.
     getApi()

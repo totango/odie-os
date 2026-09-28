@@ -2,6 +2,24 @@
 
 ## Status and mandate
 
+### Latest-main refresh (active integration)
+
+The original authoring status and pins below are historical. The coordinator has since integrated
+the pinned upstream and started an authorized latest-main merge. Verified in the target worktree:
+
+| Input | Revision |
+| --- | --- |
+| Current integration HEAD | `6e77d8ef553da4c996d8d5b080f01dcfadcb2cf1` |
+| Active latest-main MERGE_HEAD | `aa485877389515479426b6e346582244da536d5a` |
+| Merge base of those inputs | `6a00bd36a3f15cf57810d107f45312ed28fde372` |
+| Original upstream target (unchanged) | `a591fe32783a09a0d9ac34abe203a30e778345b7` |
+
+T resolves only tooling/configuration conflicts; F/K retain runtime ownership. Preserve both the
+latest-main Playwright browser-continuity workflow and the integrated upstream/local test suites,
+dependency versions, and generated-config contracts. The merge remains uncommitted; resolving or
+staging conflicts does not establish completed merge ancestry. See `polaris-tooling-handoff.md`
+for current verification rather than the historical authoring-pass statements below.
+
 Hugin anchor plan, authored for independent review. **Implementation has not started; independent approval is pending.** This authoring task changes only this document. No merge, commit, dependency installation, build, test, or deployment is part of this pass.
 
 Execute the eventual implementation in `/Users/jacob_1/odie-os-polaris-upstream`. Other worktrees, including the dirty main checkout and other agents' work, are outside its write boundary.
@@ -137,6 +155,23 @@ Normalize supported runtime diff responses into a bounded presentation model (pa
 Validate actual pinned OpenCode response schemas before implementing its adapter. Reuse Pi/Prime's available structured evidence only where verified; label unavailable evidence explicitly. If existing response data is insufficient, the scoped fallback is a clear read-only unsupported/raw view, with the missing structured feature recorded as unresolved until a reviewed bounded read seam is supplied. General browse/write/rename/delete Files operations and autosave remain outside this initial scope. A private upload endpoint is not that seam.
 
 ### ADR E — Coordinated protocol and OAuth cutover
+
+**Enforcement update:** `scripts/build-production-deploy.mjs` emits write-paused production
+artifacts, and `.github/workflows/deploy-production.yml` validates a protected operator record
+before any provider deployment or secret mutation. Prepare/resume require fresh exact-target
+artifact approval; routine releases require a verified resume receipt, ancestry and matching
+compatibility fingerprint. See [the cutover runbook](polaris-production-cutover.md) for record schema,
+real operator steps, and outstanding external evidence. No production confirmation is supplied;
+passing local tests is not readiness. The original normal-unset source config is not authorization
+to enable artifact writes.
+
+Current review-ledger entry: **Skuld T P1 — first-cutover deployment bypass**; owner T; repair is the
+paused-artifact/approval gate and runbook; local root tests, 17 gate tests, scripts types and scoped
+lint pass. Independent reviewer verdict remains pending. This is a repair within the coordinator's
+existing Polaris loop, not a new/reset loop sequence. The coordinator's current global ordinal was
+not supplied to T: it must be reconciled in the authoritative ledger before release. Confirmation
+records require that actual ordinal in **1–20**, and reject >20; no fabricated count or claim of
+independent approval is recorded here.
 
 **K/F/C/T must jointly approve a compatibility contract before any dependent lane integrates or any release proceeds.** K owns backend protocol acceptance and migration fences; F owns client mismatch/recovery behavior; C owns provider callbacks and catalog provenance; T owns deployment ordering, supported-version inventory and operator instructions. Freeze the accepted protocol/version combinations, rejection behavior, recovery-export format, callback lifetime rules and mixed-version fixtures as part of S0/S2. Do not assume upstream and fork clients or providers can interoperate.
 

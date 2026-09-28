@@ -431,6 +431,7 @@ function makeAccount() {
     },
   });
   kv.set("callback", callback);
+  kv.set("connectHandoffProtocol", "browser-bound-v1");
   const connect = async (returnUrl?: string) => {
     await account.setCallback(callback as never, NONCE, returnUrl);
     const begun = await account.beginOAuthFlow(NONCE);

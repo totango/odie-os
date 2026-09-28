@@ -7,7 +7,7 @@ import type { UserDirectoryRecord, ConnectFlowStart } from '@gadgets/workshop-sh
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
-import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
+import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestAttachment, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
 import { COMMUNITY_REQUESTS_SINGLETON_NAME, CommunityRequests } from "./community-requests.js";
 export { CommunityRequests };
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
@@ -306,6 +306,16 @@ export class CodingSessionToolHostImpl
     } catch { return {allowed: false, reasons: ["BUILD_AUTHORITY_UNAVAILABLE"]}; }
   }
 
+  /** Transfers one exact frozen public context file only after current build reauthorization. */
+  async readRequestBuildContextFile(
+    owner: CodingSessionOwner,
+    request: Parameters<CodingSessionToolHost["readRequestBuildContextFile"]>[1],
+    fileId: string,
+  ): ReturnType<CodingSessionToolHost["readRequestBuildContextFile"]> {
+    return this.ctx.exports.CommunityRequests.getByName(COMMUNITY_REQUESTS_SINGLETON_NAME)
+      .readRequestBuildContextFile(owner, request, fileId);
+  }
+
   async prepareSessionStartup(
     owner: CodingSessionOwner,
     _sessionId: string,
@@ -491,6 +501,21 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
   async addCommunityRequestDetail(id: string, detail: AddCommunityRequestDetail) {
     return this.#communityRequests.addDetail(this.#userId.toString(), id, detail);
+  }
+  async deleteCommunityRequestDetail(id: string, detailId: string) {
+    return this.#communityRequests.deleteDetail(this.#userId.toString(), id, detailId);
+  }
+  async addCommunityRequestAttachment(id: string, attachment: AddCommunityRequestAttachment) {
+    return this.#communityRequests.addAttachment(this.#userId.toString(), id, attachment);
+  }
+  async deleteCommunityRequestAttachment(id: string, attachmentId: string) {
+    return this.#communityRequests.deleteAttachment(this.#userId.toString(), id, attachmentId);
+  }
+  async getCommunityRequestAttachment(id: string, attachmentId: string, includeHidden = false) {
+    await this.#checkCommunityHiddenAccess(includeHidden);
+    const result = await this.#communityRequests.attachment(this.#userId.toString(), id, attachmentId, includeHidden);
+    await this.#checkCommunityHiddenAccess(includeHidden);
+    return result;
   }
   async listCommunityRequestDetails(id: string, options: CommunityRequestPageOptions = {}) {
     await this.#checkCommunityHiddenAccess(options?.includeHidden);

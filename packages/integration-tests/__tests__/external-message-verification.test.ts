@@ -122,6 +122,7 @@ describe("external-message verification", () => {
       // so collaborators must be observer-verified against it) and add Bob.
       const gadgetId = await externalGadgetId(gadgetKey);
       using overseer = await aliceApi.openGadget(gadgetId);
+      await overseer.negotiateEditingProtocol("git-ot-v1");
       const gatekeeper = await overseer.newGatekeeper(aliceAccount.id, thingUrl("external"));
       if (!gatekeeper) throw new Error("Failed to create the test connection");
 
@@ -185,6 +186,7 @@ describe("external-message verification", () => {
             accepted: false, message: expect.stringMatching(/AI model/i) });
       const gadgetId = await externalGadgetId(gadgetKey);
       using overseer = await aliceApi.openGadget(gadgetId);
+      await overseer.negotiateEditingProtocol("git-ot-v1");
       const gatekeeper = await overseer.newGatekeeper(aliceAccount.id, thingUrl("external-use"));
       if (!gatekeeper) throw new Error("Failed to create the test connection");
       using gadget = await overseer.createGadget("Test Gadget", undefined, "TEST_GADGET");

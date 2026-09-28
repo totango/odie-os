@@ -80,6 +80,7 @@ async function newWorkspace(publicApi: RpcStub<PublicApi>, thingName: string): P
   const account = await provisionAccount(aliceApi);
 
   const overseer = await aliceApi.newGadget();
+  await overseer.negotiateEditingProtocol("git-ot-v1");
   const gatekeeper = await overseer.newGatekeeper(account.id, thingUrl(thingName));
   if (!gatekeeper) throw new Error("Failed to create the test connection");
   const gatekeeperId = await gatekeeper.getId();
@@ -102,6 +103,7 @@ async function reopenAfterRestart(ws: Workspace): Promise<{
     try {
       const aliceApi = await logIn(publicApi, ws.alice);
       const overseer = await aliceApi.openGadget(ws.gadgetId);
+      await overseer.negotiateEditingProtocol("git-ot-v1");
       const gatekeeper = await overseer.getGatekeeperById(ws.gatekeeperId);
       const session = await gatekeeper.openSession() as RpcStub<TestSession>;
       // Probe with a benign read, so a session felled by the reset retries here rather than

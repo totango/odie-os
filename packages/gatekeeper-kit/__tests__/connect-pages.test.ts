@@ -14,6 +14,15 @@ import {
 const HANDOFF = { targetOrigin: "https://workshop.example", ticket: "a".repeat(64) };
 
 describe("mixed backend handoff protocols", () => {
+  it.each([undefined, "legacy", "native-verifier-v2"])("rejects persisted protocol %s even with an upgraded callback", async stored => {
+    const callback = { getHandoffProtocol: async () => "browser-bound-v1" as const };
+    const kv = {
+      get: <T>() => stored as T | undefined,
+      put: () => { throw new Error("Must not version an existing flow"); },
+      delete: () => { throw new Error("Must not mutate credentials"); },
+    };
+    await expect(requireBrowserHandoff(callback, kv)).rejects.toThrow(/before the handoff upgrade/);
+  });
   it("accepts only the explicitly negotiated browser-bound protocol", async () => {
     await expect(requireBrowserHandoff({
       getHandoffProtocol: async () => "browser-bound-v1",

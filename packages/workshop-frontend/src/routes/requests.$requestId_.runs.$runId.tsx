@@ -4,18 +4,15 @@ import { X } from '@phosphor-icons/react'
 import { RequestBuildPanel } from '../community-requests/RequestBuildPanel'
 
 export const Route = createFileRoute('/requests/$requestId_/runs/$runId')({
-  validateSearch: (search: Record<string, unknown>): { moderate?: boolean } => ({ moderate: search.moderate === true || undefined }),
   component: RequestBuildRoute,
 })
 
 function RequestBuildRoute() {
   const { requestId, runId } = Route.useParams()
-  const { moderate } = Route.useSearch()
   const navigate = useNavigate()
   const close = () => navigate({
     to: '/requests/$requestId',
     params: { requestId },
-    search: { moderate },
     replace: true,
   })
 
@@ -32,7 +29,7 @@ function RequestBuildRoute() {
         <Dialog.Close render={props => <button {...props} type="button" aria-label="Close request build" className="flex h-9 w-9 items-center justify-center rounded-lg text-kumo-subtle transition hover:bg-kumo-tint hover:text-kumo-default focus-visible:outline-2 focus-visible:outline-kumo-ring"><X size={18} /></button>} />
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6">
-        <RequestBuildPanel requestId={requestId} runId={runId} moderate={moderate} />
+        <RequestBuildPanel requestId={requestId} runId={runId} />
       </div>
     </Dialog>
   </Dialog.Root>

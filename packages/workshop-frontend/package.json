@@ -6,7 +6,8 @@
     "dev": "vite",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "test:run": "vitest run"
+    "test:run": "vitest run",
+    "test:browser:continuity": "playwright test --config browser/playwright.config.ts"
   },
   "dependencies": {
     "@cloudflare/kumo": "^2.12.0",
@@ -57,6 +58,7 @@
   },
   "devDependencies": {
     "@gadgets/scripts": "workspace:*",
+    "@playwright/test": "1.58.2",
     "@tanstack/router-plugin": "^1.168.35",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",

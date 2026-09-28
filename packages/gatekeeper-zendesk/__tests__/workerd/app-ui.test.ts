@@ -113,6 +113,7 @@ function accountFor(name: string) {
 async function connect(name: string, subdomain: string): Promise<string> {
   const account = accountFor(name);
   await account.setCallback(testExports.TestConnectCallback({}), NONCE);
+  await account.acknowledgeHandoff({ handoffProtocol: "browser-bound-v1" });
   const begun = await account.beginOAuth(NONCE, subdomain);
   expect(begun).not.toBeNull();
   await account.acceptAuthCode("auth-code", begun!.oauthNonce);

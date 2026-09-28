@@ -70,7 +70,7 @@ import {
 | --- | --- | --- |
 | `./connect-nonce` | Nonce generation, expiry, and constant-time comparison. | A connect flow mints or checks its own nonce. The handshake and credential modules already use it. |
 | `./connect-handshake` | Two-stage `initiation` to `oauth` nonce storage. | A connect link or form redirects through an OAuth provider. |
-| `./connect-pages` | Hardened connect HTML, escaping, browser mutation guards, `acknowledgeHandoff` launch negotiation, `requireBrowserHandoff` callback checks and `requireConnectHandoff` response validation. | A gatekeeper serves HTML or completes a browser-bound/native-verifier connection. |
+| `./connect-pages` | Hardened connect HTML, escaping, browser mutation guards, `acknowledgeHandoff` launch negotiation, `requirePersistedHandoff` upgrade fence, `requireBrowserHandoff` callback checks and `requireConnectHandoff` response validation. | A gatekeeper serves HTML or completes a browser-bound/native-verifier connection. |
 | `./credential-stage` | Expiring reconnect credential escrow keyed by the exact completion stage ID. | Browser completion must leave live credentials unchanged until Workshop confirms its ticket. |
 | `./credentials` | Account-side `CredentialCoordinator` and consumer-side `CredentialSource`. | An OAuth-shaped provider stores, refreshes, or rejects credentials. |
 | `./credential-expiry` | Durable, deduplicated `credentialsExpired()` notification. | An account has a Workshop connect callback to notify. |

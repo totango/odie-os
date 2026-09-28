@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { AiChatMessage, BlueprintMetadata } from "@gadgets/workshop-shared/api";
 import { HISTORY_COMMIT_GAP_MS, migrateCodeLogToGit } from "../src/git-migration";
@@ -8,6 +8,41 @@ import {
 } from "./legacy-workspace";
 
 describe("migrateCodeLogToGit", () => {
+  it.each(["partial-objects", "conversion", "pre-version-stamp"])("converges with exact pending bytes after interruption at %s", async checkpoint => {
+    const ws = new LegacyWorkspace();
+    ws.addGadget(10, "APP");
+    ws.addChat(1);
+    ws.edit(T0 + MINUTE, doc => setFile(doc, "10", "app.js", "accepted\r\n"));
+    const pending = ws.docAt("current");
+    const update = captureEdit(pending, doc => setFile(doc, "10", "app.js", "pending λ\r\n"));
+    ws.addMessage(1, AGENT, {type: "changes", update});
+    ws.addDraft(1, captureEdit(pending, doc => setFile(doc, "10", "draft.txt", "draft only\n")));
+    ws.storage.version.put(1);
+    let writes = 0;
+    const collection = checkpoint === "partial-objects" ? ws.storage.gitObjects : ws.storage.chatMeta;
+    const original = collection.put.bind(collection);
+    const fault = vi.spyOn(collection, "put").mockImplementation((record: never) => {
+      original(record);
+      if (++writes >= (checkpoint === "partial-objects" ? 2 : 1)) throw new Error("migration interruption");
+    });
+    if (checkpoint === "pre-version-stamp") fault.mockRestore();
+    try {
+      await migrateCodeLogToGit(ws.host());
+      if (checkpoint !== "pre-version-stamp") throw new Error("fault did not fire");
+    } catch (error) {
+      expect(String(error)).toContain("migration interruption");
+    } finally { fault.mockRestore(); }
+    expect(ws.storage.version.get()).toBe(1);
+    await migrateCodeLogToGit(ws.host());
+    await expectHeadsMatchDoc(ws.storage, ws.gitStore, ws.docAt("current"));
+    expect(await ws.convertedContent(1)).toEqual(new Map([[10, new Map([
+      ["app.js", "pending λ\r\n"], ["draft.txt", "draft only\n"],
+    ])]]));
+    const before = ws.codeBase(1);
+    await migrateCodeLogToGit(ws.host());
+    expect(ws.codeBase(1)).toEqual(before);
+    ws.conversionMessage(1); // exactly one boundary, even on the third run
+  });
   it("synthesizes commits at merge points and backfills merge messages", async () => {
     let ws = new LegacyWorkspace();
     ws.addGadget(10, "APP");

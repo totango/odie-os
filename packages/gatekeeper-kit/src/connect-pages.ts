@@ -3,6 +3,15 @@
 import type { ConnectHandoff, ConnectHandoffProtocol, GatekeeperConnectCallback, GatekeeperReconnectOptions } from "@gadgets/workshop-shared/gatekeeper";
 import type { KvMutable } from "./kv";
 
+/** Rejects pre-upgrade flows before any provider I/O or credential mutation. */
+export function requirePersistedHandoff(kv: Pick<KvMutable, "get">): ConnectHandoffProtocol {
+  const protocol = kv.get<ConnectHandoffProtocol>("connectHandoffProtocol");
+  if (protocol !== "browser-bound-v1" && protocol !== "native-verifier-v1") {
+    throw new Error("This connection was started before the handoff upgrade. Please start a new connection.");
+  }
+  return protocol;
+}
+
 /**
  * Checks the browser or native callback protocol before a provider exchanges or installs credentials. An older
  * callback's complete() may commit immediately and return void, so checking its result is too late.
@@ -14,9 +23,11 @@ export async function requireBrowserHandoff(
   callback: Pick<GatekeeperConnectCallback, "getHandoffProtocol">,
   kv?: KvMutable,
 ): Promise<ConnectHandoffProtocol> {
+  const expected = kv ? requirePersistedHandoff(kv) : undefined;
+  // A capable callback does not version a flow admitted by an older provider. Such flows may
+  // carry account-wide reconnect markers rather than the new nonce-bound staging intent.
   try {
     const protocol = await callback.getHandoffProtocol();
-    const expected = kv?.get<ConnectHandoffProtocol>("connectHandoffProtocol");
     if ((protocol === "browser-bound-v1" || protocol === "native-verifier-v1") &&
         (expected === undefined || protocol === expected)) return protocol;
   } catch {

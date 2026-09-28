@@ -31,7 +31,19 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   const identityPreference = useRef<{ scope: string; identity: string } | null>(null)
   const authGeneration = useRef(0)
   const pendingIdentityApiRef = useRef<RpcStub<AuthenticatedApi> | null>(null)
-  authenticatedApiRef.current = authState.authenticatedApi
+  const verifiedOwnerRef = useRef<string | null>(null)
+
+  // This records the identity of the exact capability we publish, not the login's
+  // base identity (which may differ after switchAccountIdentity).
+  const publishIdentity = (api: RpcStub<AuthenticatedApi>, token: string | null, ownerKey: string,
+      forceRevision = false) => {
+    const ownerChanged = verifiedOwnerRef.current !== null && verifiedOwnerRef.current !== ownerKey
+    verifiedOwnerRef.current = ownerKey
+    authenticatedApiRef.current = api
+    setAuthState(prev => ({ ...prev, token, authenticatedApi: api, isLoading: false, error: null,
+      identityRevision: forceRevision || ownerChanged
+        ? (prev.identityRevision ?? 0) + 1 : prev.identityRevision }))
+  }
 
   /**
    * Names the signed-in user on error reports, for as long as this stub is the current one.
@@ -83,7 +95,9 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
           else setAuthState(prev => ({ ...prev, isLoading: false }))
         })
         .catch((error) => {
-          if (!cancelled) setAuthState(prev => ({ ...prev, isLoading: false, error: error instanceof Error ? error.message : 'Could not read session' }))
+          if (!cancelled && generation === authGeneration.current) {
+            setAuthState(prev => ({ ...prev, isLoading: false, error: error instanceof Error ? error.message : 'Could not read session' }))
+          }
         })
     }
     return () => {
@@ -116,47 +130,46 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   const restoreIdentity = (authenticatedApi: RpcStub<AuthenticatedApi>, token: string | null,
       generation: number) => {
     pendingIdentityApiRef.current?.[Symbol.dispose]()
-    pendingIdentityApiRef.current = null
     const preference = identityPreference.current
-    if (preference) {
-      pendingIdentityApiRef.current = authenticatedApi
-      void (async () => {
-        let selected = authenticatedApi
-        try {
-          const scope = token ?? `access:${(await authenticatedApi.whoami()).id}`
-          if (generation !== authGeneration.current) {
-            authenticatedApi[Symbol.dispose]()
-            return
-          }
-          if (scope === preference.scope) {
-            selected = await authenticatedApi.switchAccountIdentity(preference.identity)
-            authenticatedApi[Symbol.dispose]()
-          } else {
-            identityPreference.current = null
-          }
-          if (generation !== authGeneration.current) {
-            selected[Symbol.dispose]()
-            return
-          }
-          setAuthState(prev => ({ ...prev, token, authenticatedApi: selected, isLoading: false, error: null }))
-        } catch (error) {
+    pendingIdentityApiRef.current = authenticatedApi
+    void (async () => {
+      let selected = authenticatedApi
+      try {
+        const owner = await authenticatedApi.whoami()
+        const scope = token ?? `access:${owner.id}`
+        if (generation !== authGeneration.current) {
           authenticatedApi[Symbol.dispose]()
-          if (generation === authGeneration.current) setAuthState(prev => ({ ...prev,
-            authenticatedApi: null, isLoading: false,
-            error: error instanceof Error ? error.message : 'Could not restore account identity' }))
-        } finally {
-          if (pendingIdentityApiRef.current === authenticatedApi) pendingIdentityApiRef.current = null
+          return
         }
-      })()
-      return
-    }
-    setAuthState(prev => ({
-      ...prev,
-      token,
-      authenticatedApi,
-      isLoading: false,
-      error: null
-    }))
+        if (preference && scope === preference.scope) {
+          selected = await authenticatedApi.switchAccountIdentity(preference.identity)
+          authenticatedApi[Symbol.dispose]()
+        } else {
+          identityPreference.current = null
+        }
+        if (generation !== authGeneration.current) {
+          selected[Symbol.dispose]()
+          return
+        }
+        pendingIdentityApiRef.current = selected
+        const selectedOwner = selected === authenticatedApi ? owner : await selected.whoami()
+        if (generation !== authGeneration.current) {
+          selected[Symbol.dispose]()
+          return
+        }
+        // A transport reconnect is continuity only for the same verified owner.
+        // Changing the key destroys saved Activity DOM before new authority is exposed.
+        publishIdentity(selected, token, `${selectedOwner.type}:${selectedOwner.id}`)
+      } catch (error) {
+        authenticatedApi[Symbol.dispose]()
+        if (selected !== authenticatedApi) selected[Symbol.dispose]()
+        if (generation === authGeneration.current) setAuthState(prev => ({ ...prev,
+          authenticatedApi: null, isLoading: false,
+          error: error instanceof Error ? error.message : 'Could not restore account identity' }))
+      } finally {
+        if (pendingIdentityApiRef.current === selected) pendingIdentityApiRef.current = null
+      }
+    })()
   }
 
   const authenticateWithToken = (token: string) => {
@@ -175,7 +188,7 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     })
 
     // Use promise pipelining - we can use the returned promise as a stub immediately
-    // without awaiting. Authentication errors will be handled when the stub is actually used.
+    // without awaiting. The identity fence must complete before publishing to the UI.
     const authenticatedApi = publicApi.authenticate(token)
     restoreIdentity(authenticatedApi, token, generation)
   }
@@ -186,21 +199,28 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
     const generation = authGeneration.current
     const scope = identityPreference.current?.scope ?? authState.token ?? `access:${(await source.whoami()).id}`
     const selected = await source.switchAccountIdentity(identity)
-    if (generation !== authGeneration.current) {
+    try {
+      if (generation !== authGeneration.current) throw new Error('The login changed while switching accounts.')
+      pendingIdentityApiRef.current = selected
+      const owner = await selected.whoami()
+      if (generation !== authGeneration.current) throw new Error('The login changed while switching accounts.')
+      ++authGeneration.current
+      identityPreference.current = { scope, identity }
+      source[Symbol.dispose]()
+      setReportedUserId(undefined)
+      publishIdentity(selected, authState.token, `${owner.type}:${owner.id}`, true)
+    } catch (error) {
       selected[Symbol.dispose]()
-      throw new Error('The login changed while switching accounts.')
+      throw error
+    } finally {
+      if (pendingIdentityApiRef.current === selected) pendingIdentityApiRef.current = null
     }
-    ++authGeneration.current
-    identityPreference.current = { scope, identity }
-    source[Symbol.dispose]()
-    authenticatedApiRef.current = selected
-    setReportedUserId(undefined)
-    setAuthState(prev => ({ ...prev, authenticatedApi: selected,
-      identityRevision: (prev.identityRevision ?? 0) + 1 }))
   }
 
   const login = (token: string) => {
     identityPreference.current = null
+    // Explicit login already replaces the identity boundary; don't count that replacement twice.
+    verifiedOwnerRef.current = null
     setAuthState(prev => ({ ...prev, identityRevision: (prev.identityRevision ?? 0) + 1 }))
     void getWorkshopRuntime().writeSessionSecret(token).catch(() => {})
     authenticateWithToken(token)
@@ -209,29 +229,23 @@ export function useAuth(publicApi: RpcStub<PublicApi>) {
   const logout = () => {
     ++authGeneration.current
     identityPreference.current = null
+    verifiedOwnerRef.current = null
     setReportedUserId(undefined)
     pendingIdentityApiRef.current?.[Symbol.dispose]()
     pendingIdentityApiRef.current = null
 
-    if (CF_ACCESS_MODE) {
-      window.location.assign('/cdn-cgi/access/logout')
-      return
-    }
-
-    // Use functional updater to read current state (avoids stale closure).
-    setAuthState(prev => {
-      if (prev.authenticatedApi) {
-        prev.authenticatedApi[Symbol.dispose]()
-      }
-      return {
+    // Revoke locally even if external logout navigation is blocked or never completes.
+    authenticatedApiRef.current?.[Symbol.dispose]()
+    authenticatedApiRef.current = null
+    setAuthState({
         token: null,
         authenticatedApi: null,
         isLoading: false,
         error: null
-      }
     })
 
     void getWorkshopRuntime().clearSessionSecret().catch(() => {})
+    if (CF_ACCESS_MODE) window.location.assign('/cdn-cgi/access/logout')
   }
 
   return {

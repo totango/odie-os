@@ -49,7 +49,7 @@ function PassThrough({ children }: { children: ReactNode }) { return children }
 
 let cleanups: ReturnType<typeof vi.fn<() => void>>
 function Probe() {
-  const { authenticatedApi, logout } = useAuthenticatedApi()
+  const { authenticatedApi, logout, switchIdentity } = useAuthenticatedApi()
   const [draft, setDraft] = useState('fresh')
   useEffect(() => {
     const poll = () => { void authenticatedApi.isOnboardingCompleted() }
@@ -60,6 +60,7 @@ function Probe() {
   return <div data-probe>
     <button onClick={() => setDraft('saved')}>{draft}</button>
     <button onClick={logout}>Logout</button>
+    <button data-switch onClick={() => { void switchIdentity?.('bob') }}>Switch</button>
   </div>
 }
 
@@ -82,6 +83,7 @@ function connection(owner = 'alice') {
     }
   }
   const api = {
+    switchAccountIdentity: vi.fn<(identity: string) => Promise<unknown>>(),
     whoami: vi.fn<() => Promise<{ id: string; name: string; type: 'user' }>>(async () => { guard(); return { id: owner, name: owner, type: 'user' } }),
     amIAdmin: vi.fn<() => Promise<boolean>>(async () => { guard(); return false }),
     isOnboardingCompleted: vi.fn<() => Promise<boolean>>(async () => { guard(); return true }),
@@ -202,10 +204,11 @@ describe('root auth loading boundary (real AuthProvider, required gate and Sessi
     await act(async () => read.resolve('same-token'))
     expect(nextAuthenticate).toHaveBeenCalledWith('same-token')
     expect(next.api.whoami).toHaveBeenCalled()
-    expect(container.textContent).toContain('Checking required connections')
+    expect(container.textContent).toContain('Waiting for server')
+    expect(next.api.isOnboardingCompleted).not.toHaveBeenCalled()
     expectHiddenProbe()
-    // Identity and required-connection checks are independently pending. Neither is
-    // resolved by the token read; keep the real gate closed until its own check finishes.
+    // No child receives authority until the owner fence resolves; required connections
+    // then independently keep the subtree hidden until their own check finishes.
     await act(async () => identity.resolve({ id: 'alice', name: 'alice', type: 'user' }))
     expectHiddenProbe()
     await act(async () => next.required.resolve([]))
@@ -217,6 +220,38 @@ describe('root auth loading boundary (real AuthProvider, required gate and Sessi
     expect(next.api.isOnboardingCompleted.mock.calls.length).toBeGreaterThan(1)
     expect(Object.values(first.api).map((fn) => fn.mock.calls.length)).toEqual(calls)
     expect(first.afterDisposal).not.toHaveBeenCalled()
+  })
+
+  it('real useAuth destroys saved DOM when reconnect verifies a different owner', async () => {
+    const { read, next, identity } = await awaitReplacementTokenRead()
+    await act(async () => read.resolve('same-token'))
+    expectHiddenProbe()
+    await act(async () => identity.resolve({ id: 'bob', name: 'bob', type: 'user' }))
+    await act(async () => next.required.resolve([]))
+    expect(container.querySelector('[data-probe]')?.textContent).toContain('fresh')
+    expect(container.querySelector('[data-probe]')?.textContent).not.toContain('saved')
+  })
+
+  it('destroys switched-owner DOM when a rotated token returns to the base owner', async () => {
+    const original = await vi.importActual<typeof import('../useAuth')>('../useAuth')
+    vi.mocked(useAuth).mockImplementation(original.useAuth)
+    runtime.readSessionSecret.mockResolvedValueOnce('first-token')
+    const base = connection('alice')
+    const selected = connection('bob')
+    base.required.resolve([])
+    selected.required.resolve([])
+    base.api.switchAccountIdentity.mockResolvedValue(selected.api)
+    await renderPublicApi(base)
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-switch]')!.click())
+    await saveDraft()
+    const oldProbe = container.querySelector('[data-probe]')
+    runtime.readSessionSecret.mockResolvedValueOnce('rotated-token')
+    const next = connection('alice')
+    next.required.resolve([])
+    await renderPublicApi(next)
+    expect(container.querySelector('[data-probe]')).not.toBe(oldProbe)
+    expect(container.querySelector('[data-probe]')?.textContent).toContain('fresh')
+    expect(selected.afterDisposal).not.toHaveBeenCalled()
   })
 
   it.each(['empty', 'rejected'] as const)('real useAuth awaits a replacement token read: %s', async (result) => {

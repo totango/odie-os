@@ -186,6 +186,8 @@ export default function GadgetCodeInterface({
   const branchMode = selectedChatId !== null
   const editingState = useEditingState(overseer)
   const [editingBlocked, setEditingBlocked] = useState(false)
+  const [hasVisitedEditor, setHasVisitedEditor] = useState(isVisible)
+  if (isVisible && !hasVisitedEditor) setHasVisitedEditor(true)
 
   // Keep refs to the current props so long-lived callbacks (the OT client delegate, editor
   // sessions) always read the latest values.
@@ -1080,7 +1082,7 @@ export default function GadgetCodeInterface({
     )
   }
 
-  if (!isVisible) {
+  if (!hasVisitedEditor) {
     return <div style={{ height, width: '100%' }} />
   }
 
@@ -1093,10 +1095,6 @@ export default function GadgetCodeInterface({
         Loading code files...
       </div>
     )
-  }
-
-  if (!isVisible) {
-    return <div style={{ height, width: '100%' }} />
   }
 
   const activeFileText = activeFile !== null
@@ -1115,7 +1113,7 @@ export default function GadgetCodeInterface({
       : 'Editing changes in'
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height, width: '100%' }}>
+    <div style={{ display: isVisible ? 'flex' : 'none', flexDirection: 'column', height, width: '100%' }}>
       {(editingState !== 'ready' || editingBlocked) && <div role="status" className="border-b border-kumo-line p-3 text-sm text-kumo-default">
         {editingState === 'ready' ? 'Saved edits are paused. Resume only when you are ready to submit them.' : editingMessage(editingState)}
         {editingState === 'ready' && editingBlocked && <WorkshopButton onClick={async () => {

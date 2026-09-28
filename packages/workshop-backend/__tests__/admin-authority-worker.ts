@@ -21,6 +21,16 @@ import { JarvisPolicyApi } from "../../gatekeeper-jarvis/src/policy";
 import type { ContextApi, ContextCollectionMetadata } from "../../gatekeeper-context/src/context-types";
 import { domainName } from "../../gatekeeper-context/src/domain";
 import { NativeBrowserFlow } from "../src/auth/native-browser-flow";
+import { PendingLogin as ProductionPendingLogin } from "../src/auth/login-flow";
+
+/** Test-only expiry barrier executes inside the pending login's own RPC context. */
+export class PendingLogin extends ProductionPendingLogin {
+  async expireDuringConfirmation() {
+    const result = this.ctx.storage.kv.get<Record<string, unknown>>("result")!;
+    this.ctx.storage.kv.put("result", {...result, expiresAt: 0});
+    await this.alarm();
+  }
+}
 
 /** Typed test bridge avoids merging unrelated Worker Env programs; only real owners attest. */
 export class ContextFenceVendor extends WorkerEntrypoint<Cloudflare.Env, {sharingDomain: string}> {
@@ -72,8 +82,8 @@ export class AdminProviderTestHooks extends NativeBrowserFlow {
   loginCallback(pendingId: string, flowHandle?: string, vendorId = "test") {
     return this.ctx.exports.TestNativeLoginCallback({props: {pendingId, flowHandle, vendorId}});
   }
-  handoffAccount(name: string, legacyHandoff = false) {
-    return this.ctx.exports.FakeGatekeeperAccount({props: {name, legacyHandoff}});
+  handoffAccount(name: string, legacyHandoff = false, failDescribe = false) {
+    return this.ctx.exports.FakeGatekeeperAccount({props: {name, legacyHandoff, failDescribe}});
   }
   accountCallback(userId: string, accountId: number, flowHandle?: string) {
     return this.ctx.exports.TestConnectCallback({props: {userId, accountId, flowHandle, vendorId: "test"}});
@@ -138,6 +148,8 @@ const requestBuildFixturePolicy: RequestBuildPolicy = {
   spendMicros: 2000,
   callChargeMicros: 1000,
   modelInputBytes: 8192,
+  contextFiles: 10,
+  contextBytes: 100 * 1024 * 1024,
   modelOutputTokens: 200,
   outputBytes: 8192,
   diffBytes: 4096,

@@ -37,6 +37,7 @@ it.concurrent("lists workspace metadata after activity and removes it after dele
   using publicApi = connect(requireHarness().url);
   using authenticated = await signUp(publicApi, owner);
   using workspace = await authenticated.newGadget();
+  await workspace.negotiateEditingProtocol("git-ot-v1");
   const { id } = await workspace.getMetadata();
   expect(await authenticated.listGadgets()).not.toContainEqual(expect.objectContaining({ id }));
 
@@ -72,6 +73,7 @@ it.concurrent("persists an ordered human-only chat without starting an agent", a
   using publicApi = connect(requireHarness().url);
   using authenticated = await signUp(publicApi, username());
   using workspace = await authenticated.newGadget();
+  await workspace.negotiateEditingProtocol("git-ot-v1");
 
   const chatId = await workspace.newChat("First message", null);
   await workspace.sendChatMessage(chatId, "Second message", null);
@@ -95,6 +97,7 @@ it.concurrent("creates, renames, reopens, and removes a Gadget capability", asyn
   using publicApi = connect(requireHarness().url);
   using authenticated = await signUp(publicApi, username());
   using workspace = await authenticated.newGadget();
+  await workspace.negotiateEditingProtocol("git-ot-v1");
 
   using gadget = await workspace.createGadget("Status", undefined, "STATUS");
   const gadgetId = await gadget.getId();

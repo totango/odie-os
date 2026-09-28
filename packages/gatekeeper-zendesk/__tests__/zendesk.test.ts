@@ -785,6 +785,7 @@ describe("Zendesk token lifecycle regressions", () => {
       credentialsExpired: vi.fn(), credentialsRestored: vi.fn(),
     };
     kv.set("callback", callback);
+    kv.set("connectHandoffProtocol", "browser-bound-v1");
     const account = new ZendeskAccount({ storage, facets: { delete: vi.fn() } } as never, env as never);
     return { account, kv, callback };
   }

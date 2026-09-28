@@ -48,6 +48,7 @@ it("reports collaborator presence and removes it when the capability closes", as
   using owner = await signUp(ownerPublic, ownerName);
   using collaborator = await signUp(collaboratorPublic, collaboratorName);
   using workspace = await owner.newGadget();
+  await workspace.negotiateEditingProtocol("git-ot-v1");
   const { id: workspaceId } = await workspace.getMetadata();
   await workspace.newChat("Make this workspace visible without an agent", null);
   await workspace.addCollaborator(collaboratorName, "build");

@@ -15,6 +15,23 @@ sequencing that span more than one symbol.
 
 ## Browser-bound connect compatibility
 
+### Persisted flows admitted before the upgrade
+
+Previously admitted flows without a persisted `connectHandoffProtocol` are rejected before code
+exchange or credential installation, even when their callback has already been upgraded. They are
+not migrated and their lifetime is never extended: an account-wide legacy `reconnecting` marker
+cannot prove the new nonce-bound staging intent. Users must start a fresh connect/reconnect after
+upgrade. Existing live grants, registrations and transport sessions remain intact. The ordinary
+nonce expiry and abandoned-account cleanup remain authoritative; deployment cutover must account
+for these explicit fresh-start outcomes rather than promise completion of old callbacks.
+
+The persisted-flow fence is shared by Cloudflare, Confluence, GitHub, Google, Jira, Linear,
+Notion, Slack, Spotify, Supabase, Zendesk and ZoomInfo before their OAuth exchange; Email and
+Home Assistant check it before connection completion/credential installation. MCP (including the
+portal and ODIE) also checks it at initiation before any endpoint repoint, registration, probe or
+OAuth operation, as well as at the OAuth callback. Auto-provisioned Context, JARVIS, Scheduler,
+Work Items and Sessions organization accounts have no admitted browser OAuth flow to migrate.
+
 Before exposing a connect, reconnect, or grant-expansion URL, call `acknowledgeHandoff(kv, options)`
 against the account's persisted callback and return its result as `handoffProtocol` beside `url`.
 It supports exactly `browser-bound-v1` and `native-verifier-v1` and records the request without

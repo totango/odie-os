@@ -2,6 +2,138 @@
 
 Worktree: `/Users/jacob_1/odie-os-polaris-upstream`.
 
+## Skuld T P1 — production first-cutover gate
+
+Implemented paused-by-default production artifacts and a fail-closed deployment approval gate
+before provider/secret mutations. Manual prepare remains paused; resume requires fresh exact-target
+completion evidence; automatic routine releases require a successful resume receipt, ancestry,
+and identical compatibility/gate-source fingerprint. The schema requires real K/F/C/T review IDs,
+old-client and recovery-client pins, hashed evidence references, and the actual coordinator loop
+ordinal within 1–20. No success record or readiness evidence is committed.
+
+Files: `.github/workflows/deploy-production.yml`, `scripts/build-production-deploy.mjs`, new
+`scripts/production-cutover.mjs`, its root tests, env-policy expectation, and the new operator runbook
+`docs/polaris-production-cutover.md`. The source backend config remains normally unset, while the
+artifact builder forces pause. Only successful evidence validation can remove it from an artifact.
+
+Checks: 17 cutover/artifact/schema/workflow tests pass; complete direct root scripts tests pass;
+scripts types and scoped lint pass. Tests cover missing evidence, first-cutover expiry, target/hash
+mismatch, artifact tampering, absent independent review/client pins, phase separation, and routine
+ancestry/resume-receipt requirements. These tests are synthetic fixtures, not operational evidence.
+
+External blockers remain: actual old-backend/socket/agent and OAuth admission fence, completed drain,
+restorable snapshot and restore rehearsal, pinned old-client export or deployed preparatory recovery
+release, mixed browser/native/provider OAuth matrix, migration/catalog/deployed-version verification,
+protected GitHub environment review policy, and real prepare/completion/resume records. Gate prevents
+the first deployment without those attestations; it cannot independently prove linked evidence true.
+Coordinator must reconcile its existing global loop count (not supplied to T); this remediation does
+not reset or invent it. Independent Skuld approval remains pending. No deploy, secret/resource mutation,
+commit, or new full runtime test run was performed. K owns the integration-protocol test repairs.
+
+## Root-test repair and full test attempt — current result
+
+Resolved the two root-tooling failures reported by the coordinator:
+
+- Removed obsolete `CONTINUITY_URL` and `PLAYWRIGHT_MODULE` entries from the env-policy expectation
+  after F removed the duplicate standalone Chromium fixture. `CONTINUITY_BROWSER_CHANNEL` remains.
+- Reproduced the trusted-launcher failure: a Vite+ automatically tracked task reinserts
+  `DYLD_INSERT_LIBRARIES` into a child even when invoked through `/usr/bin/env -i` with an explicit
+  clean environment. The diagnostic printed only environment key names, not values. The probe's
+  `PROXY_ENV_UNSAFE` rejection is therefore correct; the same test passes directly outside tracking.
+- Removed the temporary diagnostic task. Added a mandatory, watchdogged, `cache: false`
+  `test:trusted-launcher` prerequisite to the scripts test task. The prerequisite runs the existing
+  launcher test unchanged; the cached task runs the other tests. Both selectors share the exact
+  test name. Production launcher/proxy/security code and its assertions were not modified or relaxed.
+
+Verification:
+
+- `pnpm exec vp run --cache -F @gadgets/scripts test`: **354 passed** (one uncached launcher test
+  plus 353 in the cached task), zero failures. Both task paths executed rather than replaying cache.
+- `pnpm types:scripts`, scoped lint, and diff checks: passed.
+- `VP_RUN_CONCURRENCY_LIMIT=2 pnpm test`: **exit 1**, completed rather than timing out.
+  Root tooling passed again (353 replayed, launcher rerun). Error-reporting 23, bundled-blueprints
+  285, typed-storage 56, and router 19 tests passed; configurator-ui declares no tests.
+- Integration-tests: **33 failed, 40 passed, 8 failed files / 5 passed files**. All 33 failures
+  report `EDITING_PROTOCOL_UPGRADE_REQUIRED`. The task runner then terminated the concurrent
+  frontend test task (exit 137), so that is not evidence of a frontend assertion failure or a
+  completed frontend suite. Later packages were not reached. `vp run --last-details` reports
+  17 tasks, four cache hits, two failed tasks (integration exit 1, frontend exit 137).
+
+Exact integration failures to coordinator/K (all under `packages/integration-tests/__tests__/`):
+
+| Suite | Failing tests |
+| --- | ---: |
+| `external-message-verification.test.ts` | 2 |
+| `observer-reverification.test.ts` | 7 |
+| `observer-role-scope.test.ts` | 4 |
+| `sensitive-observations.test.ts` | 12 |
+| `workshop-blueprints.test.ts` | 2 |
+| `workshop-lifecycle.test.ts` | 3 |
+| `workshop-presence.test.ts` | 1 |
+| `workshop-sharing.test.ts` | 2 |
+
+The two agent suites pass and their shared `src/agent-session.ts:361` explicitly negotiates
+`WORKSHOP_EDITING_PROTOCOL`. The failing suites open workspaces directly (examples:
+`workshop-presence.test.ts:50`, `workshop-lifecycle.test.ts:39,74,97`,
+`observer-reverification.test.ts:143`, `observer-role-scope.test.ts:82`,
+`sensitive-observations.test.ts:101`) and need contract-aware fixture review. No protocol guard
+was bypassed and no integration/runtime implementation was edited in this tooling-only pass.
+
+Process check after completion (`pgrep -fl 'vitest|scripts/vp/run.ts|with-timeout'`) found no matching
+active test/task/watchdog processes. No duplicate full run was started. Changes in this pass are
+the two root tooling files and this handoff only; no commit or deployment.
+
+## Latest-main merge T pass — current status
+
+Inputs verified: HEAD `6e77d8ef553da4c996d8d5b080f01dcfadcb2cf1`, MERGE_HEAD
+`aa485877389515479426b6e346582244da536d5a`, merge base
+`6a00bd36a3f15cf57810d107f45312ed28fde372`. These supersede the previous exact-tree green status
+below; the active latest-main merge is not committed. The anchor document now records this refresh.
+
+### Resolutions and inspection
+
+- Frontend manifest keeps `@gadgets/scripts`, router-plugin `^1.168.35`, and newly added
+  `@playwright/test` pinned at `1.58.2`; `test:browser:continuity` is retained alongside Vitest.
+- Lockfile combines both importer entries and retains the existing dependency graph plus all new
+  Playwright package/snapshot references (`playwright`, `playwright-core`, Darwin `fsevents@2.3.2`).
+  No unrelated version refresh was needed.
+- Backend Vitest combines `workerLoaders.LOADER` and new `r2Buckets: ['BLUEPRINT_CONTENT']`, keeping
+  both the upstream gadget-execution suites and latest-main attachment storage fixtures. Existing
+  NativeBrowserFlow/UserDirectory namespace and text-module configuration remain intact.
+- Preserved the separate Chromium continuity CI job, pinned dependency install, failure artifacts,
+  and all three browser suites. The `*.pw.ts` naming keeps them outside Vitest discovery.
+- Inspected auto-merged configurator readiness: initialization waits on readiness, discards old
+  generation results, reacquires/disposes bootstrap capabilities, and rejects collection before
+  initialization. Only initial read-only bootstrap retries; normal UI actions do not. Precise
+  missing-method fallback is allowed only on the first readiness probe.
+- Updated the root configurator test host to implement the readiness contract. Added execution
+  tests against the generated bootstrap for stale-generation discard/reacquisition, initial legacy
+  fallback, authority rejection, and refusal to downgrade an established protocol.
+- Env policy retains external `CONTINUITY_BROWSER_CHANNEL` and also classifies `CONTINUITY_URL` /
+  `PLAYWRIGHT_MODULE` from the existing standalone `src/features/workspace/continuity.chromium.mjs`
+  browser harness as external. None is a production build input.
+
+### Verification and remaining dependency
+
+- `pnpm install --frozen-lockfile`: passed; 38 projects, four packages reused/added, no downloads;
+  supply-chain checks passed.
+- `node --test --test-reporter=dot 'scripts/**/*.test.ts'`: passed after readiness/env fixes.
+- `pnpm types:scripts`: passed.
+- Scoped lint of changed root tooling, backend Vitest, and browser configs: passed.
+- `pnpm --filter @gadgets/workshop-frontend exec playwright test --config browser/playwright.config.ts --list`:
+  passed, **12 tests in three files**. Discovery is not browser execution.
+- Scoped whitespace check: passed.
+
+Broad build is deferred until F finishes runtime conflict resolution, as requested. Last marker
+scan still found F-owned `GadgetEditor.tsx` (first marker 541), `GatekeeperModal.tsx` (2),
+`GadgetUI.integration.test.tsx` (611), `useActions.test.tsx` (2), and
+`useWorkspaceOpen.test.tsx` (4). K's shared `api.ts` marker scan was already clear. Run
+`VP_RUN_CONCURRENCY_LIMIT=2 pnpm build` once runtime owners release the tree; do not inherit the
+previous pass's green build as evidence for this merge.
+
+Only verified T-owned resolutions/tooling/doc updates are staged by this pass. No new broad
+generated-output rewrite, commit, push, or deployment was performed.
+
 ## Third T pass — current status: requested checks green
 
 This section supersedes the outstanding diagnostics in the earlier passes below.

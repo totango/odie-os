@@ -61,7 +61,8 @@ describe('ticket-bound native handoffs', () => {
       expect([receivedHandle, verifier, receivedTicket]).toEqual([handle, 'independent-app-verifier', ticket])
       return { status: 'completed', token: 'session-secret' }
     })
-    cleanups.push(await installNativeLoginCoordinator(f.runtime, () => ({ consumeNativeLoginFlow: consume }) as unknown as RpcStub<PublicApi>))
+    const api = { consumeNativeLoginFlow: consume } as unknown as RpcStub<PublicApi>
+    cleanups.push(await installNativeLoginCoordinator(f.runtime, () => api))
     if (mode === 'warm') f.deliver(link)
     await vi.waitFor(() => expect(f.runtime.writeSessionSecret).toHaveBeenCalledExactlyOnceWith('session-secret'))
     expect(f.read()).toBeNull()

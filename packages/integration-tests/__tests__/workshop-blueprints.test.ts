@@ -41,6 +41,7 @@ it.concurrent("publishes, instantiates, and deletes an owned blueprint", async (
   const document = formats.find(format => format.output.id === "document");
   if (document === undefined) throw new Error("Document output format is not installed");
   using sourceWorkspace = await authenticated.newGadgetFromBlueprint(document.blueprintId, {});
+  await sourceWorkspace.negotiateEditingProtocol("git-ot-v1");
   const sourceMetadata = await sourceWorkspace.getMetadata();
   const sourceGadgetId = sourceMetadata.defaultGadgetId;
   if (sourceGadgetId === undefined) throw new Error("Source workspace has no default Gadget");
@@ -96,6 +97,7 @@ it.concurrent("creates and removes an indexed standard output", async () => {
   expect(document.requiresSetup).toBe(false);
 
   using workspace = await authenticated.newGadgetFromBlueprint(document.blueprintId, {});
+  await workspace.negotiateEditingProtocol("git-ot-v1");
   const metadata = await workspace.getMetadata();
   const gadgetId = metadata.defaultGadgetId;
   if (gadgetId === undefined) throw new Error("Output workspace has no default Gadget");

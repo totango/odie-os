@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthenticatedApi, PublicApi } from "@gadgets/workshop-shared/api";
 import { COMMUNITY_REQUEST_LIMITS as LIMITS } from "@gadgets/workshop-shared/community-requests";
 import { CommunityRequests } from "../src/community-requests";
+import { COMMUNITY_ATTACHMENT_R2_PREFIX } from "../src/community-request-attachments";
 import { PublicApiImpl, type UserDurableObject, type AdminSettings, type AdminAuthority } from "../src/server";
 import type { OverseerDurableObject } from "../src/overseer";
 
@@ -51,7 +52,7 @@ const command = (action: "hide" | "restore" | "close" | "reopen" | "duplicate", 
 
 beforeEach(async () => {
   await runInDurableObject(registry(), (_instance, ctx) => {
-    for (const table of ["requests", "details", "votes", "receipts", "quotas", "moderation", "privateDiagnostics", "ownerDeletions"]) {
+    for (const table of ["requests", "details", "detailDeletions", "attachments", "attachmentAuthorDeletions", "attachmentDeletions", "votes", "receipts", "quotas", "moderation", "privateDiagnostics", "ownerDeletions"]) {
       ctx.storage.sql.exec(`DELETE FROM ${table}`);
     }
   });
@@ -75,6 +76,148 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
     await alice.unvoteCommunityRequest(request.id);
     await alice.unvoteCommunityRequest(request.id);
     expect(await alice.getCommunityRequest(request.id)).toMatchObject({ voteCount: 1, viewerHasVoted: false });
+  });
+
+  it("stores immutable public attachments on requests and authored details", async () => {
+    const { alice, bob } = await fixture();
+    const request = await alice.createCommunityRequest(draft());
+    const image = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const root = await alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "root-image", name: "screen.png", mimeType: "image/png", content: image,
+    });
+    expect(root).toMatchObject({name: "screen.png", mimeType: "image/png", byteLength: image.length, isOwn: true});
+    expect((await bob.getCommunityRequest(request.id))?.attachments).toEqual([{...root, isOwn: false}]);
+    const loaded = await bob.getCommunityRequestAttachment(request.id, root.id);
+    expect(loaded.attachment).toEqual({...root, isOwn: false});
+    expect(loaded.content).toEqual(image);
+
+    const detail = await bob.addCommunityRequestDetail(request.id, {
+      idempotencyKey: "detail-with-file", body: "The same issue appears in this trace.",
+    });
+    const text = new TextEncoder().encode("bounded public evidence\n");
+    const detailAttachment = await bob.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "detail-file", detailId: detail.id, name: "trace.txt",
+      mimeType: "text/plain", content: text,
+    });
+    expect((await alice.listCommunityRequestDetails(request.id)).items[0].attachments)
+      .toEqual([{...detailAttachment, isOwn: false}]);
+    await expect(bob.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "wrong-root", name: "trace.txt", mimeType: "text/plain", content: text,
+    })).rejects.toThrow("Only the request owner");
+    await expect(alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "wrong-detail", detailId: detail.id, name: "trace.txt",
+      mimeType: "text/plain", content: text,
+    })).rejects.toThrow("authored public detail");
+  });
+
+  it("lets only attachment authors delete their files without removing parent text", async () => {
+    const { alice, bob } = await fixture();
+    const request = await alice.createCommunityRequest(draft({title: "Delete authored attachments"}));
+    const root = await alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "delete-own-root", name: "root.txt", mimeType: "text/plain",
+      content: new TextEncoder().encode("root evidence"),
+    });
+    const detail = await bob.addCommunityRequestDetail(request.id, {
+      idempotencyKey: "delete-own-detail", body: "Keep this comment",
+    });
+    const child = await bob.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "delete-own-child", detailId: detail.id, name: "child.txt", mimeType: "text/plain",
+      content: new TextEncoder().encode("detail evidence"),
+    });
+
+    await expect(async () => bob.deleteCommunityRequestAttachment(request.id, root.id)).rejects.toThrow("attachment author");
+    await expect(async () => alice.deleteCommunityRequestAttachment(request.id, child.id)).rejects.toThrow("attachment author");
+    await alice.deleteCommunityRequestAttachment(request.id, root.id);
+    await alice.deleteCommunityRequestAttachment(request.id, root.id);
+    await bob.deleteCommunityRequestAttachment(request.id, child.id);
+    await bob.deleteCommunityRequestAttachment(request.id, child.id);
+
+    expect((await alice.getCommunityRequest(request.id))?.attachments).toEqual([]);
+    expect((await alice.listCommunityRequestDetails(request.id)).items).toEqual([
+      expect.objectContaining({id: detail.id, body: "Keep this comment", attachments: []}),
+    ]);
+    await runInDurableObject(registry(), async (instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT attachmentId FROM attachmentAuthorDeletions ORDER BY attachmentId").toArray())
+        .toEqual([{attachmentId: root.id}, {attachmentId: child.id}].toSorted((a, b) => a.attachmentId.localeCompare(b.attachmentId)));
+      ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=0");
+      await instance.alarm();
+    });
+    expect(await env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${root.id}`)).toBeNull();
+    expect(await env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${child.id}`)).toBeNull();
+    await alice.deleteCommunityRequest(request.id);
+    await runInDurableObject(registry(), (_instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT * FROM attachmentAuthorDeletions WHERE requestId=?", request.id).toArray()).toEqual([]);
+    });
+  });
+
+  it("lets only a detail author delete their detail and durably removes its attachment", async () => {
+    const { alice, bob } = await fixture();
+    const request = await alice.createCommunityRequest(draft({title: "Delete authored detail"}));
+    const detail = await bob.addCommunityRequestDetail(request.id, {
+      idempotencyKey: "detail-delete", body: "Remove my public comment keyword",
+    });
+    const attachment = await bob.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "detail-delete-file", detailId: detail.id,
+      name: "comment.txt", mimeType: "text/plain", content: new TextEncoder().encode("remove me"),
+    });
+
+    await expect(alice.deleteCommunityRequestDetail(request.id, detail.id)).rejects.toThrow("detail author");
+    await bob.deleteCommunityRequestDetail(request.id, detail.id);
+    await bob.deleteCommunityRequestDetail(request.id, detail.id);
+
+    expect((await alice.listCommunityRequestDetails(request.id)).items).toEqual([]);
+    expect((await alice.searchCommunityRequests({query: "keyword"})).items).toEqual([]);
+    await runInDurableObject(registry(), async (instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT * FROM details WHERE id=?", detail.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT * FROM attachments WHERE id=?", attachment.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT owner FROM detailDeletions WHERE detailId=?", detail.id).toArray())
+        .toEqual([{owner: expect.any(String)}]);
+      expect(ctx.storage.sql.exec("SELECT id FROM attachmentDeletions").toArray()).toEqual([{id: attachment.id}]);
+      ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=0");
+      await instance.alarm();
+    });
+    expect(await env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${attachment.id}`)).toBeNull();
+    await alice.deleteCommunityRequest(request.id);
+    await runInDurableObject(registry(), (_instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT * FROM detailDeletions WHERE requestId=?", request.id).toArray()).toEqual([]);
+    });
+  });
+
+  it("rejects unsupported, mismatched, and empty public attachments", async () => {
+    const { alice } = await fixture();
+    const request = await alice.createCommunityRequest(draft());
+    await expect(alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "svg", name: "active.svg", mimeType: "image/svg+xml",
+      content: new TextEncoder().encode("<svg/>"),
+    })).rejects.toThrow("Unsupported attachment type");
+    await expect(alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "fake-png", name: "fake.png", mimeType: "image/png",
+      content: new TextEncoder().encode("not a png"),
+    })).rejects.toThrow("does not match");
+    await expect(alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "empty", name: "empty.txt", mimeType: "text/plain",
+      content: new Uint8Array(),
+    })).rejects.toThrow("must not be empty");
+  });
+
+  it("enforces the request-wide attachment count across request and detail uploads", async () => {
+    const { alice } = await fixture();
+    const request = await alice.createCommunityRequest(draft());
+    const detail = await alice.addCommunityRequestDetail(request.id, {
+      idempotencyKey: "limit-detail", body: "Public detail with bounded files.",
+    });
+    for (let index = 0; index < LIMITS.attachmentsPerRequest; index++) {
+      await alice.addCommunityRequestAttachment(request.id, {
+        idempotencyKey: `limit-${index}`, ...(index % 2 ? {detailId: detail.id} : {}),
+        name: `file-${index}.txt`, mimeType: "text/plain", content: new Uint8Array([0x61]),
+      });
+    }
+    await expect(alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "limit-over", name: "over.txt", mimeType: "text/plain",
+      content: new Uint8Array([0x61]),
+    })).rejects.toThrow("attachment limit");
+    expect((await alice.getCommunityRequest(request.id))?.attachments).toHaveLength(5);
+    expect((await alice.listCommunityRequestDetails(request.id)).items[0].attachments).toHaveLength(5);
   });
 
   it("keeps consented bug diagnostics private, sanitized, owner-bound and moderator-only", async () => {
@@ -113,6 +256,10 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
     const bug = await alice.createCommunityRequest(draft({ kind: "bug", title: "Delete me", body: "private-ish authored text" }));
     await bob.voteCommunityRequest(bug.id);
     await alice.addCommunityRequestDetail(bug.id, { idempotencyKey: "delete-detail", body: "Delete this detail" });
+    const publicAttachment = await alice.addCommunityRequestAttachment(bug.id, {
+      idempotencyKey: "delete-attachment", name: "delete.txt", mimeType: "text/plain",
+      content: new TextEncoder().encode("Delete these public bytes"),
+    });
     await alice.attachCommunityRequestDiagnostics(bug.id, { idempotencyKey: "delete-diagnostics", pathname: "/requests/new", diagnostics: [] });
     await expect(async () => bob.deleteCommunityRequest(bug.id)).rejects.toThrow("request owner");
     await alice.deleteCommunityRequest(bug.id);
@@ -120,12 +267,100 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
     expect(await alice.getCommunityRequest(bug.id)).toBeNull();
     expect((await bob.listCommunityRequests()).items).toEqual([]);
     const tombstone = await admin.getCommunityRequest(bug.id, true);
-    expect(tombstone).toMatchObject({ title: "[Deleted by author]", body: "", hidden: true, status: "closed" });
+    expect(tombstone).toMatchObject({
+      title: "[Deleted by author]", body: "", hidden: true, status: "closed", attachments: [],
+    });
+    await runInDurableObject(registry(), async (instance, ctx) => {
+      expect(ctx.storage.sql.exec("SELECT * FROM attachments WHERE requestId=?", bug.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT * FROM detailDeletions WHERE requestId=?", bug.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT * FROM attachmentAuthorDeletions WHERE requestId=?", bug.id).toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT * FROM receipts").toArray()).toEqual([]);
+      expect(ctx.storage.sql.exec("SELECT id FROM attachmentDeletions").toArray())
+        .toEqual([{id: publicAttachment.id}]);
+      ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=0");
+      await instance.alarm();
+      expect(ctx.storage.sql.exec("SELECT id FROM attachmentDeletions").toArray()).toEqual([]);
+    });
+    expect(await env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${publicAttachment.id}`)).toBeNull();
     await expect(alice.attachCommunityRequestDiagnostics(bug.id, {
       idempotencyKey: "delete-diagnostics", pathname: "/requests/new", diagnostics: [],
     })).rejects.toThrow("deleted request");
     expect(await admin.getCommunityRequestPrivateDiagnostics(bug.id)).toBeNull();
     await expect(async () => admin.moderateCommunityRequest(bug.id, command("restore"))).rejects.toThrow("cannot be restored");
+  });
+
+  it("withholds attachment bytes when their author deletes them during the storage read", async () => {
+    const { alice, bob } = await fixture();
+    const request = await alice.createCommunityRequest(draft());
+    const attachment = await alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "delete-during-read", name: "evidence.txt", mimeType: "text/plain",
+      content: new TextEncoder().encode("withdrawn public evidence"),
+    });
+    const owner = await runInDurableObject(registry(), (_instance, ctx) =>
+      ctx.storage.sql.exec<{owner: string}>("SELECT owner FROM attachments WHERE id=?", attachment.id).one().owner);
+    let original!: R2Bucket;
+    await runInDurableObject(registry(), instance => {
+      const fixtureEnv = Reflect.get(instance, "env") as Cloudflare.Env;
+      original = fixtureEnv.BLUEPRINT_CONTENT;
+      fixtureEnv.BLUEPRINT_CONTENT = new Proxy(original, {
+        get(target, property) {
+          if (property === "get") return async (key: string) => {
+            const object = await target.get(key);
+            instance.deleteAttachment(owner, request.id, attachment.id);
+            return object;
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+    try {
+      await expect(bob.getCommunityRequestAttachment(request.id, attachment.id))
+        .rejects.toThrow("Board attachment unavailable.");
+    } finally {
+      await runInDurableObject(registry(), instance => {
+        (Reflect.get(instance, "env") as Cloudflare.Env).BLUEPRINT_CONTENT = original;
+      });
+    }
+  });
+
+  it("durably retries transient object-storage failures while scrubbing deleted attachments", async () => {
+    const { alice } = await fixture();
+    const request = await alice.createCommunityRequest(draft({title: "Delete with retry"}));
+    const attachment = await alice.addCommunityRequestAttachment(request.id, {
+      idempotencyKey: "delete-retry-file", name: "retry.txt", mimeType: "text/plain",
+      content: new TextEncoder().encode("public bytes awaiting durable cleanup"),
+    });
+    let original!: R2Bucket;
+    let attempts = 0;
+    await runInDurableObject(registry(), instance => {
+      const fixtureEnv = Reflect.get(instance, "env") as Cloudflare.Env;
+      original = fixtureEnv.BLUEPRINT_CONTENT;
+      fixtureEnv.BLUEPRINT_CONTENT = new Proxy(original, {
+        get(target, property) {
+          if (property === "delete") return async (key: string) => {
+            attempts++;
+            if (attempts === 1) throw new Error("fixture transient R2 failure");
+            return target.delete(key);
+          };
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    });
+    await alice.deleteCommunityRequest(request.id);
+    await runInDurableObject(registry(), async (instance, ctx) => {
+      ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=0");
+      await instance.alarm();
+      expect(ctx.storage.sql.exec("SELECT id FROM attachmentDeletions").toArray())
+        .toEqual([{id: attachment.id}]);
+      ctx.storage.sql.exec("UPDATE attachmentDeletions SET notBefore=0");
+      await instance.alarm();
+      expect(ctx.storage.sql.exec("SELECT id FROM attachmentDeletions").toArray()).toEqual([]);
+      (Reflect.get(instance, "env") as Cloudflare.Env).BLUEPRINT_CONTENT = original;
+    });
+    expect(attempts).toBe(2);
+    expect(await original.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${attachment.id}`)).toBeNull();
   });
 
   it("atomically deduplicates concurrent submissions, details and votes per account, rejecting conflicting retries", async () => {
@@ -255,7 +490,7 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
     });
     const bug = await alice.createCommunityRequest(draft({ kind: "bug", body: "New public bug summary" }));
     const visible = await bob.getCommunityRequest(bug.id);
-    expect(Object.keys(visible!).toSorted()).toEqual(["id", "kind", "title", "body", "status", "hidden", "duplicateOf", "createdAt", "updatedAt", "isOwn", "voteCount", "viewerHasVoted"].toSorted());
+    expect(Object.keys(visible!).toSorted()).toEqual(["id", "kind", "title", "body", "status", "hidden", "duplicateOf", "createdAt", "updatedAt", "isOwn", "voteCount", "viewerHasVoted", "attachments"].toSorted());
     const all = JSON.stringify([await bob.listCommunityRequests(), await bob.listCommunityRequestDetails(bug.id)]);
     for (const secret of [...names, "Private display name", "secret-needle", "secret-transcript", "secret-token"]) expect(all).not.toContain(secret);
     expect((await bob.searchCommunityRequests({ query: "secret-needle" })).items).toEqual([]);

@@ -171,6 +171,7 @@ function makeAccount(callback: { complete: ReturnType<typeof vi.fn>; credentials
     },
   });
   kv.set("callback", callback);
+  kv.set("connectHandoffProtocol", "browser-bound-v1");
   return account;
 }
 

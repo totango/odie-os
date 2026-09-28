@@ -99,6 +99,7 @@ async function newWorkspace(publicApi: RpcStub<PublicApi>, thingName: string): P
   const account = await provisionAccount(aliceApi);
 
   const overseer = await aliceApi.newGadget();
+  await overseer.negotiateEditingProtocol("git-ot-v1");
   const gatekeeper = await overseer.newGatekeeper(account.id, thingUrl(thingName));
   if (!gatekeeper) throw new Error("Failed to create the test connection");
   const gatekeeperId = await gatekeeper.getId();
@@ -164,6 +165,7 @@ async function reopenAfterRestart(ws: Workspace, gatekeeperId = ws.gatekeeperId)
     try {
       const aliceApi = await logIn(publicApi, ws.alice);
       const overseer = await aliceApi.openGadget(ws.gadgetId);
+      await overseer.negotiateEditingProtocol("git-ot-v1");
       const gatekeeper = await overseer.getGatekeeperById(gatekeeperId);
       const session = await gatekeeper.openSession() as RpcStub<TestSession>;
       // Probe with a benign read, so a session felled by the abort retries here rather than
@@ -421,7 +423,7 @@ describe("sensitive observations", () => {
     });
   });
 
-  it.concurrent("a refused share-link recipient persists as a collaborator without blocking reads",
+  it.concurrent("a refused share-link recipient gains no collaborator grant and does not block reads",
       async () => {
     await withSession(async publicApi => {
       const ws = await newWorkspace(publicApi, "refused-link");
@@ -435,24 +437,20 @@ describe("sensitive observations", () => {
       await setVerifyOutcome(
           accountLabel(daveAccount), { allow: false, reason: "You do not have access." });
 
-      // Dave's open redeems the key -- writing a real edge -- and observer verification then
-      // refuses him. One-step redemption accepts the residue: he persists as an unverified
-      // collaborator (see the TODO on redeemShareKey).
+      // The fork verifies before persisting a share-link grant. A denied open leaves no edge.
       const recorder =
           new ObserverConfigRecorder().alwaysChoose(daveAccount.id, MAX_OBSERVER_PROMPTS);
       const callback = stubFor(recorder);
       try {
         await expect(daveApi.openGadget(ws.gadgetId, key, callback))
-            .rejects.toThrow(/could not confirm/i);
+            .rejects.toThrow("You don't have access to this workspace.");
       } finally {
         callback[Symbol.dispose]();
       }
 
-      // The residue is a collaborator row, not access: he never opened, and he cannot open
-      // without passing the same check. So the owner's reads are untouched -- and nothing was
-      // severed either, since only his own open was denied.
+      // The owner's reads remain untouched by the refused open.
       const collaborators = await ws.overseer.listCollaborators();
-      expect(collaborators).toHaveLength(1);
+      expect(collaborators).toHaveLength(0);
       await expect(ws.session.readValue(true)).resolves.toBe(42);
     });
   });
