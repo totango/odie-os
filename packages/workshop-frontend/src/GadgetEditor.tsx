@@ -33,6 +33,7 @@ import {
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
 import GadgetCodeInterface from './GadgetCodeInterface'
+import { RecoveryWorkspace } from './Recovery'
 import GadgetUseView, { RetainedGadgetUI } from './GadgetUseView'
 import Connections from './Connections'
 import Activity, { type ActivityView } from './Activity'
@@ -1465,6 +1466,7 @@ function WorkspaceEditorContent({ workspace }: { workspace: WorkspaceState }) {
 
   // ── always render the full two-pane edit layout; preview overlays on top ──────
   return (
+    <RecoveryWorkspace workspaceId={id ?? null}>
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
       {(displayed.previewChanged || (selectedGadgetId !== null && !displayed.available)) && (
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-kumo-line px-4 py-2">
@@ -2077,5 +2079,6 @@ function WorkspaceEditorContent({ workspace }: { workspace: WorkspaceState }) {
       />
 
     </div>
+    </RecoveryWorkspace>
   )
 }

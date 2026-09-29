@@ -9,6 +9,8 @@ import type { FileChangeStatus, FileSidebarHandle } from './FileSidebar'
 import { WorkshopButton, WorkshopIconButton } from './components/WorkshopControls'
 import type { StreamingProposedChanges } from './ChatInterface'
 import { saveTextToFile } from './fileTransfers'
+import { useRecoverySource } from './Recovery'
+import { materializeRecoveryLayer } from './recoveryBundle'
 
 const CodeEditor = lazy(() => import('./CodeEditor'))
 const CodeDiffEditor = lazy(() => import('./CodeDiffEditor'))
@@ -916,6 +918,24 @@ export default function GadgetCodeInterface({ overseer, filesRoot, height = '100
       ? 'Editing changes in'
       : 'Editing'
 
+  useRecoverySource('editor', () => ({
+    kind: 'editor',
+    chatId: selectedChatId,
+    branch: { kind: branchMode ? 'chat' : 'mainline', chatId: selectedChatId },
+    filesRoot,
+    initialSyncReached: isReadyRef.current,
+    lastObservedServerVersion: serverVersionRef.current,
+    sending: isSendingRef.current,
+    unacknowledged: updateQueueRef.current.map(entry => ({ chatId: entry.chatId, bytes: entry.update.byteLength })),
+    layers: [
+      materializeRecoveryLayer('mainline', ydocRef.current, filesRoot),
+      ...(editableYdocRef.current && editableChatIdRef.current === selectedChatId && editableRootRef.current === filesRoot
+        ? [materializeRecoveryLayer('editable-branch', editableYdocRef.current, filesRoot)] : []),
+      ...(streamingYdocRef.current && streamingRootRef.current === filesRoot
+        ? [materializeRecoveryLayer('streaming-preview', streamingYdocRef.current, filesRoot)] : []),
+    ],
+  }))
+
   if (!isVisible) {
     return <div style={{ height, width: '100%' }} />
   }
@@ -936,7 +956,7 @@ export default function GadgetCodeInterface({ overseer, filesRoot, height = '100
       {hasUnsavedChanges && (
         <div className="bg-kumo-tint border-b border-kumo-line px-4 py-2 flex items-center gap-2 text-sm text-kumo-warning">
           <span className="text-base">&#9888;&#65039;</span>
-          <span>Connection issue - changes will be saved when connection is restored</span>
+          <span>Connection issue — server save is uncertain. Use Recovery export before reloading; reconnection may retry edits.</span>
         </div>
       )}
       <div className="relative flex min-h-0 flex-1">
