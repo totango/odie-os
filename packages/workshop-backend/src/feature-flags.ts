@@ -33,10 +33,7 @@ export async function resolveUiFeatureFlags(
 
   const flags = env.FLAGS;
   if (!flags) {
-    logger.warn("Flagship binding missing; using default values", {
-      event: "feature-flags.binding.missing",
-      operation: "feature-flags.resolve",
-    });
+    // Flagship is optional; deployments without a binding use their configured defaults.
     return deploymentDefaults;
   }
 

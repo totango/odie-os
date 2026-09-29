@@ -9,8 +9,14 @@ import { resolveUiFeatureFlags } from "../src/feature-flags.js";
 const TEST_USER_ID = "test-user";
 
 describe("resolveUiFeatureFlags", () => {
-  it("uses default values when Flagship is not configured", async () => {
-    await expect(resolveUiFeatureFlags({}, TEST_USER_ID)).resolves.toEqual(DEFAULT_UI_FEATURE_FLAGS);
+  it("uses default values without a warning when optional Flagship is not configured", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(resolveUiFeatureFlags({}, TEST_USER_ID)).resolves.toEqual(DEFAULT_UI_FEATURE_FLAGS);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("enables Pi by default only when the deployment has the Pi runtime", async () => {
