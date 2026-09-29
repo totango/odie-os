@@ -138,6 +138,36 @@ and `postDeployVerification`. Routine requires all completed keys **plus** `resu
 Store immutable evidence in the approved access-controlled system; the URL is a locator, not a
 credential. The deployment job outputs only target/digests/phase/pause decision and record digest.
 
+## Why the admission fence is not a single backend switch
+
+Step 4 above asks for an admission fence on the *currently deployed* system. A prototype ledger was
+written and rejected (PR #190, closed; code preserved at
+`git show origin/prep/maintenance-ledger:packages/workshop-backend/src/maintenance-admission.ts`).
+These constraints came out of it and apply to any future implementation:
+
+- **Every execution and storage owner must participate.** Overseer, User, AdminSettings,
+  CommunityRequests, ScheduleDriver, the coding-session registry and each gatekeeper admit, execute
+  or persist work independently. A fence in one of them is not a deployment fence.
+- **Zero registered work is not zero work.** A counter only covers instrumented callers. Until every
+  deployed participant speaks the protocol, "zero pending" says nothing about already-running code.
+  A coverage/protocol-version gate is required *in addition to* a drained count.
+- **Do not add expiry or a force-clear.** Clearing an admission whose outcome is unknown converts an
+  unresolved write into a false "drained". The corollary is that admissions need durable owner
+  identity and a reconciliation path: without them one lost RPC response strands a record that can
+  never be acknowledged, and freeze becomes permanently unreachable.
+- **Validation is not exclusive execution ownership.** Checking that an operation was admitted does
+  not stop two continuations sharing it, nor a parent settling while async descendants still run. A
+  parent must not be able to acknowledge before its admitted children finish.
+- **The hard cases sit outside the backend's request path.** Escaped and derived gadget RPC stubs,
+  persistent restore callbacks, facet alarms, provider-side OAuth token exchange, scheduler
+  deliveries and sandbox containers all keep working after new ingress stops. Each needs its own
+  fence and its own completion evidence.
+- **Cancellation is not rollback.** An external action already dispatched can still succeed after it
+  is cancelled. Those outcomes must be reconciled, never counted as zero.
+
+Until that exists, treat steps 4-5 as an operator-controlled ingress stop plus explicit execution
+shutdown and a verified snapshot, not as an application feature.
+
 ## Outstanding operational evidence
 
 No verified production fence, drain, backup/restore, pinned old-client recovery/preparatory release,
