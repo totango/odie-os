@@ -92,18 +92,31 @@ describe("request-build policy", () => {
     expect(clone[0]).toBe("node");
     expect(clone.join("\n")).not.toContain("python3");
 
+    // Four real Node collectors plus their Git children took 6.2s in the concurrent full gate
+    // (0.43s alone). Bound synchronous children explicitly; Vitest cannot interrupt spawnSync.
+    const deadline = performance.now() + 12_000;
+    const remainingTime = () => {
+      const remaining = Math.ceil(deadline - performance.now());
+      if (remaining <= 0) throw new Error("Collection fixture exceeded its subprocess budget");
+      return remaining;
+    };
     const directory = mkdtempSync(join(tmpdir(), "request-build-collect-"));
     const git = (...args: string[]) => {
-      const result = spawnSync("git", args, { cwd: directory, encoding: "utf8" });
+      const result = spawnSync("git", args, { cwd: directory, encoding: "utf8", timeout: remainingTime() });
+      expect(result.error).toBeUndefined();
       expect(result.status, result.stderr).toBe(0);
       return result.stdout.trim();
     };
     const run = (candidate: RequestBuildIntent) => {
       const [command, ...args] = requestBuildCollectCommand(candidate);
       args[2] = args[2].replaceAll("/workspace/repository", directory);
-      return spawnSync(command, args, {
+      const result = spawnSync(command, args, {
         env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+        timeout: remainingTime(),
       });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      return result;
     };
     try {
       git("init"); git("config", "user.email", "fixture@example.invalid"); git("config", "user.name", "Fixture");
@@ -111,7 +124,10 @@ describe("request-build policy", () => {
       git("add", "a.ts"); git("commit", "-m", "base");
       const baseSha = git("rev-parse", "HEAD");
       writeFileSync(join(directory, "a.ts"), "export const a = 2;\n");
-      const expected = spawnSync("git", ["diff", "--no-ext-diff", "--no-textconv", "--binary", baseSha, "--"], { cwd: directory }).stdout;
+      const expectedDiff = spawnSync("git", ["diff", "--no-ext-diff", "--no-textconv", "--binary", baseSha, "--"], { cwd: directory, timeout: remainingTime() });
+      expect(expectedDiff.error).toBeUndefined();
+      expect(expectedDiff.status).toBe(0);
+      const expected = expectedDiff.stdout;
 
       const exactLimit = { ...value, baseSha, policy: { ...value.policy, diffBytes: expected.length } };
       const accepted = run(exactLimit);
@@ -129,7 +145,7 @@ describe("request-build policy", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
   it("materializes only SDK, owned loader/settings/toolset and ephemeral session", async () => {
     const source = requestBuildRunnerSource(await intent());
     expect(source).toContain("createAgentSession"); expect(source).toContain("createExtensionRuntime");

@@ -2,7 +2,8 @@ import { classifyRpcError, logRpcFailure } from "../rpcErrors";
 import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useKumoToastManager } from "@cloudflare/kumo";
-import { ChatInput } from "../ChatInput";
+import { ChatComposer } from "../features/chat/composer/ChatComposer";
+import { negotiateEditing, requireEditingReady } from "../features/workspace/editingProtocol";
 import MeshBackground from "../components/MeshBackground";
 import HomeTaskSuggestions from "../components/AppShell/HomeTaskSuggestions";
 import { useAuthenticatedApi } from "../AuthContext";
@@ -23,8 +24,8 @@ import {
 } from "../modelSelection";
 import { useDocumentTitle } from "../useDocumentTitle";
 import { homePromptFromSearch } from "../homePrompt";
-import { composerDraftStorageKey } from "../composerDraft";
 import { HUB_DETAILS, useHub } from "../HubContext";
+import { composerDraftStorageKey } from "../features/chat/composer/draft/composerDraft";
 
 type HomeSearch = { prompt?: string };
 
@@ -96,6 +97,8 @@ function FinanceHomePageContent() {
     const creation = { stub: overseer };
     creationRef.current = creation;
     try {
+      await negotiateEditing(overseer);
+      if (creationRef.current !== creation) return;
       const { id } = await overseer.getMetadata();
       if (creationRef.current !== creation) return;
       navigate({ to: '/workspace/$id', params: { id }, search: {} });
@@ -199,6 +202,7 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
     if (!lifetime?.active) throw new Error('Home is no longer active');
     if (!provisionalOverseerRef.current) {
       const overseer = authenticatedApi.newGadget(hub);
+      void negotiateEditing(overseer);
       provisionalOverseerRef.current = { stub: overseer, hub };
     }
   }, [authenticatedApi, hub, lifetime]);
@@ -228,6 +232,8 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
         ensureProvisionalGadget();
         const provisional = provisionalOverseerRef.current!;
         const overseer = provisional.stub;
+        await requireEditingReady(overseer);
+        if (sendPendingRef.current !== send) return false;
         const { id } = await overseer.getMetadata();
         if (sendPendingRef.current !== send) return false;
         // If the workspace was pre-created for the currently selected hub, skip the extra round-trip.
@@ -262,17 +268,21 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
     [authenticatedApi, ensureProvisionalGadget, hub, navigate, toasts, lifetime],
   );
 
-  const getOverseer = useCallback((): RpcStub<Overseer> => {
+  const getOverseer = useCallback((): Promise<RpcStub<Overseer>> => {
     ensureProvisionalGadget();
-    return provisionalOverseerRef.current!.stub;
+    const stub = provisionalOverseerRef.current!.stub;
+    return requireEditingReady(stub).then(() => {
+      if (!lifetime?.active) throw new Error('Home is no longer active');
+      return stub;
+    });
   }, [ensureProvisionalGadget]);
 
   const createCapsuleGatekeeper = useCallback(
-    (accountId: number, url: string) => {
-      ensureProvisionalGadget();
-      return provisionalOverseerRef.current!.stub.newGatekeeper(accountId, url);
+    async (accountId: number, url: string) => {
+      const stub = await getOverseer();
+      return stub.newGatekeeper(accountId, url);
     },
-    [ensureProvisionalGadget],
+    [getOverseer],
   );
 
   return (
@@ -305,7 +315,7 @@ function GenericHomePageContent({ prompt }: HomeSearch) {
         </header>
 
         {/* Composer */}
-        <ChatInput
+        <ChatComposer
           createCapsuleGatekeeper={createCapsuleGatekeeper}
           getOverseer={getOverseer}
           onSend={handleSend}

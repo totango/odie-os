@@ -27,7 +27,7 @@ function createApi(statuses: RequiredConnectionStatus[]): FakeApi & { subscriber
     dispose,
     getRequiredConnectionStatuses: vi.fn<() => Promise<RequiredConnectionStatus[]>>(async () => statuses),
     connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://connect.example.test' })),
-    reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://reconnect.example.test' })),
+    reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://reconnect.example.test', nonce: 'a'.repeat(64) })),
     subscribeConnectedAccounts: vi.fn<(subscriber: ConnectedAccountsSubscriber) => Promise<{ [Symbol.dispose](): void }>>(async (subscriber) => {
       api.subscriber = subscriber
       return { [Symbol.dispose]: dispose }
@@ -95,15 +95,16 @@ describe('RequiredConnectionsGate', () => {
 
     await act(async () => button!.click())
 
-    expect(api.connectAccount).toHaveBeenCalledWith('github')
+    expect(api.connectAccount).not.toHaveBeenCalled()
     expect(api.reconnectAccount).not.toHaveBeenCalled()
     expect(window.open).toHaveBeenCalledWith('about:blank', '_blank')
     expect(rendered.textContent).toContain('Your browser blocked the popup')
-    expect(rendered.querySelector('a[href="https://connect.example.test"]')).toBeTruthy()
+    expect(rendered.querySelector('a[href="https://connect.example.test"]')).toBeNull()
   })
 
   it('starts an expired connection reconnect by account id', async () => {
-    vi.spyOn(window, 'open').mockImplementation(() => null)
+    const popup = { opener: null, sessionStorage: { setItem: vi.fn<(key: string, value: string) => void>() }, location: { href: '' }, close: vi.fn<() => void>() }
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
     const api = createApi([{ vendorId: 'github', displayName: 'GitHub', state: 'expired', accountId: 42 }])
     const rendered = await renderGate(api, '/sessions')
     const button = Array.from(rendered.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Reconnect GitHub'))
@@ -112,7 +113,9 @@ describe('RequiredConnectionsGate', () => {
 
     expect(api.reconnectAccount).toHaveBeenCalledWith(42)
     expect(api.connectAccount).not.toHaveBeenCalled()
-    expect(rendered.querySelector('a[href="https://reconnect.example.test"]')).toBeTruthy()
+    expect(popup.location.href).toBe('https://reconnect.example.test')
+    expect(popup.sessionStorage.setItem).toHaveBeenCalledWith('gadgets.handoff', JSON.stringify({ kind: 'connect', nonce: 'a'.repeat(64) }))
+    expect(rendered.querySelector('a[href="https://reconnect.example.test"]')).toBeNull()
   })
 
   it('leaves admin and other recovery routes available even when a required vendor is unavailable', async () => {

@@ -6,6 +6,8 @@ import type { AuthenticatedApi } from '@gadgets/workshop-shared/api'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { getWorkshopRuntime } from '../../runtime'
 import { WorkshopButton, WorkshopIconButton } from '../WorkshopControls'
+import { parseOpenCodeChanges, readDiffResponse, type SessionChanges } from '../../features/sessions/openCodeChanges'
+import { SessionChangesView } from '../../features/sessions/SessionChangesView'
 
 const POLL_INTERVAL_MS = 4_000
 const EXPIRY_REFRESH_WINDOW_MS = 10_000
@@ -83,6 +85,7 @@ type WorkbenchSnapshot = {
   running: boolean
   statusText: string
   diffText?: string
+  changes?: SessionChanges
   todoText?: string
   mcpText?: string
 }
@@ -185,6 +188,7 @@ export function OpenCodeWorkbenchInner({
   const [statusReady, setStatusReady] = useState(false)
   const [startupPhase, setStartupPhase] = useState('Connecting to the coding session…')
   const draftSessionIdRef = useRef(sessionId)
+  const snapshotSessionIdRef = useRef(sessionId)
 
   useEffect(() => {
     mountedRef.current = true
@@ -216,8 +220,11 @@ export function OpenCodeWorkbenchInner({
     capabilityPromiseRef.current = undefined
     pendingTurnNotificationRef.current = undefined
     sendingRef.current = false
-    setSnapshot({ sessions: [], messages: [], running: false, statusText: 'Connecting…' })
-    setLoading(true)
+    if (snapshotSessionIdRef.current !== sessionId) {
+      snapshotSessionIdRef.current = sessionId
+      setSnapshot({ sessions: [], messages: [], running: false, statusText: 'Connecting…' })
+      setLoading(true)
+    }
     setRefreshing(false)
     setSending(false)
     setAborting(false)
@@ -295,6 +302,7 @@ export function OpenCodeWorkbenchInner({
       if (epoch === requestEpochRef.current && (response.status === 403 || response.status === 410)) onSessionUnavailable?.()
       if (!response.ok) throw new Error(`OpenCode request failed (${response.status}).`)
       if (response.status === 204) return undefined
+      if (path.endsWith('/diff')) return await readDiffResponse(response)
       const text = await response.text()
       if (!mountedRef.current || epoch !== requestEpochRef.current) throw new DOMException('Session changed.', 'AbortError')
       if (!text) return undefined
@@ -342,7 +350,7 @@ export function OpenCodeWorkbenchInner({
       if (!selectedId) throw new Error('Could not select an OpenCode session.')
       const changed = selectedOpenCodeSessionIdRef.current !== selectedId
       selectedOpenCodeSessionIdRef.current = selectedId
-      setSnapshot((current) => ({ ...current, sessions, selected, ...(changed ? { messages: [], diffText: undefined, todoText: undefined, mcpText: undefined } : {}) }))
+      setSnapshot((current) => ({ ...current, sessions, selected, ...(changed ? { messages: [], diffText: undefined, changes: undefined, todoText: undefined, mcpText: undefined } : {}) }))
       setStartupPhase('Reading the transcript…')
 
       // Dispatch critical reads first, but let metadata publish independently.
@@ -376,7 +384,8 @@ export function OpenCodeWorkbenchInner({
         setMetadata((current) => ({ ...current, [field]: { loading: true } }))
         void fetchJson(path).then((data) => {
           if (!metadataCurrent()) return
-          setSnapshot((current) => ({ ...current, [field]: summarizeUnknown(data, MAX_PAYLOAD_LENGTH) }))
+          setSnapshot((current) => ({ ...current, [field]: summarizeUnknown(data, MAX_PAYLOAD_LENGTH),
+            ...(field === 'diffText' ? { changes: parseOpenCodeChanges(data) } : {}) }))
           setMetadata((current) => ({ ...current, [field]: { loading: false } }))
         }).catch(() => {
           if (metadataCurrent()) setMetadata((current) => ({ ...current, [field]: { loading: false, error: `${label} unavailable. Will retry automatically.` } }))
@@ -716,6 +725,7 @@ export function OpenCodeWorkbenchInner({
                         running: false,
                         statusText: 'Loading transcript…',
                         diffText: undefined,
+                        changes: undefined,
                         todoText: undefined,
                         mcpText: undefined,
                       }))
@@ -738,7 +748,10 @@ export function OpenCodeWorkbenchInner({
               </div>
             )}
             {surface === 'changes' ? (
-              <ChangesPane diffText={metadata.diffText?.error ?? snapshot.diffText} todoText={metadata.todoText?.error ?? snapshot.todoText} diffLoading={metadata.diffText?.loading ?? loading} todoLoading={metadata.todoText?.loading ?? loading} />
+              <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
+                <SessionChangesView key={snapshot.selected?.id} changes={snapshot.changes} error={metadata.diffText?.error} loading={metadata.diffText?.loading ?? loading} />
+                <ContextCard title="Todo" text={metadata.todoText?.error ?? snapshot.todoText} loading={metadata.todoText?.loading ?? loading} />
+              </div>
             ) : (
               <>
                 <div ref={transcriptRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
@@ -869,18 +882,6 @@ function ToolDetail({ label, text, tone }: { label: string; text?: string; tone?
       <summary className={`cursor-pointer text-[11px] font-medium ${tone === 'danger' ? 'text-kumo-danger' : 'text-kumo-subtle'}`}>{label}</summary>
       <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-xs leading-5 text-kumo-subtle">{text}</pre>
     </details>
-  )
-}
-
-function ChangesPane({ diffText, todoText, diffLoading, todoLoading }: { diffText?: string; todoText?: string; diffLoading: boolean; todoLoading: boolean }) {
-  return (
-    <div className="min-h-0 min-w-0 flex-1 overflow-y-auto p-3">
-      <div className="mb-3 rounded-xl border border-kumo-line bg-kumo-tint/40 p-3 text-xs leading-5 text-kumo-subtle">
-        Review OpenCode's current diff here. For a full editor and source control workflow, open browser VS Code from the workbench toolbar.
-      </div>
-      <ContextCard title="Diff" text={diffText} loading={diffLoading} />
-      <ContextCard title="Todo" text={todoText} loading={todoLoading} />
-    </div>
   )
 }
 

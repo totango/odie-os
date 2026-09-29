@@ -8,6 +8,19 @@ reads through observation authorization and writes through the approval queue.
 No production OAuth client secret is committed. Set `CLIENT_ID`, `CLIENT_SECRET`, and `BASE_URL` in
 the deployment environment.
 
+## Browser and native connection completion
+
+Launch acknowledges exactly the requested `browser-bound-v1` or `native-verifier-v1` protocol.
+Missing or incompatible callbacks fail before code exchange. Browser flows finish through
+`/connect/handoff#<ticket>`; native flows through `/native/oauth-return/<handle>#<ticket>` with
+the callback-issued handle and independently held app verifier. A provider page or return URL alone
+does not activate an account. Native return URLs retain their same-origin/path validation.
+
+Reconnect credentials and site discovery stay staged until Workshop calls `commitReconnect` with
+the exact stage ID. Expired, replaced, consumed, revoked, or changed-site stages are refused. A
+legacy multi-site account may choose its first site through this staged flow; an already-selected
+account cannot switch sites. Expired credentials can be restored through the same confirmation path.
+
 ## Site selection
 
 A connection uses exactly one Jira site. The chosen `cloudId` is persisted as `selectedSite`, and

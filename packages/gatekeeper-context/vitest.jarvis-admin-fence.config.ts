@@ -21,5 +21,5 @@ export default defineConfig({
       },
     }),
   ],
-  test: {include: ["../gatekeeper-jarvis/__tests__/admin-fence.worker.test.ts"], setupFiles: ["../../scripts/assert-workerd.ts"]},
+  test: {include: ["../gatekeeper-jarvis/__tests__/admin-fence.worker.test.ts"], setupFiles: ["@gadgets/scripts/assert-workerd"]},
 });

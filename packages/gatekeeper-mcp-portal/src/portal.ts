@@ -53,9 +53,9 @@ import {
 } from "@gadgets/mcp-shared/scope";
 import {
   errorPageHtml,
+  connectHandoffPageHtml,
   htmlResponse,
   INVALID_LINK_HTML,
-  SELF_CLOSING_HTML,
 } from "@gadgets/mcp-shared/html";
 import { handleMcpHttpRequest } from "@gadgets/mcp-shared/http";
 import {
@@ -64,6 +64,7 @@ import {
   type McpGatekeeperUserProps,
 } from "@gadgets/mcp-shared/user";
 import {
+  isPortalServerHidden,
   portalAuthRequiresReconnect,
   portalCodingSessionResourceUrls,
   portalCatalogValidationMode,
@@ -72,6 +73,7 @@ import {
   portalTokenFor,
   portalTrust,
   readPortalConfig,
+  requirePortalServerVisible,
   requirePortalServerScope,
   isPortalToolGrantable,
   toolGrantOptions,
@@ -162,6 +164,7 @@ async function validatePortalScope(
 ): Promise<{ scope: ToolScope & { serverId: string }; upstream: PortalServer | undefined }> {
   const scope = parseToolScope(requested);
   requirePortalServerScope(scope);
+  requirePortalServerVisible(env, scope.serverId);
 
   const listing = await tryListPortalServers(env, account, endpoint);
   if (listing === null) {
@@ -263,7 +266,7 @@ async function continueConnect(
 
   if (outcome.kind === "invalid") return htmlResponse(INVALID_LINK_HTML, 400);
   if (outcome.kind === "redirect") return Response.redirect(outcome.url, 302);
-  return htmlResponse(SELF_CLOSING_HTML);
+  return htmlResponse(connectHandoffPageHtml(outcome.handoff));
 }
 
 // ---------------------------------------------------------------------------
@@ -289,12 +292,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
-    _options?: GatekeeperConnectOptions,
-  ): Promise<{ url: string }> {
+    options?: GatekeeperConnectOptions,
+  ): Promise<import("@gadgets/workshop-shared/gatekeeper").GatekeeperConnectResult> {
     const accountId = this.ctx.exports.McpAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.McpAccount.get(accountId).setCallback(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}` };
+    return { url: `${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}`, handoffProtocol: await this.ctx.exports.McpAccount.get(accountId).acknowledgeHandoff(options) };
   }
 
   /**
@@ -505,19 +508,21 @@ class McpServerConfiguratorUI extends RpcTarget implements McpServerConfigurator
   // endpoint that does not implement the portal contract or currently fronts nothing; either case
   // leaves the form unsubmittable.
   async listServerOptions(): Promise<ConfiguratorUIOption[]> {
-    return (await this.#portalServers()).map(upstream => ({
-      value: upstream.id,
-      title: upstream.name,
-      // A server can be configured but switched off for this session, making a grant onto it valid
-      // but presently empty, which the person choosing should see.
-      meta: upstream.enabled ? undefined : "disabled in portal",
-    }));
+    return (await this.#portalServers())
+      .filter(upstream => !isPortalServerHidden(this.#env, upstream.id))
+      .map(upstream => ({
+        value: upstream.id,
+        title: upstream.name,
+        // A server can be configured but switched off for this session, making a grant onto it valid
+        // but presently empty, which the person choosing should see.
+        meta: upstream.enabled ? undefined : "disabled in portal",
+      }));
   }
 
   // Tools the grant may cover within one portal upstream server. The survey is checked before the
   // detailed catalog is fetched, and `toolGrantOptions` decides what each source says.
   async listToolOptions(serverId: string): Promise<ConfiguratorUIOption[]> {
-    if (!isValidToolName(serverId)) return [];
+    if (!isValidToolName(serverId) || isPortalServerHidden(this.#env, serverId)) return [];
     if (!(await this.#portalServers()).some(server => server.id === serverId)) return [];
     const server = await this.#server();
     const tools = await withClient(this.#env, this.#account, server.endpoint,

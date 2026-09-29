@@ -1,4 +1,5 @@
 import { Link } from '@tanstack/react-router'
+import { requireEditingReady } from '../features/workspace/editingProtocol'
 import { Clock, MagnifyingGlass, Hexagon, DotsThreeVertical, ShareNetwork, Trash, Info, Star, Pencil, ArrowRight } from '@phosphor-icons/react'
 import { useState, useEffect, useRef } from 'react'
 import { DropdownMenu, Dialog, Button, useKumoToastManager } from '@cloudflare/kumo'
@@ -12,6 +13,7 @@ import { BindingBadge, getGradient as getBlueprintGradient, uniqueBindingBadges 
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER } from './menuStyles'
 import { BlueprintPreviewImage } from './BlueprintPreviewImage'
 import DeleteConfirmationDialog from './DeleteConfirmationDialog'
+import { isImeComposing } from '../keyboardEvent'
 
 // Neutral monogram for a workspace — matches the sidebar treatment (no per-item color noise).
 function initials(title: string | undefined): string {
@@ -98,6 +100,7 @@ function AppRow({
               onChange={(e) => setRenameValue(e.target.value)}
               onBlur={commitRename}
               onKeyDown={(e) => {
+                if (isImeComposing(e)) return
                 if (e.key === 'Enter') commitRename()
                 if (e.key === 'Escape') setIsRenaming(false)
               }}
@@ -244,6 +247,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
       } else {
         const overseer = await authenticatedApi.openGadget(deleteTarget.id)
         try {
+          await requireEditingReady(overseer)
           await overseer.deleteSelf()
         } finally {
           overseer[Symbol.dispose]()
@@ -264,6 +268,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     let overseer: RpcStub<Overseer> | null = null
     try {
       overseer = authenticatedApi.openGadget(gadget.id)
+      await requireEditingReady(overseer)
       const metadata = await overseer.getMetadata()
       setShareOverseer({ stub: overseer })
       setShareTarget({ ...gadget, ...metadata })
@@ -289,6 +294,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     // Use promise pipelining — call setPinned without awaiting openGadget first
     const overseer = authenticatedApi.openGadget(gadget.id)
     try {
+      await requireEditingReady(overseer)
       await overseer.setPinned(newPinned)
     } catch (err) {
       console.error('Failed to pin workspace:', err)
@@ -312,6 +318,7 @@ export default function GadgetList({ showHeader = true }: { showHeader?: boolean
     // Use promise pipelining — call setTitle without awaiting openGadget first
     const overseer = authenticatedApi.openGadget(gadget.id)
     try {
+      await requireEditingReady(overseer)
       await overseer.setTitle(newTitle)
     } catch (err) {
       console.error('Failed to rename workspace:', err)

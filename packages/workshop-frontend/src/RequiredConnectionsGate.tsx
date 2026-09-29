@@ -211,7 +211,7 @@ function RequiredConnectionCard({
 }) {
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState<string>()
-  const [manualUrl, setManualUrl] = useState<string>()
+  const [opened, setOpened] = useState(false)
   const [popupBlocked, setPopupBlocked] = useState(false)
   const expired = connection.state === 'expired'
   const unavailable = connection.state === 'unavailable'
@@ -223,11 +223,12 @@ function RequiredConnectionCard({
     setBusy(true)
     setActionError(undefined)
     setPopupBlocked(false)
+    setOpened(false)
     try {
       const result = expired && connection.accountId !== undefined
         ? await accountBrowserFlows.reconnect(authenticatedApi, connection.accountId, { webPopup: 'preopen', webFallback: 'manual' })
         : await accountBrowserFlows.connect(authenticatedApi, connection.vendorId, undefined, { webPopup: 'preopen', webFallback: 'manual' })
-      setManualUrl(result.url)
+      setOpened(!!result.url)
       if (result.popupBlocked) setPopupBlocked(true)
     } catch (error) {
       logRpcFailure(`Could not start required ${expired ? 'reconnect' : 'connect'} flow:`, error)
@@ -250,11 +251,9 @@ function RequiredConnectionCard({
             {connection.message ?? statusCopy(connection.state, connection.displayName)}
           </p>
           {actionError && <p className="mt-3 rounded-lg border border-kumo-danger/25 bg-kumo-danger-tint px-3 py-2 text-sm text-kumo-danger" role="alert">{actionError}</p>}
-          {(manualUrl || popupBlocked) && (
+          {(opened || popupBlocked) && (
             <div className="mt-3 rounded-lg border border-kumo-warning/25 bg-kumo-warning-tint px-3 py-2 text-sm text-kumo-warning" role="status">
-              {popupBlocked ? 'Your browser blocked the popup. ' : 'A new tab should open. '}
-              {manualUrl && <a href={manualUrl} target="_blank" rel="noreferrer" className="font-semibold underline">Open authorization manually</a>}
-              <span className="text-kumo-subtle">, then recheck when it finishes.</span>
+              {popupBlocked ? 'Your browser blocked the popup. Allow popups and try again.' : 'A new tab should open. Recheck when authorization finishes.'}
             </div>
           )}
         </div>

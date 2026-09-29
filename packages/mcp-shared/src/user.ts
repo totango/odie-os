@@ -1,5 +1,7 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { AccountDescription, AvatarImage } from "@gadgets/workshop-shared/gatekeeper";
+import type { GatekeeperConnectResult, GatekeeperReconnectOptions } from "@gadgets/workshop-shared/gatekeeper";
+import type { McpAccountBase } from "./account.js";
 
 import type { ConnectedServer } from "./account.js";
 import { generateNonce } from "./connect-nonce.js";
@@ -9,12 +11,16 @@ export type McpGatekeeperUserProps = { accountObjectId: string };
 
 /** The account operations used by the common MCP account lifecycle. */
 export interface McpGatekeeperUserAccount {
+  /** Negotiates the provider launch using the account's persisted callback. */
+  acknowledgeHandoff: McpAccountBase<{}>["acknowledgeHandoff"];
   /** Returns the connected MCP server. */
   getServer(): Promise<ConnectedServer>;
   /** Revokes the account and its credentials. */
   revoke(): Promise<void>;
   /** Starts a reconnect with a fresh initiation nonce. */
   prepareReconnect(initiationNonce: string): Promise<void>;
+  /** Makes the credentials staged under `stageId` live. */
+  commitReconnect(stageId: string): Promise<void>;
 }
 
 /** Connector-owned values used by the common MCP account lifecycle. */
@@ -63,13 +69,19 @@ export abstract class McpGatekeeperUserBase<E>
     await this[mcpGatekeeperUserContext]().account.revoke();
   }
 
+  /** Makes the credentials staged under `stageId` live (see GatekeeperUser.commitReconnect). */
+  async commitReconnect(stageId: string): Promise<void> {
+    await this[mcpGatekeeperUserContext]().account.commitReconnect(stageId);
+  }
+
   /** Starts reconnecting the connected account. */
-  async reconnect(): Promise<{ url: string }> {
+  async reconnect(options?: GatekeeperReconnectOptions): Promise<GatekeeperConnectResult> {
     const { account, baseUrl } = this[mcpGatekeeperUserContext]();
     const initiationNonce = generateNonce();
     await account.prepareReconnect(initiationNonce);
     return {
       url: `${baseUrl}/${this.ctx.props.accountObjectId}/${initiationNonce}`,
+      handoffProtocol: await account.acknowledgeHandoff(options),
     };
   }
 }

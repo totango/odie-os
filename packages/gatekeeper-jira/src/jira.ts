@@ -15,8 +15,12 @@ import {
   type ResourceDescription,
   type SupportedResource,
   type VendorDescription,
-  renderBrowserFlowCompletionHtml,
+  type ConnectHandoff,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { acknowledgeHandoff, connectHandoffPageHtml, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
+import type { GatekeeperConnectResult as HandoffLaunch } from "@gadgets/workshop-shared/gatekeeper";
+import { stageCredentials, commitStagedCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { buildDescription } from "@gadgets/gatekeeper-kit/action-description";
 import { boundAgentCatalog } from "@gadgets/workshop-shared/gatekeeper";
 import type { McpCallResult, McpToolInfo } from "@gadgets/mcp-shared/types";
 import { createLogger } from "@gadgets/backend-utils/logger";
@@ -100,14 +104,15 @@ import { JiraConfiguratorUI } from "./jira-configurators";
 import type { ConfiguratorOption, JiraConfiguratorRpc, JiraDefaultProject } from "./configurator/jira-configurator-types";
 
 type Env = Cloudflare.Env & { BASE_URL?: string; PUBLIC_BASE_URL?: string; CLIENT_ID?: string; CLIENT_SECRET?: string };
-type StoredNonce = { value: string; expiresAt: number; stage: "initiation" | "oauth" | "exchanging" | "selection"; returnUrl?: string };
+type StoredNonce = { value: string; expiresAt: number; stage: "initiation" | "oauth" | "exchanging" | "selection"; returnUrl?: string; reconnect?: boolean };
 type StoredGrant = Pick<OAuthGrant, "accessToken" | "refreshToken" | "expiresAt">;
 /** The one Jira site this connection is scoped to. Atlassian never reports the consented site. */
 type StoredSite = { cloudId: string; url: string; name: string };
 /** A grant held while the browser flow asks which site to use; never usable until a site is chosen. */
 type StoredPendingSelection = { grant: StoredGrant; sites: AccessibleResource[]; identity: AtlassianIdentity | null };
 /** Outcome of a browser-flow step: completed, awaiting a site choice, or refused with a reason. */
-type OAuthOutcome = { returnUrl?: string; selection?: { nonce: string; sites: StoredSite[] }; error?: string };
+type OAuthOutcome = { handoff?: ConnectHandoff; selection?: { nonce: string; sites: StoredSite[] }; error?: string };
+type StagedJiraConnection = StoredPendingSelection & { selected: StoredSite; previous?: StoredSite; generation: number };
 type StoredDefaultProject = { cloudId: string; webBase: string; projectKey: string; projectName: string };
 type StoredOAuthError = { error?: string; error_description?: string };
 type StagedActionState = { state: "pending" | "applying" | "approved" | "rejected" | "failed"; action: StoredAction; createdAt: number; result?: unknown; error?: string };
@@ -431,7 +436,7 @@ export default {
       if (!accepted) return htmlResponse(page("Authorization Link Expired", "Return to Cloudflare OS and try again."));
       if (accepted.error) return htmlResponse(page("Jira Site Not Connected", accepted.error), 400);
       if (accepted.selection) return htmlResponse(siteChooserPage(env, `${id}:${accepted.selection.nonce}`, accepted.selection.sites));
-      return htmlResponse(renderBrowserFlowCompletionHtml({ returnUrl: accepted.returnUrl, appName: "Odie OS" }));
+      return htmlResponse(connectHandoffPageHtml(requireConnectHandoff(accepted.handoff)));
     }
     if (relPath === "/select") {
       if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: { allow: "POST" } });
@@ -442,7 +447,7 @@ export default {
       const selected = await stub.selectSite(String(form.get("cloudId") ?? "").slice(0, 200), parts[1]);
       if (!selected) return htmlResponse(page("Authorization Link Expired", "Return to Cloudflare OS and try again."));
       if (selected.error) return htmlResponse(page("Jira Site Not Connected", selected.error), 400);
-      return htmlResponse(renderBrowserFlowCompletionHtml({ returnUrl: selected.returnUrl, appName: "Odie OS" }));
+      return htmlResponse(connectHandoffPageHtml(requireConnectHandoff(selected.handoff)));
     }
     return new Response("Not Found", { status: 404 });
   },
@@ -451,17 +456,19 @@ export default {
 @validateRpc()
 export class GatekeeperVendor extends WorkerEntrypoint<Env> implements GatekeeperVendorIface {
   async describe(): Promise<VendorDescription> { return { displayName: "Jira", url: "https://www.atlassian.com/software/jira", logo: { url: JIRA_LOGO_URL }, color: "#deebff", tagline: "Read and update Jira Cloud work items", description: "Connect Jira Cloud to let agents search issues, inspect project work, and prepare approval-backed work item updates." }; }
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions): Promise<{ url: string }> {
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions): Promise<HandoffLaunch> {
     const id = this.ctx.exports.UserAccount.newUniqueId();
     const nonce = generateNonce();
     await this.ctx.exports.UserAccount.get(id).setCallback(callback, nonce, validateNativeReturnUrl(options?.returnUrl, this.env));
-    return { url: `${getBaseUrl(this.env)}/${id.toString()}/${nonce}` };
+    return { url: `${getBaseUrl(this.env)}/${id.toString()}/${nonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(id).acknowledgeHandoff(options) };
   }
   async getSupportedResources(): Promise<SupportedResource[]> { return SUPPORTED_RESOURCES; }
   async getTypeScriptTypes(): Promise<string> { return TYPES_CODE; }
 }
 
 export class UserAccount extends DurableObject<Env> {
+  /** Records supported launch intent; callback agreement is checked before exchange. */
+  acknowledgeHandoff(options?: GatekeeperReconnectOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   #refreshPromise: Promise<string> | undefined;
 
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string, returnUrl?: string): Promise<void> {
@@ -474,7 +481,7 @@ export class UserAccount extends DurableObject<Env> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "initiation" || Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, nonce)) return null;
     const oauthNonce = generateNonce();
-    this.ctx.storage.kv.put<StoredNonce>("nonce", { value: oauthNonce, expiresAt: Date.now() + NONCE_TTL_MS, stage: "oauth", returnUrl: stored.returnUrl });
+    this.ctx.storage.kv.put<StoredNonce>("nonce", { ...stored, value: oauthNonce, expiresAt: Date.now() + NONCE_TTL_MS, stage: "oauth" });
     return { oauthNonce };
   }
   async acceptAuthCode(code: string, nonce: string): Promise<OAuthOutcome | null> {
@@ -483,7 +490,9 @@ export class UserAccount extends DurableObject<Env> {
     // Consume the code once, but retain its nonce to fence off newer flows and revocation during I/O.
     this.ctx.storage.kv.put<StoredNonce>("nonce", { ...stored, stage: "exchanging" });
     if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) throw new Error("The Jira Gatekeeper is not configured.");
-    if (!this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback")) throw new Error("Authorization callback expired.");
+    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (!callback) throw new Error("Authorization callback expired.");
+    await requireBrowserHandoff(callback, this.ctx.storage.kv);
     const grant = await exchangeAuthCode(code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, `${getBaseUrl(this.env)}/oauth`);
     // Atlassian's consent callback carries only `code` and `state`, never the site the user consented
     // to, and accessible-resources has no documented order. The site is therefore always chosen here.
@@ -500,12 +509,12 @@ export class UserAccount extends DurableObject<Env> {
       if (!sites.some(site => site.id === previous.cloudId && site.url === previous.url)) {
         return { error: `This authorization does not include ${new URL(previous.url).hostname}, the Jira site this connection uses. Authorize that site again, or connect a new Jira account to use a different site.` };
       }
-      return this.#completeConnection(grant, sites, identity, previous, stored.returnUrl);
+      return this.#completeConnection(grant, sites, identity, previous, "reconnect");
     }
     if (sites.length === 0) return { error: "This authorization includes no Jira sites. Reconnect and authorize a Jira site." };
-    if (sites.length === 1) return this.#completeConnection(grant, sites, identity, storedSite(sites[0]), stored.returnUrl);
+    if (sites.length === 1) return this.#completeConnection(grant, sites, identity, storedSite(sites[0]), stored.reconnect ? "reconnect" : "connect");
     const selectionNonce = generateNonce();
-    this.ctx.storage.kv.put<StoredNonce>("nonce", { value: selectionNonce, expiresAt: Date.now() + NONCE_TTL_MS, stage: "selection", returnUrl: stored.returnUrl });
+    this.ctx.storage.kv.put<StoredNonce>("nonce", { ...stored, value: selectionNonce, expiresAt: Date.now() + NONCE_TTL_MS, stage: "selection" });
     this.ctx.storage.kv.put<StoredPendingSelection>("pendingSelection", { grant, sites, identity });
     this.ctx.storage.kv.put("oauthCleanupAt", Date.now() + CONNECT_TIMEOUT_MS);
     await this.#scheduleAlarm();
@@ -519,17 +528,36 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.delete("pendingSelection");
     const site = pending.sites.find(candidate => candidate.id === cloudId);
     if (!site) return { error: "That Jira site is not part of this authorization. Start the Jira connection again." };
-    return this.#completeConnection(pending.grant, pending.sites, pending.identity, storedSite(site), stored.returnUrl);
+    return this.#completeConnection(pending.grant, pending.sites, pending.identity, storedSite(site), stored.reconnect ? "reconnect" : "connect");
   }
-  async #completeConnection(grant: StoredGrant, sites: AccessibleResource[], identity: AtlassianIdentity | null, selected: StoredSite, returnUrl?: string): Promise<OAuthOutcome> {
+  async #completeConnection(grant: StoredGrant, sites: AccessibleResource[], identity: AtlassianIdentity | null, selected: StoredSite, mode: "connect" | "reconnect" | "commit"): Promise<OAuthOutcome> {
     const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
     if (!callback) throw new Error("Authorization callback expired.");
-    const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
+    if (mode !== "commit") {
+      const generation = this.ctx.storage.kv.get<number>("grantGeneration") ?? 0;
+      const nonce = this.ctx.storage.kv.get<StoredNonce>("nonce")?.value;
+      await requireBrowserHandoff(callback, this.ctx.storage.kv);
+      if (!this.ctx.storage.kv.get("callback") ||
+          (this.ctx.storage.kv.get<number>("grantGeneration") ?? 0) !== generation ||
+          this.ctx.storage.kv.get<StoredNonce>("nonce")?.value !== nonce) {
+        throw new Error("This authorization was superseded or revoked. Start a new connection.");
+      }
+    }
+    if (mode === "reconnect") {
+      const stageId = stageCredentials<StagedJiraConnection>(this.ctx.storage.kv, {
+        grant, sites, identity, selected,
+        previous: this.ctx.storage.kv.get<StoredSite>("selectedSite"),
+        generation: this.ctx.storage.kv.get<number>("grantGeneration") ?? 0,
+      }, Date.now());
+      return { handoff: requireConnectHandoff(await callback.reconnectComplete(stageId,
+        grant.refreshToken ? undefined : new Date(grant.expiresAt)), this.ctx.storage.kv.get("connectHandoffProtocol")) };
+    }
     this.ctx.storage.kv.delete("reconnecting");
     const generation = this.#nextGrantGeneration();
     this.ctx.storage.kv.put<StoredGrant>("grant", grant);
     this.ctx.storage.kv.put("sites", sites);
     if (identity) this.ctx.storage.kv.put("identity", identity);
+    else this.ctx.storage.kv.delete("identity");
     this.ctx.storage.kv.put<StoredSite>("selectedSite", selected);
     this.ctx.storage.kv.delete("credentialsExpiredNotified");
     this.ctx.storage.kv.delete("credentialsExpiredPending");
@@ -544,14 +572,14 @@ export class UserAccount extends DurableObject<Env> {
     await this.#scheduleAlarm();
     if (!isSameStoredGrant(this.ctx.storage.kv.get<StoredGrant>("grant"), grant) || this.ctx.storage.kv.get<number>("grantGeneration") !== generation) return { error: "This authorization was superseded or revoked. Return to Connections and try again." };
     const expiresAt = grant.refreshToken ? undefined : new Date(grant.expiresAt);
-    if (reconnecting) {
-      this.ctx.storage.kv.put("refreshRestoredPending", true);
-      this.ctx.storage.kv.put("refreshRestoredGeneration", generation);
-      await this.#notifyRefreshRestoredOnce(expiresAt);
+    if (mode === "commit") {
+      this.ctx.storage.kv.put("refreshRestoredNotified", generation);
+      return {};
     } else {
       try {
-        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props: { userObjectId: this.ctx.id.toString() } }), expiresAt);
+        const handoff = requireConnectHandoff(await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props: { userObjectId: this.ctx.id.toString() } }), expiresAt), this.ctx.storage.kv.get("connectHandoffProtocol"));
         if (this.ctx.storage.kv.get<number>("grantGeneration") === generation && this.ctx.storage.kv.get("grant")) this.ctx.storage.kv.put("refreshRestoredNotified", generation);
+        return { handoff };
       } catch (error) {
         if (this.ctx.storage.kv.get<number>("grantGeneration") !== generation || !this.ctx.storage.kv.get("grant")) throw error;
         this.ctx.storage.kv.delete("grant");
@@ -565,7 +593,18 @@ export class UserAccount extends DurableObject<Env> {
         throw error;
       }
     }
-    return { returnUrl };
+  }
+  /** Installs only the exact browser-confirmed stage, without repeating OAuth or completion. */
+  async commitReconnect(stageId: string): Promise<void> {
+    const staged = commitStagedCredentials<StagedJiraConnection>(this.ctx.storage.kv, Date.now(), stageId);
+    if (!staged) throw new Error("No reconnect is awaiting confirmation. Please try again.");
+    const previous = this.ctx.storage.kv.get<StoredSite>("selectedSite");
+    if ((this.ctx.storage.kv.get<number>("grantGeneration") ?? 0) !== staged.generation ||
+        previous?.cloudId !== staged.previous?.cloudId || previous?.url !== staged.previous?.url) {
+      throw new Error("The Jira connection changed before confirmation. Start a new connection.");
+    }
+    const outcome = await this.#completeConnection(staged.grant, staged.sites, staged.identity, staged.selected, "commit");
+    if (outcome.error) throw new Error(outcome.error);
   }
   async getAccessToken(): Promise<string> {
     const grant = this.ctx.storage.kv.get<StoredGrant>("grant");
@@ -656,7 +695,7 @@ export class UserAccount extends DurableObject<Env> {
     this.ctx.storage.kv.put<StoredDefaultProject>("defaultProject", stored);
     return stored;
   }
-  async prepareReconnect(nonce: string, returnUrl?: string): Promise<void> { this.ctx.storage.kv.put("reconnecting", true); this.ctx.storage.kv.put("oauthCleanupAt", Date.now() + CONNECT_TIMEOUT_MS); this.ctx.storage.kv.put<StoredNonce>("nonce", { value: nonce, expiresAt: Date.now() + NONCE_TTL_MS, stage: "initiation", returnUrl }); await this.#scheduleAlarm(); }
+  async prepareReconnect(nonce: string, returnUrl?: string): Promise<void> { this.ctx.storage.kv.put("oauthCleanupAt", Date.now() + CONNECT_TIMEOUT_MS); this.ctx.storage.kv.put<StoredNonce>("nonce", { value: nonce, expiresAt: Date.now() + NONCE_TTL_MS, stage: "initiation", returnUrl, reconnect: true }); await this.#scheduleAlarm(); }
   async alarm(): Promise<void> {
     const now = Date.now();
     const cleanupAt = this.ctx.storage.kv.get<number>("oauthCleanupAt");
@@ -758,7 +797,9 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, { userObjectId: st
   async getSupportedResources(): Promise<SupportedResource[]> { return SUPPORTED_RESOURCES; }
   async getAuthenticatedEmail(): Promise<string | null> { return (await this.#account().getIdentity())?.email ?? null; }
   async ensureResources(_patterns: string[]): Promise<{ url?: string }> { return {}; }
-  async reconnect(options?: GatekeeperReconnectOptions): Promise<{ url: string }> { const nonce = generateNonce(); await this.#account().prepareReconnect(nonce, validateNativeReturnUrl(options?.returnUrl, this.env)); return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${nonce}` }; }
+  async reconnect(options?: GatekeeperReconnectOptions): Promise<HandoffLaunch> { const nonce = generateNonce(); await this.#account().prepareReconnect(nonce, validateNativeReturnUrl(options?.returnUrl, this.env)); return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${nonce}`, handoffProtocol: await this.#account().acknowledgeHandoff(options) }; }
+  /** Commits credentials only after the Workshop redeems the browser-bound handoff. */
+  async commitReconnect(stageId: string): Promise<void> { await this.#account().commitReconnect(stageId); }
   async revoke(): Promise<void> { await this.#account().revoke(); }
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> { return this.ctx.exports.JiraVerifier({ props: { userObjectId: this.ctx.props.userObjectId } }); }
@@ -947,7 +988,15 @@ abstract class BaseGatekeeper<Session, Props extends BaseProps = BaseProps> exte
     this.ctx.storage.kv.put("nextAction", id + 1);
     this.ctx.storage.kv.put<StagedActionState>(`action:${id}`, { state: "pending", action, createdAt: Date.now() });
     try {
-      await queue.submitAction(id, { title, description: `${description}\n\n${actionPreview(action)}`, implementsRevert: false, actionKind: { tag: action.kind === "comment" ? "jira.comment" : `jira.${action.kind}`, label: title }, autoApprovable: auto, awaitDecision: action.kind !== "comment" });
+      const preview = buildDescription("Apply the following Jira change.").verbatim("Summary", description)
+        .verbatim("Preview", actionPreview(action));
+      if (action.kind === "upload") {
+        preview.inline("Issue", action.issue).file("Attachment", {
+          name: action.filename, mediaType: action.mimeType ?? "application/octet-stream", size: action.bytes.byteLength, origin: "agent",
+        });
+      } else preview.json("Action", action);
+      await queue.submitAction(id, { title, ...preview.finish(),
+        implementsRevert: false, actionKind: { tag: action.kind === "comment" ? "jira.comment" : `jira.${action.kind}`, label: title }, autoApprovable: auto, awaitDecision: action.kind !== "comment" });
     } catch (error) {
       // submitAction may have dispatched applyAction before its response failed. Keep any
       // claimed/terminal state so the write cannot be mistaken for an unattempted action.

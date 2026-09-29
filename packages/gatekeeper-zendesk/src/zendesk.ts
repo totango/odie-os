@@ -3,7 +3,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { createLogger } from "@gadgets/backend-utils/logger";
 import {
   boundAgentCatalog,
-  renderBrowserFlowCompletionHtml,
+  type ConnectHandoff,
   stripTrailingSlashes,
   type AccountDescription,
   type ActionKind,
@@ -26,6 +26,10 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { acknowledgeHandoff, connectHandoffPageHtml, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
+import type { GatekeeperConnectResult as HandoffLaunch } from "@gadgets/workshop-shared/gatekeeper";
+import { stageCredentials, commitStagedCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
+import { buildDescription } from "@gadgets/gatekeeper-kit/action-description";
 import APP_HTML from "./app.txt";
 import TICKET_CONFIGURATOR_HTML from "./generated/ticket-configurator-ui.txt";
 import TYPES_CODE from "./types.txt";
@@ -83,7 +87,8 @@ import type {
 
 type Env = Cloudflare.Env & { BASE_URL?: string; CLIENT_ID?: string; CLIENT_SECRET?: string; PUBLIC_BASE_URL?: string };
 type Props = { accountId: string; subdomain: string; ticketId?: string };
-type StoredNonce = { value: string; expiresAt: number; returnUrl?: string };
+type StoredNonce = { value: string; expiresAt: number; returnUrl?: string; stage: "initiation" | "oauth" | "exchanging"; reconnect?: boolean };
+type StagedZendeskConnection = { grant: ZendeskOAuthGrant; subdomain: string };
 type StoredUpload = {
   token: string;
   ticketId: string;
@@ -388,7 +393,7 @@ export default {
         .get(parsedAccountId)
         .acceptAuthCode(code, oauthNonce);
       if (!accepted) return textResponse("Invalid or expired OAuth state.");
-      return new Response(renderBrowserFlowCompletionHtml({ appName: "Odie OS", returnUrl: accepted.returnUrl }), {
+      return new Response(connectHandoffPageHtml(accepted), {
         headers: {
           "Cache-Control": "no-store",
           "Content-Type": "text/html; charset=utf-8",
@@ -416,12 +421,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions): Promise<{ url: string }> {
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>, options?: GatekeeperConnectOptions): Promise<HandoffLaunch> {
     const exports = exportsOf(this.ctx);
     const accountId = exports.ZendeskAccount.newUniqueId();
     const nonce = randomNonce();
     await exports.ZendeskAccount.get(accountId).setCallback(callback, nonce, validateNativeReturnUrl(this.env, options?.returnUrl));
-    return { url: `${getBaseUrl(this.env)}/connect/${accountId}/${nonce}` };
+    return { url: `${getBaseUrl(this.env)}/connect/${accountId}/${nonce}`, handoffProtocol: await exports.ZendeskAccount.get(accountId).acknowledgeHandoff(options) };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> { return [ACCOUNT_RESOURCE, TICKET_RESOURCE]; }
@@ -429,33 +434,41 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 }
 
 export class ZendeskAccount extends DurableObject<Env> {
+  /** Records supported launch intent; callback agreement is checked before exchange. */
+  acknowledgeHandoff(options?: GatekeeperReconnectOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   #refreshing?: Promise<string>;
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, nonce: string, returnUrl?: string): Promise<void> {
     this.ctx.storage.kv.put("callback", callback);
-    this.ctx.storage.kv.put<StoredNonce>("nonce", { value: nonce, expiresAt: Date.now() + NONCE_TTL_MS, returnUrl });
+    this.ctx.storage.kv.put<StoredNonce>("nonce", { value: nonce, expiresAt: Date.now() + NONCE_TTL_MS, returnUrl, stage: "initiation" });
     if (!this.ctx.storage.kv.get<ZendeskOAuthGrant>("grant")) await this.ctx.storage.setAlarm(Date.now() + CONNECT_TIMEOUT_MS);
   }
 
   async beginOAuth(nonce: string, subdomain: string, returnUrl?: string): Promise<{ oauthNonce: string } | null> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
-    if (!stored || Date.now() >= stored.expiresAt || !timingSafeEqual(stored.value, nonce)) return null;
-    if (this.ctx.storage.kv.get("grant") && subdomain !== this.ctx.storage.kv.get("subdomain")) throw new Error("Reconnect must use the original Zendesk subdomain.");
+    if (!stored || stored.stage !== "initiation" || Date.now() >= stored.expiresAt || !timingSafeEqual(stored.value, nonce)) return null;
+    const originalSubdomain = this.ctx.storage.kv.get<string>("subdomain");
+    if (originalSubdomain && subdomain !== originalSubdomain) throw new Error("Reconnect must use the original Zendesk subdomain.");
     const oauthNonce = randomNonce();
     this.ctx.storage.kv.put("subdomain", subdomain);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: oauthNonce,
       expiresAt: Date.now() + NONCE_TTL_MS,
       returnUrl: returnUrl ?? stored.returnUrl,
+      stage: "oauth",
+      reconnect: stored.reconnect,
     });
     return { oauthNonce };
   }
 
-  async acceptAuthCode(code: string, nonce: string): Promise<{ returnUrl?: string } | null> {
+  async acceptAuthCode(code: string, nonce: string): Promise<ConnectHandoff | null> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     const subdomain = this.ctx.storage.kv.get<string>("subdomain");
-    if (!stored || Date.now() >= stored.expiresAt || !timingSafeEqual(stored.value, nonce) || !subdomain) return null;
+    if (!stored || stored.stage !== "oauth" || Date.now() >= stored.expiresAt || !timingSafeEqual(stored.value, nonce) || !subdomain) return null;
     if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) throw new Error("Zendesk OAuth is not configured.");
-    this.ctx.storage.kv.delete("nonce");
+    this.ctx.storage.kv.put<StoredNonce>("nonce", { ...stored, stage: "exchanging" });
+    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
+    if (!callback) throw new Error("Zendesk connection attempt was abandoned.");
+    const protocol = await requireBrowserHandoff(callback, this.ctx.storage.kv);
     const grant = await exchangeAuthCode({
       subdomain,
       code,
@@ -464,19 +477,39 @@ export class ZendeskAccount extends DurableObject<Env> {
       redirectUri: `${getBaseUrl(this.env)}/oauth`,
       scope: OAUTH_SCOPE,
     });
+    const current = this.ctx.storage.kv.get<StoredNonce>("nonce");
+    if (!current || current.stage !== "exchanging" || current.value !== nonce || Date.now() >= current.expiresAt) return null;
+    this.ctx.storage.kv.delete("nonce");
+    let handoff: ConnectHandoff;
+    if (stored.reconnect) {
+      const stageId = stageCredentials<StagedZendeskConnection>(this.ctx.storage.kv, { grant, subdomain }, Date.now());
+      handoff = requireConnectHandoff(await callback.reconnectComplete(stageId));
+    } else {
+      this.#writeGrant(grant);
+      try {
+        handoff = requireConnectHandoff(await callback.complete(exportsOf(this.ctx).ZendeskUserImpl({ props: { accountId: this.ctx.id.toString(), subdomain } })), protocol);
+      } catch (error) {
+        if (this.ctx.storage.kv.get<ZendeskOAuthGrant>("grant")?.accessToken === grant.accessToken) this.ctx.storage.kv.delete("grant");
+        throw error;
+      }
+    }
+    await this.ctx.storage.deleteAlarm();
+    return requireConnectHandoff(handoff, protocol);
+  }
+
+  #writeGrant(grant: ZendeskOAuthGrant): void {
     this.ctx.storage.kv.put<ZendeskOAuthGrant>("grant", grant);
     this.ctx.storage.kv.delete("identity");
     this.ctx.storage.kv.delete("expiredNotified");
-    const callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    if (!callback) throw new Error("Zendesk connection attempt was abandoned.");
-    if (this.ctx.storage.kv.get<boolean>("reconnecting")) {
-      this.ctx.storage.kv.delete("reconnecting");
-      await callback.credentialsRestored();
-    } else {
-      await callback.complete(exportsOf(this.ctx).ZendeskUserImpl({ props: { accountId: this.ctx.id.toString(), subdomain } }));
+  }
+
+  /** Installs only the exact stage confirmed on the initiating Workshop session. */
+  async commitReconnect(stageId: string): Promise<void> {
+    const staged = commitStagedCredentials<StagedZendeskConnection>(this.ctx.storage.kv, Date.now(), stageId);
+    if (!staged || staged.subdomain !== this.ctx.storage.kv.get<string>("subdomain") || !this.ctx.storage.kv.get("callback")) {
+      throw new Error("No reconnect is awaiting confirmation. Please try again.");
     }
-    await this.ctx.storage.deleteAlarm();
-    return { returnUrl: stored.returnUrl };
+    this.#writeGrant(staged.grant);
   }
 
   /** Opens the management UI over an account-owned facet, using only the account's stored identity. */
@@ -529,8 +562,7 @@ export class ZendeskAccount extends DurableObject<Env> {
   async identity(): Promise<ZendeskIdentity | undefined> { return this.ctx.storage.kv.get<ZendeskIdentity>("identity"); }
   async storeIdentity(identity: ZendeskIdentity): Promise<void> { this.ctx.storage.kv.put("identity", identity); }
   async prepareReconnect(nonce: string, returnUrl?: string): Promise<void> {
-    this.ctx.storage.kv.put("reconnecting", true);
-    this.ctx.storage.kv.put<StoredNonce>("nonce", { value: nonce, expiresAt: Date.now() + NONCE_TTL_MS, returnUrl });
+    this.ctx.storage.kv.put<StoredNonce>("nonce", { value: nonce, expiresAt: Date.now() + NONCE_TTL_MS, returnUrl, stage: "initiation", reconnect: true });
   }
   async notifyExpired(): Promise<void> {
     if (this.ctx.storage.kv.get<boolean>("expiredNotified")) return;
@@ -546,6 +578,8 @@ export class ZendeskAccount extends DurableObject<Env> {
 
 @validateRpc()
 export class ZendeskUserImpl extends WorkerEntrypoint<Env, Props> implements GatekeeperUser {
+  /** Commits credentials only after browser-bound ticket redemption by Workshop. */
+  async commitReconnect(stageId: string): Promise<void> { await this.#account().commitReconnect(stageId); }
   #account(): DurableObjectStub<ZendeskAccount> {
     const exports = exportsOf(this.ctx);
     return exports.ZendeskAccount.get(exports.ZendeskAccount.idFromString(this.ctx.props.accountId));
@@ -603,10 +637,10 @@ export class ZendeskUserImpl extends WorkerEntrypoint<Env, Props> implements Gat
     return { iframeHtml: APP_HTML, ui: await this.#account().workItemsManagementUi() };
   }
   async revoke(): Promise<void> { await this.#account().revoke(); }
-  async reconnect(options?: GatekeeperReconnectOptions): Promise<{ url: string }> {
+  async reconnect(options?: GatekeeperReconnectOptions): Promise<HandoffLaunch> {
     const nonce = randomNonce();
     await this.#account().prepareReconnect(nonce, validateNativeReturnUrl(this.env, options?.returnUrl));
-    return { url: `${getBaseUrl(this.env)}/connect/${this.ctx.props.accountId}/${nonce}` };
+    return { url: `${getBaseUrl(this.env)}/connect/${this.ctx.props.accountId}/${nonce}`, handoffProtocol: await this.#account().acknowledgeHandoff(options) };
   }
   @skipRpcValidation()
   async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
@@ -905,7 +939,14 @@ export class ZendeskGatekeeper extends DurableObject<Env, Props> implements Gate
     const id = this.#nextActionId();
     this.ctx.storage.kv.put<StoredAction>(actionKey(id), { ...action, id, status: "pending" });
     this.ctx.storage.kv.put<ZendeskActionResult>(resultKey(id), { status: "pending" });
-    try { await queue.submitAction(id, { title, description, implementsRevert: false, actionKind, ...(action.kind === "create" ? { awaitDecision: true, autoApprovable: false } : {}) }); }
+    const rendered = buildDescription("Apply the following Zendesk change.")
+      .verbatim("Summary", description).json("Action", action).finish();
+    // Upload tokens name bytes the approver has not read; showing their identifiers is not a
+    // complete description of the attached content, even when every JSON field fits.
+    if (action.kind === "comment" && action.uploadTokens.length > 0) delete rendered.descriptionIsComplete;
+    try { await queue.submitAction(id, { title,
+      ...rendered,
+      implementsRevert: false, actionKind, ...(action.kind === "create" ? { awaitDecision: true, autoApprovable: false } : {}) }); }
     catch (error) {
       // submitAction may have delivered the action before its response was lost. Never erase a claim.
       if (action.kind === "create" && this.ctx.storage.kv.get<StoredAction>(actionKey(id))?.status !== "pending") throw error;

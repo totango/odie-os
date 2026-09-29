@@ -4,7 +4,7 @@ import { act, useEffect, useSyncExternalStore, type ComponentProps, type ReactNo
 import { createRoot, type Root } from 'react-dom/client'
 import { RpcStub, RpcTarget } from 'capnweb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { AuthenticatedApi, GadgetClient, GadgetMetadata, WorkpieceSummary, WorkpiecesSubscriber, ActionsSubscriber } from '@gadgets/workshop-shared/api'
+import type { AuthenticatedApi, GadgetClient, GadgetMetadata, WorkpiecesSubscriber, ActionsSubscriber } from '@gadgets/workshop-shared/api'
 import GadgetEditor, { useDisplayedGadget } from './GadgetEditor'
 import { RetainedGadgetUI } from './GadgetUseView'
 
@@ -43,7 +43,7 @@ vi.mock('./WorkpiecePicker', async original => ({
 }))
 vi.mock('./ShareModal', () => ({ default: () => null }))
 vi.mock('./BlueprintModal', () => ({ default: () => null }))
-vi.mock('./GadgetCodeInterface', () => ({ default: ({ onHasCodeChange }: ComponentProps<typeof import('./GadgetCodeInterface').default>) => {
+vi.mock('./features/code/WorkpieceCodeInterface', () => ({ default: ({ onHasCodeChange }: ComponentProps<typeof import('./features/code/WorkpieceCodeInterface').default>) => {
   useEffect(() => { onHasCodeChange?.(true) }, [onHasCodeChange])
   return null
 } }))
@@ -61,7 +61,7 @@ vi.mock('./GadgetUI', () => ({ default: ({ gadget, chatId }: { gadget: RpcStub<G
   return <iframe title="running app" data-chat={chatId ?? 'main'} sandbox="" />
 } }))
 
-const gadget = (id: number, chatId?: number) => ({ id, type: 'gadget', title: `App ${id}`, chatId }) as WorkpieceSummary
+const gadget = (id: number, chatId?: number) => ({ id, type: 'gadget' as const, title: `App ${id}`, chatId })
 let root: Root
 let container: HTMLDivElement
 afterEach(() => {
@@ -71,6 +71,25 @@ afterEach(() => {
 function setup() { container = document.createElement('div'); document.body.append(container); root = createRoot(container) }
 
 describe('displayed gadget pin', () => {
+  it('does not offer a preview for unrelated Git/OT workpieces', async () => {
+    let selection!: ReturnType<typeof useDisplayedGadget>
+    function Probe(props: Parameters<typeof useDisplayedGadget>[0]) {
+      const value = useDisplayedGadget(props)
+      useEffect(() => { selection = value })
+      return null
+    }
+    setup()
+    const initial = { candidateId: 1, requestedId: 1, gadgets: [gadget(1), gadget(2)],
+      selectedChatId: 7, hasProposedChanges: true, proposedWorkpieces: [2] }
+    await act(async () => root.render(<Probe {...initial} />))
+    expect(selection.chatId).toBeUndefined()
+    expect(selection.previewChanged).toBe(false)
+    await act(async () => root.render(<Probe {...initial} proposedWorkpieces={[1, 2]} />))
+    expect(selection.chatId).toBeUndefined()
+    expect(selection.previewChanged).toBe(true)
+    await act(async () => selection.acceptPreview())
+    expect(selection.chatId).toBe(7)
+  })
   it('ignores automatic candidate and proposal changes, suspends disappearance, and accepts explicit choices', async () => {
     let selection!: ReturnType<typeof useDisplayedGadget>
     function Probe(props: Parameters<typeof useDisplayedGadget>[0]) {
@@ -215,8 +234,8 @@ it.each(['eight', 'list'] as const)('retains draft D when navigating to conversa
       return new RpcTarget()
     }
     async subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>) {
-      await subscriber.entry({ ...gadget(1), filesRoot: 'accepted' })
-      await subscriber.entry({ ...gadget(2, 7), filesRoot: 'draft' })
+      await subscriber.entry({ ...gadget(1), commitId: 'a'.repeat(40) })
+      await subscriber.entry(gadget(2, 7))
       await subscriber.ready()
       return new RpcTarget()
     }

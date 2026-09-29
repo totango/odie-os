@@ -21,7 +21,7 @@ const testState = vi.hoisted(() => ({
     ]),
     listAddableGatekeepers: vi.fn<() => Promise<GatekeeperVendorInfo[]>>(async () => []),
     connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://connect.example.test' })),
-    reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://reconnect.example.test' })),
+    reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://reconnect.example.test', nonce: 'a'.repeat(64) })),
     provisionAmbientAccount: vi.fn<(vendorId: string) => Promise<void>>(async () => {}),
     subscribeConnectedAccounts: vi.fn<(subscriber: ConnectedAccountsSubscriber, filter: { includeForcedAutoProvisionedAccounts: boolean }) => Promise<{ [Symbol.dispose](): void }>>(),
   },
@@ -224,7 +224,7 @@ describe('Getting started', () => {
   })
 
   it('reconnects an expired native Jira account instead of creating a duplicate', async () => {
-    const popup = { location: { href: 'about:blank' }, close: vi.fn<() => void>() } as unknown as Window
+    const popup = { sessionStorage: { setItem: vi.fn<(key: string, value: string) => void>() }, location: { href: 'about:blank' }, close: vi.fn<() => void>() } as unknown as Window
     const open = vi.spyOn(window, 'open').mockReturnValue(popup)
     container = document.createElement('div')
     document.body.append(container)

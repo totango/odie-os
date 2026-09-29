@@ -3,6 +3,7 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer, PreApprovableAction } from '@gadgets/workshop-shared/api'
 import type { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
+import { requireEditingReady } from './features/workspace/editingProtocol'
 
 export interface AutoApprovalEntry {
   gatekeeperId: number
@@ -109,6 +110,7 @@ export function useAutoApproval(overseer: RpcStub<Overseer> | null) {
       ? [...previous, { gatekeeperId: entry.gatekeeperId, actionKind: entry.actionKind }]
       : previous.filter(rule => autoApprovalKey(rule) !== key))
     try {
+      await requireEditingReady(overseer)
       if (enabled) await overseer.setAutoApprovedActionKind(entry.gatekeeperId, entry.actionKind)
       else await overseer.removeAutoApprovedActionKind(entry.gatekeeperId, entry.actionKind.tag)
     } catch (err) {

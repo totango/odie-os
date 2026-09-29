@@ -39,7 +39,7 @@ import {
   errorPageHtml,
   htmlResponse,
   INVALID_LINK_HTML,
-  SELF_CLOSING_HTML,
+  connectHandoffPageHtml,
 } from "@gadgets/mcp-shared/html";
 import { handleMcpHttpRequest } from "@gadgets/mcp-shared/http";
 import type { McpLog, McpLogFields } from "@gadgets/mcp-shared/log";
@@ -132,7 +132,7 @@ async function continueConnect(
   }
   if (outcome.kind === "invalid") return htmlResponse(INVALID_LINK_HTML, 400);
   if (outcome.kind === "redirect") return Response.redirect(outcome.url, 302);
-  return htmlResponse(SELF_CLOSING_HTML);
+  return htmlResponse(connectHandoffPageHtml(outcome.handoff));
 }
 
 export default {
@@ -172,14 +172,14 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   /** Starts the per-user Agentic OAuth flow without accepting a caller-provided endpoint. */
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
-    _options?: GatekeeperConnectOptions,
-  ): Promise<{ url: string }> {
+    options?: GatekeeperConnectOptions,
+  ): Promise<import("@gadgets/workshop-shared/gatekeeper").GatekeeperConnectResult> {
     if (!readOdieKgConfig(this.env)) throw new Error("ODIE MCP is not configured.");
     const exports = (this.ctx as ExportContext<unknown>).exports;
     const accountId = exports.OdieKgAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await exports.OdieKgAccount.get(accountId).setCallback(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}` };
+    return { url: `${getBaseUrl(this.env)}/${accountId.toString()}/${initiationNonce}`, handoffProtocol: await exports.OdieKgAccount.get(accountId).acknowledgeHandoff(options) };
   }
 
   /** Returns one non-grantable resource so the connector is visible before account connection. */
@@ -460,6 +460,7 @@ class DomainSharingApprovalQueue extends RpcTarget implements ApprovalQueue {
     });
   }
   getSessionSurface(): Promise<"chat" | "code"> { return this.inner.getSessionSurface(); }
+  getGitCache(): ReturnType<ApprovalQueue["getGitCache"]> { return this.inner.getGitCache(); }
   submitAction(action: number, description: ActionDescription): Promise<void> {
     return this.inner.submitAction(action, description);
   }

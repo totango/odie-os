@@ -6,6 +6,8 @@ import type { ProductAnalyticsRecord } from "./analytics";
 declare global {
   namespace Cloudflare {
     interface Env {
+      // Set "true" during coordinated Git/OT cutover; runtime gadget RPC remains available.
+      WORKSHOP_EDITING_PAUSED?: string;
       // Static Workshop administrators / managed bootstrap seeds, and default Finance operators:
       // a JSON array binding or the same array encoded as a JSON string.
       ADMINS?: string[] | string;

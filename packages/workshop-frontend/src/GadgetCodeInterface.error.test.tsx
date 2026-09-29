@@ -3,9 +3,7 @@
 
 import { act, type ButtonHTMLAttributes } from 'react'
 import { createRoot } from 'react-dom/client'
-import * as Y from 'yjs'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import type { CodeSubscriber } from '@gadgets/workshop-shared/api'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -24,20 +22,21 @@ const imports = vi.hoisted(() => {
   return { code: deferred(), diff: deferred() }
 })
 
-vi.mock('./CodeEditor', async () => {
+vi.mock('./features/code/CodeEditor', async () => {
   imports.code.loads++
   return await imports.code.promise
 })
-vi.mock('./CodeDiffEditor', async () => {
+vi.mock('./features/code/CodeDiffEditor', async () => {
   imports.diff.loads++
   return await imports.diff.promise
 })
 vi.mock('@cloudflare/kumo', () => ({
   useKumoToastManager: () => ({ add: vi.fn<() => void>() }),
 }))
-vi.mock('./FileSidebar', () => ({
-  default: ({ files, onFileSelect }: { files: string[]; onFileSelect: (filename: string) => void }) => (
-    <nav aria-label="Files">{files.map(file => <button key={file} onClick={() => onFileSelect(file)}>{file}</button>)}</nav>
+vi.mock('./features/code/FileBrowser', () => ({
+  isOpenableKind: (kind: string) => kind === 'file',
+  default: ({ tree, onFileSelect }: { tree: { leaves: ReadonlyMap<string, string> }; onFileSelect: (filename: string) => void }) => (
+    <nav aria-label="Files">{[...tree.leaves.keys()].map(file => <button key={file} onClick={() => onFileSelect(file)}>{file}</button>)}</nav>
   ),
 }))
 vi.mock('./components/WorkshopControls', () => ({
@@ -45,7 +44,7 @@ vi.mock('./components/WorkshopControls', () => ({
   WorkshopIconButton: (props: ButtonHTMLAttributes<HTMLButtonElement>) => <button {...props} />,
 }))
 
-import GadgetCodeInterface from './GadgetCodeInterface'
+import WorkpieceCodeInterface from './features/code/WorkpieceCodeInterface'
 
 describe('editor import failures', () => {
   it.each(['code', 'diff'] as const)('contains a rejected %s import without disposing code sync', async (kind) => {
@@ -53,26 +52,18 @@ describe('editor import failures', () => {
     document.body.append(container)
     const caught = vi.fn<() => void>()
     const root = createRoot(container, { onCaughtError: caught })
-    const doc = new Y.Doc()
-    const files = doc.getMap<Y.Text>('files')
-    files.set('client.js', new Y.Text('client'))
-    files.set('server.js', new Y.Text('server'))
-    const dispose = vi.fn<() => void>()
-    let subscriber!: CodeSubscriber
+    let commitId = `error-${kind}`
+    const files = new Map([['client.js', 'client'], ['server.js', 'server']])
     const overseer = {
-      subscribeToCode: vi.fn<(next: CodeSubscriber) => Promise<Disposable>>(async (next) => {
-        subscriber = next
-        next.update({ version: 1, timestamp: new Date(), update: Y.encodeStateAsUpdateV2(doc) })
-        next.ready()
-        return { [Symbol.dispose]: dispose }
-      }),
-      updateCode: vi.fn<() => Promise<void>>(),
+      listTree: vi.fn<() => Promise<object[]>>(async () => [...files.keys()].map(name => ({ name, kind: 'file' }))),
+      readFilesAtCommit: async (_commit: string, paths: string[]) => paths.map(path => [path, { kind: 'text', text: files.get(path) }]),
     }
     const hasCode = vi.fn<(value: boolean) => void>()
     const render = (isVisible: boolean) => act(async () => {
       root.render(<>
         <button>Workspace chat</button>
-        <GadgetCodeInterface overseer={overseer as never} filesRoot="files" isAgentActive={false}
+        <WorkpieceCodeInterface overseer={overseer as never} summary={{ id: 1, type: 'gadget', title: 'App', commitId }} isAgentActive={false}
+          chatChanges={kind === 'diff' ? { chatId: 7, rowsThrough: 0 } : undefined}
           selectedChatId={kind === 'diff' ? 7 : null} isVisible={isVisible} onHasCodeChange={hasCode} />
       </>)
     })
@@ -95,7 +86,6 @@ describe('editor import failures', () => {
       expect(container.textContent).toContain('Reloading may lose unsent messages and unsaved changes.')
       expect(container.querySelector('button')).toBe(chat)
       expect(container.querySelector('nav')).toBe(sidebar)
-      expect(dispose).not.toHaveBeenCalled()
 
       await act(async () => {
         sidebar!.querySelectorAll('button')[1].click()
@@ -105,20 +95,16 @@ describe('editor import failures', () => {
       expect(container.querySelector('[role="alert"]')).not.toBeNull()
       expect(imports[kind].loads).toBe(1)
 
-      await act(async () => {
-        files.set('incoming.js', new Y.Text('still syncing'))
-        subscriber.update({ version: 2, timestamp: new Date(), update: Y.encodeStateAsUpdateV2(doc) })
-      })
-      expect(sidebar!.textContent).toContain('incoming.js')
+      files.set('incoming.js', 'still syncing')
+      commitId += '-next'
+      await render(true)
+      expect(container.querySelector('nav')!.textContent).toContain('incoming.js')
       expect(hasCode).toHaveBeenLastCalledWith(true)
-      expect(overseer.subscribeToCode).toHaveBeenCalledTimes(1)
-      expect(dispose).not.toHaveBeenCalled()
+      expect(overseer.listTree).toHaveBeenCalledTimes(2)
       await act(async () => root.render(null))
-      expect(dispose).toHaveBeenCalledTimes(1)
     } finally {
       act(() => root.unmount())
       container.remove()
-      doc.destroy()
     }
   })
 })

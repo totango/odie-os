@@ -7,6 +7,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "jsonc-parser";
 import { collectModules } from "./release/hash-lib.ts";
+import { pauseBackendConfig, sealArtifact } from "./production-cutover.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FRONTEND_DIST = join(ROOT, "packages", "workshop-frontend", "dist");
@@ -91,7 +92,8 @@ function main() {
     mkdirSync(workerDir, { recursive: true });
     runWrangler(packageDir, configPath, workerDir);
 
-    const config = parse(readFileSync(configPath, "utf8"));
+    let config = parse(readFileSync(configPath, "utf8"));
+    if (packageName === "workshop-backend") config = pauseBackendConfig(config);
     validateConfig(config, configPath);
     const { mainModule } = collectModules(workerDir);
     delete config.$schema;
@@ -125,6 +127,8 @@ function main() {
     JSON.stringify(nativeRouterConfig, null, 2) + "\n",
   );
   console.log(`prepared ${relative(ROOT, nativeRouterDir)}`);
+  const targetSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim();
+  sealArtifact(outputDir, ROOT, targetSha);
 }
 
 main();

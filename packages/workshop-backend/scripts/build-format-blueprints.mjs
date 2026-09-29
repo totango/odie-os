@@ -1,6 +1,11 @@
 // Bundles repository-provided blueprints into a generated TypeScript module, so the Worker can
 // install them with no network access when a deployment first serves /api.
 //
+// Retained for the fork's deterministic featured-starter pipeline. The runtime consumes only
+// FEATURED_BLUEPRINTS from this module. The authoritative format set is now emitted by
+// build-bundled-blueprints.ts, which includes these local archives in its repository default and
+// uses BUNDLED_BLUEPRINTS_DIR as a complete replacement. FORMAT_BLUEPRINTS below is legacy output.
+//
 // The directory defaults to this package's `format-blueprints/`, and `FORMAT_BLUEPRINTS_DIR`
 // points somewhere else. That is how a deployment ships its own formats: this repo is often a
 // submodule, so a fork can't add files here without conflicting on every update -- it keeps its
@@ -23,7 +28,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 const pkgRoot = join(here, "..");
 const formatSourceDir = resolve(pkgRoot, process.env.FORMAT_BLUEPRINTS_DIR ?? "format-blueprints");
 const featuredSourceDir = resolve(pkgRoot, process.env.FEATURED_BLUEPRINTS_DIR ?? "featured-blueprints");
-const outFile = join(pkgRoot, "src", "generated", "format-blueprints.ts");
+const outIndex = process.argv.indexOf("--out");
+if (outIndex !== -1 && (!process.argv[outIndex + 1] || process.argv[outIndex + 1].startsWith("--"))) {
+  throw new Error("--out requires a path");
+}
+const outFile = outIndex === -1 ? join(pkgRoot, "src", "generated", "format-blueprints.ts")
+    : resolve(pkgRoot, process.argv[outIndex + 1]);
 const MAX_BLUEPRINT_METADATA_BYTES = 64 * 1024;
 const MAX_BLUEPRINT_CONTENT_BYTES = 32 * 1024 * 1024;
 const MAX_SOURCE_FILE_BYTES = 1024 * 1024;

@@ -9,6 +9,12 @@ on:
     types:
       - completed
   workflow_dispatch:
+    inputs:
+      cutover_phase:
+        description: 'Routine requires prior verified cutover; prepare stays paused; resume requires exact-target completion evidence.'
+        type: choice
+        options: [routine, prepare, resume]
+        default: routine
 
 permissions:
   contents: read
@@ -107,6 +113,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up trusted Node.js runtime
@@ -136,6 +143,16 @@ jobs:
         with:
           name: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
           path: production-deploy
+
+      # Before the first secret write or provider deploy. The operator's checklist is supplied by
+      # the production environment, never by workflow inputs or the candidate artifact.
+      - name: Enforce production cutover checklist
+        env:
+          POLARIS_CUTOVER_RECORD: ${{ vars.POLARIS_CUTOVER_RECORD }}
+          CUTOVER_PHASE: ${{ inputs.cutover_phase || 'routine' }}
+        run: |
+          mkdir -p deploy-receipts
+          node scripts/production-cutover.mjs production-deploy "$CUTOVER_PHASE" "$DEPLOY_SHA" > deploy-receipts/cutover.json
 
       - name: Verify deployment credentials
         env:

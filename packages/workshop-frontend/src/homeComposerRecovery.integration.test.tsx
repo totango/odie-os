@@ -9,16 +9,18 @@ import type { Overseer, SlashCommandChoice, ChatAttachmentHandle, GatekeeperClie
 import type { ResourceDescription } from '@gadgets/workshop-shared/gatekeeper';
 import { ChatInput } from './ChatInput';
 import { HomePageContent } from './routes/index';
-import { readComposerDraft } from './composerDraft';
+import { readComposerDraft } from './features/chat/composer/draft/composerDraft';
 import { HubProvider } from './HubContext';
 
 const mocks = vi.hoisted(() => ({
   auth: {} as ReturnType<typeof import('./AuthContext').useAuthenticatedApi>,
   navigate: vi.fn<(options: unknown) => void>(),
   toast: vi.fn<(toast: unknown) => void>(),
+  saveText: vi.fn<(filename: string, text: string) => Promise<void>>(async () => {}),
   attachCreated: undefined as ComponentProps<typeof import('./GatekeeperModal').default>['onCreated'] | undefined,
 }));
 vi.mock('./AuthContext', () => ({ useAuthenticatedApi: () => mocks.auth }));
+vi.mock('./runtime', () => ({ getWorkshopRuntime: () => ({ saveText: mocks.saveText }) }));
 vi.mock('@tanstack/react-router', async (original) => ({
   ...await original<typeof import('@tanstack/react-router')>(), useNavigate: () => mocks.navigate,
 }));
@@ -77,6 +79,10 @@ class Resource extends RpcTarget {
 }
 
 class Workspace extends RpcTarget {
+  editingState = 'ready';
+  protocol = 'git-ot-v1';
+  negotiateEditingProtocol() { return this.getEditingProtocol(); }
+  getEditingProtocol() { return { protocol: this.protocol, state: this.editingState }; }
   catalog = deferred<SlashCommandChoice[]>();
   upload = deferred<ChatAttachmentHandle>();
   deleted: string[] = [];
@@ -157,6 +163,25 @@ describe('Home recovery with the real composer, slash resolver, and RPC ownershi
   async function send() {
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Send message"]')!.click());
   }
+
+  it.each(['paused', 'upgrade-required'] as const)('keeps and exports the real composer draft on %s without starting an agent', async state => {
+    await render();
+    await edit('Keep my unreplayed instructions');
+    const old = workspaces[0];
+    old.editingState = state;
+    await send();
+    expect(old.chats).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('Keep my unreplayed instructions');
+    const exportButton = [...container.querySelectorAll('button')].find(button => button.textContent === 'Export draft')!;
+    await act(async () => exportButton.click());
+    const recovery = JSON.parse(mocks.saveText.mock.calls[0][1]);
+    expect(recovery.draft.text).toBe('Keep my unreplayed instructions');
+    expect(recovery.acknowledgement).toBe('unconfirmed');
+    await interrupt('reveal');
+    expect(old.chats).not.toHaveBeenCalled();
+    expect(container.querySelector('textarea')!.value).toBe('Keep my unreplayed instructions');
+  });
   async function interrupt(kind: 'hidden' | 'exit' | 'api' | 'reveal') {
     if (kind === 'api') {
       mocks.auth = { ...mocks.auth, authenticatedApi: {

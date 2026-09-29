@@ -355,6 +355,10 @@ export class GitHubOrganizationAccount
   reconnect(): never {
     throw new Error("Totango GitHub is deployment-configured; ask an administrator to rotate it.");
   }
+  /** Deployment-owned credentials cannot be replaced through a browser reconnect. */
+  commitReconnect(_stageId: string): never {
+    throw new Error("Totango GitHub has no browser reconnect flow.");
+  }
   async getAuthenticatedEmail(): Promise<string | null> { return null; }
 
   @skipRpcValidation()

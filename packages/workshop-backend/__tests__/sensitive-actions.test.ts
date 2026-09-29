@@ -26,6 +26,7 @@ type Impl = OverseerDurableObject["impl"];
 async function withWorkspace(test: (impl: Impl) => Promise<void>) {
   const stub = env.TEST_OVERSEER.getByName(crypto.randomUUID());
   await runInDurableObject(stub, async (instance: OverseerDurableObject) => {
+    instance["impl"].storage.gatekeepers.put({id: 42, resourceTitle: "Private resource", class: {} as never});
     await test(instance["impl"]);
   });
 }
@@ -71,7 +72,7 @@ describe("sensitive workspace action approval", () => {
       await impl.drainAutoApprovals(42);
       expect(apply).not.toHaveBeenCalled();
       await impl.applyPendingAction(record, OWNER, false, OWNER_USER_ID);
-      expect(apply).toHaveBeenCalledWith(100);
+      expect(apply).toHaveBeenCalledWith(100, expect.objectContaining({gatekeeperId: 42, actionId: 1}));
       expect(action(impl, 1)).toMatchObject({state: "approved", resolvedBy: OWNER, autoApproved: false});
       expect(() => impl.getWebFetchEnv()).toThrow("prohibited from fetching");
       expect(impl.storage.prohibitAllSharing.get()).toBe(true);

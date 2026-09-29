@@ -335,6 +335,11 @@ export class JarvisAccount
     throw new Error("JARVIS is deployment-configured; ask an administrator to rotate its token.");
   }
 
+  /** Deployment-owned credentials cannot be replaced by a browser handoff. */
+  commitReconnect(_stageId: string): never {
+    throw new Error("JARVIS has no browser reconnect flow.");
+  }
+
   /** JARVIS does not authenticate end users. */
   async getAuthenticatedEmail(): Promise<string | null> {
     return null;
@@ -407,6 +412,7 @@ class DomainSharingApprovalQueue extends RpcTarget implements ApprovalQueue {
     });
   }
   getSessionSurface(): Promise<"chat" | "code"> { return this.inner.getSessionSurface(); }
+  getGitCache(): ReturnType<ApprovalQueue["getGitCache"]> { return this.inner.getGitCache(); }
   submitAction(action: number, description: ActionDescription): Promise<void> {
     return this.inner.submitAction(action, description);
   }

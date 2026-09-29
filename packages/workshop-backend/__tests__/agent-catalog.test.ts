@@ -4,8 +4,7 @@ import {
   AGENT_CATALOG_MAX_TITLE_LENGTH, boundAgentCatalog,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  completeAgentCatalogSnapshot, formatAgentCatalogPrompt,
-  formatAlwaysAvailableResourcesPrompt, normalizeAgentCatalog,
+  completeAgentCatalogSnapshot, formatAgentCatalogPrompt, formatAlwaysAvailableResourcesPrompt, normalizeAgentCatalog,
 } from "../src/agent-catalog";
 
 describe("normalizeAgentCatalog", () => {

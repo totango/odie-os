@@ -34,7 +34,7 @@ vi.mock('./components/WorkshopControls', () => ({
   ),
 }))
 
-const configurator = vi.hoisted(() => ({ current: null as null | {
+const configurator = vi.hoisted(() => ({ readiness: true as boolean | null, current: null as null | {
   frame: ResourceConfiguratorFrame | null; resourceIdentity?: string; frameIdentity?: string
   authorityAvailable?: boolean; isAuthorityCurrent?: () => boolean
 } }))
@@ -54,7 +54,7 @@ vi.mock('./ResourceConfiguratorHost', () => ({
     useEffect(() => {
       if (frame && authorityAvailable) {
         onCollectResourceUrlChange(() => Promise.resolve('https://acme.atlassian.net/browse/ENG-1'))
-        onSelectionReadyChange(true)
+        onSelectionReadyChange(configurator.readiness)
       } else {
         onCollectResourceUrlChange(null)
         onSelectionReadyChange(null)
@@ -151,6 +151,8 @@ function makeApi(ownerId = 'owner', isAdmin = false) {
     connectAccount: typeof connectAccount
   }
   const overseer = {
+    negotiateEditingProtocol: async () => ({ protocol: 'git-ot-v1', state: 'ready' }),
+    getEditingProtocol: async () => ({ protocol: 'git-ot-v1', state: 'ready' }),
     newGatekeeper,
   } as unknown as RpcStub<Overseer> & { newGatekeeper: typeof newGatekeeper }
   return { api, overseer, startResourceConfigurator, newGatekeeper, methods }
@@ -176,6 +178,7 @@ describe('GatekeeperModal requestConnection accept flow', () => {
     root = undefined
     container = undefined
     configurator.current = null
+    configurator.readiness = true
   })
 
   async function renderVendorOnly() {
@@ -203,6 +206,18 @@ describe('GatekeeperModal requestConnection accept flow', () => {
     expect(container!.textContent).toContain('Jira issue')
     expect(container!.textContent).not.toContain('GitHub repo')
     expect(container!.textContent).not.toContain('AI Model')
+  })
+
+  it('keeps Add connection disabled when a current mounted configurator reports lifecycle null readiness', async () => {
+    configurator.readiness = null
+    const harness = await renderVendorOnly()
+    await select('Jira issue')
+    expect(configurator.current?.frame).not.toBeNull()
+    expect(configurator.current?.authorityAvailable).toBe(true)
+    const add = [...container!.querySelectorAll('button')].find(button => button.textContent === 'Add connection')!
+    expect(add.disabled).toBe(true)
+    await act(async () => add.click())
+    expect(harness.newGatekeeper).not.toHaveBeenCalled()
   })
 
   it('reuses an existing authorized account after the user chooses a vendor resource', async () => {

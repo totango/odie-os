@@ -1,4 +1,5 @@
 import { logRpcFailure } from '../../rpcErrors'
+import { requireEditingReady } from '../../features/workspace/editingProtocol'
 import {
   createContext,
   useCallback,
@@ -150,6 +151,7 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     setGadgets((prev) => prev.map((x) => (x.id === g.id ? { ...x, pinned: newPinned } : x)))
     const overseer = authenticatedApi.openGadget(g.id) // pipelining
     try {
+      await requireEditingReady(overseer)
       await overseer.setPinned(newPinned)
     } catch (err) {
       console.error('Failed to toggle pin:', err)
@@ -164,6 +166,7 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     setGadgets((prev) => prev.map((x) => (x.id === g.id ? { ...x, title: newTitle } : x)))
     const overseer = authenticatedApi.openGadget(g.id)
     try {
+      await requireEditingReady(overseer)
       await overseer.setTitle(newTitle)
     } catch (err) {
       console.error('Failed to rename:', err)
@@ -178,6 +181,7 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
     let overseer: RpcStub<Overseer> | null = null
     try {
       overseer = authenticatedApi.openGadget(g.id)
+      await requireEditingReady(overseer)
       const metadata = await overseer.getMetadata()
       setShareOverseer({ stub: overseer })
       setShareTarget({ ...g, ...metadata })
@@ -198,6 +202,7 @@ export function SidebarWorkspacesProvider({ children }: { children: ReactNode })
       } else {
         const overseer = authenticatedApi.openGadget(deleteTarget.id) // pipelining
         try {
+          await requireEditingReady(overseer)
           await overseer.deleteSelf()
         } finally {
           overseer[Symbol.dispose]()
