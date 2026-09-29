@@ -266,6 +266,40 @@ describe('ObserverConfigModal account selection', () => {
     expect(rendered.textContent).toContain('Ready')
   })
 
+  it('keeps the pending connection when an existing account refreshes', async () => {
+    const connectAccount = vi.fn<
+      (vendorId: string, resourceUrlPatterns?: string[]) => Promise<{ url: string }>
+    >().mockResolvedValue({ url: 'https://accounts.google.test/oauth' })
+    const popup = { opener: window, location: { href: 'about:blank' }, close: vi.fn<() => void>() }
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    const existing = account(1, 'existing@cloudflare.com', [DOC_RESOURCE.urlPattern])
+    let subscriber: ConnectedAccountsSubscriber | undefined
+    const api = fakeApi([existing], {
+      connectAccount,
+      subscribeConnectedAccounts: vi.fn<
+        (subscriber: ConnectedAccountsSubscriber) => Promise<{ [Symbol.dispose](): void }>
+      >(s => {
+        subscriber = s
+        s.add(existing.id, existing.description, VENDOR, [DOC_RESOURCE], true, 'google')
+        s.ready()
+        return Object.assign(Promise.resolve({ [Symbol.dispose]() {} }), { [Symbol.dispose]() {} })
+      }),
+    })
+    const rendered = await render([existing], { api })
+    vi.useFakeTimers()
+    const connect = [...rendered.querySelectorAll('button')]
+      .find(button => button.textContent === 'Connect a different account')!
+    await act(async () => connect.click())
+    expect(vi.getTimerCount()).toBe(1)
+    act(() => subscriber!.add(existing.id, existing.description, VENDOR, [DOC_RESOURCE], true, 'google'))
+    expect(vi.getTimerCount()).toBe(1)
+    expect(rendered.querySelector('a[href="https://accounts.google.test/oauth"]')).not.toBeNull()
+    const newAccount = account(2, 'new@cloudflare.com', [DOC_RESOURCE.urlPattern])
+    act(() => subscriber!.add(newAccount.id, newAccount.description, VENDOR, [DOC_RESOURCE], true, 'google'))
+    expect(vi.getTimerCount()).toBe(0)
+    expect(rendered.querySelector('a[href="https://accounts.google.test/oauth"]')).toBeNull()
+  })
+
   it('navigates a pre-opened popup without exposing an opener', async () => {
     const connectAccount = vi.fn<
       (vendorId: string, resourceUrlPatterns?: string[]) => Promise<{ url: string }>

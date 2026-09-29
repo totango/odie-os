@@ -109,6 +109,11 @@ export default function ObserverConfigModal({
   // The subscriber closure (created once) reads the in-flight connect target through this ref so it
   // can clear it when the freshly-connected account arrives.
   const connectingRef = useRef<string | null>(null)
+  // A subscription can report unrelated accounts while OAuth is pending. Only its target may
+  // dismiss the authorization link and retry clock.
+  const authorizationTargetRef = useRef<
+    { vendorId: string; existingIds: Set<number> } | { accountId: number } | null
+  >(null)
 
   // ── subscribe to the user's connected accounts ────────────────────────────────
   useEffect(() => {
@@ -123,11 +128,16 @@ export default function ObserverConfigModal({
           return next
         })
         if (credentialsValid) {
-          setManualAuthorization(null)
-          setReconnecting(r => (r === id ? null : r))
-          setGranting(g => (g === id ? null : g))
-          // If we were waiting on a connect for this vendor, it's done.
-          if (connectingRef.current === vendorId) {
+          const target = authorizationTargetRef.current
+          const matchesTarget = target !== null && ('accountId' in target
+            ? target.accountId === id
+            : target.vendorId === vendorId && !target.existingIds.has(id))
+          if (matchesTarget) {
+            authorizationTargetRef.current = null
+            setManualAuthorization(null)
+            setRetryAvailable(false)
+            setReconnecting(r => (r === id ? null : r))
+            setGranting(g => (g === id ? null : g))
             connectingRef.current = null
             setConnecting(null)
           }
@@ -217,6 +227,10 @@ export default function ObserverConfigModal({
   const handleConnect = async (need: ObserverBindingNeed) => {
     const { vendorId } = need
     connectingRef.current = vendorId
+    authorizationTargetRef.current = {
+      vendorId,
+      existingIds: new Set([...accounts.values()].filter(a => a.vendorId === vendorId).map(a => a.id)),
+    }
     setConnecting(vendorId)
     setRetryAvailable(false)
     setManualAuthorization(null)
@@ -242,11 +256,13 @@ export default function ObserverConfigModal({
       console.error('Failed to initiate connection:', err)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
       connectingRef.current = null
+      authorizationTargetRef.current = null
       setConnecting(null)
     }
   }
 
   const handleReconnect = async (accountId: number) => {
+    authorizationTargetRef.current = { accountId }
     setReconnecting(accountId)
     setRetryAvailable(false)
     setManualAuthorization(null)
@@ -259,6 +275,7 @@ export default function ObserverConfigModal({
     } catch (err) {
       console.error('Failed to initiate reconnection:', err)
       toasts.add({ title: 'Failed to start re-authentication flow', variant: 'error' })
+      authorizationTargetRef.current = null
       setReconnecting(null)
     }
   }
@@ -271,6 +288,7 @@ export default function ObserverConfigModal({
     )
     const missing = missingResourceUrlPatterns(account, required)
     if (missing.length === 0) return
+    authorizationTargetRef.current = { accountId: account.id }
     setGranting(account.id)
     setRetryAvailable(false)
     setManualAuthorization(null)
@@ -280,6 +298,7 @@ export default function ObserverConfigModal({
       setManualAuthorization(result.url ? { url: result.url, popupBlocked: !!result.popupBlocked } : null)
       if (result.popupBlocked) setGranting(null)
       if (!result.url) {
+        authorizationTargetRef.current = null
         // The gatekeeper confirmed this account already has access. Update the modal so the user can
         // continue without an OAuth flow.
         setAccounts(prev => {
@@ -305,6 +324,7 @@ export default function ObserverConfigModal({
     } catch (err) {
       console.error('Failed to request additional access:', err)
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })
+      authorizationTargetRef.current = null
       setGranting(null)
     }
   }
