@@ -100,11 +100,10 @@ export default function ObserverConfigModal({
   // not while the request to start authorization is still pending. Clear it on completion/unmount.
   useEffect(() => {
     if (connecting === null && reconnecting === null && granting === null) return
-    if (manualAuthorization?.popupBlocked !== false &&
-      !(connecting !== null && vendorsById.get(connecting)?.description.autoProvisionsAccount)) return
+    if (manualAuthorization?.popupBlocked !== false) return
     const timer = window.setTimeout(() => setRetryAvailable(true), 30_000)
     return () => window.clearTimeout(timer)
-  }, [connecting, reconnecting, granting, manualAuthorization, vendorsById])
+  }, [connecting, reconnecting, granting, manualAuthorization])
 
   // The subscriber closure (created once) reads the in-flight connect target through this ref so it
   // can clear it when the freshly-connected account arrives.
