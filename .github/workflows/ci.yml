@@ -83,9 +83,9 @@ jobs:
   test:
     name: Build and test
     runs-on: ubuntu-latest
-    # Job-level backstop for installation/build as well as tests. Test commands have shorter
-    # process-level deadlines below so a wedged runner reports a failure before cancellation.
-    timeout-minutes: 20
+    # Leave 9m beyond the Test step for install/build, isolated UI and failure diagnostics
+    # (~3m before Test in run 36503328859). Keep a finite whole-job backstop as well.
+    timeout-minutes: 35
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -128,14 +128,18 @@ jobs:
       # not a total RSS limit. Build retains its normal concurrency.
       # A package watchdog fired in run 36497593549 but vp never returned. Supervise
       # the root too, with GNU timeout as a backstop even if watchdog cleanup wedges.
+      # Serial x64 run 36503328859 hit the old 11m cap during healthy request-build
+      # progress, with seven package test tasks unfinished. Allow 23m for the full graph;
+      # keep root idle=120s and package watchdogs (normally idle=60s, max=600s) unchanged.
+      # GNU gets 2m for root cleanup; the step outlasts GNU's 25m + 10s kill grace.
       - name: Test
-        timeout-minutes: 13
+        timeout-minutes: 26
         env:
           VP_RUN_CONCURRENCY_LIMIT: "1"
           NODE_OPTIONS: --max-old-space-size=4096
         run: >-
-          timeout --verbose --kill-after=10s 12m
-          node scripts/with-timeout.ts --idle 120 --max 660 -- pnpm test
+          timeout --verbose --kill-after=10s 25m
+          node scripts/with-timeout.ts --idle 120 --max 1380 -- pnpm test
 
       - name: Test failure diagnostics
         if: failure()
