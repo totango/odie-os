@@ -10,6 +10,8 @@ import {
 } from "react";
 import { DropdownMenu, useKumoToastManager } from "@cloudflare/kumo";
 import { Brain, DotsThree, File as FileIcon } from "@phosphor-icons/react";
+import { RecoveryControls, useRecoverySource } from "../../../Recovery";
+import { recoveryComposerText, type ComposerRecovery } from "../../../recoveryBundle";
 import { RpcStub } from "capnweb";
 import type {
   AiChatAuthorInfo,
@@ -694,12 +696,29 @@ export const ChatComposer = ({
   const canSend = !isSending && !isAgentActive && !isBlocked &&
     (inputValue.trim().length > 0 || selectedSlashCommand !== null || hasReadyAttachment) &&
     !hasUnreadyAttachment && !isCreatingResource;
+
+  // Local, synchronous read for the manual recovery export: visible prose only, with resources and
+  // attachment payloads/handles reduced to counts and a manifest.
+  const captureRecovery = (): ComposerRecovery => ({
+    kind: 'composer', chatId: chatKey ?? null,
+    text: recoveryComposerText(inputValue, capsules),
+    sending: isSending,
+    omittedCapsules: capsules.length,
+    attachments: pendingAttachments.map(attachment => ({
+      name: attachment.name ?? null, mimeType: attachment.mimeType,
+      bytes: attachment.blob.size, state: attachment.uploadState, omitted: true,
+    })),
+  });
+  // A composer rendered outside the root provider (tests, embeddings) still needs its own control.
+  const hasRecoveryScope = useRecoverySource('composer', captureRecovery);
+
   return (
     // isolation: isolate contains z-indexes used inside the composer (the
     // captured-log floating chip with z-10, the textarea/mirror with z-[1])
     // so they can't paint on top of body-level portaled popovers like the
     // model picker dropdown opening above the composer.
     <div className="relative isolate px-2 py-2 sm:px-4 sm:py-4">
+      {!hasRecoveryScope && <RecoveryControls capture={captureRecovery} />}
       <input
         ref={attachmentInputRef}
         type="file"

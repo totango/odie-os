@@ -396,8 +396,13 @@ export class ChatOtClient {
     return this.#inflight !== null || !isEmptyChange(this.#pending)
   }
 
-  #saveRecovery(): void {
-    if (!this.hasLocalEdits()) return
+  /**
+   * A bounded, local copy of this chat's unacknowledged text, or null when there is nothing to
+   * recover. Reads local state only: `bases`, `revision` and `acknowledgement` describe what this
+   * client last observed, never that the server persisted anything.
+   */
+  captureRecovery(): CodeRecoverySnapshot | null {
+    if (!this.hasLocalEdits()) return null
     let remaining = 1024 * 1024
     const files: CodeRecoverySnapshot['files'] = []
     let omitted = 0
@@ -413,11 +418,16 @@ export class ChatOtClient {
     const bases = new Map<WorkpieceId, string>()
     for (const pin of this.#latestDurable.codeBase?.pins ?? []) bases.set(pin.gadgetId, pin.baseCommit)
     for (const [gadgetId, seed] of this.#localSeeds) bases.set(gadgetId, seed.baseCommit)
-    this.#delegate.onRecoverySnapshot?.({ version: 1, generation: this.#generation,
+    return { version: 1, generation: this.#generation,
       revision: this.#appliedRevision, clientId: this.#clientId, seq: this.#seq,
       acknowledgement: this.#inflight?.accepted ? 'accepted-awaiting-replay' : 'unconfirmed',
       bases: [...bases].slice(0, 100).map(([gadgetId, baseCommit]) => ({ gadgetId, baseCommit })),
-      omittedBases: Math.max(0, bases.size - 100), files, omitted })
+      omittedBases: Math.max(0, bases.size - 100), files, omitted }
+  }
+
+  #saveRecovery(): void {
+    const snapshot = this.captureRecovery()
+    if (snapshot) this.#delegate.onRecoverySnapshot?.(snapshot)
   }
 
   /** Update the set of gadgets still pending (chat-created) in this chat. */

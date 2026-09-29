@@ -145,6 +145,27 @@ describe("extracted ChatInput runtime", () => {
     expect(readComposerDraft(props.draftStorageKey)).toBeUndefined();
   });
 
+  it('exports the live blocked composer without storage or RPC access', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage unavailable'); });
+    try {
+      props.chatKey = 17;
+      await render();
+      await edit('Recover this live draft');
+      props.blockedReason = 'Session paused';
+      await render();
+      await act(async () => button('Capture recovery snapshot').click());
+      const snapshot = JSON.parse(container.querySelector<HTMLTextAreaElement>('textarea[readonly]')!.value);
+      expect(snapshot.sources[0]).toMatchObject({ kind: 'composer', chatId: 17, text: 'Recover this live draft', attachments: [] });
+      expect(props.getOverseer).not.toHaveBeenCalled();
+      expect(props.onSend).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      getItem.mockRestore();
+      setItem.mockRestore();
+    }
+  });
+
   it("preserves local edits when the authenticated draft key arrives", async () => {
     writeComposerDraft("test:composer", { version: 1, text: "Older draft", formats: [] });
     props.draftStorageKey = undefined;
@@ -223,6 +244,14 @@ describe("extracted ChatInput runtime", () => {
     const handle = { id: "opaque-upload-handle" };
     await act(async () => finishUpload(handle));
     expect(send().disabled).toBe(false);
+    await act(async () => button('Capture recovery snapshot').click());
+    const recoveryJson = container.querySelector<HTMLTextAreaElement>('textarea[readonly]')!.value;
+    expect(JSON.parse(recoveryJson).sources[0].attachments).toEqual([
+      { name: 'notes.txt', mimeType: 'text/plain', bytes: 5, state: 'ready', omitted: true },
+    ]);
+    expect(recoveryJson).not.toContain('opaque-upload-handle');
+    expect(recoveryJson).not.toContain('hello');
+    await act(async () => button('Discard snapshot').click());
     await act(async () => send().click());
     expect(props.onSend).toHaveBeenCalledWith("", "model-a", undefined, [handle], undefined);
     expect(vi.mocked(props.onSend).mock.calls[0][3]?.[0]).toBe(handle);

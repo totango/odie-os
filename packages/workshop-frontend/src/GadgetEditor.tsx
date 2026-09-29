@@ -36,6 +36,7 @@ import {
   WorkpiecesSubscriber,
 } from '@gadgets/workshop-shared/api'
 import ObserverConfigModal from './ObserverConfigModal'
+import { RecoveryWorkspace } from './Recovery'
 import GadgetUseView, { RetainedGadgetUI } from './GadgetUseView'
 import WorkpieceCodeInterface from './features/code/WorkpieceCodeInterface'
 import Connections from './Connections'
@@ -1584,6 +1585,7 @@ function WorkspaceEditorContent({ workspace }: { workspace: WorkspaceState }) {
 
   // ── always render the full two-pane edit layout; preview overlays on top ──────
   return (
+    <RecoveryWorkspace workspaceId={id ?? null}>
     <div className="relative flex h-full flex-col overflow-hidden bg-kumo-base">
       <EditingProtocolBanner overseer={overseer.stub} />
       {(displayed.previewChanged || (selectedGadgetId !== null && !displayed.available)) && (
@@ -2223,5 +2225,6 @@ function WorkspaceEditorContent({ workspace }: { workspace: WorkspaceState }) {
       />
 
     </div>
+    </RecoveryWorkspace>
   )
 }

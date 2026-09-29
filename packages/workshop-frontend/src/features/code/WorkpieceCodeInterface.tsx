@@ -12,6 +12,7 @@ import {
 import { RpcStub } from 'capnweb'
 import type { EditSession } from './CodeEditor'
 import EditorErrorBoundary from '../../EditorErrorBoundary'
+import { useRecoverySource } from '../../Recovery'
 
 const CodeEditor = lazy(() => import('./CodeEditor'))
 const CodeDiffEditor = lazy(() => import('./CodeDiffEditor'))
@@ -1342,6 +1343,17 @@ export default function WorkpieceCodeInterface({
       setActiveFile(null)
     }
   }, [activeFile, isReady, stableDisplayedFiles])
+
+  // Local, synchronous read for the manual recovery export. The OT client's own bounded copy is
+  // the editor's recoverable state: it is null when nothing is unacknowledged, and its base
+  // commits/revision describe what this client last observed, never a server acknowledgement.
+  useRecoverySource('editor', () => ({
+    kind: 'editor',
+    chatId: selectedChatId,
+    branch: { kind: branchMode ? 'chat' : 'mainline', chatId: selectedChatId },
+    sending: hasUnsavedChanges,
+    code: clientRef.current?.captureRecovery() ?? null,
+  }))
 
   if (treeError !== null && browserTree === null) {
     return (
