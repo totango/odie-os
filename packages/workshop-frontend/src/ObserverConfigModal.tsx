@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Dialog, Select, Loader, Text, useKumoToastManager } from '@cloudflare/kumo'
 import { Warning, Plus, ArrowClockwise, CheckCircle } from '@phosphor-icons/react'
 import { RpcPromise, RpcStub } from 'capnweb'
@@ -91,14 +91,13 @@ export default function ObserverConfigModal({
   // observer binding needs.
   const [vendorsById, setVendorsById] = useState<Map<string, GatekeeperVendorInfo>>(new Map())
   const [vendorsReady, setVendorsReady] = useState(false)
-  // The flow being started, by vendorId (connect) or accountId (re-authenticate, grant). Held only
-  // while the request that starts it is in flight, not until the account arrives: a popup flow can
-  // end without adding one (abandoned, refused by the provider, or an account the user already has),
-  // and waiting on it would strand the dialog with every way forward disabled. The result arrives
-  // through the accounts subscription whenever the flow does complete.
   const [connecting, setConnecting] = useState<string | null>(null)
   const [reconnecting, setReconnecting] = useState<number | null>(null)
   const [granting, setGranting] = useState<number | null>(null)
+
+  // The subscriber closure (created once) reads the in-flight connect target through this ref so it
+  // can clear it when the freshly-connected account arrives.
+  const connectingRef = useRef<string | null>(null)
 
   // ── subscribe to the user's connected accounts ────────────────────────────────
   useEffect(() => {
@@ -112,6 +111,15 @@ export default function ObserverConfigModal({
           next.set(id, { id, description, vendor, vendorId, supportedResources, credentialsValid })
           return next
         })
+        if (credentialsValid) {
+          setReconnecting(r => (r === id ? null : r))
+          setGranting(g => (g === id ? null : g))
+          // If we were waiting on a connect for this vendor, it's done.
+          if (connectingRef.current === vendorId) {
+            connectingRef.current = null
+            setConnecting(null)
+          }
+        }
       },
       remove(id) {
         if (cancelled) return
@@ -168,8 +176,8 @@ export default function ObserverConfigModal({
   // ── keep choices in sync with the available accounts ──────────────────────────
   // Default each binding to its first matching account, and drop a choice whose account has
   // disappeared (e.g. disconnected in another tab). When a binding is being re-prompted because it
-  // just failed, prefer the account that failed, so the reason shown is about the selected account
-  // and an expired one can be re-authenticated in place.
+  // just failed, prefer the account that failed: re-authenticating it in place is usually the fix,
+  // so it should be what the re-authenticate affordance is aimed at.
   useEffect(() => {
     setChoices(prev => {
       let changed = false
@@ -196,6 +204,7 @@ export default function ObserverConfigModal({
   // ── connect / reconnect handlers ──────────────────────────────────────────────
   const handleConnect = async (need: ObserverBindingNeed) => {
     const { vendorId } = need
+    connectingRef.current = vendorId
     setConnecting(vendorId)
     try {
       const vendor = vendorsById.get(vendorId)
@@ -212,7 +221,7 @@ export default function ObserverConfigModal({
     } catch (err) {
       console.error('Failed to initiate connection:', err)
       toasts.add({ title: 'Failed to start connection flow', variant: 'error' })
-    } finally {
+      connectingRef.current = null
       setConnecting(null)
     }
   }
@@ -221,11 +230,10 @@ export default function ObserverConfigModal({
     setReconnecting(accountId)
     try {
       await accountBrowserFlows.reconnect(authenticatedApi, accountId)
-      // The popup redeems the ticket itself; the restored account arrives through the subscription.
+      // Subscription fires add() with credentialsValid:true on completion, clearing `reconnecting`.
     } catch (err) {
       console.error('Failed to initiate reconnection:', err)
       toasts.add({ title: 'Failed to start re-authentication flow', variant: 'error' })
-    } finally {
       setReconnecting(null)
     }
   }
@@ -262,11 +270,11 @@ export default function ObserverConfigModal({
           })
           return next
         })
+        setGranting(null)
       }
     } catch (err) {
       console.error('Failed to request additional access:', err)
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })
-    } finally {
       setGranting(null)
     }
   }
@@ -299,7 +307,7 @@ export default function ObserverConfigModal({
   }
 
   // The overseer re-prompts with `failure` set when an already-configured binding failed
-  // verification on this open: expired credentials, or an account without access to the data.
+  // verification on this open (typically expired credentials).
   const isRetry = needs.some(n => n.failure)
 
   return (
@@ -310,9 +318,8 @@ export default function ObserverConfigModal({
         </Dialog.Title>
         <Text variant="secondary" size="sm" as="p">
           {isRetry
-            ? 'We couldn’t confirm your access to everything this workspace has read. Depending on ' +
-              'the reason below, re-authenticate an expired account, choose a different one, or ask ' +
-              'the workspace owner to share what your account can’t access.'
+            ? 'We couldn’t confirm your access to everything this workspace has read. Re-authenticate ' +
+              'the account below, or choose a different one, then try again.'
             : 'Before opening this workspace, confirm that your own accounts can access the connected ' +
               'data it uses.'}
         </Text>
@@ -357,7 +364,7 @@ export default function ObserverConfigModal({
                         onClick={() => handleConnect(need)}
                         disabled={connecting === need.vendorId}
                       >
-                        {connecting === need.vendorId ? 'Connecting…' : 'Connect'}
+                        {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect'}
                       </WorkshopButton>
                     )}
                   </div>
@@ -387,9 +394,7 @@ export default function ObserverConfigModal({
                               {accountLabel(matching[0], matching[0].id)}
                             </div>
                           </div>
-                          {/* Never for the account verification just refused, whatever it has been granted. */}
-                          {accountSatisfies(need, matching[0]) &&
-                            matching[0].id !== need.failure?.accountId && (
+                          {accountSatisfies(need, matching[0]) && (
                             <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-kumo-success">
                               <CheckCircle size={15} weight="fill" /> Ready
                             </span>
@@ -433,7 +438,7 @@ export default function ObserverConfigModal({
                             <Warning size={12} />
                           )}
                           {granting === chosen.id
-                            ? 'Requesting access…'
+                            ? 'Waiting for access…'
                             : 'Grant the access needed to verify this resource'}
                         </button>
                       )}
@@ -442,30 +447,24 @@ export default function ObserverConfigModal({
                           when this is the account that just failed verification: a gatekeeper that
                           rejects an observer on an auth error doesn't always tell the Workshop, so
                           `credentialsValid` can still read true. reconnectAccount() is documented as
-                          safe for an account that merely *may* be expiring. The second case is not
-                          styled as a warning: a refusal of valid credentials usually means the
-                          account lacks access, which re-authenticating cannot fix. */}
+                          safe for an account that merely *may* be expiring. */}
                       {chosen && missing.length === 0 &&
                         (!chosen.credentialsValid || chosen.id === need.failure?.accountId) && (
                         <button
                           type="button"
                           onClick={() => handleReconnect(chosen.id)}
                           disabled={reconnecting === chosen.id}
-                          className={chosen.credentialsValid
-                            ? 'flex items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-default disabled:opacity-60 self-start'
-                            : 'flex items-center gap-1.5 text-xs text-kumo-warning hover:underline disabled:opacity-60'}
+                          className="flex items-center gap-1.5 text-xs text-kumo-warning hover:underline disabled:opacity-60"
                         >
                           {reconnecting === chosen.id ? (
                             <ArrowClockwise size={12} className="animate-spin" />
-                          ) : chosen.credentialsValid ? (
-                            <ArrowClockwise size={12} />
                           ) : (
                             <Warning size={12} />
                           )}
                           {reconnecting === chosen.id
                             ? 'Re-authenticating…'
                             : chosen.credentialsValid
-                              ? 'Re-authenticate this account'
+                              ? 'Click to re-authenticate this account'
                               : 'This account has expired — click to re-authenticate'}
                         </button>
                       )}
@@ -478,7 +477,7 @@ export default function ObserverConfigModal({
                           className="flex items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-default disabled:opacity-60 self-start"
                         >
                           <Plus size={11} />
-                          {connecting === need.vendorId ? 'Connecting…' : 'Connect a different account'}
+                          {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect a different account'}
                         </button>
                       )}
                     </div>

@@ -609,8 +609,8 @@ export function ConnectorsPage() {
         resourceUrlPatterns,
         { webPopup: 'preopen' },
       )
-      // The popup redeems the ticket itself; the new grant arrives via subscribeConnectedAccounts(),
-      // and the toggle reflects it once `grantedResourceUrlPatterns` updates.
+      // On success the new grant arrives via subscribeConnectedAccounts(); the toggle reflects it
+      // once `grantedResourceUrlPatterns` updates.
     } catch (err) {
       console.error('Failed to expand account access:', err)
       toasts.add({ title: 'Failed to request additional access', variant: 'error' })

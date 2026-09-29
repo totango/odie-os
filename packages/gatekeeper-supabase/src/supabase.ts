@@ -4,7 +4,6 @@ import {
   ApprovalQueue,
   stripTrailingSlashes,
   type AccountDescription,
-  type ConnectHandoff,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperUser,
@@ -15,10 +14,6 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { acknowledgeHandoff, connectHandoffPageHtml, htmlResponse, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
-import type { GatekeeperConnectOptions as HandoffConnectOptions, GatekeeperConnectResult as HandoffLaunch, GatekeeperReconnectOptions as HandoffOptions } from "@gadgets/workshop-shared/gatekeeper";
-import { buildDescription, codeSpan } from "@gadgets/gatekeeper-kit/action-description";
-import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import {
   SupabaseApi,
   SupabaseApiError,
@@ -26,7 +21,6 @@ import {
   refreshAccessToken,
   revokeRefreshToken,
   type ProjectResponse,
-  type SupabaseOAuthGrant,
 } from "./supabase-api";
 import { describeTable, listSchemas, listTables } from "./supabase-introspection";
 import {
@@ -81,36 +75,12 @@ type StoredNonce = {
   value: string;
   expiresAt: number;
   stage: "initiation" | "oauth";
-  /**
-   * Set when this flow reconnects an existing account, so its grant is staged rather than made
-   * live. The mode travels with the flow instead of living on the account: committing one
-   * reconnect while another is in flight must not change how that other flow lands.
-   */
-  reconnect?: true;
 };
 
 type StoredToken = {
   token: string;
   expiresAt: number;
 };
-
-/**
- * A grant as persisted (or staged for a reconnect): the expiry is absolute, since the provider's
- * relative `expiresIn` counts from the exchange, not from whenever the grant is later made live.
- */
-type StoredGrant = {
-  accessToken: string;
-  refreshToken: string;
-  accessTokenExpiresAt: number;
-};
-
-function toStoredGrant(grant: SupabaseOAuthGrant, now: number): StoredGrant {
-  return {
-    accessToken: grant.accessToken,
-    refreshToken: grant.refreshToken,
-    accessTokenExpiresAt: now + grant.expiresIn * 1000,
-  };
-}
 
 // A mutating SQL statement queued for human approval and applied once approved.
 type StoredExecuteAction = {
@@ -164,6 +134,14 @@ const ORGANIZATION_RESOURCE: SupportedResource = {
 };
 
 const SUPPORTED_RESOURCES: SupportedResource[] = [PROJECT_RESOURCE, ORGANIZATION_RESOURCE];
+
+const SELF_CLOSING_HTML = `<!DOCTYPE html>
+<html lang="en">
+  <body>
+    <script type="text/javascript">window.close();</script>
+    <p>Authorization complete. You may close this tab and return to Cloudflare OS.</p>
+  </body>
+</html>`;
 
 const INVALID_LINK_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -343,12 +321,12 @@ export default {
       const stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(
         ctx.exports.UserAccount.idFromString(doId),
       );
-      const handoff = await stub.acceptAuthCode(code, oauthNonce);
-      if (!handoff) {
+      const accepted = await stub.acceptAuthCode(code, oauthNonce);
+      if (!accepted) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
 
-      return htmlResponse(connectHandoffPageHtml(handoff));
+      return new Response(SELF_CLOSING_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
     return new Response("Not Found", { status: 404 });
@@ -373,11 +351,11 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
     };
   }
 
-  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>, options?: HandoffConnectOptions): Promise<HandoffLaunch> {
+  async connectAccount(callback: Fetcher<GatekeeperConnectCallback>): Promise<{ url: string }> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(userObjectId).acknowledgeHandoff(options) };
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -393,8 +371,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // UserAccount DO — stores OAuth tokens and refreshes them on demand.
 
 export class UserAccount extends DurableObject<Env> {
-  /** Records supported launch intent; callback agreement is checked before exchange. */
-  acknowledgeHandoff(options?: HandoffOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   // Guards against concurrent refreshes: Supabase rotates refresh tokens, so two simultaneous
   // refreshes with the same token would make the second fail with `invalid_grant`. DO calls
   // interleave at await points (e.g. describeTable fires three queries via Promise.all), so we
@@ -414,12 +390,12 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string): Promise<void> {
+    this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
-      reconnect: true,
     });
   }
 
@@ -436,20 +412,15 @@ export class UserAccount extends DurableObject<Env> {
       value: oauthNonce,
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
-      reconnect: stored.reconnect,
     });
     return oauthNonce;
   }
 
-  /**
-   * Finishes the OAuth code exchange and returns the handoff for the page the browser lands on, or
-   * null when the callback's nonce doesn't match.
-   */
-  async acceptAuthCode(code: string, oauthNonce: string): Promise<ConnectHandoff | null> {
+  async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "oauth" || Date.now() >= stored.expiresAt
         || !constantTimeEqual(stored.value, oauthNonce)) {
-      return null;
+      return false;
     }
     this.ctx.storage.kv.delete("nonce");
 
@@ -464,25 +435,18 @@ export class UserAccount extends DurableObject<Env> {
       throw new Error("Took too long to complete authorization. Please try again.");
     }
 
-    const protocol = await requireBrowserHandoff(callback, this.ctx.storage.kv);
-    const grant = toStoredGrant(
-      await exchangeAuthCode(code, clientId, clientSecret, `${getBaseUrl(this.env)}/oauth`),
-      Date.now(),
-    );
+    const grant = await exchangeAuthCode(code, clientId, clientSecret, `${getBaseUrl(this.env)}/oauth`);
+    this.#storeGrant(grant.accessToken, grant.refreshToken, grant.expiresIn);
+    this.ctx.storage.kv.put("expiredNotified", false);
 
-    let handoff: ConnectHandoff;
-    if (stored.reconnect) {
-      // The reconnect URL is a bearer capability, so the new grant is only staged until the Workshop
-      // has confirmed the browser that finished the flow is the owner's (see commitReconnect). Bound
-      // gadgets keep reading the current token meanwhile.
-      const stageId = stageCredentials(this.ctx.storage.kv, grant, Date.now());
-      handoff = await callback.reconnectComplete(stageId);
+    const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
+    if (reconnecting) {
+      this.ctx.storage.kv.delete("reconnecting");
+      await callback.credentialsRestored();
     } else {
-      this.#storeGrant(grant);
-      this.ctx.storage.kv.put("expiredNotified", false);
       try {
         const props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
-        handoff = requireConnectHandoff(await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props })), protocol);
+        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
       } catch (error) {
         this.ctx.storage.kv.delete("accessToken");
         this.ctx.storage.kv.delete("refreshToken");
@@ -492,21 +456,13 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     await this.ctx.storage.deleteAlarm();
-    return requireConnectHandoff(handoff, protocol);
+    return true;
   }
 
-  /** Makes the grant staged under `stageId` live; see GatekeeperUser.commitReconnect. */
-  async commitReconnect(stageId: string): Promise<void> {
-    const grant = commitStagedCredentials<StoredGrant>(this.ctx.storage.kv, Date.now(), stageId);
-    if (!grant) throw new Error("No reconnect is awaiting confirmation. Please try again.");
-    this.#storeGrant(grant);
-    this.ctx.storage.kv.put("expiredNotified", false);
-  }
-
-  #storeGrant(grant: StoredGrant): void {
-    this.ctx.storage.kv.put("accessToken", grant.accessToken);
-    this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
-    this.ctx.storage.kv.put<number>("accessTokenExpiresAt", grant.accessTokenExpiresAt);
+  #storeGrant(accessToken: string, refreshToken: string, expiresIn: number): void {
+    this.ctx.storage.kv.put("accessToken", accessToken);
+    this.ctx.storage.kv.put("refreshToken", refreshToken);
+    this.ctx.storage.kv.put<number>("accessTokenExpiresAt", Date.now() + expiresIn * 1000);
   }
 
   /** Returns a valid access token (and its expiry), transparently refreshing when close to expiry. */
@@ -543,10 +499,9 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     try {
-      const grant = toStoredGrant(
-        await refreshAccessToken(refreshToken, clientId, clientSecret), Date.now());
-      this.#storeGrant(grant);
-      return { token: grant.accessToken, expiresAt: grant.accessTokenExpiresAt };
+      const grant = await refreshAccessToken(refreshToken, clientId, clientSecret);
+      this.#storeGrant(grant.accessToken, grant.refreshToken, grant.expiresIn);
+      return { token: grant.accessToken, expiresAt: Date.now() + grant.expiresIn * 1000 };
     } catch (error) {
       // A revoked/expired refresh token surfaces as an auth error; record it so the UI prompts a
       // reconnect rather than surfacing a cryptic failure.
@@ -697,14 +652,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().revoke();
   }
 
-  async reconnect(options?: HandoffOptions): Promise<HandoffLaunch> {
+  async reconnect(): Promise<{ url: string }> {
     const initiationNonce = generateNonce();
     await this.#userAccount().prepareReconnect(initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}`, handoffProtocol: await this.#userAccount().acknowledgeHandoff(options) };
-  }
-
-  async commitReconnect(stageId: string): Promise<void> {
-    await this.#userAccount().commitReconnect(stageId);
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 
   /**
@@ -944,11 +895,10 @@ class SupabaseSessionContext {
     try {
       await this.approvalQueue.submitAction(actionId, {
         title: "Run SQL on Supabase",
-        // A field shows the statement literally, so nothing in it can escape into the prose.
-        ...buildDescription(`Execute a mutating SQL statement against Supabase project ${codeSpan(ref)}.`)
-          .verbatim("SQL", sql, "sql")
-          .json("Parameters", params ?? [])
-          .finish(),
+        description:
+            `Execute a mutating SQL statement against Supabase project \`${ref}\`.\n\n` +
+            "```sql\n" + sql + "\n```" +
+            (params && params.length > 0 ? `\n\nParameters: \`${JSON.stringify(params)}\`` : ""),
         // Arbitrary SQL cannot be automatically reverted.
         implementsRevert: false,
         // This gatekeeper doesn't simulate writes, so the agent shouldn't continue (and read back

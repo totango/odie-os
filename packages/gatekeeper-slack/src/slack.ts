@@ -5,14 +5,11 @@ import {
   ApprovalQueue, VendorDescription, GatekeeperConnectCallback, GatekeeperConnectOptions,
   AccountDescription, SupportedResource, ResourceConfiguratorFrame, ActionKind, Cursor,
   GatekeeperUserVerifier, ObservationDescription,
-  stripTrailingSlashes, type ConnectHandoff,
+  stripTrailingSlashes,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { acknowledgeHandoff, connectHandoffPageHtml, htmlResponse, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
-import type { GatekeeperConnectResult as HandoffLaunch, GatekeeperReconnectOptions as HandoffOptions } from "@gadgets/workshop-shared/gatekeeper";
-import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import {
-  SlackApi, SlackApiError, SlackAccessToken, SlackConversationTypeFilter, SlackOAuthGrant,
-  exchangeAuthCode, refreshAccessToken, revokeToken,
+  SlackApi, SlackApiError, SlackAccessToken, SlackConversationTypeFilter, exchangeAuthCode,
+  refreshAccessToken, revokeToken,
 } from "./slack-api";
 import {
   SlackConversation, SlackConversationEntry, SlackConversationInfo, SlackMessage,
@@ -34,12 +31,6 @@ type StoredNonce = {
   value: string;
   expiresAt: number;
   stage: "initiation" | "oauth";
-  /**
-   * Set when this flow reconnects an existing account, so its grant is staged rather than made
-   * live. The mode travels with the flow instead of living on the account: committing one
-   * reconnect while another is in flight must not change how that other flow lands.
-   */
-  reconnect?: true;
 };
 
 const NONCE_BYTES = 32;
@@ -192,6 +183,14 @@ const SLACK_LOGO_URL = `data:image/svg+xml,${encodeURIComponent(SLACK_LOGO_SVG)}
 
 // ── HTML shown in the OAuth popup ───────────────────────────────────
 
+const SELF_CLOSING_HTML = `<!DOCTYPE html>
+<html lang="en">
+  <body>
+    <script type="text/javascript">window.close();</script>
+    <p>Authorization complete. You may close this tab and return to Cloudflare OS.
+  </body>
+</html>`;
+
 const INVALID_LINK_HTML = `<!DOCTYPE html>
 <html lang="en">
   <head><meta charset="UTF-8"><title>Authorization Link Expired</title></head>
@@ -264,12 +263,12 @@ export default {
       if (!code) return new Response("Error: no 'code' provided");
 
       let stub = ctx.exports.UserAccount.get(ctx.exports.UserAccount.idFromString(doId));
-      let handoff = await stub.acceptAuthCode(code, oauthNonce);
-      if (!handoff) {
+      if (!await stub.acceptAuthCode(code, oauthNonce)) {
         return new Response(INVALID_LINK_HTML,
             { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
-      return htmlResponse(connectHandoffPageHtml(handoff));
+      return new Response(SELF_CLOSING_HTML,
+          { headers: { "Content-Type": "text/html; charset=utf-8" } });
     } else {
       return new Response("Not Found", { status: 404 });
     }
@@ -295,13 +294,13 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
   }
 
   async connectAccount(callback: Fetcher<GatekeeperConnectCallback>,
-                       options?: GatekeeperConnectOptions): Promise<HandoffLaunch> {
+                       options?: GatekeeperConnectOptions): Promise<{ url: string }> {
     let userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     let initiationNonce = generateNonce();
     let requestedScopes = resourceUrlPatternsToScopes(options?.resourceUrlPatterns);
     await this.ctx.exports.UserAccount.get(userObjectId)
         .setCallback(callback, initiationNonce, requestedScopes);
-    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(userObjectId).acknowledgeHandoff(options) };
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -316,8 +315,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // ── UserAccount DO: token storage + rotation ────────────────────────
 
 export class UserAccount extends DurableObject<Env> {
-  /** Records supported launch intent; callback agreement is checked before exchange. */
-  acknowledgeHandoff(options?: HandoffOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   // Serialize refresh, reconnect, and revoke because rotating refresh tokens are single-use.
   #credentialUpdate: Promise<void> = Promise.resolve();
 
@@ -350,16 +347,16 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   /**
-   * Prepare for a reconnect/expansion flow: the next acceptAuthCode() stages the new credentials
-   * and notifies via reconnectComplete() instead of complete(); commitReconnect() makes them live.
+   * Prepare for a reconnect/expansion flow: the next acceptAuthCode() replaces credentials and
+   * notifies via credentialsRestored() instead of complete().
    */
   async prepareReconnect(initiationNonce: string, requestedScopes: string[]) {
+    this.ctx.storage.kv.put<boolean>("reconnecting", true);
     this.ctx.storage.kv.put<string[]>("requestedScopes", requestedScopes);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
-      reconnect: true,
     });
   }
 
@@ -381,36 +378,26 @@ export class UserAccount extends DurableObject<Env> {
       value: oauthNonce,
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
-      reconnect: stored.reconnect,
     });
     let scopes = this.ctx.storage.kv.get<string[]>("requestedScopes") ?? resourceUrlPatternsToScopes();
     return { oauthNonce, scopes };
   }
 
-  /**
-   * Finishes the OAuth code exchange and returns the handoff for the page the browser lands on, or
-   * null when the callback's nonce doesn't match.
-   */
-  async acceptAuthCode(code: string, oauthNonce: string): Promise<ConnectHandoff | null> {
+  async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
     let stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "oauth" ||
         Date.now() >= stored.expiresAt || !constantTimeEqual(stored.value, oauthNonce)) {
-      return null;
+      return false;
     }
     // Consume OAuth state before the network exchange to prevent callback replay.
     this.ctx.storage.kv.delete("nonce");
-    let reconnect = stored.reconnect;
-
-    const flowCallback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
-    if (!flowCallback) throw new Error("Took too long to complete the authorization. Please try again.");
-    const protocol = await requireBrowserHandoff(flowCallback, this.ctx.storage.kv);
 
     let completion = await this.#updateCredentials(async () => {
       if (!this.env.CLIENT_ID || !this.env.CLIENT_SECRET) {
         throw new Error("The Slack Gatekeeper is not configured.");
       }
 
-      let callback = flowCallback;
+      let callback = this.ctx.storage.kv.get<Fetcher<GatekeeperConnectCallback>>("callback");
       if (!callback) {
         throw new Error("Took too long to complete the authorization. Please try again.");
       }
@@ -418,26 +405,27 @@ export class UserAccount extends DurableObject<Env> {
       let grant = await exchangeAuthCode(
           code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, getBaseUrl(this.env) + "/oauth");
 
-      // The reconnect URL is a bearer capability, so the new grant is only staged until the Workshop
-      // has confirmed the browser that finished the flow is the owner's (see commitReconnect). Bound
-      // gadgets keep reading the current token meanwhile.
-      let stageId = reconnect
-          ? stageCredentials(this.ctx.storage.kv, grant, Date.now())
-          : undefined;
-      if (stageId === undefined) this.#writeGrant(grant);
+      this.ctx.storage.kv.put<SlackAccessToken>("accessToken", grant.accessToken);
+      if (grant.refreshToken) this.ctx.storage.kv.put<string>("refreshToken", grant.refreshToken);
+      this.ctx.storage.kv.put<string[]>("grantedScopes", grant.grantedScopes);
+      this.ctx.storage.kv.put<string>("userId", grant.userId);
+      this.ctx.storage.kv.put<string>("teamId", grant.teamId);
+      if (grant.teamName) this.ctx.storage.kv.put<string>("teamName", grant.teamName);
       this.ctx.storage.kv.delete("requestedScopes");
-      return { callback, grant, stageId };
+
+      let reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
+      if (reconnecting) {
+        this.ctx.storage.kv.delete("reconnecting");
+      }
+      return { callback, grant, reconnecting: !!reconnecting };
     });
 
-    let handoff: ConnectHandoff;
-    if (completion.stageId !== undefined) {
-      handoff = await completion.callback.reconnectComplete(
-          completion.stageId, completion.grant.accessToken.expires);
+    if (completion.reconnecting) {
+      await completion.callback.credentialsRestored();
     } else {
       try {
         let props: SlackUserImplProps = { userObjectId: this.ctx.id.toString() };
-        handoff = requireConnectHandoff(await completion.callback.complete(
-            this.ctx.exports.SlackUserImpl({ props }), completion.grant.accessToken.expires), protocol);
+        await completion.callback.complete(this.ctx.exports.SlackUserImpl({ props }));
       } catch (err) {
         await this.#updateCredentials(async () => {
           let storedToken = this.ctx.storage.kv.get<SlackAccessToken>("accessToken");
@@ -449,25 +437,7 @@ export class UserAccount extends DurableObject<Env> {
         throw err;
       }
     }
-    return requireConnectHandoff(handoff, protocol);
-  }
-
-  /** Makes the grant staged under `stageId` live; see GatekeeperUser.commitReconnect. */
-  async commitReconnect(stageId: string): Promise<void> {
-    await this.#updateCredentials(async () => {
-      let grant = commitStagedCredentials<SlackOAuthGrant>(this.ctx.storage.kv, Date.now(), stageId);
-      if (!grant) throw new Error("No reconnect is awaiting confirmation. Please try again.");
-      this.#writeGrant(grant);
-    });
-  }
-
-  #writeGrant(grant: SlackOAuthGrant) {
-    this.ctx.storage.kv.put<SlackAccessToken>("accessToken", grant.accessToken);
-    if (grant.refreshToken) this.ctx.storage.kv.put<string>("refreshToken", grant.refreshToken);
-    this.ctx.storage.kv.put<string[]>("grantedScopes", grant.grantedScopes);
-    this.ctx.storage.kv.put<string>("userId", grant.userId);
-    this.ctx.storage.kv.put<string>("teamId", grant.teamId);
-    if (grant.teamName) this.ctx.storage.kv.put<string>("teamName", grant.teamName);
+    return true;
   }
 
   async getUserId(): Promise<string> {
@@ -657,19 +627,15 @@ export class SlackUserImpl extends WorkerEntrypoint<Env, SlackUserImplProps>
     throw new Error(`Unsupported resource configurator type: ${resourceUrlPattern}`);
   }
 
-  async reconnect(options?: HandoffOptions): Promise<HandoffLaunch> {
+  async reconnect(): Promise<{ url: string }> {
     let account = this.#account();
     let initiationNonce = generateNonce();
     let requestedScopes = resourceUrlPatternsToScopes(await account.getGrantedResourceUrlPatterns());
     await account.prepareReconnect(initiationNonce, requestedScopes);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}`, handoffProtocol: await account.acknowledgeHandoff(options) };
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 
-  async commitReconnect(stageId: string): Promise<void> {
-    await this.#account().commitReconnect(stageId);
-  }
-
-  async ensureResources(resourceUrlPatterns: string[], options?: HandoffOptions): Promise<Partial<HandoffLaunch>> {
+  async ensureResources(resourceUrlPatterns: string[]): Promise<{ url?: string }> {
     let account = this.#account();
     let granted = new Set(await account.getGrantedResourceUrlPatterns());
     if (resourceUrlPatterns.every(pattern => granted.has(pattern))) return {};
@@ -678,7 +644,7 @@ export class SlackUserImpl extends WorkerEntrypoint<Env, SlackUserImplProps>
     let requestedScopes = resourceUrlPatternsToScopes([...union]);
     let initiationNonce = generateNonce();
     await account.prepareReconnect(initiationNonce, requestedScopes);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}`, handoffProtocol: await account.acknowledgeHandoff(options) };
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 
   async revoke(): Promise<void> {

@@ -9,15 +9,14 @@ import { validateRpc } from 'capnweb-validate';
 import { collection, createTypedStorage } from '@gadgets/typed-storage';
 import { createWorkshopLogger } from "./observability";
 import { ADMIN_CONFIG_KEY, FEATURED_BLUEPRINTS_KEY, isReservedBlueprintKey, parseBlueprintKvRecord, readBlueprintKvRecord, sanitizeBlueprintOutput, serializeFeaturedBlueprints } from './blueprint-archive.js';
-import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, applyDeploymentAdminConfigDefaults, defaultOutputFormatId, listPromotedFormats, normalizeAdminConfig, normalizeEnabledHubs, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
+import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, applyDeploymentAdminConfigDefaults, defaultOutputFormatId, listPromotedFormats, normalizeEnabledHubs, reorderFormats, sanitizeOutputOverrides, serializeAdminConfig } from './admin-config.js';
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
 import type { UserDurableObject } from './user.js';
 import type { OverseerDurableObject } from './overseer.js';
-import { featuredBlueprintsManifestVersion, installFeaturedBlueprints, loadBundledFinanceOperationsWorkbenchSource, bundledBlueprintsManifestVersion, installBundledBlueprints } from './bundled-blueprints.js';
-import { FEATURED_BLUEPRINTS } from './generated/format-blueprints.js';
-import { BUNDLED_BLUEPRINTS } from './generated/bundled-blueprints.js';
+import { featuredBlueprintsManifestVersion, formatBlueprintsManifestVersion, installFeaturedBlueprints, installFormatBlueprints, loadBundledFinanceOperationsWorkbenchSource } from './format-blueprints.js';
+import { FEATURED_BLUEPRINTS, FORMAT_BLUEPRINTS } from './generated/format-blueprints.js';
 
 const logger = createWorkshopLogger("workshop.admin.settings");
 
@@ -48,8 +47,8 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       // connect/login/agent hot paths can read it without touching this singleton DO.
       adminConfig: DEFAULT_ADMIN_CONFIG as AdminConfig,
 
-      // Which set of bundled blueprints has been installed (see
-      // bundledBlueprintsManifestVersion). Empty means none yet; a mismatch means the repo shipped
+      // Which set of bundled format blueprints has been installed (see
+      // formatBlueprintsManifestVersion). Empty means none yet; a mismatch means the repo shipped
       // new or updated ones and they should be reinstalled.
       installedFormatBlueprints: "",
 
@@ -257,8 +256,8 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
    * Callers are coalesced onto one run, or two isolates racing on a fresh deployment both promote
    * the same blueprints, and a duplicated id makes setFormatOrder() reject every reordering.
    */
-  ensureBundledBlueprintsInstalled(): Promise<boolean> {
-    return this.#installInFlight ??= this.#installBundledBlueprints()
+  ensureFormatBlueprintsInstalled(): Promise<boolean> {
+    return this.#installInFlight ??= this.#installFormatBlueprints()
         .finally(() => { this.#installInFlight = undefined; });
   }
 
@@ -266,11 +265,11 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
 
   // Resolves true once every bundled blueprint is live. A partial install resolves false rather
   // than throwing: the caller has nothing to handle, but it does need to know to ask again.
-  async #installBundledBlueprints(): Promise<boolean> {
+  async #installFormatBlueprints(): Promise<boolean> {
     let complete = true;
-    let manifestVersion = bundledBlueprintsManifestVersion();
+    let manifestVersion = formatBlueprintsManifestVersion();
     if (this.storage.installedFormatBlueprints.get() !== manifestVersion) {
-      let installed = await installBundledBlueprints(this.env);
+      let installed = await installFormatBlueprints(this.env);
 
       if (installed.length > 0) {
         await this.#mutateFeaturedMirror(() => {
@@ -284,14 +283,14 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       // Stamped only once the whole manifest is live, so a crash or a single bad archive retries
       // next time. Recording a partial install as complete would strand the entries that failed
       // until the manifest happened to change again.
-      complete = installed.length === BUNDLED_BLUEPRINTS.length;
+      complete = installed.length === FORMAT_BLUEPRINTS.length;
       if (complete) {
         this.storage.installedFormatBlueprints.put(manifestVersion);
       }
-      logger.info("installed bundled blueprints", {
+      logger.info("installed bundled format blueprints", {
         event: "formats.install.complete",
         size: installed.length,
-        failureCount: BUNDLED_BLUEPRINTS.length - installed.length,
+        failureCount: FORMAT_BLUEPRINTS.length - installed.length,
       });
     }
 
@@ -342,7 +341,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // bundled set ever changes.
   async #promoteBundledFormats(): Promise<void> {
     let promoted = new Set(this.storage.promotedFormatBlueprints.get());
-    let pending = BUNDLED_BLUEPRINTS.filter(entry => !promoted.has(entry.blueprintId));
+    let pending = FORMAT_BLUEPRINTS.filter(entry => !promoted.has(entry.blueprintId));
     if (pending.length === 0) return;
 
     let config = this.#config();
@@ -425,7 +424,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
       owner: kvRecord.ownerId
           ? this.users.get(this.users.idFromString(kvRecord.ownerId))
           : undefined,
-      // A deployment-installed blueprint (see bundled-blueprints.ts) has no owning User DO to hold
+      // A deployment-installed blueprint (see format-blueprints.ts) has no owning User DO to hold
       // the authoritative featured bit, so the owner-anchored toggle doesn't apply -- the same
       // answer as an uploaded blueprint. It reaches users through the deployment's curation.
       featureable: !!kvRecord.gadgetId && !!kvRecord.ownerId,
@@ -507,7 +506,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // is missing that field entirely, so reads must backfill from the defaults or the first
   // deployment to upgrade hits `undefined` on it.
   #storedConfig(): AdminConfig {
-    let stored = normalizeAdminConfig(this.storage.adminConfig.get());
+    let stored = this.storage.adminConfig.get();
     let config = {
       ...DEFAULT_ADMIN_CONFIG,
       ...stored,
@@ -573,7 +572,6 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     let config = this.#config();
     return {
       signupsEnabled: config.signupsEnabled,
-      userSearchEnabled: config.userSearchEnabled,
       siteName: config.siteName,
       siteLogo: siteLogoImage(config.siteLogoConfigured),
       instanceInstructions: config.instanceInstructions,
@@ -591,7 +589,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   // Admin view of the promoted formats: the deployment's curation joined with each blueprint, so
   // the panel can show what is being curated and flag entries whose blueprint has been deleted.
   async #listFormatConfig(config: AdminConfig): Promise<AdminFormat[]> {
-    let bundled = new Set(BUNDLED_BLUEPRINTS.map(entry => entry.blueprintId));
+    let bundled = new Set(FORMAT_BLUEPRINTS.map(entry => entry.blueprintId));
 
     // Every entry, not just the offered ones: the panel exists to show what is disabled and what
     // points at a deleted blueprint.
@@ -649,7 +647,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     // Enforced here, not just in the panel: this is an RPC an admin session can call directly.
     // Withdrawing a bundled entry is `enabled: false`, which keeps its overrides, hint and
     // position.
-    if (BUNDLED_BLUEPRINTS.some(entry => entry.blueprintId === blueprintId)) {
+    if (FORMAT_BLUEPRINTS.some(entry => entry.blueprintId === blueprintId)) {
       throw new Error(
           "This format ships with the deployment, so it can't be removed. Turn it off instead.");
     }
@@ -909,11 +907,6 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
   async setSignupsEnabled(enabled: boolean): Promise<void> {
     await this.authority.assertCurrent(this.claim, "administration");
     await this.admin.updateAdminConfig({ signupsEnabled: enabled });
-  }
-
-  async setUserSearchEnabled(enabled: boolean): Promise<void> {
-    await this.authority.assertCurrent(this.claim, "administration");
-    await this.admin.updateAdminConfig({ userSearchEnabled: enabled });
   }
 
   async setSiteName(name: string): Promise<void> {

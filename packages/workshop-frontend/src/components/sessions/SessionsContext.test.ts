@@ -130,7 +130,6 @@ async function renderProvider({ loadRepositories = false, strictMode = false }: 
 
 function fakePopup() {
   return {
-    sessionStorage: { setItem: vi.fn<(key: string, value: string) => void>() },
     opener: {} as unknown,
     close: vi.fn<() => void>(),
     location: { replace: vi.fn<(url: string) => void>() },
@@ -154,7 +153,7 @@ describe('openGitHubAccountPopup', () => {
     const popup = fakePopup()
     const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
     const authenticatedApi = {
-      connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://github.example.test/oauth/connect', nonce: 'a'.repeat(64) })),
+      connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://github.example.test/oauth/connect' })),
       reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://github.example.test/oauth/reconnect' })),
     }
 
@@ -176,7 +175,7 @@ describe('openGitHubAccountPopup', () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
     const authenticatedApi = {
       connectAccount: vi.fn<(vendorId: string) => Promise<{ url: string }>>(async () => ({ url: 'https://github.example.test/oauth/connect' })),
-      reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://github.example.test/oauth/reconnect', nonce: 'b'.repeat(64) })),
+      reconnectAccount: vi.fn<(accountId: number) => Promise<{ url: string }>>(async () => ({ url: 'https://github.example.test/oauth/reconnect' })),
     }
 
     const promise = openGitHubAccountPopup(authenticatedApi, { kind: 'reconnect', accountId: 42 })

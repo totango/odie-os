@@ -7,7 +7,7 @@ describe('parseNativeDeepLink', () => {
   it('accepts claimed SPA routes and native OAuth returns', () => {
     expect(parseNativeDeepLink(`${origin}/`)).toEqual({ kind: 'spa-route', path: '/' })
     expect(parseNativeDeepLink(`${origin}/workspace/abc?x=1`)).toEqual({ kind: 'spa-route', path: '/workspace/abc?x=1' })
-    expect(parseNativeDeepLink(`${origin}/native/oauth-return/${'a'.repeat(32)}#${'b'.repeat(64)}`)).toEqual({ kind: 'oauth-return', handle: 'a'.repeat(32), ticket: 'b'.repeat(64) })
+    expect(parseNativeDeepLink(`${origin}/native/oauth-return/${'a'.repeat(32)}`)).toEqual({ kind: 'oauth-return', handle: 'a'.repeat(32) })
   })
 
   it('retains only validated workspace share fragments', () => {
@@ -28,9 +28,6 @@ describe('parseNativeDeepLink', () => {
     expect(parseNativeDeepLink(`https://user:pass@odie-os.odie-os.workers.dev/workspaces`)).toBeNull()
     expect(parseNativeDeepLink(`${origin}/native/oauth-return/${'b'.repeat(32)}#token`)).toBeNull()
     expect(parseNativeDeepLink(`${origin}/native/oauth-return/%E0%A4%A`)).toBeNull()
-    expect(parseNativeDeepLink(`${origin}/native/oauth-return/${'a'.repeat(32)}`)).toBeNull()
-    expect(parseNativeDeepLink(`${origin}/native/oauth-return/${'a'.repeat(32)}?ticket=${'b'.repeat(64)}`)).toBeNull()
-    expect(parseNativeDeepLink(`${origin}/native/oauth-return/${'a'.repeat(32)}?x=1#${'b'.repeat(64)}`)).toBeNull()
   })
 
   it('keeps the verified-link matrix explicit', () => {

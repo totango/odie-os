@@ -240,12 +240,7 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
         if (!row) return null;
         const object = await this.env.BLUEPRINT_CONTENT.get(`${COMMUNITY_ATTACHMENT_R2_PREFIX}${row.id}`);
         if (!object || object.size !== row.byteLength || object.customMetadata?.sha256 !== row.sha256) return null;
-        const content = new Uint8Array(await object.arrayBuffer());
-        // The author can withdraw a file while R2 is awaited. Its frozen hash identifies bytes,
-        // not continuing read authority; do not hand deleted context to a restricted runner.
-        if (!this.ctx.storage.sql.exec(
-          "SELECT 1 FROM attachments WHERE id=? AND ready=1", attachmentId).toArray().length) return null;
-        return content;
+        return new Uint8Array(await object.arrayBuffer());
       },
     });
     ctx.blockConcurrencyWhile(async () => {
@@ -538,13 +533,7 @@ export class CommunityRequests extends DurableObject<Cloudflare.Env> {
     const digest = await crypto.subtle.digest("SHA-256", content);
     const sha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
     if (sha256 !== row.sha256) throw new Error("Board attachment unavailable.");
-    this.#read(owner, () => {
-      this.#require(requestId, includeHidden);
-      if (!this.ctx.storage.sql.exec(
-        "SELECT 1 FROM attachments WHERE id=? AND requestId=? AND ready=1", attachmentId, requestId).toArray().length) {
-        throw new Error("Board attachment unavailable.");
-      }
-    });
+    this.#read(owner, () => this.#require(requestId, includeHidden));
     return {attachment: {id: row.id, name: row.name, mimeType: row.mimeType,
       byteLength: row.byteLength, sha256: row.sha256, createdAt: row.createdAt,
       isOwn: row.owner === owner}, content};

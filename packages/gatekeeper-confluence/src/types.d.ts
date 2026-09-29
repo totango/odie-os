@@ -360,10 +360,7 @@ export type UploadAttachmentOptions = {
   filename: string;
   /** MIME type of the file. */
   mediaType: string;
-  /**
-   * The raw file bytes. Limited to 25 MiB per attachment, and 50 MiB across all of a connection's
-   * pending (not yet approved) uploads.
-   */
+  /** The raw file bytes. */
   data: Uint8Array;
   /** Optional comment describing the attachment/upload. */
   comment?: string;

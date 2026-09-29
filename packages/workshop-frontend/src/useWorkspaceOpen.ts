@@ -9,9 +9,7 @@ import type {
   Overseer,
 } from '@gadgets/workshop-shared/api'
 import { reportIssue } from './errorReporting'
-import { linkActionLog } from './useActions'
 import { useDocumentTitle } from './useDocumentTitle'
-import { negotiateEditing } from './features/workspace/editingProtocol'
 import {
   classifyWorkspaceOpenFailure,
   type WorkspaceOpenFailureKind,
@@ -127,9 +125,6 @@ export function useWorkspaceOpen({
         configureObservers = new RpcStub(configureObserversTarget)
 
         overseerStub = authenticatedApi.openGadget(id, shareKey, configureObservers)
-        await negotiateEditing(overseerStub)
-        if (cancelled) return
-        linkActionLog(overseerStub, id)
 
         const resolvedSubscription = await overseerStub.subscribeToMetadata((nextMetadata) => {
           if (cancelled) return
@@ -151,7 +146,7 @@ export function useWorkspaceOpen({
         if (cancelled) return
         console.error('Failed to load gadget:', caught)
 
-        // TODO: Give invalid-share-key and observer failures stable codes so this remaining legacy
+        // TODO: Give share-link and observer failures stable codes so this remaining legacy
         // message classification can be removed.
         const message = caught instanceof Error ? caught.message : ''
         if (message.includes('Invalid or expired share key')) {

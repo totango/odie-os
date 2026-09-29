@@ -14,7 +14,6 @@
     "test:run": "vitest run --passWithNoTests"
   },
   "devDependencies": {
-    "@gadgets/scripts": "workspace:*",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

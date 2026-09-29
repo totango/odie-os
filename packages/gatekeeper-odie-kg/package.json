@@ -8,22 +8,21 @@
     "deploy": "wrangler deploy",
     "build": "pnpm exec capnweb-validate build --out .wrangler/validate && tsc",
     "types:check": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
-    "test:run": "vitest run",
+    "test": "vitest run",
     "clean": "rm -rf dist .wrangler"
   },
   "dependencies": {
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/mcp-shared": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb": "catalog:",
-    "capnweb-validate": "catalog:"
+    "capnweb": "^0.8.0",
+    "capnweb-validate": "0.2.1"
   },
   "devDependencies": {
-    "@gadgets/scripts": "workspace:*",
-    "@cloudflare/workers-types": "catalog:",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@gadgets/integration-tests": "workspace:*",
-    "typescript": "catalog:",
-    "vitest": "catalog:",
-    "wrangler": "catalog:"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.119.0"
   }
 }

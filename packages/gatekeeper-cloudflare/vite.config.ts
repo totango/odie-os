@@ -1,5 +1,5 @@
-import gatekeeperConfiguratorConfig from "@gadgets/scripts/gatekeeper-configurator";
-import { withVitestTask } from "@gadgets/scripts/vitest-task";
+import gatekeeperConfiguratorConfig from "../../scripts/gatekeeper-configurator-vite-config.js";
+import { withVitestTask } from "../../scripts/vitest-task-vite-config.js";
 
 /**
  * Vite+ per-package settings: the shared gatekeeper-configurator tasks plus a two-pass `test` task.

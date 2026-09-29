@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import { isTextContentType } from "./context-types.js";
 
-const textDecoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
+const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
 const MAX_DOCUMENT_DESCRIPTION_CHARS = 16_000;
 
@@ -21,10 +21,7 @@ export function decodeStoredContextBody(
 }
 
 export function encodeStoredContextBody(contentType: string, body: string): Uint8Array {
-  if (isTextContentType(contentType)) return textEncoder.encode(body);
-  let decoded = Buffer.from(body, "base64");
-  if (decoded.toString("base64") !== body) {
-    throw new Error("Binary document body must be valid canonical base64.");
-  }
-  return new Uint8Array(decoded);
+  return isTextContentType(contentType)
+    ? textEncoder.encode(body)
+    : new Uint8Array(Buffer.from(body, "base64"));
 }

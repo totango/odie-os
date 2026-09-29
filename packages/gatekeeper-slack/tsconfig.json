@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ESNext"],
+    "lib": ["ES2023", "ESNext.Disposable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react",

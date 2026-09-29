@@ -1,4 +1,4 @@
-import { withVitestTask, type GlobWithBase } from "./vitest-task-vite-config.ts";
+import { withVitestTask, type GlobWithBase } from "./vitest-task-vite-config.js";
 
 /**
  * Shared Vite+ settings for every gatekeeper package with a `src/configurator/` UI, re-exported by
@@ -47,11 +47,11 @@ const gatekeeperConfiguratorConfig = {
       // artifacts of an enabled-reporting build would survive a later disabled-reporting cache hit
       // (see clean-error-reporting-artifacts.ts). This runs every time, before the cache lookup.
       "clean:error-reporting-artifacts": {
-        command: "gadgets-clean-error-reporting .",
+        command: "node ../../scripts/clean-error-reporting-artifacts.ts .",
         cache: false,
       },
       "build:configurator": {
-        command: "gadgets-build-configurator .",
+        command: "node ../../scripts/build-gatekeeper-configurator.ts .",
         dependsOn: ["clean:error-reporting-artifacts"],
         input: [
           { auto: true },

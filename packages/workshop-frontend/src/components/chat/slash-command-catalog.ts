@@ -16,20 +16,14 @@ const catalogs = new WeakMap<OverseerSource, Promise<SlashCommandChoice[]>>();
 export function loadSlashCommandCatalog(source: OverseerSource): Promise<SlashCommandChoice[]> {
   let cached = catalogs.get(source);
   if (cached) return cached;
-  let load: Promise<SlashCommandChoice[]>;
-  load = Promise.resolve(source())
+  let load = Promise.resolve(source())
     .then((overseer) => overseer.listSlashCommands())
     .catch((err) => {
-      if (catalogs.get(source) === load) catalogs.delete(source);
+      catalogs.delete(source);
       throw err;
     });
   catalogs.set(source, load);
   return load;
-}
-
-/** Drops a cached catalog after a connection changes the available commands. */
-export function invalidateSlashCommandCatalog(source: OverseerSource): void {
-  catalogs.delete(source);
 }
 
 /**

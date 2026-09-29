@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "build": "pnpm exec capnweb-validate build --out .wrangler/validate && tsc && tsc -p canary/tsconfig.json",
     "types:check": "tsc --noEmit && tsc -p canary/tsconfig.json",
-    "test:run": "vitest run",
+    "test": "vitest run",
     "clean": "rm -rf dist .wrangler"
   },
   "dependencies": {
@@ -16,15 +16,14 @@
     "@cloudflare/sandbox": "0.13.0-next.751.1",
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
-    "capnweb": "catalog:",
-    "capnweb-validate": "catalog:"
+    "capnweb": "^0.8.0",
+    "capnweb-validate": "0.2.1"
   },
   "devDependencies": {
-    "@gadgets/scripts": "workspace:*",
-    "@cloudflare/workers-types": "catalog:",
+    "@cloudflare/workers-types": "^4.20260702.1",
     "@types/node": "26.1.0",
-    "typescript": "catalog:",
-    "vitest": "catalog:",
-    "wrangler": "catalog:"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.115.0"
   }
 }

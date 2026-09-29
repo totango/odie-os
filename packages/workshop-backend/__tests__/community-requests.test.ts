@@ -289,41 +289,6 @@ describe("CommunityRequests authenticated public board (real workerd)", () => {
     await expect(async () => admin.moderateCommunityRequest(bug.id, command("restore"))).rejects.toThrow("cannot be restored");
   });
 
-  it("withholds attachment bytes when their author deletes them during the storage read", async () => {
-    const { alice, bob } = await fixture();
-    const request = await alice.createCommunityRequest(draft());
-    const attachment = await alice.addCommunityRequestAttachment(request.id, {
-      idempotencyKey: "delete-during-read", name: "evidence.txt", mimeType: "text/plain",
-      content: new TextEncoder().encode("withdrawn public evidence"),
-    });
-    const owner = await runInDurableObject(registry(), (_instance, ctx) =>
-      ctx.storage.sql.exec<{owner: string}>("SELECT owner FROM attachments WHERE id=?", attachment.id).one().owner);
-    let original!: R2Bucket;
-    await runInDurableObject(registry(), instance => {
-      const fixtureEnv = Reflect.get(instance, "env") as Cloudflare.Env;
-      original = fixtureEnv.BLUEPRINT_CONTENT;
-      fixtureEnv.BLUEPRINT_CONTENT = new Proxy(original, {
-        get(target, property) {
-          if (property === "get") return async (key: string) => {
-            const object = await target.get(key);
-            instance.deleteAttachment(owner, request.id, attachment.id);
-            return object;
-          };
-          const value = Reflect.get(target, property, target);
-          return typeof value === "function" ? value.bind(target) : value;
-        },
-      });
-    });
-    try {
-      await expect(bob.getCommunityRequestAttachment(request.id, attachment.id))
-        .rejects.toThrow("Board attachment unavailable.");
-    } finally {
-      await runInDurableObject(registry(), instance => {
-        (Reflect.get(instance, "env") as Cloudflare.Env).BLUEPRINT_CONTENT = original;
-      });
-    }
-  });
-
   it("durably retries transient object-storage failures while scrubbing deleted attachments", async () => {
     const { alice } = await fixture();
     const request = await alice.createCommunityRequest(draft({title: "Delete with retry"}));

@@ -1,8 +1,6 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
 import { RpcStub } from 'capnweb'
 import { AuthenticatedApi, AiChatAuthorInfo } from '@gadgets/workshop-shared/api'
-import { getWorkshopRuntime } from './runtime'
-import { installNativeAccountCoordinator } from './runtime/nativeLoginCoordinator'
 
 interface AuthContextType {
   authenticatedApi: RpcStub<AuthenticatedApi>
@@ -29,16 +27,6 @@ export function AuthProvider({ children, authenticatedApi, onLogout, onSwitchIde
   const currentUser = identity?.api === authenticatedApi ? identity.user : null
   const [adminStatus, setAdminStatus] = useState<{ api: RpcStub<AuthenticatedApi>; allowed: boolean }>()
   const isAdmin = adminStatus?.api === authenticatedApi && adminStatus.allowed
-
-  useEffect(() => {
-    let active = true
-    let cleanup: (() => void) | undefined
-    void installNativeAccountCoordinator(getWorkshopRuntime(), () => {
-      if (!active) throw new Error('Authentication changed')
-      return authenticatedApi
-    }).then(dispose => { if (active) cleanup = dispose; else dispose() })
-    return () => { active = false; cleanup?.() }
-  }, [authenticatedApi])
 
   useEffect(() => {
     let cancelled = false

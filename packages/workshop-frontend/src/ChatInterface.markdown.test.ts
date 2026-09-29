@@ -23,7 +23,6 @@ describe("MarkdownMessage line breaks", () => {
   afterEach(async () => {
     if (root) await act(async () => root.unmount());
     container?.remove();
-    vi.unstubAllGlobals();
   });
 
   async function render(message: string, onOpenWorkItem?: (target: WorkItemTarget) => void) {
@@ -92,19 +91,5 @@ describe("MarkdownMessage line breaks", () => {
     expect(onOpenWorkItem).not.toHaveBeenCalled();
     expect(report.target).toBe("_blank");
     expect(report.rel).toBe("noopener noreferrer");
-  });
-  it("copies fenced code without the Markdown trailing newline", async () => {
-    const writeText = vi.fn<(text: string) => Promise<void>>(async () => undefined);
-    vi.stubGlobal("navigator", { clipboard: { writeText } });
-    await render("```ts\nconst answer = 42;\n```");
-
-    const button = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Copy code"]',
-    );
-    expect(button?.title).toBe("Copy code");
-
-    await act(async () => button?.click());
-
-    expect(writeText).toHaveBeenCalledWith("const answer = 42;");
   });
 });

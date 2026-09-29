@@ -2,7 +2,6 @@ import { useCallback, useRef, type Dispatch, type SetStateAction } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { ActionState, Overseer } from '@gadgets/workshop-shared/api'
-import { requireEditingReady } from './features/workspace/editingProtocol'
 
 type ActionDecision = 'approve' | 'deny'
 
@@ -18,7 +17,6 @@ export function useResolveAction(
   return useCallback(async (actionId: number, decision: ActionDecision) => {
     setProcessing(previous => new Set(previous).add(actionId))
     try {
-      await requireEditingReady(overseer)
       if (decision === 'approve') await overseer.approveAction(actionId)
       else await overseer.rejectAction(actionId)
       onResolvedRef.current?.(actionId, decision === 'approve' ? 'approved' : 'rejected')

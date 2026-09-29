@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { connectCallback } from "./connect-callback";
 import { UserAccount } from "../src/jira";
 
 const SITES = [{ id: "site", name: "Site", url: "https://example.atlassian.net", scopes: ["read:jira-work"] }];
@@ -60,7 +59,7 @@ describe("Jira OAuth refresh rotation", () => {
     }));
     const { account, setAlarm } = makeAccount();
 
-    await account.setCallback(connectCallback(), "a".repeat(64));
+    await account.setCallback({ complete: vi.fn(), credentialsRestored: vi.fn(), credentialsExpired: vi.fn() }, "a".repeat(64));
     const begun = await account.beginOAuthFlow("a".repeat(64));
     if (!begun) throw new Error("OAuth flow did not begin.");
     await account.acceptAuthCode("code", begun.oauthNonce);
@@ -232,12 +231,10 @@ describe("Jira OAuth refresh rotation", () => {
     if (!begun) throw new Error("OAuth flow did not begin.");
     await account.acceptAuthCode("code", begun.oauthNonce);
 
-    expect(kv.has("grant")).toBe(false);
-    await account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]);
     expect(kv.get("grant")).toMatchObject({ accessToken: "new-access", refreshToken: "new-refresh" });
     expect(kv.has("credentialsExpiredNotified")).toBe(false);
-    expect(callback.reconnectComplete).toHaveBeenCalledWith(expect.any(String), undefined);
-    expect(callback.credentialsRestored).not.toHaveBeenCalled();
+    expect(callback.credentialsRestored).toHaveBeenCalledWith(undefined);
+    expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
   });
 
   it("retries a failed legacy credentialsRestored notification without marking it delivered", async () => {
@@ -408,11 +405,9 @@ describe("Jira OAuth refresh rotation", () => {
     if (!begun) throw new Error("OAuth flow did not begin.");
     await account.acceptAuthCode("code", begun.oauthNonce);
 
-    expect(kv.has("grant")).toBe(false);
-    await account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]);
     expect(kv.get("grant")).toMatchObject({ accessToken: "access-2", refreshToken: "refresh-2" });
-    expect(callback.reconnectComplete).toHaveBeenCalledWith(expect.any(String), undefined);
-    expect(callback.credentialsRestored).not.toHaveBeenCalled();
+    expect(callback.credentialsRestored).toHaveBeenCalledWith(undefined);
+    expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
     expect(kv.get("refreshRestoredNotified")).toBe(2);
   });
 
@@ -440,15 +435,13 @@ describe("Jira OAuth refresh rotation", () => {
     const begun = await account.beginOAuthFlow("b".repeat(64));
     if (!begun) throw new Error("OAuth flow did not begin.");
     await account.acceptAuthCode("code", begun.oauthNonce);
-    await account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]);
     kv.set("callbackRetryAt", Date.now() - 1);
     await account.alarm();
 
     expect(callback.credentialsExpired).toHaveBeenCalledTimes(1);
     expect(kv.has("credentialsExpiredPending")).toBe(false);
     expect(kv.has("credentialsExpiredNotified")).toBe(false);
-    expect(callback.reconnectComplete).toHaveBeenCalledTimes(1);
-    expect(callback.credentialsRestored).not.toHaveBeenCalled();
+    expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -460,10 +453,10 @@ async function completeOAuth(account: UserAccount, callback: { complete: ReturnT
   await account.acceptAuthCode("code", begun.oauthNonce);
 }
 
-function makeAccount() {
+function makeAccount(): { account: UserAccount; kv: Map<string, unknown>; callback: { complete: ReturnType<typeof vi.fn>; credentialsRestored: ReturnType<typeof vi.fn>; credentialsExpired: ReturnType<typeof vi.fn> }; setAlarm: ReturnType<typeof vi.fn> } {
   const account = new UserAccount();
   const kv = new Map<string, unknown>();
-  const callback = connectCallback();
+  const callback = { complete: vi.fn(), credentialsRestored: vi.fn(), credentialsExpired: vi.fn() };
   const setAlarm = vi.fn();
   Object.assign(account, {
     env: { BASE_URL: "https://workshop.example/gatekeeper/jira", CLIENT_ID: "client", CLIENT_SECRET: "secret" },
@@ -483,7 +476,6 @@ function makeAccount() {
     },
   });
   kv.set("callback", callback);
-  kv.set("connectHandoffProtocol", "browser-bound-v1");
   return { account, kv, callback, setAlarm };
 }
 

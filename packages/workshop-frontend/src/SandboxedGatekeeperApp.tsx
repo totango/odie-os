@@ -99,8 +99,8 @@ function iframeStyleForOverlay(overlay: OverlayState): CSSProperties {
       right: 'env(safe-area-inset-right)',
       bottom: 'calc(var(--app-bottom) + env(safe-area-inset-bottom))',
       left: 'env(safe-area-inset-left)',
-      width: 'calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right))',
-      height: 'calc(100vh - var(--app-top) - var(--app-bottom) - env(safe-area-inset-top) - env(safe-area-inset-bottom))',
+      width: 'auto',
+      height: 'auto',
       zIndex: overlayZIndex,
     }
   }

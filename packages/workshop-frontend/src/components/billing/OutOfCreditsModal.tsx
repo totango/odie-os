@@ -62,12 +62,8 @@ export default function OutOfCreditsModal({ open, onClose }: OutOfCreditsModalPr
     setConnecting(true)
     try {
       await accountBrowserFlows.connect(auth.authenticatedApi, 'cloudflare', [])
-    } catch (err) {
-      toasts.add({
-        title: 'Failed to start Cloudflare connection',
-        description: err instanceof Error ? err.message : undefined,
-        variant: 'error',
-      })
+    } catch {
+      // ignore
     } finally {
       setConnecting(false)
     }

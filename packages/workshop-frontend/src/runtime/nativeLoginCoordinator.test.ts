@@ -1,16 +1,13 @@
 /** @vitest-environment jsdom */
 import { describe, expect, it, vi } from 'vitest'
-import { consumePendingNativeLogin, consumePendingNativeLoginUrl, installNativeLoginCoordinator } from './nativeLoginCoordinator'
+import { consumePendingNativeLoginUrl, installNativeLoginCoordinator } from './nativeLoginCoordinator'
 import type { WorkshopRuntime } from './WorkshopRuntime'
 
 function mockFn<T extends (...args: any[]) => any>() {
   return vi.fn<T>()
 }
 
-const TICKET = 'c'.repeat(64)
-const returnUrl = (handle = 'a'.repeat(32)) => `https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/${handle}#${TICKET}`
-
-function runtime(pending: { flowHandle: string; verifier: string; ticket?: string } | null): WorkshopRuntime {
+function runtime(pending: { flowHandle: string; verifier: string } | null): WorkshopRuntime {
   return {
     kind: 'tauri',
     apiOrigin: new URL('https://odie-os-native-api.odie-os.workers.dev'),
@@ -42,14 +39,14 @@ describe('native login coordinator', () => {
     const currentApi = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(async () => ({ status: 'completed', token: 'user:token' })) }
     const getApi = vi.fn<() => any>()
       .mockReturnValueOnce(firstApi)
-      .mockReturnValue(currentApi)
+      .mockReturnValueOnce(currentApi)
 
     // Proves callers can install with one stub and consume later with the replaced/current stub.
     getApi()
-    const consumed = await consumePendingNativeLoginUrl(rt, getApi, returnUrl())
+    const consumed = await consumePendingNativeLoginUrl(rt, getApi, 'https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/' + 'a'.repeat(32))
     expect(consumed).toBe(true)
     expect(firstApi.consumeNativeLoginFlow).not.toHaveBeenCalled()
-    expect(currentApi.consumeNativeLoginFlow).toHaveBeenCalledWith('a'.repeat(32), 'verifier', TICKET)
+    expect(currentApi.consumeNativeLoginFlow).toHaveBeenCalledWith('a'.repeat(32), 'verifier')
     expect(rt.writeSessionSecret).toHaveBeenCalledWith('user:token')
     expect(rt.clearPendingNativeLoginFlow).toHaveBeenCalled()
   })
@@ -58,7 +55,7 @@ describe('native login coordinator', () => {
     const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
     const api = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<string>>() }
     expect(await consumePendingNativeLoginUrl(rt, () => api as any, 'https://evil.example/native/oauth-return/' + 'a'.repeat(32))).toBe(false)
-    expect(await consumePendingNativeLoginUrl(rt, () => api as any, returnUrl('b'.repeat(32)))).toBe(false)
+    expect(await consumePendingNativeLoginUrl(rt, () => api as any, 'https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/' + 'b'.repeat(32))).toBe(false)
     expect(api.consumeNativeLoginFlow).not.toHaveBeenCalled()
     expect(rt.clearPendingNativeLoginFlow).not.toHaveBeenCalled()
   })
@@ -66,8 +63,7 @@ describe('native login coordinator', () => {
   it('retains pending verifier on transient RPC failures', async () => {
     const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
     const api = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(async () => { throw new Error('WebSocket disconnected') }) }
-    await expect(consumePendingNativeLoginUrl(rt, () => api as any, returnUrl())).rejects.toThrow('WebSocket disconnected')
-    expect(rt.writePendingNativeLoginFlow).toHaveBeenCalledWith({ flowHandle: 'a'.repeat(32), verifier: 'verifier', ticket: TICKET })
+    await expect(consumePendingNativeLoginUrl(rt, () => api as any, 'https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/' + 'a'.repeat(32))).rejects.toThrow('WebSocket disconnected')
     expect(rt.clearPendingNativeLoginFlow).not.toHaveBeenCalled()
   })
 
@@ -77,7 +73,7 @@ describe('native login coordinator', () => {
     vi.mocked(rt.subscribeDeepLinks).mockResolvedValue(() => {})
     vi.mocked(rt.readPendingNativeLoginFlow)
       .mockResolvedValueOnce(null)
-      .mockResolvedValue({ flowHandle: 'a'.repeat(32), verifier: 'verifier', ticket: TICKET })
+      .mockResolvedValue({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
     const api = {
       consumeNativeLoginFlow: vi.fn<() => Promise<any>>(async () => ({ status: 'completed', token: 'user:token' })),
     }
@@ -106,12 +102,12 @@ describe('native login coordinator', () => {
   it('clears pending verifier on terminal server outcomes', async () => {
     const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
     const api = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(async () => ({ status: 'expired' })) }
-    await expect(consumePendingNativeLoginUrl(rt, () => api as any, returnUrl())).resolves.toBe(true)
+    await expect(consumePendingNativeLoginUrl(rt, () => api as any, 'https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/' + 'a'.repeat(32))).resolves.toBe(true)
     expect(rt.clearPendingNativeLoginFlow).toHaveBeenCalled()
   })
 
-  it('retries a previously delivered ticket on startup when an app link is unavailable', async () => {
-    const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier', ticket: TICKET })
+  it('consumes a completed pending flow on startup even when an app link is unavailable', async () => {
+    const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
     vi.mocked(rt.subscribeDeepLinks).mockResolvedValue(() => {})
     const api = {
       consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(
@@ -124,7 +120,7 @@ describe('native login coordinator', () => {
   })
 
   it('keeps polling when native deep-link registration fails', async () => {
-    const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier', ticket: TICKET })
+    const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
     vi.mocked(rt.subscribeDeepLinks).mockRejectedValue(new Error('plugin unavailable'))
     const api = {
       consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(
@@ -162,18 +158,10 @@ describe('native login coordinator', () => {
     const api = { consumeNativeLoginFlow: vi.fn<(handle: string, verifier: string) => Promise<any>>(async () => ({ status: 'completed', token: 'user:token' })) }
     const cleanup = await installNativeLoginCoordinator(rt, () => api as any)
     try {
-      callback({ url: returnUrl() })
+      callback({ url: 'https://odie-os-native-api.odie-os.workers.dev/native/oauth-return/' + 'a'.repeat(32) })
       await vi.waitFor(() => expect(api.consumeNativeLoginFlow).toHaveBeenCalled())
     } finally {
       cleanup()
     }
-  })
-
-  it('never accepts a legacy backend token from a status-only poll', async () => {
-    const rt = runtime({ flowHandle: 'a'.repeat(32), verifier: 'verifier' })
-    const api = { consumeNativeLoginFlow: vi.fn<() => Promise<any>>(async () => ({ status: 'completed', token: 'unsafe' })) }
-    expect(await consumePendingNativeLogin(rt, () => api as any)).toBe(false)
-    expect(rt.writeSessionSecret).not.toHaveBeenCalled()
-    expect(rt.clearPendingNativeLoginFlow).not.toHaveBeenCalled()
   })
 })

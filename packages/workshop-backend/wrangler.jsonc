@@ -6,7 +6,7 @@
     "command": "pnpm run build:worker",
     "watch_dir": "src"
   },
-  "compatibility_date": "2026-09-04",
+  "compatibility_date": "2026-02-02",
 
   // `global_fetch_strictly_public` makes the global fetch() function strictly fetch from
   // the public internet in production, rather than the legacy behavior in which same-zone
@@ -23,6 +23,7 @@
   // tradeoff for dev.
   "compatibility_flags": [
     "allow_irrevocable_stub_storage",
+    "enhanced_error_serialization",
     "global_fetch_strictly_public",
 
     // The pi-ai inference layer wraps the official provider SDKs (@anthropic-ai/sdk, openai,
@@ -65,11 +66,7 @@
       "tag": "v4-community-requests",
       "new_sqlite_classes": [ "CommunityRequests" ]
     },
-    { "tag": "v5-admin-authority", "new_sqlite_classes": ["AdminAuthority"] },
-    {
-      "tag": "v6-user-directory",
-      "new_sqlite_classes": [ "UserDirectoryDurableObject" ]
-    }
+    { "tag": "v5-admin-authority", "new_sqlite_classes": ["AdminAuthority"] }
   ],
 
   // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin, NativeBrowserFlow, CommunityRequests, ...) are
@@ -95,10 +92,6 @@
       "binding": "LOADER"
     }
   ],
-
-  // Deployment-only Git/OT cutover gate: set vars.WORKSHOP_EDITING_PAUSED to the string "true"
-  // during the coordinated pause. Leave it unset for normal operation; it is not an admin UI setting.
-  // Its optional type is declared in src/env.d.ts rather than enabling it in the default config.
 
   // When deploying to prod, you may want to bundle the frontend as assets on the backend, like so.
   // But it's not the only way to do it.

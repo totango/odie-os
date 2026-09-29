@@ -3,7 +3,6 @@ import { Dialog, Button, Input } from '@cloudflare/kumo'
 import { X } from '@phosphor-icons/react'
 import type { Connection, ConnectionResource } from '../../data/sample'
 import { logoComponents } from '../ConnectionLogos'
-import { isImeComposing } from '../../keyboardEvent'
 
 export default function ConnectionConfigModal({
   connection,
@@ -81,7 +80,6 @@ export default function ConnectionConfigModal({
                   value={inputValue}
                   onChange={(e) => setInputValue(e.currentTarget.value)}
                   onKeyDown={(e) => {
-                    if (isImeComposing(e)) return
                     if (e.key === 'Enter') handleAdd()
                   }}
                   placeholder={config.placeholder}

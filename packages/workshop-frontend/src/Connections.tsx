@@ -1,5 +1,4 @@
 import { useState, useEffect, useMemo } from 'react'
-import { requireEditingReady } from './features/workspace/editingProtocol'
 import { Dialog, Tooltip, useKumoToastManager } from '@cloudflare/kumo'
 import {
   Pencil,
@@ -22,7 +21,6 @@ import {
   loadBindingCardData,
 } from './components/BlueprintBindingCard'
 import { reportIssue } from './errorReporting'
-import { isImeComposing } from './keyboardEvent'
 
 interface ConnectionsProps {
   overseer: RpcStub<Overseer>
@@ -90,10 +88,8 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     setTogglingHooks((prev) => new Set(prev).add(id))
     try {
       if (enabled) {
-        await requireEditingReady(overseer)
         await overseer.enableHook(id)
       } else {
-        await requireEditingReady(overseer)
         await overseer.disableHook(id)
       }
       await loadGatekeepers()
@@ -114,7 +110,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const handleDeleteHookConfirm = async () => {
     if (!deleteHookTarget) return
     try {
-      await requireEditingReady(overseer)
       await overseer.deleteHook(deleteHookTarget.id)
       await loadGatekeepers()
     } catch (err) {
@@ -176,7 +171,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     }
 
     try {
-      await requireEditingReady(overseer)
       await gadget.renameBinding(name, newName)
       await loadGatekeepers()
       onConnectionsChange?.()
@@ -196,7 +190,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return
     try {
-      await requireEditingReady(overseer)
       await gadget.unbind(deleteTarget.name)
       await loadGatekeepers()
       onConnectionsChange?.()
@@ -284,7 +277,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                           value={editValue}
                           onChange={(e) => setEditValue(e.target.value)}
                           onKeyDown={(e) => {
-                            if (isImeComposing(e)) return
                             if (e.key === 'Enter') handleEditSave(gk.name)
                             if (e.key === 'Escape') handleEditCancel()
                           }}
@@ -468,7 +460,6 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
         onCreated={async (gk) => {
           try {
             const gatekeeperId = await gk.getId()
-            await requireEditingReady(overseer)
             await gadget.bindWithSuggestedName(gatekeeperId, chatId)
             toasts.add({
               title: chatId === undefined

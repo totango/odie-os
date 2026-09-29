@@ -92,16 +92,15 @@ async function runToolBatch(
     tools: AgentTool[],
     events: AgentEvent[] = []): Promise<AgentEvent[]> {
   let context: AgentContext = {
-    messages: [{role: "system", content: "test", timestamp: 0,
-      toolsAdded: tools.map(({name, description, parameters}) => ({name, description, parameters}))},
-      {role: "user", content: "go", timestamp: 0} as Message],
+    systemPrompt: "test",
+    messages: [{role: "user", content: "go", timestamp: 0} as Message],
     tools,
   };
   let config: AgentLoopConfig = {
     model: makeModel(),
     convertToLlm: messages => messages as Message[],
     toolExecution: "parallel",
-    finishTurn: () => ({action: "end"}),
+    shouldStopAfterTurn: () => true,
   };
   await runAgentLoopContinue(
       context, config, async event => { events.push(event); }, undefined,

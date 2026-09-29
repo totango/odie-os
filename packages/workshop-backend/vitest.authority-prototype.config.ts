@@ -11,7 +11,7 @@ export default defineConfig({
   })],
   test: {
     include: ["__tests__/authority-prototype/*.test.ts"],
-    setupFiles: ["@gadgets/scripts/assert-workerd"],
+    setupFiles: ["../../scripts/assert-workerd.ts"],
     testTimeout: 15_000,
   },
 });
