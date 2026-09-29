@@ -94,6 +94,17 @@ export default function ObserverConfigModal({
   const [connecting, setConnecting] = useState<string | null>(null)
   const [reconnecting, setReconnecting] = useState<number | null>(null)
   const [granting, setGranting] = useState<number | null>(null)
+  const [manualAuthorization, setManualAuthorization] = useState<{ url: string; popupBlocked: boolean } | null>(null)
+  const [retryAvailable, setRetryAvailable] = useState(false)
+  // OAuth may be abandoned after its tab opens. Start the retry clock once the popup opens,
+  // not while the request to start authorization is still pending. Clear it on completion/unmount.
+  useEffect(() => {
+    if (connecting === null && reconnecting === null && granting === null) return
+    if (manualAuthorization?.popupBlocked !== false &&
+      !(connecting !== null && vendorsById.get(connecting)?.description.autoProvisionsAccount)) return
+    const timer = window.setTimeout(() => setRetryAvailable(true), 30_000)
+    return () => window.clearTimeout(timer)
+  }, [connecting, reconnecting, granting, manualAuthorization, vendorsById])
 
   // The subscriber closure (created once) reads the in-flight connect target through this ref so it
   // can clear it when the freshly-connected account arrives.
@@ -112,6 +123,7 @@ export default function ObserverConfigModal({
           return next
         })
         if (credentialsValid) {
+          setManualAuthorization(null)
           setReconnecting(r => (r === id ? null : r))
           setGranting(g => (g === id ? null : g))
           // If we were waiting on a connect for this vendor, it's done.
@@ -206,17 +218,25 @@ export default function ObserverConfigModal({
     const { vendorId } = need
     connectingRef.current = vendorId
     setConnecting(vendorId)
+    setRetryAvailable(false)
+    setManualAuthorization(null)
     try {
       const vendor = vendorsById.get(vendorId)
       if (vendor?.description.autoProvisionsAccount) {
         await authenticatedApi.provisionAmbientAccount(vendorId)
       } else {
         const required = requiredResourceUrlPatterns(need, vendor)
-        await accountBrowserFlows.connect(
+        const result = await accountBrowserFlows.connect(
           authenticatedApi,
           vendorId,
           required.length > 0 ? required : undefined,
+          { webPopup: 'preopen', webFallback: 'manual' },
         )
+        setManualAuthorization(result.url ? { url: result.url, popupBlocked: !!result.popupBlocked } : null)
+        if (result.popupBlocked) {
+          connectingRef.current = null
+          setConnecting(null)
+        }
       }
     } catch (err) {
       console.error('Failed to initiate connection:', err)
@@ -228,8 +248,13 @@ export default function ObserverConfigModal({
 
   const handleReconnect = async (accountId: number) => {
     setReconnecting(accountId)
+    setRetryAvailable(false)
+    setManualAuthorization(null)
     try {
-      await accountBrowserFlows.reconnect(authenticatedApi, accountId)
+      const result = await accountBrowserFlows.reconnect(authenticatedApi, accountId,
+        { webPopup: 'preopen', webFallback: 'manual' })
+      setManualAuthorization(result.url ? { url: result.url, popupBlocked: !!result.popupBlocked } : null)
+      if (result.popupBlocked) setReconnecting(null)
       // Subscription fires add() with credentialsValid:true on completion, clearing `reconnecting`.
     } catch (err) {
       console.error('Failed to initiate reconnection:', err)
@@ -247,9 +272,14 @@ export default function ObserverConfigModal({
     const missing = missingResourceUrlPatterns(account, required)
     if (missing.length === 0) return
     setGranting(account.id)
+    setRetryAvailable(false)
+    setManualAuthorization(null)
     try {
-      const { url } = await accountBrowserFlows.grant(authenticatedApi, account.id, missing)
-      if (!url) {
+      const result = await accountBrowserFlows.grant(authenticatedApi, account.id, missing,
+        { webPopup: 'preopen', webFallback: 'manual' })
+      setManualAuthorization(result.url ? { url: result.url, popupBlocked: !!result.popupBlocked } : null)
+      if (result.popupBlocked) setGranting(null)
+      if (!result.url) {
         // The gatekeeper confirmed this account already has access. Update the modal so the user can
         // continue without an OAuth flow.
         setAccounts(prev => {
@@ -362,9 +392,11 @@ export default function ObserverConfigModal({
                       <WorkshopButton
                         tone="primary"
                         onClick={() => handleConnect(need)}
-                        disabled={connecting === need.vendorId}
+                        disabled={connecting === need.vendorId && !retryAvailable}
                       >
-                        {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect'}
+                        {connecting === need.vendorId
+                          ? (retryAvailable ? 'Try connecting again' : 'Waiting for connection…')
+                          : 'Connect'}
                       </WorkshopButton>
                     )}
                   </div>
@@ -429,16 +461,16 @@ export default function ObserverConfigModal({
                         <button
                           type="button"
                           onClick={() => handleGrantResourceAccess(need, chosen)}
-                          disabled={granting === chosen.id}
+                          disabled={granting === chosen.id && !retryAvailable}
                           className="flex items-center gap-1.5 text-xs text-kumo-warning hover:underline disabled:opacity-60"
                         >
-                          {granting === chosen.id ? (
+                          {granting === chosen.id && !retryAvailable ? (
                             <ArrowClockwise size={12} className="animate-spin" />
                           ) : (
                             <Warning size={12} />
                           )}
                           {granting === chosen.id
-                            ? 'Waiting for access…'
+                            ? (retryAvailable ? 'Try connecting again' : 'Waiting for access…')
                             : 'Grant the access needed to verify this resource'}
                         </button>
                       )}
@@ -453,16 +485,16 @@ export default function ObserverConfigModal({
                         <button
                           type="button"
                           onClick={() => handleReconnect(chosen.id)}
-                          disabled={reconnecting === chosen.id}
+                          disabled={reconnecting === chosen.id && !retryAvailable}
                           className="flex items-center gap-1.5 text-xs text-kumo-warning hover:underline disabled:opacity-60"
                         >
-                          {reconnecting === chosen.id ? (
+                          {reconnecting === chosen.id && !retryAvailable ? (
                             <ArrowClockwise size={12} className="animate-spin" />
                           ) : (
                             <Warning size={12} />
                           )}
                           {reconnecting === chosen.id
-                            ? 'Re-authenticating…'
+                            ? (retryAvailable ? 'Try connecting again' : 'Re-authenticating…')
                             : chosen.credentialsValid
                               ? 'Click to re-authenticate this account'
                               : 'This account has expired — click to re-authenticate'}
@@ -473,11 +505,13 @@ export default function ObserverConfigModal({
                         <button
                           type="button"
                           onClick={() => handleConnect(need)}
-                          disabled={connecting === need.vendorId}
+                          disabled={connecting === need.vendorId && !retryAvailable}
                           className="flex items-center gap-1 text-xs text-kumo-subtle hover:text-kumo-default disabled:opacity-60 self-start"
                         >
                           <Plus size={11} />
-                          {connecting === need.vendorId ? 'Waiting for connection…' : 'Connect a different account'}
+                          {connecting === need.vendorId
+                            ? (retryAvailable ? 'Try connecting again' : 'Waiting for connection…')
+                            : 'Connect a different account'}
                         </button>
                       )}
                     </div>
@@ -485,6 +519,16 @@ export default function ObserverConfigModal({
                 </div>
               )
             })}
+          </div>
+        )}
+
+        {manualAuthorization && (
+          <div className="mt-4 rounded-lg border border-kumo-warning/25 bg-kumo-warning-tint px-3 py-2 text-sm text-kumo-warning" role="status">
+            {manualAuthorization.popupBlocked ? 'Your browser blocked the popup. ' : 'A new tab should open. '}
+            <a href={manualAuthorization.url} target="_blank" rel="noreferrer" className="font-semibold underline">
+              Open authorization manually
+            </a>
+            <span className="text-kumo-subtle">, then return here to verify your access.</span>
           </div>
         )}
 
