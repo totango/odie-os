@@ -64,7 +64,7 @@ describe("real user DO migration and capability boundaries", () => {
     Object.defineProperty(ctx, "exports", { value: {
       UserDurableObject: env.TEST_USER,
       PendingLogin: { idFromString: (id: string) => id,
-        get: () => ({ startDelivery: async () => {}, deliver: async (token: string) => { delivered = token },
+        get: () => ({ deliver: async (token: string) => { delivered = token },
           fail: async (message: string) => { failure = message } }) },
     } });
     const callback = new LoginConnectCallbackImpl(ctx, { ...env, ...migration } as Cloudflare.Env);

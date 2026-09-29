@@ -484,8 +484,7 @@ export interface SpotifyAccountSession {
 
   /**
    * Create a new playlist owned by the connected user and return a capability for it. Action.
-   * Dispose the returned stub when done. `public` defaults to true, as at Spotify, unless
-   * `collaborative` is true: a collaborative playlist must be private.
+   * Dispose the returned stub when done.
    */
   createPlaylist(
     name: string,

@@ -215,11 +215,7 @@ describe("Jira action claims and approval previews", () => {
       { kind: "upload", issue: "ENG-1", filename: "evidence.png", mimeType: "image/png", bytes: new Uint8Array([1, 2, 3]).buffer },
     ];
     for (const action of actions) await gatekeeper.stageAction(queue as never, action, "Action", "Summary");
-    const previews = queue.submitAction.mock.calls.map(([, description]) => {
-      const field = description.fields.find((field: {label: string}) => field.label === "Preview");
-      expect(field.kind).toBe("text");
-      return field.value;
-    });
+    const previews = queue.submitAction.mock.calls.map(([, description]) => (description as { description: string }).description);
     expect(previews[0]).toContain('"summary": "A task"');
     for (const preview of previews.slice(1, 3)) {
       expect(preview).toContain('"accountId": "owner-2"');
@@ -235,8 +231,6 @@ describe("Jira action claims and approval previews", () => {
     expect(previews[4]).toContain('"mimeType": "image/png"');
     expect(previews[4]).toContain('"sizeBytes": 3');
     expect(previews[4]).not.toContain('"bytes"');
-    expect(queue.submitAction.mock.calls[4][1].descriptionIsComplete).toBeUndefined();
-    expect(queue.submitAction.mock.calls[4][1].fields).toContainEqual(expect.objectContaining({kind: "file", origin: "agent", size: 3}));
   });
 });
 

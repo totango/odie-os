@@ -60,8 +60,6 @@ This JSDoc is the agent's sole documentation for the API, so keep it **narrowly 
 
 Do NOT leak details the caller doesn't need to use the API — the approval queue (never mention `submitAction`/`applyAction`/approvals; correct simulation keeps this invisible), or gatekeeper internals (caching, DO storage, OAuth, syncing). Document those in the `.ts` implementation or PR, never in the agent-facing `.d.ts`.
 
-The agent receives the `.d.ts` text **verbatim** (via the `types.txt` symlink), and nothing resolves its imports — so it must be **self-contained**. Don't import types from other packages or files (e.g. `Cursor` from `@gadgets/workshop-shared/gatekeeper`); copy the definition into the `.d.ts` instead. TypeScript's structural typing means the implementation can still return the shared type. The only exception is `cloudflare:workers` (e.g. `import type { RpcTarget } from "cloudflare:workers"`), which the agent's environment provides. `pnpm lint` enforces this with the `gadgets/self-contained-agent-types` rule on every `packages/gatekeeper-*/src/*types.d.ts`. Also keep the file free of comments aimed at maintainers (such as "keep in sync with X"), since the agent reads those too.
-
 ### Step 3: STOP — Present API for review
 
 **Do not proceed without operator approval.**
@@ -245,7 +243,7 @@ async getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>> {
 
 Strategy is chosen **per `Gatekeeper` DO class / binding**, not per package — one package may use several (e.g. Google: Gmail=A, Doc=B, BigQuery=C).
 
-- **A — Private-only.** `addObserver()` always throws; `removeObserver()` is a no-op. `getVerifier()` must still exist (the overseer mints it) but is never consulted. Use when the resource is too sensitive to share and there is no per-observer access oracle (e.g. a personal Gmail mailbox). For truly sensitive data, also mark each observation with `ObservationDescription.containsRestrictedData: true`: because nobody can open the workspace without passing `addObserver()`, and with strategy A nobody ever does, the first such observation makes the workspace effectively unshareable — and it permanently sets the workspace's `containsRestrictedData` flag, whose restricted mode blocks all actions and public web fetches, so the data cannot leak back out through other gatekeepers.
+- **A — Private-only.** `addObserver()` always throws; `removeObserver()` is a no-op. `getVerifier()` must still exist (the overseer mints it) but is never consulted. Use when the resource is too sensitive to share and there is no per-observer access oracle (e.g. a personal Gmail mailbox).
 - **B — ACL check (single unit).** The binding is one atomic resource; sub-resources inherit its ACL. `addObserver()` calls a verifier method to confirm the observer can access it and throws otherwise; `removeObserver()` is a no-op; nothing is tracked and no `excludeObservers` is ever needed. Use for repo / document / page / team / single-project bindings.
 - **C — Data-set tracking.** The binding spans sub-resources with **distinct ACLs**, and there is a **per-observer access oracle** for each. The DO logs the data sets actually observed and the current observers; `addObserver()` verifies the observer against **every** logged set (plus a coarse membership baseline) and **stores their verifier**; each later observation that first touches a **new** set re-checks all stored observers and sets `excludeObservers` for any who fail. Use for workspace / organization / dataset-spanning bindings.
 - **D — Low-stakes.** `addObserver()` / `removeObserver()` are no-ops; `getVerifier()` returns a trivial verifier with a no-op public method such as `verify(): void {}` (an empty `WorkerEntrypoint` is not registered in `ctx.exports`). Use when any collaborator may observe (personal, low-stakes services).
@@ -324,7 +322,7 @@ When defining a session interface with hooks, it's important to include comments
 
 ## Tips
 
-- `types.txt` must be a **symlink** to `types.d.ts`, never a copy. Because it is delivered verbatim, `types.d.ts` must not import from other modules — inline any shared types (see [Documenting the API](#documenting-the-api-typesdts)).
+- `types.txt` must be a **symlink** to `types.d.ts`, never a copy.
 - Call `.dup()` on `approvalQueue` stubs before storing in a session, since Cap'n Web automatically disposes all stubs in parameters to an RPC call when the call returns.
 - `suggestedBindingName` in `describe()` reflects the resource **type** (e.g. `"GMAIL_INBOX"`), not the specific instance.
 - For read-only or push-only gatekeepers, `applyAction()` / `rejectAction()` / `revertAction()` can simply throw (they'll never be called since the gatekeeper never submits actions).

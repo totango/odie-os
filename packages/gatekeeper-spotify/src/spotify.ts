@@ -4,7 +4,7 @@ import {
   ApprovalQueue,
   stripTrailingSlashes,
   type AccountDescription,
-  type ConnectHandoff,
+  type ActionDescription,
   type Gatekeeper,
   type GatekeeperConnectCallback,
   type GatekeeperConnectOptions,
@@ -16,10 +16,6 @@ import {
   type SupportedResource,
   type VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
-import { acknowledgeHandoff, connectHandoffPageHtml, htmlResponse, requireBrowserHandoff, requireConnectHandoff } from "@gadgets/gatekeeper-kit/connect-pages";
-import type { GatekeeperConnectResult as HandoffLaunch, GatekeeperReconnectOptions as HandoffOptions } from "@gadgets/workshop-shared/gatekeeper";
-import { buildDescription, type RenderedDescription } from "@gadgets/gatekeeper-kit/action-description";
-import { commitStagedCredentials, stageCredentials } from "@gadgets/gatekeeper-kit/credential-stage";
 import {
   SpotifyApi,
   SpotifyApiError,
@@ -76,23 +72,6 @@ type StoredNonce = {
   value: string;
   expiresAt: number;
   stage: "initiation" | "oauth";
-  /**
-   * Set when this flow reconnects an existing account, so its grant is staged rather than made
-   * live. The mode travels with the flow instead of living on the account: committing one
-   * reconnect while another is in flight must not change how that other flow lands.
-   */
-  reconnect?: true;
-};
-
-/**
- * The live credential keys a grant is written to, held as one unit while a reconnect awaits
- * confirmation (see UserAccount.commitReconnect).
- */
-type StoredCredentials = {
-  refreshToken: string;
-  accessToken: string;
-  accessTokenExpiresAt: number;
-  scopes: string[];
 };
 
 type ResourceKind = "account" | "playlist";
@@ -149,6 +128,14 @@ const PLAYLIST_RESOURCE: SupportedResource = {
 };
 
 const SUPPORTED_RESOURCES: SupportedResource[] = [ACCOUNT_RESOURCE, PLAYLIST_RESOURCE];
+
+const SELF_CLOSING_HTML = `<!DOCTYPE html>
+<html lang="en">
+  <body>
+    <script type="text/javascript">window.close();</script>
+    <p>Authorization complete. You may close this tab and return to Cloudflare OS.</p>
+  </body>
+</html>`;
 
 const INVALID_LINK_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -453,12 +440,12 @@ export default {
       const stub: DurableObjectStub<UserAccount> = ctx.exports.UserAccount.get(
         ctx.exports.UserAccount.idFromString(doId),
       );
-      const handoff = await stub.acceptAuthCode(code, oauthNonce);
-      if (!handoff) {
+      const accepted = await stub.acceptAuthCode(code, oauthNonce);
+      if (!accepted) {
         return new Response(INVALID_LINK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
 
-      return htmlResponse(connectHandoffPageHtml(handoff));
+      return new Response(SELF_CLOSING_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
     return new Response("Not Found", { status: 404 });
@@ -486,12 +473,12 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 
   async connectAccount(
     callback: Fetcher<GatekeeperConnectCallback>,
-    options?: GatekeeperConnectOptions,
-  ): Promise<HandoffLaunch> {
+    _options?: GatekeeperConnectOptions,
+  ): Promise<{ url: string }> {
     const userObjectId = this.ctx.exports.UserAccount.newUniqueId();
     const initiationNonce = generateNonce();
     await this.ctx.exports.UserAccount.get(userObjectId).setCallback(callback, initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}`, handoffProtocol: await this.ctx.exports.UserAccount.get(userObjectId).acknowledgeHandoff(options) };
+    return { url: `${getBaseUrl(this.env)}/${userObjectId.toString()}/${initiationNonce}` };
   }
 
   async getSupportedResources(): Promise<SupportedResource[]> {
@@ -507,8 +494,6 @@ export class GatekeeperVendor extends WorkerEntrypoint<Env> implements Gatekeepe
 // UserAccount DO — stores OAuth credentials and refreshes access tokens.
 
 export class UserAccount extends DurableObject<Env> {
-  /** Records supported launch intent; callback agreement is checked before exchange. */
-  acknowledgeHandoff(options?: HandoffOptions) { return acknowledgeHandoff(this.ctx.storage.kv, options); }
   async setCallback(callback: Fetcher<GatekeeperConnectCallback>, initiationNonce: string): Promise<void> {
     if (!this.ctx.storage.kv.get<string>("refreshToken")) {
       await this.ctx.storage.setAlarm(Date.now() + CONNECT_TIMEOUT_MS);
@@ -522,12 +507,12 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   async prepareReconnect(initiationNonce: string): Promise<void> {
+    this.ctx.storage.kv.put("reconnecting", true);
     this.ctx.storage.kv.put("expiredNotified", false);
     this.ctx.storage.kv.put<StoredNonce>("nonce", {
       value: initiationNonce,
       expiresAt: Date.now() + INITIATION_NONCE_LIFETIME_MS,
       stage: "initiation",
-      reconnect: true,
     });
   }
 
@@ -542,20 +527,15 @@ export class UserAccount extends DurableObject<Env> {
       value: oauthNonce,
       expiresAt: Date.now() + OAUTH_NONCE_LIFETIME_MS,
       stage: "oauth",
-      reconnect: stored.reconnect,
     });
     return { oauthNonce, scopes: OAUTH_SCOPES };
   }
 
-  /**
-   * Finishes the OAuth code exchange and returns the handoff for the page the browser lands on, or
-   * null when the callback's nonce doesn't match.
-   */
-  async acceptAuthCode(code: string, oauthNonce: string): Promise<ConnectHandoff | null> {
+  async acceptAuthCode(code: string, oauthNonce: string): Promise<boolean> {
     const stored = this.ctx.storage.kv.get<StoredNonce>("nonce");
     if (!stored || stored.stage !== "oauth" || Date.now() >= stored.expiresAt ||
         !constantTimeEqual(stored.value, oauthNonce)) {
-      return null;
+      return false;
     }
     this.ctx.storage.kv.delete("nonce");
 
@@ -565,31 +545,25 @@ export class UserAccount extends DurableObject<Env> {
       throw new Error("Took too long to complete authorization. Please try again.");
     }
 
-    const protocol = await requireBrowserHandoff(callback, this.ctx.storage.kv);
     const grant = await exchangeAuthCode(code, this.env.CLIENT_ID, this.env.CLIENT_SECRET, `${getBaseUrl(this.env)}/oauth`);
     if (!grant.refreshToken) {
       throw new Error("Spotify did not return a refresh token.");
     }
 
-    const credentials: StoredCredentials = {
-      refreshToken: grant.refreshToken,
-      accessToken: grant.accessToken,
-      accessTokenExpiresAt: Date.now() + grant.expiresIn * 1000,
-      scopes: grant.scopes,
-    };
+    this.ctx.storage.kv.put("refreshToken", grant.refreshToken);
+    this.ctx.storage.kv.put("accessToken", grant.accessToken);
+    this.ctx.storage.kv.put("accessTokenExpiresAt", Date.now() + grant.expiresIn * 1000);
+    this.ctx.storage.kv.put("scopes", grant.scopes);
+    this.ctx.storage.kv.put("expiredNotified", false);
 
-    let handoff: ConnectHandoff;
-    if (stored.reconnect) {
-      // The reconnect URL is a bearer capability, so the new grant is only staged until the Workshop
-      // has confirmed the browser that finished the flow is the owner's (see commitReconnect). Bound
-      // gadgets keep reading the current token meanwhile.
-      const stageId = stageCredentials(this.ctx.storage.kv, credentials, Date.now());
-      handoff = await callback.reconnectComplete(stageId);
+    const reconnecting = this.ctx.storage.kv.get<boolean>("reconnecting");
+    if (reconnecting) {
+      this.ctx.storage.kv.delete("reconnecting");
+      await callback.credentialsRestored();
     } else {
-      this.#storeCredentials(credentials);
       try {
         const props: GatekeeperUserImplProps = { userObjectId: this.ctx.id.toString() };
-        handoff = requireConnectHandoff(await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props })), protocol);
+        await callback.complete(this.ctx.exports.GatekeeperUserImpl({ props }));
       } catch (err) {
         this.ctx.storage.kv.delete("refreshToken");
         this.ctx.storage.kv.delete("accessToken");
@@ -598,22 +572,7 @@ export class UserAccount extends DurableObject<Env> {
     }
 
     await this.ctx.storage.deleteAlarm();
-    return requireConnectHandoff(handoff, protocol);
-  }
-
-  /** Makes the grant staged under `stageId` live; see GatekeeperUser.commitReconnect. */
-  async commitReconnect(stageId: string): Promise<void> {
-    const credentials = commitStagedCredentials<StoredCredentials>(this.ctx.storage.kv, Date.now(), stageId);
-    if (!credentials) throw new Error("No reconnect is awaiting confirmation. Please try again.");
-    this.#storeCredentials(credentials);
-  }
-
-  #storeCredentials(credentials: StoredCredentials): void {
-    this.ctx.storage.kv.put("refreshToken", credentials.refreshToken);
-    this.ctx.storage.kv.put("accessToken", credentials.accessToken);
-    this.ctx.storage.kv.put("accessTokenExpiresAt", credentials.accessTokenExpiresAt);
-    this.ctx.storage.kv.put("scopes", credentials.scopes);
-    this.ctx.storage.kv.put("expiredNotified", false);
+    return true;
   }
 
   async getAccessToken(): Promise<string> {
@@ -762,14 +721,10 @@ export class GatekeeperUserImpl extends WorkerEntrypoint<Env, GatekeeperUserImpl
     await this.#userAccount().revoke();
   }
 
-  async reconnect(options?: HandoffOptions): Promise<HandoffLaunch> {
+  async reconnect(): Promise<{ url: string }> {
     const initiationNonce = generateNonce();
     await this.#userAccount().prepareReconnect(initiationNonce);
-    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}`, handoffProtocol: await this.#userAccount().acknowledgeHandoff(options) };
-  }
-
-  async commitReconnect(stageId: string): Promise<void> {
-    await this.#userAccount().commitReconnect(stageId);
+    return { url: `${getBaseUrl(this.env)}/${this.ctx.props.userObjectId}/${initiationNonce}` };
   }
 
   /**
@@ -820,8 +775,6 @@ type PlaylistCreateAction = BaseAction & {
   provisionalId: string;
   name: string;
   description?: string;
-  // Set at prepare to what Spotify would assume when omitted, so apply sends, and the approver
-  // reads, the real visibility. Absent only on records staged before that was done.
   public?: boolean;
   collaborative?: boolean;
 };
@@ -857,107 +810,6 @@ type SpotifyAction =
   | PlaylistCreateAction | PlaylistTrackAction | PlaylistDetailsAction
   | PlaylistUnfollowAction | PlaylistFollowAction
   | PlayerAction;
-
-/**
- * The approver-facing text for a prepared action, rendered from the payload that will be applied
- * so every id, URI, name and request body the agent chose is there to read in full.
- */
-function describeSpotifyAction(action: SpotifyAction): RenderedDescription {
-  switch (action.type) {
-    case "saveTracks":
-      return buildDescription(`Save ${action.trackIds.length} track(s) to the library.`)
-        .list("Track IDs", action.trackIds).finish();
-    case "removeSavedTracks":
-      return buildDescription(`Remove ${action.trackIds.length} track(s) from the library.`)
-        .list("Track IDs", action.trackIds).finish();
-    case "saveAlbums":
-      return buildDescription(`Save ${action.albumIds.length} album(s) to the library.`)
-        .list("Album IDs", action.albumIds).finish();
-    case "removeSavedAlbums":
-      return buildDescription(`Remove ${action.albumIds.length} album(s) from the library.`)
-        .list("Album IDs", action.albumIds).finish();
-    case "followArtists":
-      return buildDescription(`Follow ${action.artistIds.length} artist(s).`)
-        .list("Artist IDs", action.artistIds).finish();
-    case "unfollowArtists":
-      return buildDescription(`Unfollow ${action.artistIds.length} artist(s).`)
-        .list("Artist IDs", action.artistIds).finish();
-    case "playlistCreate":
-      return buildDescription(`Create a new ${action.public ? "public" : "private"}` +
-        `${action.collaborative ? ", collaborative" : ""} playlist.`)
-        .inline("Provisional ID", action.provisionalId)
-        .inline("Name", action.name)
-        .verbatim("Description", action.description ?? "")
-        .finish();
-    case "playlistAdd":
-      return buildDescription(`Add ${action.uris.length} track(s) to the playlist` +
-        `${action.position === undefined ? "" : ` at position ${action.position}`}.`)
-        .inline("Playlist", action.playlistId)
-        .list("Track URIs", action.uris)
-        .finish();
-    case "playlistRemove":
-      return buildDescription(
-        `Remove every occurrence of the ${action.uris.length} track URI(s) below from the playlist.`)
-        .inline("Playlist", action.playlistId)
-        .list("Track URIs", action.uris)
-        .finish();
-    case "playlistReorder":
-      return buildDescription(`Move ${action.rangeLength} track(s) from position ` +
-        `${action.rangeStart} to before position ${action.insertBefore}.`)
-        .inline("Playlist", action.playlistId)
-        .finish();
-    case "playlistReplace":
-      return buildDescription(
-        `Replace the playlist's contents with ${action.uris.length} track(s).`)
-        .inline("Playlist", action.playlistId)
-        .list("Track URIs", action.uris)
-        .finish();
-    case "playlistDetails": {
-      const { update } = action;
-      const builder = buildDescription("Update the playlist's details.")
-        .inline("Playlist", action.playlistId);
-      if (update.name !== undefined) builder.inline("Name", update.name);
-      if (update.description !== undefined) builder.verbatim("Description", update.description);
-      if (update.public !== undefined) builder.inline("Public", String(update.public));
-      if (update.collaborative !== undefined) {
-        builder.inline("Collaborative", String(update.collaborative));
-      }
-      return builder.finish();
-    }
-    case "playlistUnfollow":
-      return buildDescription(
-        "Remove this playlist from your library (for a playlist you own, this deletes it).")
-        .inline("Playlist", action.playlistId).finish();
-    case "playlistFollow":
-      return buildDescription("Follow this playlist (add it to your library).")
-        .inline("Playlist", action.playlistId).finish();
-    case "player":
-      return describePlayerCommand(action.command);
-  }
-}
-
-function describePlayerCommand(command: PlayerCommand): RenderedDescription {
-  const builder = (() => {
-    switch (command.op) {
-      case "play":
-        return buildDescription("Start or resume Spotify playback.")
-          .json("Request body", command.body);
-      case "pause": return buildDescription("Pause Spotify playback.");
-      case "next": return buildDescription("Skip to the next track.");
-      case "previous": return buildDescription("Skip to the previous track.");
-      case "seek": return buildDescription(`Seek to ${command.positionMs} ms in the current track.`);
-      case "setVolume": return buildDescription(`Set playback volume to ${command.volumePercent}%.`);
-      case "setShuffle": return buildDescription(`Turn shuffle ${command.shuffle ? "on" : "off"}.`);
-      case "setRepeat": return buildDescription(`Set repeat mode to "${command.mode}".`);
-      case "transfer":
-        return buildDescription(`Move playback to another device${command.play ? " and resume" : ""}.`);
-      case "addToQueue":
-        return buildDescription("Add a track to the playback queue.").inline("Track URI", command.uri);
-    }
-  })();
-  if (command.deviceId !== undefined) builder.inline("Device", command.deviceId);
-  return builder.finish();
-}
 
 type RevertInfo =
   | { kind: "playlistTracks"; realId: string; previousUris: string[] }
@@ -1772,9 +1624,7 @@ export class SpotifyGatekeeperImpl extends DurableObject<Env, SpotifyGatekeeperI
       provisionalId: `~${this.#counter("provisional")}`,
       name,
       description: options?.description,
-      // Spotify makes a playlist public unless told otherwise, and a collaborative one must be
-      // private, so an omitted `public` is resolved here rather than left to the API.
-      public: options?.public ?? !options?.collaborative,
+      public: options?.public,
       collaborative: options?.collaborative,
     };
   }
@@ -1807,12 +1657,11 @@ export class SpotifyGatekeeperImpl extends DurableObject<Env, SpotifyGatekeeperI
   async submitActionForApproval(
     queue: RpcStub<ApprovalQueue>,
     action: SpotifyAction,
-    presentation: { title: string; implementsRevert: boolean },
+    description: ActionDescription,
   ): Promise<void> {
     this.ctx.storage.kv.put<StoredActionRecord>(this.#actionKey(action.approvalId), { action, state: "staged" });
     try {
-      // The text comes from the prepared payload, not the caller, so it always shows what applies.
-      await queue.submitAction(action.approvalId, { ...presentation, ...describeSpotifyAction(action) });
+      await queue.submitAction(action.approvalId, description);
     } catch (error) {
       this.ctx.storage.kv.delete(this.#actionKey(action.approvalId));
       throw error;
@@ -2081,9 +1930,9 @@ class SpotifyPlayerImpl extends RpcTarget implements SpotifyPlayer {
     disposeQueue(this.#queue);
   }
 
-  async #submit(command: PlayerCommand, title: string): Promise<void> {
+  async #submit(command: PlayerCommand, title: string, description: string): Promise<void> {
     const action = this.#gk.preparePlayer(command);
-    await this.#gk.submitActionForApproval(this.#queue, action, { title, implementsRevert: false });
+    await this.#gk.submitActionForApproval(this.#queue, action, { title, description, implementsRevert: false });
   }
 
   async getState(): Promise<SpotifyPlaybackState> {
@@ -2131,19 +1980,23 @@ class SpotifyPlayerImpl extends RpcTarget implements SpotifyPlayer {
     if (options?.trackUris) body.uris = options.trackUris.map(toTrackUri);
     if (options?.offsetPosition !== undefined) body.offset = { position: options.offsetPosition };
     if (options?.positionMs !== undefined) body.position_ms = options.positionMs;
-    await this.#submit({ op: "play", deviceId: options?.deviceId, body }, "Start/resume playback");
+    await this.#submit(
+      { op: "play", deviceId: options?.deviceId, body },
+      "Start/resume playback",
+      "Start or resume Spotify playback on the active device.",
+    );
   }
 
   async pause(deviceId?: string): Promise<void> {
-    await this.#submit({ op: "pause", deviceId }, "Pause playback");
+    await this.#submit({ op: "pause", deviceId }, "Pause playback", "Pause Spotify playback.");
   }
 
   async next(deviceId?: string): Promise<void> {
-    await this.#submit({ op: "next", deviceId }, "Skip to next track");
+    await this.#submit({ op: "next", deviceId }, "Skip to next track", "Skip to the next track.");
   }
 
   async previous(deviceId?: string): Promise<void> {
-    await this.#submit({ op: "previous", deviceId }, "Skip to previous track");
+    await this.#submit({ op: "previous", deviceId }, "Skip to previous track", "Skip to the previous track.");
   }
 
   async seek(positionMs: number, deviceId?: string): Promise<void> {
@@ -2151,7 +2004,7 @@ class SpotifyPlayerImpl extends RpcTarget implements SpotifyPlayer {
       throw new Error("seek(): positionMs must be a non-negative number of milliseconds.");
     }
     const pos = Math.floor(positionMs);
-    await this.#submit({ op: "seek", positionMs: pos, deviceId }, "Seek playback");
+    await this.#submit({ op: "seek", positionMs: pos, deviceId }, "Seek playback", `Seek to ${pos} ms in the current track.`);
   }
 
   async setVolume(volumePercent: number, deviceId?: string): Promise<void> {
@@ -2159,7 +2012,7 @@ class SpotifyPlayerImpl extends RpcTarget implements SpotifyPlayer {
       throw new Error("setVolume(): volumePercent must be between 0 and 100.");
     }
     const volume = Math.round(volumePercent);
-    await this.#submit({ op: "setVolume", volumePercent: volume, deviceId }, "Set volume");
+    await this.#submit({ op: "setVolume", volumePercent: volume, deviceId }, "Set volume", `Set playback volume to ${volume}%.`);
   }
 
   @skipRpcValidation()
@@ -2168,7 +2021,7 @@ class SpotifyPlayerImpl extends RpcTarget implements SpotifyPlayer {
       throw new Error("setShuffle(): shuffle must be a boolean (true or false).");
     }
     assertOptionalDeviceId(deviceId);
-    await this.#submit({ op: "setShuffle", shuffle, deviceId }, "Set shuffle");
+    await this.#submit({ op: "setShuffle", shuffle, deviceId }, "Set shuffle", `Turn shuffle ${shuffle ? "on" : "off"}.`);
   }
 
   @skipRpcValidation()
@@ -2177,19 +2030,23 @@ class SpotifyPlayerImpl extends RpcTarget implements SpotifyPlayer {
       throw new Error(`setRepeat(): mode must be one of "off", "track", or "context".`);
     }
     assertOptionalDeviceId(deviceId);
-    await this.#submit({ op: "setRepeat", mode: mode as SpotifyRepeatMode, deviceId }, "Set repeat mode");
+    await this.#submit({ op: "setRepeat", mode: mode as SpotifyRepeatMode, deviceId }, "Set repeat mode", `Set repeat mode to "${mode}".`);
   }
 
   async transferTo(deviceId: string, play?: boolean): Promise<void> {
     if (typeof deviceId !== "string" || deviceId.trim() === "") {
       throw new Error("transferTo(): deviceId must be a non-empty string.");
     }
-    await this.#submit({ op: "transfer", deviceId, play: play ?? false }, "Transfer playback");
+    await this.#submit(
+      { op: "transfer", deviceId, play: play ?? false },
+      "Transfer playback",
+      `Move playback to device ${deviceId}${play ? " and resume" : ""}.`,
+    );
   }
 
   async addToQueue(uri: string, deviceId?: string): Promise<void> {
     const trackUriValue = toTrackUri(uri);
-    await this.#submit({ op: "addToQueue", uri: trackUriValue, deviceId }, "Add to queue");
+    await this.#submit({ op: "addToQueue", uri: trackUriValue, deviceId }, "Add to queue", `Add ${trackUriValue} to the playback queue.`);
   }
 }
 
@@ -2241,6 +2098,7 @@ class SpotifyPlaylistImpl extends RpcTarget implements SpotifyPlaylist {
     const action = this.#gk.preparePlaylistAdd(this.#logicalId, uris, position);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Add ${uris.length} track(s) to playlist`,
+      description: `Add ${uris.length} track(s) to the playlist${position === undefined ? "" : ` at position ${position}`}.`,
       implementsRevert: true,
     });
   }
@@ -2252,6 +2110,7 @@ class SpotifyPlaylistImpl extends RpcTarget implements SpotifyPlaylist {
     const action = this.#gk.preparePlaylistRemove(this.#logicalId, uris);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Remove ${uris.length} track(s) from playlist`,
+      description: `Remove ${uris.length} track(s) from the playlist.`,
       implementsRevert: true,
     });
   }
@@ -2270,6 +2129,7 @@ class SpotifyPlaylistImpl extends RpcTarget implements SpotifyPlaylist {
     const action = this.#gk.preparePlaylistReorder(this.#logicalId, rangeStart, insertBefore, length);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: "Reorder playlist tracks",
+      description: `Move ${length} track(s) from position ${rangeStart} to before position ${insertBefore}.`,
       implementsRevert: true,
     });
   }
@@ -2283,6 +2143,7 @@ class SpotifyPlaylistImpl extends RpcTarget implements SpotifyPlaylist {
     const action = this.#gk.preparePlaylistReplace(this.#logicalId, uris);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: "Replace playlist tracks",
+      description: `Replace the playlist's contents with ${uris.length} track(s).`,
       implementsRevert: true,
     });
   }
@@ -2294,8 +2155,10 @@ class SpotifyPlaylistImpl extends RpcTarget implements SpotifyPlaylist {
     }
     await this.#gk.assertEditablePlaylist(this.#logicalId);
     const action = this.#gk.preparePlaylistDetails(this.#logicalId, update);
+    const fields = Object.keys(update).join(", ") || "details";
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: "Change playlist details",
+      description: `Update playlist ${fields}.`,
       implementsRevert: true,
     });
   }
@@ -2304,6 +2167,7 @@ class SpotifyPlaylistImpl extends RpcTarget implements SpotifyPlaylist {
     const action = this.#gk.preparePlaylistUnfollow(this.#logicalId);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: "Remove playlist from library",
+      description: "Remove this playlist from your library (for a playlist you own, this deletes it).",
       implementsRevert: true,
     });
   }
@@ -2312,6 +2176,7 @@ class SpotifyPlaylistImpl extends RpcTarget implements SpotifyPlaylist {
     const action = this.#gk.preparePlaylistFollow(this.#logicalId);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: "Add playlist to library",
+      description: "Follow this playlist (add it to your library).",
       implementsRevert: true,
     });
   }
@@ -2451,6 +2316,7 @@ class SpotifyAccountSessionImpl extends RpcTarget implements SpotifyAccountSessi
     const action = this.#gk.prepareSaveTracks(trackIds);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Save ${trackIds.length} track(s)`,
+      description: `Save ${trackIds.length} track(s) to the library.`,
       implementsRevert: true,
     });
   }
@@ -2461,6 +2327,7 @@ class SpotifyAccountSessionImpl extends RpcTarget implements SpotifyAccountSessi
     const action = this.#gk.prepareRemoveSavedTracks(trackIds);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Remove ${trackIds.length} saved track(s)`,
+      description: `Remove ${trackIds.length} track(s) from the library.`,
       implementsRevert: true,
     });
   }
@@ -2471,6 +2338,7 @@ class SpotifyAccountSessionImpl extends RpcTarget implements SpotifyAccountSessi
     const action = this.#gk.prepareSaveAlbums(albumIds);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Save ${albumIds.length} album(s)`,
+      description: `Save ${albumIds.length} album(s) to the library.`,
       implementsRevert: true,
     });
   }
@@ -2481,6 +2349,7 @@ class SpotifyAccountSessionImpl extends RpcTarget implements SpotifyAccountSessi
     const action = this.#gk.prepareRemoveSavedAlbums(albumIds);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Remove ${albumIds.length} saved album(s)`,
+      description: `Remove ${albumIds.length} album(s) from the library.`,
       implementsRevert: true,
     });
   }
@@ -2491,6 +2360,7 @@ class SpotifyAccountSessionImpl extends RpcTarget implements SpotifyAccountSessi
     const action = this.#gk.prepareFollowArtists(artistIds);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Follow ${artistIds.length} artist(s)`,
+      description: `Follow ${artistIds.length} artist(s).`,
       implementsRevert: true,
     });
   }
@@ -2501,6 +2371,7 @@ class SpotifyAccountSessionImpl extends RpcTarget implements SpotifyAccountSessi
     const action = this.#gk.prepareUnfollowArtists(artistIds);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Unfollow ${artistIds.length} artist(s)`,
+      description: `Unfollow ${artistIds.length} artist(s).`,
       implementsRevert: true,
     });
   }
@@ -2543,6 +2414,7 @@ class SpotifyAccountSessionImpl extends RpcTarget implements SpotifyAccountSessi
     const action = this.#gk.preparePlaylistCreate(name, options);
     await this.#gk.submitActionForApproval(this.#queue, action, {
       title: `Create playlist "${name}"`,
+      description: `Create a new ${options?.public ? "public" : "private"} playlist named "${name}".`,
       implementsRevert: true,
     });
     return new SpotifyPlaylistImpl(this.#gk, this.#queue.dup(), action.provisionalId);

@@ -496,12 +496,6 @@ export class RequestBuilds {
     if (hash !== descriptor.sha256) throw new Error("BUILD_CONTEXT_UNAVAILABLE");
     const current = await this.authorize(owner, request);
     if (!current.allowed) throw new Error("BUILD_AUTHORIZATION_DENIED");
-    // Authorization awaits provider/authority RPC. Recheck withdrawal synchronously after it;
-    // a frozen descriptor is not permission to return bytes the author has since deleted.
-    if (!this.#spec(run).contextFiles.some(file => file.id === descriptor.id &&
-        file.sha256 === descriptor.sha256 && file.byteLength === descriptor.byteLength)) {
-      throw new Error("BUILD_CONTEXT_UNAVAILABLE");
-    }
     return content;
   }
 

@@ -15,6 +15,7 @@ vi.mock('./runtime', () => ({
   getWorkshopRuntime: () => ({ kind: fixture.native ? 'tauri' : 'web', apiOrigin: new URL('https://example.test') }),
   installNativeLoginCoordinator: async () => {},
 }))
+vi.mock('./workshopWebSocketRpc', () => ({ newWorkshopWebSocketRpcSession: fixture.connect }))
 
 // A controlled transport boundary; the production RpcPromise and retry loop remain real.
 function connection(ping: () => Promise<void> = async () => {}) {
@@ -34,11 +35,7 @@ beforeEach(() => {
   vi.spyOn(Math, 'random').mockReturnValue(0.5)
   for (const level of ['debug', 'info', 'warn'] as const) vi.spyOn(console, level).mockImplementation(() => {})
   fixture.native = false
-  fixture.connect = vi.fn<() => ReturnType<typeof connection>>()
-  // Unlike a hoisted vi.mock (whose export stays cached across resetModules), a per-test
-  // factory pins this page's transport. Late work from a failed page cannot call a later
-  // test's socket factory, even when a test fails before it drains its fake timers.
-  vi.doMock('./workshopWebSocketRpc', () => ({ newWorkshopWebSocketRpcSession: fixture.connect }))
+  fixture.connect.mockReset()
   fixture.render.mockClear()
   // main owns page-lifetime listeners; clean them up when simulating a new page in the next test.
   for (const target of [window, document]) {
@@ -55,7 +52,6 @@ afterEach(() => {
   vi.clearAllTimers()
   vi.useRealTimers()
   vi.restoreAllMocks()
-  vi.doUnmock('./workshopWebSocketRpc')
 })
 
 it.each([false, true])('retains exponential backoff across successful but short-lived connections (native=%s)', async (native) => {

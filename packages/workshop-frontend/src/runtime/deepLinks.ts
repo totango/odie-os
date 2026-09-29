@@ -2,7 +2,7 @@ import { ODIE_PRODUCTION_ORIGIN } from './WorkshopRuntime'
 
 export type NativeDeepLink =
   | { kind: 'spa-route'; path: string }
-  | { kind: 'oauth-return'; handle: string; ticket: string }
+  | { kind: 'oauth-return'; handle: string }
 
 const CLAIMED_STATIC_PATHS = new Set([
   '/',
@@ -50,7 +50,7 @@ export function parseNativeDeepLink(rawUrl: string, expectedOrigin = ODIE_PRODUC
   if (EXCLUDED_PREFIXES.some(prefix => path === prefix.slice(0, -1) || path.startsWith(prefix))) return null
 
   if (path.startsWith(OAUTH_RETURN_PREFIX)) {
-    if (url.search || !/^#[0-9a-f]{64}$/.test(url.hash)) return null
+    if (url.hash) return null
     let handle: string
     try {
       handle = decodeURIComponent(path.slice(OAUTH_RETURN_PREFIX.length))
@@ -58,7 +58,7 @@ export function parseNativeDeepLink(rawUrl: string, expectedOrigin = ODIE_PRODUC
       return null
     }
     if (!/^[A-Za-z0-9_-]{16,256}$/.test(handle)) return null
-    return { kind: 'oauth-return', handle, ticket: url.hash.slice(1) }
+    return { kind: 'oauth-return', handle }
   }
 
   const shareFragment = parseShareFragment(url.hash, path)

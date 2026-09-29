@@ -12,7 +12,7 @@
 // Every Zendesk request is served by the stub below. Nothing here reaches a real Zendesk tenant, and
 // no test writes to a live ticket.
 
-import { env, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { exports as workerExports, RpcStub, RpcTarget } from "cloudflare:workers";
 import type { ZendeskAccount } from "../../src/zendesk.js";
 import type {
@@ -113,7 +113,6 @@ function accountFor(name: string) {
 async function connect(name: string, subdomain: string): Promise<string> {
   const account = accountFor(name);
   await account.setCallback(testExports.TestConnectCallback({}), NONCE);
-  await account.acknowledgeHandoff({ handoffProtocol: "browser-bound-v1" });
   const begun = await account.beginOAuth(NONCE, subdomain);
   expect(begun).not.toBeNull();
   await account.acceptAuthCode("auth-code", begun!.oauthNonce);
@@ -143,29 +142,6 @@ afterEach(() => {
 });
 
 describe("Zendesk Work Items app UI", () => {
-  it("keeps reconnect credentials staged across real RPC until exact-stage redemption", async () => {
-    await connect("staged-reconnect", SUBDOMAIN);
-    const account = accountFor("staged-reconnect");
-    await account.prepareReconnect(NONCE);
-    const begun = await account.beginOAuth(NONCE, SUBDOMAIN);
-    vi.stubGlobal("fetch", async () => Response.json({ access_token: "replacement-token" }));
-    const handoff = await account.acceptAuthCode("replacement-code", begun!.oauthNonce);
-    if (!handoff) throw new Error("Expected staged handoff");
-    await expect(account.getAccessToken()).resolves.toBe("access-token");
-    // Inspect rejection in the real DO: this pool reports rejected native RPC promises as
-    // unhandled even when the caller awaits/catches them. Successful commit still traverses RPC.
-    await runInDurableObject(account, async instance => {
-      await expect(instance.commitReconnect("wrong-stage")).rejects.toThrow(/No reconnect/);
-    });
-    await expect(account.getAccessToken()).resolves.toBe("access-token");
-    await account.commitReconnect(handoff.ticket);
-    await expect(account.getAccessToken()).resolves.toBe("replacement-token");
-    await runInDurableObject(account, async instance => {
-      await expect(instance.commitReconnect(handoff.ticket)).rejects.toThrow(/No reconnect/);
-    });
-    await expect(account.acceptAuthCode("replacement-code", begun!.oauthNonce)).resolves.toBeNull();
-  });
-
   it("keeps management writes off the agent session while creation traverses real approval RPC", async () => {
     const accountId = await connect("creation-session", SUBDOMAIN);
     const hooks = testEnv.TEST_HOOKS.get(testEnv.TEST_HOOKS.idFromName("creation-session"));

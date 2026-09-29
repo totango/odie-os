@@ -1,5 +1,4 @@
 import { logRpcFailure } from './rpcErrors'
-import { negotiateEditing, requireEditingReady } from './features/workspace/editingProtocol'
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useParams, useRouter } from '@tanstack/react-router'
 import { RpcPromise, RpcStub } from 'capnweb'
@@ -25,7 +24,6 @@ import { AccountsSubscriberAdapter } from './accountsSubscriber'
 import { useHub } from './HubContext'
 import { blueprintCreationOrigin } from './blueprintCreationOrigin'
 import { accountBrowserFlows } from './accountBrowserFlow'
-import { useDialogSelectPortalContainer } from './useDialogSelectPortalContainer'
 
 interface Props {
   rpcStub: RpcStub<PublicApi>
@@ -71,7 +69,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   // Per-binding URL collector functions exposed by each gatekeeper configurator iframe. We call
   // these at submit time to capture the chosen resource URL.
   const collectorsRef = useRef<Map<string, () => Promise<string>>>(new Map())
-  const selectPortalContainer = useDialogSelectPortalContainer()
+  const selectPortalRef = useRef<HTMLDivElement>(null)
   const [canManageFeatured, setCanManageFeatured] = useState(false)
   const [isFeatured, setIsFeatured] = useState(false)
   const [updatingFeatured, setUpdatingFeatured] = useState(false)
@@ -574,7 +572,6 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       blueprintCreationOrigin(hub),
     )
     try {
-      await negotiateEditing(overseer)
       let metadata = await overseer.getMetadata()
       window.location.href = `/workspace/${metadata.id}`
     } catch (err: any) {
@@ -714,7 +711,6 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
       // the blueprint was never published from one), the user record is all there is to clean up.
       if (ownBlueprintSummary?.source.type === 'workspace') {
         overseer = authenticatedApi.openGadget(ownBlueprintSummary.source.workspaceId)
-        await requireEditingReady(overseer)
         await overseer.deleteBlueprint(id)
       } else {
         await authenticatedApi.deleteOrphanedBlueprint(id)
@@ -1055,7 +1051,7 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
                   onReconnectAccount={handleReconnectAccount}
                   onReadyChange={(ready) => handleGatekeeperReadyChange(activeBindingName, ready)}
                   onCollectorChange={(collect) => handleCollectorChange(activeBindingName, collect)}
-                  selectPortalContainer={selectPortalContainer}
+                  selectPortalContainer={selectPortalRef}
                 />
               </div>
 
@@ -1074,6 +1070,10 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
             </>
           )}
         </Dialog>
+        <div
+          ref={selectPortalRef}
+          className="pointer-events-none fixed inset-0 z-[1100] [&>*]:pointer-events-auto"
+        />
       </Dialog.Root>
 
       {/* Delete blueprint confirmation dialog */}
@@ -1368,7 +1368,7 @@ function BindingField({
   onReconnectAccount: (accountId: number) => void
   onReadyChange: (ready: boolean) => void
   onCollectorChange: (collect: (() => Promise<string>) | null) => void
-  selectPortalContainer?: HTMLElement | null
+  selectPortalContainer?: { current: HTMLElement | null }
 }) {
   const title = binding.title || name
 

@@ -12,7 +12,6 @@
   "dependencies": {
     "@gadgets/backend-utils": "workspace:*",
     "@gadgets/configurator-ui": "workspace:*",
-    "@gadgets/gatekeeper-kit": "workspace:*",
     "@gadgets/gatekeeper-work-items": "workspace:*",
     "@gadgets/mcp-shared": "workspace:*",
     "@gadgets/workshop-shared": "workspace:*",
@@ -20,7 +19,6 @@
     "capnweb-validate": "catalog:"
   },
   "devDependencies": {
-    "@gadgets/scripts": "workspace:*",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"

@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [capnwebValidate(), cloudflareTest({
     main: "./src/index.ts",
     miniflare: {
-      compatibilityDate: "2026-09-04",
+      compatibilityDate: "2026-02-02",
       compatibilityFlags: ["nodejs_compat", "allow_irrevocable_stub_storage"],
       serviceBindings: {
         TEST_CONTEXT_FENCE_VENDOR: {name: kCurrentWorker, entrypoint: "GatekeeperVendor", props: {sharingDomain: "context-provider-fixture"}},
@@ -21,8 +21,9 @@ export default defineConfig({
     },
   })],
   test: {
+    fileParallelism: false,
     exclude: ["__tests__/vite-config.test.ts"],
     include: ["__tests__/*.test.ts"],
-    setupFiles: ["@gadgets/scripts/assert-workerd"],
+    setupFiles: ["../../scripts/assert-workerd.ts"],
   },
 });

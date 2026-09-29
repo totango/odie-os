@@ -1,39 +1,11 @@
 import { RpcStub } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GatekeeperUserImpl, GatekeeperVendor, UserAccount, validateNativeReturnUrl } from "../src/jira";
-import { connectCallback, HANDOFF } from "./connect-callback";
-import { connectHandoffPageHtml } from "@gadgets/gatekeeper-kit/connect-pages";
 
 const nativeReturnUrl = "https://workshop.example/native/oauth-return/abcdefghijklmnopqrstuvwxyzABCDEF0123456789_-";
 
 describe("Jira native OAuth return handling", () => {
   afterEach(() => vi.unstubAllGlobals());
-
-  it.each(["browser-bound-v1", "native-verifier-v1"] as const)("negotiates %s and completes without changing its return protocol", async handoffProtocol => {
-    const callback = connectCallback(handoffProtocol);
-    const account = makeAccount(callback);
-    const nonce = "a".repeat(64);
-    await account.setCallback(callback, nonce, nativeReturnUrl);
-    await expect(account.acknowledgeHandoff({ handoffProtocol })).resolves.toBe(handoffProtocol);
-    const begun = await account.beginOAuthFlow(nonce);
-    const outcome = await account.acceptAuthCode("code", begun!.oauthNonce);
-    if (!outcome?.handoff) throw new Error("Expected handoff");
-    const html = connectHandoffPageHtml(outcome.handoff);
-    expect(html).toContain(handoffProtocol === "native-verifier-v1" ? `/native/oauth-return/${"n".repeat(43)}#` : "/connect/handoff#");
-    expect(callback.complete).toHaveBeenCalledOnce();
-    await expect(account.acceptAuthCode("code", begun!.oauthNonce)).resolves.toBeNull();
-  });
-
-  it("rejects a stale browser callback before exchange when native launch was requested", async () => {
-    const callback = connectCallback();
-    const account = makeAccount(callback);
-    await account.setCallback(callback, "a".repeat(64));
-    await expect(account.acknowledgeHandoff({ handoffProtocol: "native-verifier-v1" })).resolves.toBe("native-verifier-v1");
-    const begun = await account.beginOAuthFlow("a".repeat(64));
-    await expect(account.acceptAuthCode("code", begun!.oauthNonce)).rejects.toThrow(/start a new connection/);
-    expect(fetch).not.toHaveBeenCalled();
-    expect(callback.complete).not.toHaveBeenCalled();
-  });
 
   it("validates only Workshop native OAuth return URLs", () => {
     const env = { BASE_URL: "https://workshop.example/gatekeeper/jira" };
@@ -46,7 +18,7 @@ describe("Jira native OAuth return handling", () => {
   });
 
   it("threads a validated native return URL through connect nonce state", async () => {
-    const callback = connectCallback();
+    const callback = { complete: vi.fn(), credentialsRestored: vi.fn() };
     const setCallback = vi.fn();
     const vendor = new GatekeeperVendor();
     Object.assign(vendor, {
@@ -55,21 +27,20 @@ describe("Jira native OAuth return handling", () => {
         exports: {
           UserAccount: {
             newUniqueId: () => ({ toString: () => "e".repeat(64) }),
-            get: () => ({ setCallback, acknowledgeHandoff: async () => "native-verifier-v1" }),
+            get: () => ({ setCallback }),
           },
         },
       },
     });
 
-    await expect(vendor.connectAccount(new RpcStub(callback), { returnUrl: nativeReturnUrl, handoffProtocol: "native-verifier-v1" })).resolves.toMatchObject({
-      handoffProtocol: "native-verifier-v1",
+    await expect(vendor.connectAccount(new RpcStub(callback), { returnUrl: nativeReturnUrl })).resolves.toMatchObject({
       url: expect.stringContaining(`/${"e".repeat(64)}/`),
     });
     expect(setCallback).toHaveBeenCalledWith(expect.any(RpcStub), expect.stringMatching(/^[0-9a-f]{64}$/), nativeReturnUrl);
   });
 
   it("preserves the native return URL across connect OAuth nonce state", async () => {
-    const callback = connectCallback();
+    const callback = { complete: vi.fn(), credentialsRestored: vi.fn() };
     const account = makeAccount(callback);
 
     await account.setCallback(callback, "a".repeat(64), nativeReturnUrl);
@@ -79,7 +50,7 @@ describe("Jira native OAuth return handling", () => {
 
     const accepted = await account.acceptAuthCode("code", begun.oauthNonce);
 
-    expect(accepted).toEqual({ handoff: HANDOFF });
+    expect(accepted).toEqual({ returnUrl: nativeReturnUrl });
     expect(callback.complete).toHaveBeenCalledTimes(1);
     expect(callback.credentialsRestored).not.toHaveBeenCalled();
   });
@@ -94,21 +65,20 @@ describe("Jira native OAuth return handling", () => {
         exports: {
           UserAccount: {
             idFromString: (id: string) => id,
-            get: () => ({ prepareReconnect, acknowledgeHandoff: async () => "native-verifier-v1" }),
+            get: () => ({ prepareReconnect }),
           },
         },
       },
     });
 
-    await expect(user.reconnect({ returnUrl: nativeReturnUrl, handoffProtocol: "native-verifier-v1" })).resolves.toMatchObject({
-      handoffProtocol: "native-verifier-v1",
+    await expect(user.reconnect({ returnUrl: nativeReturnUrl })).resolves.toMatchObject({
       url: expect.stringContaining(`/${"f".repeat(64)}/`),
     });
     expect(prepareReconnect).toHaveBeenCalledWith(expect.stringMatching(/^[0-9a-f]{64}$/), nativeReturnUrl);
   });
 
   it("preserves the native return URL across reconnect OAuth nonce state", async () => {
-    const callback = connectCallback();
+    const callback = { complete: vi.fn(), credentialsRestored: vi.fn() };
     const account = makeAccount(callback);
 
     await account.setCallback(callback, "a".repeat(64));
@@ -119,15 +89,13 @@ describe("Jira native OAuth return handling", () => {
 
     const accepted = await account.acceptAuthCode("code", begun.oauthNonce);
 
-    expect(accepted).toEqual({ handoff: HANDOFF });
-    expect(callback.reconnectComplete).toHaveBeenCalledTimes(1);
-    expect(callback.credentialsRestored).not.toHaveBeenCalled();
-    await account.commitReconnect(callback.reconnectComplete.mock.calls[0][0]);
+    expect(accepted).toEqual({ returnUrl: nativeReturnUrl });
+    expect(callback.credentialsRestored).toHaveBeenCalledTimes(1);
     expect(callback.complete).not.toHaveBeenCalled();
   });
 
   it("consumes initiation and OAuth nonces exactly once", async () => {
-    const callback = connectCallback();
+    const callback = { complete: vi.fn(), credentialsRestored: vi.fn() };
     const account = makeAccount(callback);
 
     await account.setCallback(callback, "c".repeat(64), nativeReturnUrl);
@@ -136,7 +104,7 @@ describe("Jira native OAuth return handling", () => {
     await expect(account.beginOAuthFlow("c".repeat(64))).resolves.toBeNull();
     if (!begun) throw new Error("OAuth flow did not begin.");
 
-    await expect(account.acceptAuthCode("code", begun.oauthNonce)).resolves.toEqual({ handoff: HANDOFF });
+    await expect(account.acceptAuthCode("code", begun.oauthNonce)).resolves.toEqual({ returnUrl: nativeReturnUrl });
     await expect(account.acceptAuthCode("code", begun.oauthNonce)).resolves.toBeNull();
     expect(callback.complete).toHaveBeenCalledTimes(1);
   });
@@ -171,7 +139,6 @@ function makeAccount(callback: { complete: ReturnType<typeof vi.fn>; credentials
     },
   });
   kv.set("callback", callback);
-  kv.set("connectHandoffProtocol", "browser-bound-v1");
   return account;
 }
 

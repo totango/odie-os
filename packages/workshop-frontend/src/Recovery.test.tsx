@@ -3,16 +3,19 @@
 import { Activity, act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
-import type { CodeChangeSubmission } from '@gadgets/workshop-shared/api'
-import { ChatOtClient, type ChatOtClientDelegate } from './features/code/otClient'
+import * as Y from 'yjs'
+import type { CodeSubscriber } from '@gadgets/workshop-shared/api'
 import { RecoveryControls, RecoveryProvider, RecoveryWorkspace, useRecoverySource } from './Recovery'
-import {
-  createRecoveryBundle, recoveryBundleHtml, recoveryComposerText,
-  type ComposerRecovery, type EditorRecovery, type RecoveryBundle,
-} from './recoveryBundle'
+import GadgetCodeInterface from './GadgetCodeInterface'
+import { createRecoveryBundle, recoveryBundleHtml, recoveryComposerText, type ComposerRecovery, type RecoveryBundle } from './recoveryBundle'
 
-const mocks = vi.hoisted(() => ({ saveBlob: vi.fn<() => Promise<void>>() }))
+const mocks = vi.hoisted(() => ({ text: null as Y.Text | null, saveBlob: vi.fn<() => Promise<void>>() }))
 vi.mock('./runtime', () => ({ getWorkshopRuntime: () => ({ saveBlob: mocks.saveBlob }) }))
+vi.mock('@cloudflare/kumo', () => ({ useKumoToastManager: () => ({ add: () => {} }) }))
+vi.mock('./FileSidebar', () => ({ default: () => null }))
+vi.mock('./components/WorkshopControls', () => ({ WorkshopButton: () => null, WorkshopIconButton: () => null }))
+vi.mock('./CodeEditor', () => ({ default: ({ ytext }: { ytext: Y.Text }) => { mocks.text = ytext; return null } }))
+vi.mock('./CodeDiffEditor', () => ({ default: ({ modifiedYText }: { modifiedYText: Y.Text }) => { mocks.text = modifiedYText; return null } }))
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 const container = document.createElement('div')
@@ -30,67 +33,47 @@ const click = async (label: string) => {
   await act(async () => button!.click())
 }
 const snapshot = (): RecoveryBundle => JSON.parse(container.querySelector('textarea')!.value)
-const flush = () => new Promise<void>(resolve => setTimeout(resolve, 5))
 
-// A real OT client whose submission never settles: the state the export exists for.
-function unacknowledgedClient(): { client: ChatOtClient; submissions: CodeChangeSubmission[] } {
-  const submissions: CodeChangeSubmission[] = []
-  const delegate: ChatOtClientDelegate = {
-    fetchFilesAtCommit: async () => new Map(),
-    submitCodeChange: submission => {
-      submissions.push(submission)
-      return new Promise(() => {})
-    },
-    isTransientError: () => false,
-    onRemoteChange: () => {},
-    onLocalEditsDiscarded: () => {},
-    onDirtyState: () => {},
-    onFatalError: () => {},
+it('captures materialized branch edits while updateCode is unresolved, including while Files is hidden', async () => {
+  const doc = new Y.Doc()
+  doc.getMap<Y.Text>('files').set('client.js', new Y.Text('base'))
+  doc.getMap<Y.Text>('files').set('untouched.txt', new Y.Text('full text'))
+  let resolve!: () => void
+  const updateCode = vi.fn<() => Promise<void>>(() => new Promise<void>(r => { resolve = r }))
+  const overseer = {
+    subscribeToCode: async (subscriber: CodeSubscriber) => {
+      subscriber.update({ update: Y.encodeStateAsUpdateV2(doc), version: 7, timestamp: new Date() })
+      subscriber.ready()
+      return { [Symbol.dispose]() {} }
+    }, updateCode,
   }
-  return { client: new ChatOtClient(delegate), submissions }
-}
-
-it("exports the OT client's own unacknowledged text, including while the editor is hidden", async () => {
-  const { client, submissions } = unacknowledgedClient()
-  client.setDurableState({ rowsThrough: 0 })
-  client.setPendingCreations(new Set([1]))
-  await flush()
-  client.applyLocalChange({ 1: [['client.js', { set: 'local unacknowledged' }]] })
-  await flush()
-  expect(submissions).toHaveLength(1)
-
-  // The real interface registers this source below its own visibility gate, so a hidden Files
-  // pane must still capture. Activity hiding is covered separately, below.
-  function Editor() {
-    useRecoverySource('editor', (): EditorRecovery => ({
-      kind: 'editor', chatId: 42, branch: { kind: 'chat', chatId: 42 },
-      sending: client.hasLocalEdits(), code: client.captureRecovery(),
-    }))
-    return null
+  const render = async (visible: boolean) => {
+    await act(async () => root.render(<RecoveryProvider>
+      <RecoveryControls workspaceId="workspace" />
+      <GadgetCodeInterface overseer={overseer as never} filesRoot="files" selectedChatId={42} isAgentActive={false} isVisible={visible} />
+    </RecoveryProvider>))
   }
-  await act(async () => root.render(<RecoveryProvider>
-    <RecoveryControls workspaceId="workspace" />
-    <Editor />
-  </RecoveryProvider>))
+  await render(true)
+  await act(async () => { mocks.text!.insert(4, ' local unacknowledged') })
+  expect(updateCode).toHaveBeenCalledTimes(1)
+  await render(false)
   await click('Capture recovery snapshot')
-
   const source = snapshot().sources[0]
-  if (source.kind !== 'editor') throw new Error('missing editor source')
+  expect(source.kind).toBe('editor')
+  if (source.kind !== 'editor') throw new Error('missing editor')
   expect(source.sending).toBe(true)
+  expect(source.unacknowledged).toEqual([{ chatId: 42, bytes: expect.any(Number) }])
+  expect(source.lastObservedServerVersion).toBe(7)
   expect(source.branch).toEqual({ kind: 'chat', chatId: 42 })
-  expect(source.code?.acknowledgement).toBe('unconfirmed')
-  expect(source.code?.files).toEqual([{ gadgetId: 1, path: 'client.js', text: 'local unacknowledged' }])
-  expect(submissions).toHaveLength(1) // capture never resubmits
-  client.dispose()
-})
-
-it('reports a clean editor as nothing to recover rather than inventing a copy', async () => {
-  const { client } = unacknowledgedClient()
-  client.setDurableState({ rowsThrough: 0 })
-  await flush()
-  expect(client.hasLocalEdits()).toBe(false)
-  expect(client.captureRecovery()).toBeNull()
-  client.dispose()
+  const branch = source.layers.find(layer => layer.name === 'editable-branch')!
+  expect(branch.files).toEqual([{ name: 'client.js', text: 'base local unacknowledged' }, { name: 'untouched.txt', text: 'full text' }])
+  expect(branch.localStateVector.length).toBeGreaterThan(0)
+  expect(updateCode).toHaveBeenCalledTimes(1) // capture never replays
+  await act(async () => resolve())
+  expect(snapshot().sources[0]).toEqual(source) // the captured snapshot cannot silently change
+  await click('Capture recovery snapshot')
+  expect(snapshot().sources[0]).toMatchObject({ sending: false, unacknowledged: [] })
+  doc.destroy()
 })
 
 it('works without storage/network and preserves a copyable snapshot after download rejection', async () => {
@@ -109,17 +92,14 @@ it('works without storage/network and preserves a copyable snapshot after downlo
   expect(fetch).not.toHaveBeenCalled()
 })
 
-it('renders hostile paths/drafts as inert text in a standalone offline viewer and retains exact JSON', () => {
+it('renders hostile filenames/drafts as inert text in a standalone offline viewer and retains exact JSON', () => {
   const text = '</pre><script>alert(1)</script><img src="https://example.com">\r\n\u0000 & 😀'
   const bundle = createRecoveryBundle('workspace', [
     { kind: 'composer', chatId: null, text, sending: false, attachments: [], omittedCapsules: 0 },
     {
-      kind: 'editor', chatId: null, branch: { kind: 'mainline', chatId: null }, sending: false,
-      code: {
-        version: 1, generation: 0, revision: 0, clientId: 'client', seq: 0,
-        acknowledgement: 'unconfirmed', bases: [], omittedBases: 0,
-        files: [{ gadgetId: 1, path: '<img src=x onerror=alert(1)>', text }], omitted: 0,
-      },
+      kind: 'editor', chatId: null, branch: { kind: 'mainline', chatId: null }, filesRoot: 'files',
+      initialSyncReached: false, lastObservedServerVersion: 0, sending: false, unacknowledged: [],
+      layers: [{ name: 'mainline', files: [{ name: '<img src=x onerror=alert(1)>', text }], localStateVector: [] }],
     },
   ])
   const document = new DOMParser().parseFromString(recoveryBundleHtml(bundle), 'text/html')

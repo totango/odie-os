@@ -5,9 +5,9 @@
 // way to turn a props-carrying `DurableObjectClass` into a running object -- exists on Durable
 // Objects alone. That asymmetry is the whole reason `ZendeskAccount` owns the management facet.
 
-import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
+import { DurableObject, RpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import type { ZendeskGatekeeper } from "../src/zendesk.js";
-import type { ApprovalQueue, ConnectHandoff, Gatekeeper, GatekeeperConnectCallback, GatekeeperUser, GitCache } from "@gadgets/workshop-shared/gatekeeper";
+import type { ApprovalQueue } from "@gadgets/workshop-shared/gatekeeper";
 import type { ZendeskAccountSession } from "../src/types.js";
 
 // Named rather than `export *`: the loopback bindings on `ctx.exports` are built from the module's
@@ -29,29 +29,10 @@ type GatekeeperProps = { accountId: string; subdomain: string; ticketId?: string
  * It is a `WorkerEntrypoint` rather than a local `RpcTarget`: `setCallback` persists the callback in
  * Durable Object storage, and only a stub that can outlive the request survives that write.
  */
-export class TestConnectCallback extends WorkerEntrypoint implements GatekeeperConnectCallback {
-  async getHandoffProtocol(): Promise<"browser-bound-v1"> { return "browser-bound-v1"; }
-  async complete(_account: Fetcher<GatekeeperUser>, _expiresAt?: Date): Promise<ConnectHandoff> {
-    return { targetOrigin: "https://workshop.example", ticket: "1".repeat(64) };
-  }
-  async reconnectComplete(stageId: string, _expiresAt?: Date): Promise<ConnectHandoff> {
-    // The fixture echoes the stage so tests can emulate the Workshop's exact-stage redemption.
-    return { targetOrigin: "https://workshop.example", ticket: stageId };
-  }
+export class TestConnectCallback extends WorkerEntrypoint {
+  async complete(): Promise<void> {}
   async credentialsExpired(): Promise<void> {}
   async credentialsRestored(): Promise<void> {}
-}
-
-/** Zendesk actions must never read or write Git objects. */
-class UnusedGitCache extends RpcTarget implements GitCache {
-  get(): never { throw new Error("Unexpected Git cache use"); }
-  has(): never { throw new Error("Unexpected Git cache use"); }
-  stat(): never { throw new Error("Unexpected Git cache use"); }
-  put(): never { throw new Error("Unexpected Git cache use"); }
-  advertiseCommit(): never { throw new Error("Unexpected Git cache use"); }
-  buildPack(): never { throw new Error("Unexpected Git cache use"); }
-  consumePack(): never { throw new Error("Unexpected Git cache use"); }
-  isAncestor(): never { throw new Error("Unexpected Git cache use"); }
 }
 
 export class TestHooks extends DurableObject<Cloudflare.Env> {
@@ -70,9 +51,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
   /** Delivers an approval to the same test facet. */
   async applyAction(props: GatekeeperProps, id: number): Promise<void> {
-    using cache = new RpcStub(new UnusedGitCache());
-    const gatekeeper: Pick<Gatekeeper<ZendeskAccountSession>, "applyAction"> = this.#gatekeeper(props);
-    await gatekeeper.applyAction(id, cache);
+    await this.#gatekeeper(props).applyAction(id);
   }
   /**
    * Calls a gatekeeper method on the `DurableObjectClass` itself -- exactly what

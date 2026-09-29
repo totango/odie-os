@@ -3,14 +3,12 @@ export { AdminAuthority, AdminAuthorizationEntrypoint };
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
-import type { UserDirectoryRecord, ConnectFlowStart } from '@gadgets/workshop-shared/api';
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, WORKSHOP_EDITING_PROTOCOL, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, isDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, type CodingSessionApplicationCapability, type CodingSessionAttachCapability, type CodingSessionDevelopmentCatalog, type CodingSessionDevelopmentPlan, type CodingSessionDevelopmentStatus, type CodingSessionEditorCapability, type CodingSessionFileUploadRequest, type CodingSessionFileUploadResult, type CodingSessionOpenCodeCapability, type CodingSessionRepositoryOption, type CodingSessionSummary, type CodingSessionTerminalKind, type CreateCodingSessionRequest, type DeploymentHubId, type FinanceHubStatus, type OpenCodeUserCustomization, type RequiredConnectionStatus, type BrowserFlowOptions, type BrowserFlowStart, type NativeLoginFlowStatus, type NativeLoginConsumeResult } from '@gadgets/workshop-shared/api';
 import type { CodingSessionActivity } from "@gadgets/workshop-shared/coding-sessions";
 import type { ProductFeedbackStatus, ProductFeedbackSubmissionResult, SubmitProductFeedbackRequest } from "@gadgets/workshop-shared/product-feedback";
 import type { CreateCommunityRequest, CommunityRequestQuery, CommunityRequestPageOptions, AddCommunityRequestAttachment, AddCommunityRequestDetail, AttachCommunityRequestDiagnostics, ModerateCommunityRequest } from "@gadgets/workshop-shared/community-requests";
 import { COMMUNITY_REQUESTS_SINGLETON_NAME, CommunityRequests } from "./community-requests.js";
 export { CommunityRequests };
-import type { RedactedAiModelConfig } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist, accountEmailIdentities } from "./auth/config.js";
@@ -18,9 +16,8 @@ import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { existingAccountIdentities, resolveAuthIdentity } from "./auth/identity.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
-import { PendingLogin, LoginConnectCallbackImpl, NativeLoginConnectCallbackImpl, EXPIRED_MESSAGE } from "./auth/login-flow.js";
+import { PendingLogin, LoginConnectCallbackImpl, NativeLoginConnectCallbackImpl } from "./auth/login-flow.js";
 import { NativeBrowserFlow, createNativeBrowserFlowRecord } from "./auth/native-browser-flow.js";
-import { hashPresentedSecret, newSecretToken, requireProviderHandoff } from "./connect-handoff.js";
 import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from "./admin-config.js";
 
 
@@ -39,8 +36,7 @@ import {
 } from "./admin-settings.js";
 import { BlueprintKvRecord, buildBlueprintArchiveStream, sanitizeBlueprintOutput, listFeaturedBlueprintsFromKv, parseBlueprintArchive, randomBlueprintId, readBlueprintContent, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { GatekeeperConnectCallbackImpl, normalizeUsername, UserDurableObject, CLOUDFLARE_VENDOR_ID, type ProvidedAccountInfo } from "./user";
-import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback } from "./overseer";
-import { UserDirectoryDurableObject } from "./user-directory.js";
+import { OverseerDurableObject, GatekeeperLoopback, CodeModeTailLoopback, AgentSpawnerGatekeeper, GatekeeperHookLoopback, GadgetTailLoopback, AgentSelfLoopback, TransientStubLoopback } from "./overseer";
 import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub, WorkerEntrypoint } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
@@ -50,7 +46,7 @@ import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
-import { loadBundledFinanceOperationsWorkbenchSource } from "./bundled-blueprints.js";
+import { loadBundledFinanceOperationsWorkbenchSource } from "./format-blueprints.js";
 import { isFinanceOperator } from "./finance-operators";
 import { indexAccountProfile } from "./account-directory";
 
@@ -78,7 +74,7 @@ function publicBaseUrl(env: Env): URL {
 }
 
 function nativeBrowserFlows(ctx: ExecutionContext): DurableObjectNamespace<NativeBrowserFlow> {
-  return ctx.exports.NativeBrowserFlow;
+  return ctx.exports.NativeBrowserFlow as unknown as DurableObjectNamespace<NativeBrowserFlow>;
 }
 
 export async function gatekeeperAppInstanceId(account: Pick<ProvidedAccountInfo, "accountId">)
@@ -126,11 +122,9 @@ export async function resolveGatekeeperAppAccount(accounts: ProvidedAccountInfo[
   return app;
 }
 
-// Set once we've asked the AdminSettings DO to install the bundled blueprints (see the
+// Set once we've asked the AdminSettings DO to install the bundled format blueprints (see the
 // fetch handler), so later requests skip the call. The DO holds the real answer.
-let bundledBlueprintInstallStarted = false;
-
-const USER_SEARCH_POLICY_CACHE_TTL_MS = 30_000;
+let formatBlueprintInstallStarted = false;
 
 function publicBlueprintInfo(id: string, metadata: BlueprintPublicInfo['metadata']): BlueprintPublicInfo {
   return {
@@ -282,9 +276,6 @@ export { LanguageModelGatekeeper };
 // Re-export entrypoint types from admin-settings.ts.
 export { AdminSettings };
 
-// Re-export the deployment-wide user directory Durable Object.
-export { UserDirectoryDurableObject };
-
 // Re-export entrypoint types from user.ts.
 export { UserDurableObject, GatekeeperConnectCallbackImpl };
 
@@ -365,7 +356,7 @@ export class CodingSessionToolHostImpl
 // Re-export entrypoint types from overseer.ts.
 export { OverseerDurableObject, GatekeeperLoopback, GatekeeperHookLoopback,
     CodeModeTailLoopback, AgentSpawnerGatekeeper, GadgetTailLoopback,
-    AgentSelfLoopback };
+    AgentSelfLoopback, TransientStubLoopback };
 
 // Re-export service-binding entrypoint for external channel integrations.
 export { ExternalMessageGateway };
@@ -400,20 +391,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   private users: DurableObjectNamespace<UserDurableObject>;
 
   #userId: DurableObjectId;
-  #userSearchPolicyCache?: { expiresAt: number; promise: Promise<boolean> };
-
-  #userSearchEnabled(): Promise<boolean> {
-    let cached = this.#userSearchPolicyCache;
-    if (cached && Date.now() < cached.expiresAt) return cached.promise;
-
-    let promise = readAdminConfig(this.env).then(config => config.userSearchEnabled);
-    let next = { expiresAt: Date.now() + USER_SEARCH_POLICY_CACHE_TTL_MS, promise };
-    this.#userSearchPolicyCache = next;
-    promise.catch(() => {
-      if (this.#userSearchPolicyCache === next) this.#userSearchPolicyCache = undefined;
-    });
-    return promise;
-  }
 
   // Get a stub pointing at the user DO. We create a new stub for every request so that we don't
   // have to worry about detecting when a stub has become broken.
@@ -556,14 +533,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     this.ctx.waitUntil(indexAccountProfile(this.env.BLUEPRINTS, profile).catch(error =>
       logger.warn("failed to refresh account discovery hint", {event: "account.directory.refresh.failed", error})));
   }
-  setOwnCommitEmail(email: string | null): Promise<void> {
-    return this.#user.setOwnCommitEmail(email);
-  }
-  async searchUsers(query: string, excludeIds: string[]): Promise<UserDirectoryRecord[]> {
-    if (!(await this.#userSearchEnabled())) return [];
-    return retryOnDoReset(() => this.ctx.exports.UserDirectoryDurableObject.getByName("")
-        .searchUsers(query, [this.#userId.name!, ...excludeIds]));
-  }
   changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
     return this.#user.changePassword(oldHash, newHash);
   }
@@ -573,15 +542,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   listModels(): Promise<AiChatAuthorInfo[]> {
     return retryOnDoReset(() => this.#user.listModels());
   }
-  addModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig,
-           copySecretsFrom?: string): Promise<void> {
-    return this.#user.addModel(profile, config, copySecretsFrom);
-  }
-  getModelConfig(id: string): Promise<{profile: AiChatAuthorInfo, config: RedactedAiModelConfig}> {
-    return retryOnDoReset(() => this.#user.getModelConfig(id));
-  }
-  updateModel(profile: AiChatAuthorInfo, config: RedactedAiModelConfig): Promise<void> {
-    return this.#user.updateModel(profile, config);
+  addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
+    return this.#user.addModel(profile, config);
   }
   deleteModel(id: string): Promise<void> {
     return this.#user.deleteModel(id);
@@ -968,17 +930,12 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return this.#user.connectAccount(vendorId, resourceUrlPatterns);
   }
 
-  async ensureAccountResources(accountId: number, resourceUrlPatterns: string[], options?: { flow?: BrowserFlowOptions }): Promise<(BrowserFlowStart & { nonce?: string }) | null> {
+  ensureAccountResources(accountId: number, resourceUrlPatterns: string[], options?: { flow?: BrowserFlowOptions }): Promise<Partial<BrowserFlowStart>> {
     if (options?.flow?.returnMode === "native-verified-link") {
-      const result = await this.#startNativeAccountFlow("grant", options.flow, flow =>
+      return this.#startNativeAccountFlow("grant", options.flow, flow =>
         this.#user.ensureAccountResources(accountId, resourceUrlPatterns, flow));
-      return result.url ? { ...result, url: result.url } : null;
     }
     return this.#user.ensureAccountResources(accountId, resourceUrlPatterns);
-  }
-
-  completeConnectHandoff(ticket: string, nonce: string): Promise<void> {
-    return this.#user.completeConnectHandoff(ticket, nonce);
   }
 
   listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {
@@ -1012,12 +969,11 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async #startNativeAccountFlow(
       kind: "connect" | "reconnect" | "grant",
       flow: BrowserFlowOptions,
-      start: (flow: { flowHandle: string; returnUrl: string }) => Promise<{ url?: string; nonce: string } | null>): Promise<Partial<BrowserFlowStart>> {
+      start: (flow: { flowHandle: string; returnUrl: string }) => Promise<{ url?: string }>): Promise<Partial<BrowserFlowStart>> {
     if (!flow.clientVerifierHash) throw new Error("Native account browser flow requires a client verifier hash.");
     const flowHandle = randomOpaqueHandle();
     const returnUrl = new URL(`/native/oauth-return/${encodeURIComponent(flowHandle)}`, publicBaseUrl(this.env)).toString();
-    const started = await start({ flowHandle, returnUrl });
-    const providerInitiationUrl = started?.url;
+    const { url: providerInitiationUrl } = await start({ flowHandle, returnUrl });
     if (!providerInitiationUrl) return {};
     const record = createNativeBrowserFlowRecord({
       kind,
@@ -1026,7 +982,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
       clientVerifierHash: flow.clientVerifierHash,
       providerInitiationUrl,
       userId: this.#userId.toString(),
-      accountNonce: started!.nonce,
     });
     await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
         .initialize(record);
@@ -1040,11 +995,6 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   async getNativeAccountFlowStatus(flowHandle: string, clientVerifier: string): Promise<NativeLoginFlowStatus> {
     return await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
         .getAccountStatus(await sha256Hex(clientVerifier), this.#userId.toString());
-  }
-
-  async completeNativeAccountFlow(flowHandle: string, clientVerifier: string, ticket: string): Promise<void> {
-    await nativeBrowserFlows(this.ctx).getByName(flowHandle).completeAccountHandoff(
-        await sha256Hex(clientVerifier), ticket, this.#userId.toString());
   }
 
   startResourceConfigurator(
@@ -1207,12 +1157,8 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
                 sanitizeBlueprintOutput(kvRecord.metadata.output)));
 
         // 5. Create gatekeepers from assignments and bind them into the workspace's (only) gadget.
-        // Internal setup needs a writable session, but the session returned to the caller must
-        // remain unnegotiated so an old client cannot bypass the editing-protocol handshake.
-        using setupOverseer = await this.#openGadgetInternal(id, undefined, undefined, true);
-        await setupOverseer.negotiateEditingProtocol(WORKSHOP_EDITING_PROTOCOL);
-        let metadata = await setupOverseer.getMetadata();
-        using gadget = await setupOverseer.getGadget(metadata.defaultGadgetId!);
+        let metadata = await openedOverseer.getMetadata();
+        using gadget = await openedOverseer.getGadget(metadata.defaultGadgetId!);
 
         // Defensively put blueprint bindings into a map (not a raw object) until validation.
         let blueprintBindings = new Map(Object.entries(kvRecord.metadata.bindings));
@@ -1231,13 +1177,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
           gkPromises.push((async () => {
             let gk;
             if (assignment.type === "gatekeeper") {
-              gk = await setupOverseer.newGatekeeper(
+              gk = await openedOverseer.newGatekeeper(
                   assignment.accountId, assignment.resourceUrl);
               if (!gk) {
                 throw new Error(`Failed to create gatekeeper for binding "${bindingName}".`);
               }
             } else if (assignment.type === "aiModel") {
-              gk = await setupOverseer.newAiModelGatekeeper(assignment.modelId);
+              gk = await openedOverseer.newAiModelGatekeeper(assignment.modelId);
             } else {
               return;  // agent spawners are created in phase two
             }
@@ -1282,7 +1228,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
             modelId: assignment.modelId,
             env,
           };
-          using gk = await setupOverseer.newAgentSpawnerGatekeeper(config);
+          using gk = await openedOverseer.newAgentSpawnerGatekeeper(config);
           await gadget.bind(bindingName, await gk.getId());
         }
 
@@ -1370,18 +1316,18 @@ async function serveBlueprintScreenshot(env: Env, blueprintId: string): Promise<
   });
 }
 
-// Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client redeems the login
+// Returned by startGatekeeperLogin(). Wraps the PendingLogin DO so the client awaits the login
 // result through a capability (this stub) rather than a guessable id — no login id is ever exposed
-// to the client. The stub alone is not enough: receive() yields the token only once the popup has
-// confirmed the attempt's ticket with the nonce (PublicApi.confirmLogin).
+// to the client. Disposing the stub (e.g. when the pop-up closes or the component unmounts) cancels
+// the in-flight wait and lets the DO be evicted.
 @validateRpc()
 class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
   constructor(private pending: DurableObjectStub<PendingLogin>) {
     super();
   }
 
-  async receive(): Promise<string | null> {
-    return await this.pending.receive();
+  async wait(): Promise<string> {
+    return await this.pending.awaitResult();
   }
 }
 
@@ -1403,9 +1349,9 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     return getServerConfig(this.env);
   }
 
-  startGatekeeperLogin(vendorId: string): Promise<ConnectFlowStart & { attempt: RpcStub<LoginAttempt> }>;
+  startGatekeeperLogin(vendorId: string): Promise<{ url: string; attempt: RpcStub<LoginAttempt> }>;
   startGatekeeperLogin(vendorId: string, options: { flow: BrowserFlowOptions }): Promise<BrowserFlowStart>;
-  async startGatekeeperLogin(vendorId: string, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { nonce?: string; attempt?: RpcStub<LoginAttempt> }> {
+  async startGatekeeperLogin(vendorId: string, options?: { flow?: BrowserFlowOptions }): Promise<BrowserFlowStart & { attempt?: RpcStub<LoginAttempt> }> {
     if (!getAuthGatekeeperAllowlist(this.env).includes(vendorId)) {
       throw new Error(`Sign-in via "${vendorId}" is not enabled on this deployment.`);
     }
@@ -1421,26 +1367,18 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
     if (options?.flow?.returnMode === "native-verified-link") {
       if (!options.flow.clientVerifierHash) throw new Error("Native login requires a client verifier hash.");
       const flowHandle = randomOpaqueHandle();
-      const pending = this.ctx.exports.PendingLogin.getByName(crypto.randomUUID());
-      await pending.begin();
-      const callback = this.ctx.exports.NativeLoginConnectCallbackImpl({
-        props: { flowHandle, vendorId, pendingId: pending.id.toString() },
-      });
+      const callback = this.ctx.exports.NativeLoginConnectCallbackImpl({ props: { flowHandle, vendorId } });
       const returnUrl = new URL(`/native/oauth-return/${encodeURIComponent(flowHandle)}`, publicBaseUrl(this.env));
-      const started = await vendor.connectAccount(callback, {
+      const { url: providerInitiationUrl } = await vendor.connectAccount(callback, {
         ...connectOptions,
         returnUrl: returnUrl.toString(),
-        handoffProtocol: "native-verifier-v1",
       });
-      requireProviderHandoff(started, "native-verifier-v1");
-      const providerInitiationUrl = started.url;
       const record = createNativeBrowserFlowRecord({
         kind: "login",
         flowHandle,
         launchTicket: flowHandle,
         clientVerifierHash: options.flow.clientVerifierHash,
         providerInitiationUrl,
-        pendingLoginId: pending.id.toString(),
       });
       await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
           .initialize(record);
@@ -1451,38 +1389,21 @@ export class PublicApiImpl extends RpcTarget implements PublicApi {
       };
     }
 
-    // The PendingLogin DO is the rendezvous between this request, the (separate) OAuth-callback
-    // invocation, and the popup's confirmLogin(). Its name is the hash of a secret only the popup
-    // will hold, so confirmLogin can address it while the client side holds no id at all; the client
-    // redeems through the `attempt` capability.
-    const { secret, hash } = await newSecretToken();
-    const pendingId = this.ctx.exports.PendingLogin.idFromName(hash);
+    // The PendingLogin DO is the rendezvous between this request and the (separate) OAuth-callback
+    // invocation. The client never sees its id — we hand back an `attempt` stub instead.
+    const pendingId = this.ctx.exports.PendingLogin.newUniqueId();
     const pending = this.ctx.exports.PendingLogin.get(pendingId);
-    // Mark the attempt as started before the gatekeeper can deliver to it, so receive() answers null
-    // while it is still running instead of reporting it expired.
-    await pending.begin();
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
         { props: { pendingId: pendingId.toString(), vendorId } });
-    const started = await vendor.connectAccount(callback, {...connectOptions, handoffProtocol: "browser-bound-v1"});
-    requireProviderHandoff(started, "browser-bound-v1");
-    const {url} = started;
+    const { url } = await vendor.connectAccount(callback, connectOptions);
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
-    return { url, nonce: secret.toHex(), attempt: new LoginAttemptImpl(pending) };
+    return { url, attempt: new LoginAttemptImpl(pending) };
   }
 
-  async confirmLogin(ticket: string, nonce: string): Promise<void> {
-    // A nonce naming a DO that never began finds no result there and is refused as expired; reading
-    // an empty DO creates nothing. The ticket is checked by confirm() itself.
-    const nonceHash = await hashPresentedSecret(nonce);
-    if (nonceHash === undefined) throw new Error(EXPIRED_MESSAGE);
-    const id = this.ctx.exports.PendingLogin.idFromName(nonceHash);
-    await this.ctx.exports.PendingLogin.get(id).confirm(ticket);
-  }
-
-  async consumeNativeLoginFlow(flowHandle: string, clientVerifier: string, ticket?: string): Promise<NativeLoginConsumeResult> {
+  async consumeNativeLoginFlow(flowHandle: string, clientVerifier: string): Promise<NativeLoginConsumeResult> {
     return await nativeBrowserFlows(this.ctx).get(nativeBrowserFlows(this.ctx).idFromName(flowHandle))
-        .consumeLoginResult(await sha256Hex(clientVerifier), ticket);
+        .consumeLoginResult(await sha256Hex(clientVerifier));
   }
 
   async authenticate(token: string): Promise<AuthenticatedApi> {
@@ -1616,27 +1537,26 @@ export default {
     }
 
     if (url.pathname.startsWith("/native/oauth-start/")) {
-      if (req.method !== "GET") return new Response("Method Not Allowed", {status: 405});
       const launchTicket = decodeURIComponent(url.pathname.slice("/native/oauth-start/".length));
       const providerUrl = await nativeBrowserFlows(ctx)
           .get(nativeBrowserFlows(ctx).idFromName(launchTicket))
           .launch(launchTicket);
       return new Response(null, {
         status: 302,
-        headers: { Location: providerUrl, "Referrer-Policy": "no-referrer", "Cache-Control": "no-store" },
+        headers: { Location: providerUrl, "Referrer-Policy": "no-referrer" },
       });
     }
 
     // Sign-in via authentication gatekeepers happens entirely within each gatekeeper Worker (the
     // OAuth redirect lands on `/gatekeeper/<name>/oauth`); native flows use /native/oauth-start/* as
     // a branded one-time trampoline and return via /native/oauth-return/*. A signed Universal Link
-    // opens the app before this request reaches the Worker. The app must present the fragment's
-    // completion ticket plus its verifier; merely reaching this page or polling is not confirmation.
+    // opens the app before this request reaches the Worker; unsigned desktop builds land here while
+    // the app securely consumes the result through its verifier-bound polling fallback.
     if (url.pathname.startsWith("/native/oauth-return/")) {
       if (req.method !== "GET" && req.method !== "HEAD") {
         return new Response("Method Not Allowed", { status: 405, headers: { Allow: "GET, HEAD" } });
       }
-      const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Return to Odie OS</title><style>body{box-sizing:border-box;min-height:100vh;margin:0;display:grid;place-items:center;background:#fafafa;color:#202020;font:16px system-ui,sans-serif;text-align:center}.card{max-width:28rem;padding:2rem}h1{margin:.75rem 0;font-size:1.75rem}p{color:#666;line-height:1.5}.mark{color:#f47f53;font-size:2.5rem}</style></head><body><main class="card"><div class="mark">●</div><h1>Continue in Odie OS</h1><p>Return to Odie OS to confirm this connection. If it cannot be confirmed, start a new flow in the app.</p></main></body></html>`;
+      const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Return to Odie OS</title><style>body{box-sizing:border-box;min-height:100vh;margin:0;display:grid;place-items:center;background:#fafafa;color:#202020;font:16px system-ui,sans-serif;text-align:center}.card{max-width:28rem;padding:2rem}h1{margin:.75rem 0;font-size:1.75rem}p{color:#666;line-height:1.5}.mark{color:#f47f53;font-size:2.5rem}</style></head><body><main class="card"><div class="mark">●</div><h1>Sign-in complete</h1><p>Return to Odie OS. The app will continue automatically.</p></main></body></html>`;
       return new Response(req.method === "HEAD" ? null : html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
@@ -1653,24 +1573,25 @@ export default {
     }
 
     if (url.pathname === "/api") {
-      // Make sure the bundled blueprints are installed. The AdminSettings DO doesn't wake
+      // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
       // merely because someone deployed, so the install needs a trigger; hanging it off API
       // traffic means a fresh deployment is provisioned by its first visitor. Fire-and-forget,
       // and the DO is idempotent.
-      if (!bundledBlueprintInstallStarted) {
-        bundledBlueprintInstallStarted = true;
-        ctx.waitUntil(ctx.exports.AdminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME).ensureBundledBlueprintsInstalled()
+      if (!formatBlueprintInstallStarted) {
+        formatBlueprintInstallStarted = true;
+        ctx.waitUntil(ctx.exports.AdminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME)
+            .ensureFormatBlueprintsInstalled()
             .then((complete: boolean) => {
               // A partial install resolves rather than throwing, and nothing else will call the DO
               // from here, so clearing this is the whole retry: one bad archive would otherwise
               // leave the deployment half-provisioned for as long as the isolate lives.
-              if (!complete) bundledBlueprintInstallStarted = false;
+              if (!complete) formatBlueprintInstallStarted = false;
             })
             .catch((err: unknown) => {
               // Likewise let the next request try again. The DO coalesces concurrent callers, so a
               // retry costs one comparison once it succeeds.
-              bundledBlueprintInstallStarted = false;
-              logger.warn("failed to install bundled blueprints", {
+              formatBlueprintInstallStarted = false;
+              logger.warn("failed to install bundled format blueprints", {
                 event: "formats.install.trigger.failed", error: err,
               });
             }));

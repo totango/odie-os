@@ -3,7 +3,6 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import { RpcStub } from 'capnweb'
 import { Overseer } from '@gadgets/workshop-shared/api'
 import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
-import { requireEditingReady } from './features/workspace/editingProtocol'
 
 /**
  * Enables an auto-approval rule for the action's (gatekeeperId, actionKind.tag), and tracks
@@ -26,7 +25,6 @@ export function useAlwaysApproveTag(
              actionKind: ActionKind): Promise<boolean> => {
     setProcessingActions(prev => new Set(prev).add(actionId))
     try {
-      await requireEditingReady(overseer)
       await overseer.setAutoApprovedActionKind(gatekeeperId, actionKind)
       setEnabledTags(prev => new Set(prev).add(`${gatekeeperId}:${actionKind.tag}`))
       onEnabled?.()

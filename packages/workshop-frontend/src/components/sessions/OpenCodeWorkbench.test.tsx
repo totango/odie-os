@@ -616,8 +616,7 @@ describe('OpenCodeWorkbench', () => {
     await act(async () => {})
 
     expect(container.querySelector('[aria-label="OpenCode changes"]')).toBeTruthy()
-    expect(container.textContent).toContain('Read-only runtime patches')
-    expect(container.textContent).toContain('Unsupported diff response')
+    expect(container.textContent).toContain('Review OpenCode')
     expect(container.textContent).toContain('src/app.ts')
     expect(container.textContent).toContain('Run tests')
     expect(container.querySelector('textarea')).toBeNull()

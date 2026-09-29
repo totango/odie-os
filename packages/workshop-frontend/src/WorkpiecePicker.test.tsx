@@ -22,7 +22,6 @@ describe('WorkpiecePicker', () => {
           { id: 1, type: 'gadget', title: 'Hooked' },
           { id: 2, type: 'gadget', title: 'Ordinary' },
         ]}
-        worktrees={[]}
         selectedId={null}
         expanded={expanded}
         hookedGadgetIds={new Set([1])}

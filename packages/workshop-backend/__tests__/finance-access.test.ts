@@ -8,7 +8,7 @@ import {
   isFinanceOperationsWorkbenchBlueprintId,
   type AiChatAuthorInfo,
   type BlueprintUserSummary,
-  type WorkpieceSummary,
+  type CodeUpdate,
 } from "@gadgets/workshop-shared/api";
 import type {
   ObservationDescription,
@@ -31,7 +31,7 @@ import {
   isProfileAllowedByDomainSharingPolicy,
   type OverseerDurableObject,
 } from "../src/overseer.js";
-import { loadBundledFinanceOperationsWorkbenchSource } from "../src/bundled-blueprints.js";
+import { loadBundledFinanceOperationsWorkbenchSource } from "../src/format-blueprints.js";
 import type { AdminSettings, FinanceWorkspaceClaim } from "../src/admin-settings.js";
 import { retryOnDoReset } from "../src/do-retry.js";
 import { configuredFinanceOperators, isFinanceOperator } from "../src/finance-operators";
@@ -123,25 +123,20 @@ async function expectOpenDenied(open: () => PromiseLike<unknown>): Promise<void>
 
 async function readWorkspaceFiles(workspace: Awaited<ReturnType<OverseerDurableObject["open"]>>):
     Promise<Record<string, string>> {
+  let doc = new Y.Doc();
   let ready!: () => void;
   let readyPromise = new Promise<void>(resolve => { ready = resolve; });
-  let commitId: string | undefined;
-  let hasDefaultGadget = false;
-  using subscriber = new RpcStub({
-    entry(summary: WorkpieceSummary) {
-      if (summary.id === 0) {
-        hasDefaultGadget = true;
-        commitId = summary.commitId;
-      }
-    },
-    removed() {},
+  let subscriber = new RpcStub({
+    update(update: CodeUpdate) { Y.applyUpdateV2(doc, update.update); },
     ready() { ready(); },
   });
-  using _subscription = await workspace.subscribeToWorkpieces(subscriber);
+  let subscription = await workspace.subscribeToCode(subscriber);
   await readyPromise;
-  if (!hasDefaultGadget) return {};
-  if (!commitId) throw new Error("Default gadget has no committed head.");
-  return Object.fromEntries((await workspace.getCodeAtCommit(commitId)).files);
+  subscription[Symbol.dispose]();
+  subscriber[Symbol.dispose]();
+  let files: Record<string, string> = {};
+  doc.getMap<Y.Text>("").forEach((text, name) => { files[name] = text.toString(); });
+  return files;
 }
 
 function blueprintSummary(id: string): BlueprintUserSummary {
@@ -1322,11 +1317,11 @@ describe("organization-scoped observation sharing policy", () => {
         const impl = (instance as unknown as {
           impl: {
             authorizeResourceDescription(description: ResourceDescription): Promise<void>;
-            scheduleAccessRestart(reason: string): Promise<void>;
+            scheduleRevocationRestart(): Promise<void>;
           };
         }).impl;
-        const scheduleAccessRestart = impl.scheduleAccessRestart;
-        impl.scheduleAccessRestart = async () => { restartScheduled = true; };
+        const scheduleRevocationRestart = impl.scheduleRevocationRestart;
+        impl.scheduleRevocationRestart = async () => { restartScheduled = true; };
         try {
           await expect(impl.authorizeResourceDescription({
             title: "Private repository",
@@ -1337,7 +1332,7 @@ describe("organization-scoped observation sharing policy", () => {
             domainSharingPolicy: TOTANGO_POLICY,
           })).rejects.toThrow(/verified @totango\.com SSO collaborator/);
         } finally {
-          impl.scheduleAccessRestart = scheduleAccessRestart;
+          impl.scheduleRevocationRestart = scheduleRevocationRestart;
         }
       });
       expect(restartScheduled).toBe(true);

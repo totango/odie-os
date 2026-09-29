@@ -23,7 +23,7 @@ vi.mock('@cloudflare/kumo', async importOriginal => ({
 }))
 vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <span>{children}</span> }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
-const settings: AdminSettingsView = { userSearchEnabled: false, signupsEnabled: true, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'neutral' }, accentColor: '', enabledHubs: [], resourceVendors: [], formats: [] }
+const settings: AdminSettingsView = { signupsEnabled: true, siteName: '', instanceInstructions: '', announcement: '', banner: { text: '', color: 'neutral' }, accentColor: '', enabledHubs: [], resourceVendors: [], formats: [] }
 class PageFixture extends RpcTarget implements Pick<AdminApi, 'getSettings' | 'listAdministrators' | 'listAdministratorAudit'> {
   settingsCall = vi.fn<AdminApi['getSettings']>(async () => settings)
   membersCall = vi.fn<AdminApi['listAdministrators']>(async () => ({ mode: 'legacy', revision: 0, staticProfileIds: ['jacob.beck@totango.com', 'keith@totango.com', 'nick.roberts@totango.com', 'stacy.kennedy@totango.com'], items: [], blockers: ['LEGACY_CAPABILITIES_UNDRAINED'] }))

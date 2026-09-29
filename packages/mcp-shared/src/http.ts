@@ -1,16 +1,15 @@
-import { stripTrailingSlashes, type ConnectHandoff } from "@gadgets/workshop-shared/gatekeeper";
+import { stripTrailingSlashes } from "@gadgets/workshop-shared/gatekeeper";
 import { NONCE_BYTES } from "./connect-nonce.js";
 import {
-  connectHandoffPageHtml,
   errorPageHtml,
   htmlResponse,
   INVALID_LINK_HTML,
+  SELF_CLOSING_HTML,
 } from "./html.js";
 import type { McpLog } from "./log.js";
 
 type OAuthCallbackAccount = {
-  /** Finishes the code exchange; null when the callback's nonce doesn't match. */
-  acceptAuthCode(code: string, nonce: string, issuer?: string): Promise<ConnectHandoff | null>;
+  acceptAuthCode(code: string, nonce: string, issuer?: string): Promise<boolean>;
 };
 
 async function handleOAuthCallback(
@@ -37,17 +36,16 @@ async function handleOAuthCallback(
     return htmlResponse(INVALID_LINK_HTML, 400);
   }
 
-  let handoff: ConnectHandoff | null;
   try {
-    handoff = await account.acceptAuthCode(
+    const accepted = await account.acceptAuthCode(
       code, state.slice(separator + 1), url.searchParams.get("iss") ?? undefined);
+    if (!accepted) return htmlResponse(INVALID_LINK_HTML, 400);
   } catch (err) {
     log.warn("oauth code exchange failed", { event: "connect.oauth.failed", error: err });
     return htmlResponse(errorPageHtml(
       "Could not finish connecting", err instanceof Error ? err.message : String(err)), 502);
   }
-  if (!handoff) return htmlResponse(INVALID_LINK_HTML, 400);
-  return htmlResponse(connectHandoffPageHtml(handoff));
+  return htmlResponse(SELF_CLOSING_HTML);
 }
 
 /** Routes the HTTP paths common to both MCP connectors. */

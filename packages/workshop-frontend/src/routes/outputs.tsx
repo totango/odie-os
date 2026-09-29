@@ -1,5 +1,4 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
-import { requireEditingReady } from '../features/workspace/editingProtocol'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Dialog, DropdownMenu, useKumoToastManager } from '@cloudflare/kumo'
 import {
@@ -557,7 +556,6 @@ function OutputsPage() {
     let gadget
     try {
       overseer = await authenticatedApi.openGadget(current.workspaceId)
-      await requireEditingReady(overseer)
       gadget = overseer.getGadget(current.workpieceId)
       const title = renameValue.trim()
       await gadget.setTitle(title)
@@ -582,7 +580,6 @@ function OutputsPage() {
     let gadget
     try {
       overseer = await authenticatedApi.openGadget(current.workspaceId)
-      await requireEditingReady(overseer)
       gadget = overseer.getGadget(current.workpieceId)
       await gadget.remove()
       setOutputs((list) => list.filter((output) => outputKey(output) !== outputKey(current)))
@@ -604,7 +601,6 @@ function OutputsPage() {
     const overseer = authenticatedApi.newGadget(blueprintCreationOrigin(hub))
     let gadget
     try {
-      await requireEditingReady(overseer)
       const [metadata] = await Promise.all([
         overseer.getMetadata(),
         overseer.setTitle(title),
