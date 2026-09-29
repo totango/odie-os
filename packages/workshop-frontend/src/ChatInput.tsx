@@ -1,4 +1,6 @@
 import { isTransientRpcError } from "./rpcErrors";
+import { RecoveryControls, useRecoverySource } from './Recovery';
+import { recoveryComposerText, type ComposerRecovery } from './recoveryBundle';
 import {
   useState,
   useEffect,
@@ -1700,12 +1702,25 @@ export const ChatInput = ({
     !hasUnreadyAttachment;
   const canAttachMore = pendingAttachments.length < MAX_PENDING_ATTACHMENTS;
 
+  const captureRecovery = (): ComposerRecovery => ({
+    kind: 'composer', chatId: chatKey ?? null,
+    text: recoveryComposerText(inputValue, capsules),
+    sending: isSending,
+    omittedCapsules: capsules.length,
+    attachments: pendingAttachments.map(attachment => ({
+      name: attachment.name ?? null, mimeType: attachment.mimeType,
+      bytes: attachment.blob.size, state: attachment.uploadState, omitted: true,
+    })),
+  });
+  const hasRecoveryScope = useRecoverySource('composer', captureRecovery);
+
   return (
     // isolation: isolate contains z-indexes used inside the composer (the
     // captured-log floating chip with z-10, the textarea/mirror with z-[1])
     // so they can't paint on top of body-level portaled popovers like the
     // model picker dropdown opening above the composer.
     <div className={`relative isolate px-2 py-2 sm:px-4 sm:py-4 ${styles.chatInputRoot}`}>
+      {!hasRecoveryScope && <RecoveryControls capture={captureRecovery} />}
       <input
         ref={attachmentInputRef}
         type="file"

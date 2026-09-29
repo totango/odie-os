@@ -15,6 +15,7 @@ import OnboardingWizard from '../OnboardingWizard'
 import AccountSelectionModal from '../components/billing/AccountSelectionModal'
 import { SessionsProvider } from '../components/sessions/SessionsContext'
 import { RequiredConnectionsGate } from '../RequiredConnectionsGate'
+import { RecoveryControls, RecoveryProvider } from '../Recovery'
 import { HubProvider } from '../HubContext'
 import { useEnabledHubs } from '../ServerConfigContext'
 import { AppLoadingSkeleton } from '../components/AppLoadingSkeleton'
@@ -96,7 +97,10 @@ function RootComponent() {
   // useAuth publishes only after verifying whoami and increments identityRevision on an owner
   // change. A new owner's API must never resume another owner's retained DOM or frame bridge.
   return (
-    <>
+    <RecoveryProvider key={identityRevision ?? 0} scope={pathname}>
+      <div className="fixed right-2 bottom-2 z-50 max-h-[70vh] w-[min(34rem,calc(100vw-1rem))] overflow-auto rounded-lg border border-kumo-line shadow-lg">
+        <RecoveryControls key={pathname} />
+      </div>
       <Activity mode={isLoading ? 'hidden' : 'visible'}>
         <Suspense fallback={null}>
           <CurrentAuthenticatedContent
@@ -110,7 +114,7 @@ function RootComponent() {
         </Suspense>
       </Activity>
       {isLoading && <AppLoadingSkeleton label={connectionLost ? 'Waiting for server' : 'Restoring session'} />}
-    </>
+    </RecoveryProvider>
   )
 }
 
