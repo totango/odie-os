@@ -83,9 +83,8 @@ jobs:
   test:
     name: Build and test
     runs-on: ubuntu-latest
-    # Install, build and test together take ~2.5 minutes. Without an explicit cap a wedged test
-    # process (a spawned child that outlives its reap keeps `node --test` alive forever) burns the
-    # 6-hour default instead of failing, on every run of the branch.
+    # Job-level backstop for installation/build as well as tests. Test commands have shorter
+    # process-level deadlines below so a wedged runner reports a failure before cancellation.
     timeout-minutes: 20
     steps:
       - name: Check out repository
@@ -112,5 +111,41 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # UI's synchronous jsdom menu tests pass alone but exceed the 60s silence budget
+      # alongside workerd suites. Diagnose them independently, without widening that budget.
+      - name: Test shared UI in isolation
+        timeout-minutes: 3
+        working-directory: packages/ui
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: >-
+          timeout --verbose --kill-after=10s 150s
+          pnpm exec gadgets-with-timeout --idle 60 --max 120 --
+          vitest run --maxWorkers=1 --reporter=verbose
+
+      # Keep the complete root test graph, including UI. One package task at a time
+      # avoids multiplying Vitest/workerd fleets; the V8 heap cap is per Node process,
+      # not a total RSS limit. Build retains its normal concurrency.
+      # A package watchdog fired in run 36497593549 but vp never returned. Supervise
+      # the root too, with GNU timeout as a backstop even if watchdog cleanup wedges.
       - name: Test
-        run: pnpm test
+        timeout-minutes: 13
+        env:
+          VP_RUN_CONCURRENCY_LIMIT: "1"
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: >-
+          timeout --verbose --kill-after=10s 12m
+          node scripts/with-timeout.ts --idle 120 --max 660 -- pnpm test
+
+      - name: Test failure diagnostics
+        if: failure()
+        run: |
+          free -m
+          ps -eo pid,ppid,stat,pcpu,rss,comm --sort=-rss
+          # Distinguish memory pressure from a live but stalled worker on the next failure.
+          for file in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.peak; do
+            if [ -r "$file" ]; then
+              printf '\n%s\n' "$file"
+              cat "$file"
+            fi
+          done

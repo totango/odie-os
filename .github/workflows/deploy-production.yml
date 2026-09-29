@@ -144,9 +144,9 @@ jobs:
           name: production-deploy-${{ github.run_id }}-${{ github.run_attempt }}
           path: production-deploy
 
-      # Before the first secret write or provider deploy. The record is supplied by environment
-      # administrators/reviewers, never by workflow inputs or the candidate artifact.
-      - name: Enforce reviewed production cutover
+      # Before the first secret write or provider deploy. The operator's checklist is supplied by
+      # the production environment, never by workflow inputs or the candidate artifact.
+      - name: Enforce production cutover checklist
         env:
           POLARIS_CUTOVER_RECORD: ${{ vars.POLARIS_CUTOVER_RECORD }}
           CUTOVER_PHASE: ${{ inputs.cutover_phase || 'routine' }}

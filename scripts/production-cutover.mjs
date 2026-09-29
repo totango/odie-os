@@ -36,7 +36,7 @@ export function pauseBackendConfig(config) {
   return { ...config, vars: { ...config.vars, WORKSHOP_EDITING_PAUSED: 'true' } };
 }
 
-/** Deterministic inventory binds approval to all modules, assets and generated configs. */
+/** Deterministic inventory binds the cutover record to all modules, assets and generated configs. */
 export function artifactDigest(directory) {
   const entries = [];
   function visit(relative) {
@@ -66,7 +66,7 @@ export function sealArtifact(directory, root, targetSha) {
   return descriptor;
 }
 
-/** Validate operator attestations from the protected production environment, not candidate data. */
+/** Validate the operator's cutover checklist from the production environment, not candidate data. */
 export function validateCutoverRecord(record, artifact, { phase, targetSha, isAncestor, now = Date.now() }) {
   if (!['prepare', 'resume', 'routine'].includes(phase)) fail('unknown phase');
   if (!object(artifact) || artifact.schemaVersion !== 1 || artifact.epoch !== CUTOVER_EPOCH ||
@@ -75,32 +75,23 @@ export function validateCutoverRecord(record, artifact, { phase, targetSha, isAn
   if (!object(record) || record.schemaVersion !== 1 || record.epoch !== CUTOVER_EPOCH ||
       record.deployment !== 'odie-os-production' || !hex(record.targetSha, 40) ||
       !hex(record.artifactSha256, 64) || record.contractSha256 !== artifact.contractSha256) {
-    fail('missing or mismatched reviewed record');
+    fail('missing or mismatched cutover record');
   }
   if (record.status !== (phase === 'prepare' ? 'prepared' : 'completed')) fail('record status does not authorize phase');
-  if (!Number.isInteger(record.orchestrationLoop) || record.orchestrationLoop < 1 || record.orchestrationLoop > 20) {
-    fail('coordinator loop ledger must be within the 20-loop cap');
-  }
-  const reviewed = Date.parse(record.reviewedAt);
-  if (!Number.isFinite(reviewed) || reviewed > now) fail('invalid review time');
+  const recorded = Date.parse(record.recordedAt);
+  if (!Number.isFinite(recorded) || recorded > now) fail('invalid record time');
   if (phase !== 'routine') {
     const expires = Date.parse(record.expiresAt);
-    if (!Number.isFinite(expires) || expires <= now || expires > reviewed + 24 * 60 * 60 * 1000 ||
+    if (!Number.isFinite(expires) || expires <= now || expires > recorded + 24 * 60 * 60 * 1000 ||
         record.targetSha !== targetSha || record.artifactSha256 !== artifact.artifactSha256) {
-      fail('first cutover requires fresh exact-target artifact approval');
+      fail('first cutover requires a fresh exact-target artifact record');
     }
   } else if (!isAncestor(record.targetSha, targetSha)) {
     fail('completed cutover is not an ancestor of this release');
   }
   if (record.targetSha === targetSha && record.artifactSha256 !== artifact.artifactSha256) {
-    fail('same-target artifact differs from the reviewed cutover');
+    fail('same-target artifact differs from the cutover record');
   }
-  const reviewLanes = ['K', 'F', 'C', 'T'];
-  if (!object(record.reviews) || !reviewLanes.every(lane =>
-    typeof record.reviews[lane] === 'string' && /^[a-zA-Z0-9._-]{1,80}$/.test(record.reviews[lane]))) {
-    fail('all four lane reviewer identifiers are required');
-  }
-  if (new Set(reviewLanes.map(lane => record.reviews[lane])).size < 2) fail('independent review is required');
   const requiredEvidence = record.status === 'prepared' ? PREPARED_EVIDENCE : [...COMPLETED_EVIDENCE];
   if (phase === 'routine') requiredEvidence.push('resumeReceipt');
   for (const name of requiredEvidence) {

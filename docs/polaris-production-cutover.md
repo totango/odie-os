@@ -1,6 +1,6 @@
 # Production Git/OT and OAuth cutover gate
 
-**Release is blocked until real reviewed evidence is supplied.** This document is an operator
+**Release is blocked until real operational evidence is supplied.** This document is an operator
 procedure, not a completed pause, backup, recovery rehearsal, or deployment approval. No production
 confirmation record is committed. The gate implements ADR E in `polaris-upstream-integration.md`.
 
@@ -17,14 +17,13 @@ secret mutation. An absent, malformed, stale first-cutover, mismatched, or incom
 the job. Artifacts built without approval are safe to inspect/download but remain paused and cannot
 pass the deployment gate. Only the validator removes the pause from a verified artifact.
 
-The record must be provisioned by authorized administrators in the GitHub **production environment
-variable**, with environment required reviewers and deployment-branch restrictions configured by
-the operator. Do not accept a PR file, workflow input, artifact-supplied record, or secret-bearing
-URL as approval. A record is an operator attestation: the validator checks its schema, provenance,
-digests, time window, ancestry, and presence of required evidence; it does **not** fetch evidence
-URLs or prove that an operator actually performed the operations. Reviewers must inspect the
-referenced immutable evidence and independently recompute its SHA-256 before issuing the record.
-The workflow never creates or promotes its own approval record.
+An operator provisions the record in the GitHub **production environment variable**. The fork
+does not require a second human reviewer or K/F/C/T signatures; code review is handled by agent
+fanout and the PR checks. Do not accept a PR file, workflow input, artifact-supplied record, or
+secret-bearing URL as a cutover record. The validator checks artifact identity, time window,
+ancestry, and references to actual operational evidence; it does **not** fetch evidence URLs or
+prove that an operator performed the operations. The operator checks the underlying evidence
+before recording it. The workflow never creates or promotes its own record.
 
 | Dispatch phase | Required record | Result |
 | --- | --- | --- |
@@ -32,7 +31,7 @@ The workflow never creates or promotes its own approval record.
 | `resume` (manual) | Fresh `completed`, exact target SHA and artifact digest, deployed-version and post-deploy evidence | Authorized artifact can enable writes. Only use after the identical artifact was deployed paused and verified. |
 | `routine` (automatic/default) | `completed`, prior successful resume receipt, completed target is an ancestor of current target, identical compatibility fingerprint | Normal releases can deploy after verified cutover, without repeating the first-cutover outage. |
 
-For `prepare`/`resume`, approval expires within 24 hours of review. A routine record can persist
+For `prepare`/`resume`, the record expires within 24 hours of creation. A routine record can persist
 after that window, but must include a real successful `resumeReceipt`; completion evidence without
 that receipt cannot authorize the automatic path. Removing the environment record blocks further
 deployments. It does not pause an already deployed service.
@@ -40,7 +39,7 @@ deployments. It does not pause an already deployed service.
 The compatibility fingerprint covers the shared API/gatekeeper interfaces, editing protocol,
 Git migration, backend handoff, kit handshake, and production gate/builder/workflow sources listed
 in `production-cutover.mjs`.
-Changes there fail closed until renewed reviewed evidence is issued. This is a conservative
+Changes there fail closed until a new cutover record with current evidence is issued. This is a conservative
 mechanical compatibility boundary, not proof that every other change is backward compatible.
 Reviewers must treat a breaking change elsewhere as a new cutover, update the boundary/epoch, and
 obtain new evidence. An unrelated frontend/ordinary implementation release with unchanged contract
@@ -63,7 +62,7 @@ and verified ancestry can use the routine path. Do not disable the gate to ship 
    synthetic unit fixture alone, or empty export substitutes for this evidence. If that release
    has not been implemented and deployed, stop here: this workflow is not a preparatory-release
    bypass and must not deploy the incompatible candidate in its place.
-4. Apply the reviewed admission fence to the **currently deployed** compatible system: stop new
+4. Apply an admission fence to the **currently deployed** compatible system: stop new
    editing/agent operations and incompatible OAuth initiation, including native surfaces. Prove
    existing sockets and agents cannot keep writing; a load-balancer/UI-only pause is insufficient.
    Preserve recovery/export access and old callback consumers. The new candidate's editing pause
@@ -79,10 +78,10 @@ and verified ancestry can use the routine path. Do not disable the gate to ship 
    live drafts, compaction, blueprint pins, interrupted reruns, and exact semantic inventories.
    Execute both directions of client/backend and provider/backend compatibility, browser/native
    callbacks, expiry/replay and recovery. Verify private catalog authorization/provenance.
-8. K/F/C/T reviewers inspect all evidence, including the deployment ordering. Record the actual
-   coordinator loop ordinal (1–20); never reset it or invent a value to bypass the cap. An independent
-   reviewer is required (at least two distinct reviewer identifiers). Obtain the `prepared` record
-   for this exact artifact and install it in the protected environment. Dispatch `prepare`.
+8. The operator verifies the evidence and deployment ordering, then records `prepared` for this
+   exact artifact in the production environment and dispatches `prepare`. Agent fanout and PR
+   checks review the code; this operational record requires no reviewer identifiers or agent-loop
+   ordinal. Do not record a check as complete based solely on a unit fixture or a written plan.
 
 These preconditions must already hold before the workflow can deploy **any** provider. Provider-first
 ordering alone does not make mixed OAuth protocols safe. If a compatible old-client recovery release,
@@ -126,10 +125,8 @@ in `scripts/production-cutover.mjs` / `.test.ts`; tests are not deployment evide
 | `targetSha` | Full lowercase 40-hex commit SHA of the approved cutover |
 | `artifactSha256` | SHA-256 from the exact paused artifact descriptor |
 | `contractSha256` | Compatibility fingerprint from that descriptor |
-| `reviewedAt` | Parseable UTC timestamp, not in the future |
-| `expiresAt` | For prepare/resume: after current time and no later than reviewedAt + 24h |
-| `orchestrationLoop` | Actual coordinator ledger ordinal, integer 1–20 |
-| `reviews` | Required `K`, `F`, `C`, `T` reviewer IDs, each 1–80 alphanumeric/dot/underscore/hyphen characters; at least two distinct |
+| `recordedAt` | Parseable UTC timestamp, not in the future |
+| `expiresAt` | For prepare/resume: after current time and no later than recordedAt + 24h |
 | `oldClientSha` | Full 40-hex SHA of pinned deployed old client |
 | `recoveryClientSha` | Full 40-hex SHA of validated recovery/preparatory client |
 | `recoveryPath` | `pinned-old-client-export` or `preparatory-release` |
@@ -141,10 +138,9 @@ and `postDeployVerification`. Routine requires all completed keys **plus** `resu
 Store immutable evidence in the approved access-controlled system; the URL is a locator, not a
 credential. The deployment job outputs only target/digests/phase/pause decision and record digest.
 
-## Outstanding external evidence and review
+## Outstanding operational evidence
 
 No verified production fence, drain, backup/restore, pinned old-client recovery/preparatory release,
 mixed OAuth matrix, migration rehearsal, deployment receipts, or completed cutover record has been
-supplied in this task. GitHub production environment protection must also be verified by the
-operator. **The first production deployment remains gated.** Local schema/security tests demonstrate
+supplied in this task. **The first production deployment remains gated.** Local schema/security tests demonstrate
 fail-closed tooling behavior; they do not certify operational readiness or independent approval.

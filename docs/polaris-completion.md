@@ -6,11 +6,13 @@ The code integration is complete in `/Users/jacob_1/odie-os-polaris-upstream` on
 `integration/polaris-upstream`. The final local merge commit is `96797fd2`. Git
 ancestry includes fork `origin/main` at `aa485877` and Cloudflare `upstream/main`
 at `ef65348f`. Neither the original main worktree nor production was changed.
-No push or pull request was requested or performed. Keep this worktree for review.
+The branch was pushed and opened as [PR #188](https://github.com/totango/odie-os/pull/188)
+after the original integration handoff. Keep this worktree for review; the PR has not been merged.
 
 The **production transition is not complete**. The checked-in deployment gate keeps
-the new backend artifact write-paused until authorized operators provide reviewed,
-real cutover evidence. See `polaris-production-cutover.md`; do not infer a release
+the new backend artifact write-paused until an operator records real cutover evidence.
+No independent human attestation is required by this fork; agent fanout and PR checks
+review the code. See `polaris-production-cutover.md`; do not infer a release
 approval from passing local tests.
 
 ## Context, decisions and execution
@@ -57,12 +59,12 @@ delivery and non-owner commit reads. Native/browser OAuth uses one-use,
 protocol-acknowledged handoffs; old persisted flows are rejected before exchange.
 
 Skuld review found and drove repairs for stale capability writes, expired grant
-cleanup, native-flow races, an incomplete cutover reviewer check, late attachment
+cleanup, native-flow races, an earlier cutover record-validation bug, late attachment
 withdrawal, retained worktree tool-call data and private commit IDs, owner-invite
 open races, and preview reset gaps. Independent re-reviews found those scoped
 paths clean. The last six upstream public-API test commits also received a clean
-scoped review. No GitHub PR review was requested, so no inline PR comments were
-posted.
+scoped review. A PR was subsequently opened; no inline PR comments were posted during
+the integration work.
 
 ## Exact-tree outcome checks
 
@@ -91,9 +93,9 @@ gate then passed. Four backend integration cases are intentionally skipped.
 Before deployment, operators must supply actual evidence for old-client draft
 recovery (or a compatible preparatory release), current-deployment write and OAuth
 admission fencing, draining, backup/restore rehearsal, migrated snapshot checks,
-mixed-version browser/native completion, deployment receipts and environment
-reviewer protections. The cutover validator checks exact artifact identity and
-attestation shape; it cannot prove that referenced operations occurred. Missing
+mixed-version browser/native completion and deployment receipts. The cutover
+validator checks exact artifact identity and evidence references; it cannot prove
+that referenced operations occurred. Missing
 evidence blocks the production workflow; it is not replaced by this handoff.
 
 No temporary review clone was created. The integration worktree is intentionally

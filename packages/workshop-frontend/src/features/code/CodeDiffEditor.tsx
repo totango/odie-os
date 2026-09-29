@@ -397,10 +397,13 @@ export default function CodeDiffEditor({
     const originalView = originalViewRef.current
     if (!modified || !originalView) return
 
+    let active = true
+    const isCurrent = () => active && modifiedViewRef.current === modified &&
+      originalViewRef.current === originalView
     let syncing = false
     const syncScroll = (from: EditorView, to: EditorView) => {
       const handler = () => {
-        if (syncing) return
+        if (!isCurrent() || syncing) return
         syncing = true
         to.scrollDOM.scrollTop = from.scrollDOM.scrollTop
         syncing = false
@@ -409,13 +412,25 @@ export default function CodeDiffEditor({
       return () => from.scrollDOM.removeEventListener('scroll', handler)
     }
 
-    const detachModified = syncScroll(modified, originalView)
-    const detachOriginal = syncScroll(originalView, modified)
-    originalView.scrollDOM.scrollTop = modified.scrollDOM.scrollTop
+    let detachModified: (() => void) | undefined
+    let detachOriginal: (() => void) | undefined
+    // A recreated original still has estimated line heights. Scrolling it before its first
+    // measurement lets CodeMirror's scroll anchoring move it (and then the modified pane).
+    // Keep the modified pane authoritative until the original has measured its viewport.
+    originalView.requestMeasure({
+      read: () => isCurrent() ? modified.scrollDOM.scrollTop : null,
+      write: top => {
+        if (!isCurrent() || top === null) return
+        originalView.scrollDOM.scrollTop = top
+        detachModified = syncScroll(modified, originalView)
+        detachOriginal = syncScroll(originalView, modified)
+      },
+    })
 
     return () => {
-      detachModified()
-      detachOriginal()
+      active = false
+      detachModified?.()
+      detachOriginal?.()
     }
   }, [splitDiff, viewsToken])
 

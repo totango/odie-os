@@ -31,6 +31,38 @@ test('real CodeMirror is lazy then retains selection, physical scroll and undo a
   expect(await page.evaluate(() => window.editorFixture.snapshot().text.endsWith('\nremote'))).toBe(true)
 })
 
+test('recreated split panes retain modified scroll and resume bidirectional scrolling', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto('/editor.html')
+  await page.getByRole('button', { name: 'Open code' }).click()
+  const scrollers = page.locator('.cm-scroller')
+  await expect(scrollers).toHaveCount(2)
+  await page.evaluate(() => window.editorFixture.select())
+
+  for (let cycle = 0; cycle < 3; cycle++) {
+    await page.getByRole('button', { name: 'Hide code' }).click()
+    await page.getByRole('button', { name: 'Open code' }).click()
+    await expect(scrollers).toHaveCount(2)
+    // A poll can pass before the new pane's first measurement corrupts the retained scroll.
+    // Sample across frames to cover measurement, scroll anchoring, and queued scroll events.
+    const samples = await page.evaluate(async () => {
+      const positions: number[][] = []
+      for (let frame = 0; frame < 6; frame++) {
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+        positions.push(Array.from(document.querySelectorAll('.cm-scroller'), el => el.scrollTop))
+      }
+      return positions
+    })
+    expect(samples.map(positions => positions[1])).toEqual(Array(6).fill(500))
+    expect(samples.at(-1)).toEqual([500, 500])
+
+    await scrollers.first().evaluate(el => { el.scrollTop = 800 })
+    await expect.poll(() => scrollers.evaluateAll(els => els.map(el => el.scrollTop))).toEqual([800, 800])
+    await scrollers.last().evaluate(el => { el.scrollTop = 500 })
+    await expect.poll(() => scrollers.evaluateAll(els => els.map(el => el.scrollTop))).toEqual([500, 500])
+  }
+})
+
 test('Activity reconciles missed B reset without a phantom preview; A row remains authoritative', async ({ page }) => {
   await page.goto('/editor.html')
   await page.getByRole('button', { name: 'Open code' }).click()

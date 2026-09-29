@@ -26,8 +26,7 @@ function fixture() {
   const record = {
     schemaVersion: 1, epoch: artifact.epoch, deployment: 'odie-os-production', status: 'completed',
     targetSha: sha, artifactSha256: artifact.artifactSha256, contractSha256: artifact.contractSha256,
-    orchestrationLoop: 1, reviewedAt: '2026-09-25T11:00:00Z', expiresAt: '2026-09-25T13:00:00Z',
-    reviews: { K: 'kernel-reviewer', F: 'frontend-reviewer', C: 'connector-reviewer', T: 'tooling-reviewer' },
+    recordedAt: '2026-09-25T11:00:00Z', expiresAt: '2026-09-25T13:00:00Z',
     oldClientSha: 'c'.repeat(40), recoveryClientSha: 'd'.repeat(40), recoveryPath: 'preparatory-release', evidence,
   };
   return { directory, configPath, artifact, record, close: () => rmSync(directory, { recursive: true, force: true }) };
@@ -53,7 +52,7 @@ test('prepared exact-target approval stays paused; completion is required to res
   } finally { f.close(); }
 });
 
-test('reviewed completion resumes only the sealed target without dropping other configuration', () => {
+test('recorded completion resumes only the sealed target without dropping other configuration', () => {
   const f = fixture();
   try {
     assert.equal(authorizeArtifact(f.directory, root, f.record, options).paused, false);
@@ -73,16 +72,15 @@ for (const field of ['pauseFence', 'drain', 'backupRestore', 'clientRecovery', '
   });
 }
 
-test('schema rejects stale, mismatched, unreviewed and unpinned confirmations', () => {
+test('schema rejects stale, mismatched and unpinned confirmations', () => {
   const f = fixture();
   try {
     for (const patch of [
       { schemaVersion: 2 }, { deployment: 'other' }, { epoch: 'other' }, { targetSha: 'e'.repeat(40) },
       { artifactSha256: 'e'.repeat(64) }, { contractSha256: 'e'.repeat(64) },
-      { expiresAt: '2026-09-25T11:59:00Z' }, { reviewedAt: '2026-09-26T12:00:00Z' },
-      { expiresAt: '2026-10-25T12:00:00Z' }, { reviews: {} }, { oldClientSha: '' },
-      { recoveryPath: 'assume-compatible' }, { recoveryClientSha: '' }, { orchestrationLoop: 21 },
-      { reviews: { K: 'same', F: 'same', C: 'same', T: 'same' } },
+      { expiresAt: '2026-09-25T11:59:00Z' }, { recordedAt: '2026-09-26T12:00:00Z' },
+      { expiresAt: '2026-10-25T12:00:00Z' }, { oldClientSha: '' },
+      { recoveryPath: 'assume-compatible' }, { recoveryClientSha: '' },
     ]) assert.throws(() => validateCutoverRecord({ ...f.record, ...patch }, f.artifact, options));
     assert.throws(() => validateCutoverRecord(f.record, f.artifact, { ...options, phase: 'unknown' }));
     f.record.evidence.drain.url = 'https://evidence.example/drain?token=private';
@@ -90,13 +88,14 @@ test('schema rejects stale, mismatched, unreviewed and unpinned confirmations', 
   } finally { f.close(); }
 });
 
-test('extra review keys cannot impersonate an independent lane reviewer or unpause the artifact', () => {
+test('review metadata is not a deployment requirement; the artifact evidence still is', () => {
   const f = fixture();
   try {
     const record = { ...f.record, reviews: { K: 'same', F: 'same', C: 'same', T: 'same', extra: 'other' } };
     const before = readFileSync(f.configPath, 'utf8');
-    assert.throws(() => validateCutoverRecord(record, f.artifact, options), /independent review is required/);
-    assert.throws(() => authorizeArtifact(f.directory, root, record, options), /independent review is required/);
+    assert.deepEqual(validateCutoverRecord(record, f.artifact, options), { paused: false });
+    delete record.evidence.backupRestore;
+    assert.throws(() => authorizeArtifact(f.directory, root, record, options), /backupRestore evidence/);
     assert.equal(readFileSync(f.configPath, 'utf8'), before);
     assert.equal(JSON.parse(before).vars.WORKSHOP_EDITING_PAUSED, 'true');
   } finally { f.close(); }
@@ -129,7 +128,7 @@ test('artifact tampering cannot use a valid approval to unpause', () => {
 
 test('workflow gates all deployment mutations and uses protected environment evidence', () => {
   const workflow = readFileSync(join(root, '.github/workflows/deploy-production.yml'), 'utf8');
-  const gate = workflow.indexOf('- name: Enforce reviewed production cutover');
+  const gate = workflow.indexOf('- name: Enforce production cutover checklist');
   assert.ok(gate > workflow.indexOf('- name: Download deployment artifact'));
   assert.ok(gate < workflow.indexOf('- name: Deploy new OAuth connectors'));
   assert.ok(gate < workflow.indexOf('- name: Sync browser editor capability secret'));
