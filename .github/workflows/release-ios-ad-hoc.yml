@@ -1,0 +1,203 @@
+name: Distribute TARS iOS ad hoc pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: Positive iOS build number (reuse only when adding registered devices to the same build)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Permit main branch releases only
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ref guard
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            printf '%s\n' "Ad hoc releases are only permitted from refs/heads/main." >&2
+            exit 1
+          fi
+
+  ios:
+    name: Sign and distribute registered-device IPA
+    needs: guard
+    runs-on: macos-26
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: native-release
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and pnpm
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: "24.19.0"
+          cache: true
+          run-install: false
+
+      - name: Install dependencies with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate configuration
+        env:
+          BUILD_NUMBER_INPUT: ${{ inputs.build_number }}
+          APPLE_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          APPLE_IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_IOS_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_IOS_AD_HOC_PROFILE_BASE64: ${{ secrets.APPLE_IOS_AD_HOC_PROFILE_BASE64 }}
+          NATIVE_RELEASE_KEYCHAIN_PASSWORD: ${{ secrets.NATIVE_RELEASE_KEYCHAIN_PASSWORD }}
+          FIREBASE_IOS_APP_ID: ${{ vars.FIREBASE_IOS_APP_ID }}
+          FIREBASE_TESTER_GROUP: ${{ vars.FIREBASE_TESTER_GROUP }}
+          GOOGLE_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          GOOGLE_RELEASE_SERVICE_ACCOUNT: ${{ vars.GOOGLE_RELEASE_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/heads/main"
+          case "$BUILD_NUMBER_INPUT" in
+            ''|*[!0-9]*) printf '%s\n' "build_number must be a positive integer" >&2; exit 1 ;;
+            *) if [ "$BUILD_NUMBER_INPUT" -le 0 ]; then printf '%s\n' "build_number must be positive" >&2; exit 1; fi ;;
+          esac
+          printf 'NATIVE_IOS_BUILD_NUMBER=%s\n' "$BUILD_NUMBER_INPUT" >> "$GITHUB_ENV"
+          for name in APPLE_DISTRIBUTION_CERTIFICATE_BASE64 APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD APPLE_IOS_PROVISIONING_PROFILE_BASE64 APPLE_IOS_AD_HOC_PROFILE_BASE64 NATIVE_RELEASE_KEYCHAIN_PASSWORD FIREBASE_IOS_APP_ID FIREBASE_TESTER_GROUP GOOGLE_WORKLOAD_IDENTITY_PROVIDER GOOGLE_RELEASE_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              printf 'Missing ad hoc release configuration: %s\n' "$name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Install ad hoc signing assets
+        env:
+          APPLE_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          APPLE_IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_IOS_PROVISIONING_PROFILE_BASE64 }}
+          APPLE_IOS_AD_HOC_PROFILE_BASE64: ${{ secrets.APPLE_IOS_AD_HOC_PROFILE_BASE64 }}
+          NATIVE_RELEASE_KEYCHAIN_PASSWORD: ${{ secrets.NATIVE_RELEASE_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/native-ad-hoc.keychain-db"
+          certificate_path="$RUNNER_TEMP/ios-distribution-certificate.p12"
+          archive_profile="$RUNNER_TEMP/odie-os-app-store.mobileprovision"
+          profile_path="$RUNNER_TEMP/odie-os-ad-hoc.mobileprovision"
+          printf 'NATIVE_RELEASE_KEYCHAIN_PATH=%s\n' "$keychain_path" >> "$GITHUB_ENV"
+          printf '%s' "$APPLE_DISTRIBUTION_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_IOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$archive_profile"
+          printf '%s' "$APPLE_IOS_AD_HOC_PROFILE_BASE64" | base64 -D > "$profile_path"
+          chmod 600 "$certificate_path" "$archive_profile" "$profile_path"
+          security cms -D -i "$archive_profile" > "$RUNNER_TEMP/archive-profile.plist"
+          archive_uuid="$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/archive-profile.plist")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print Name' "$RUNNER_TEMP/archive-profile.plist")" = "Odie OS App Store"
+          test "$(/usr/libexec/PlistBuddy -c 'Print Entitlements:application-identifier' "$RUNNER_TEMP/archive-profile.plist")" = "66J7DJB93K.com.totango.odieos"
+          security cms -D -i "$profile_path" > "$RUNNER_TEMP/ios-profile.plist"
+          profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/ios-profile.plist")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print Name' "$RUNNER_TEMP/ios-profile.plist")" = "Odie OS Ad Hoc"
+          test "$(/usr/libexec/PlistBuddy -c 'Print Entitlements:application-identifier' "$RUNNER_TEMP/ios-profile.plist")" = "66J7DJB93K.com.totango.odieos"
+          /usr/libexec/PlistBuddy -c 'Print Entitlements:com.apple.developer.associated-domains' "$RUNNER_TEMP/ios-profile.plist" >/dev/null
+          /usr/libexec/PlistBuddy -c 'Print ProvisionedDevices' "$RUNNER_TEMP/ios-profile.plist" >/dev/null
+          test "$(/usr/libexec/PlistBuddy -c 'Print Entitlements:get-task-allow' "$RUNNER_TEMP/ios-profile.plist")" = "false"
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$archive_profile" "$HOME/Library/MobileDevice/Provisioning Profiles/$archive_uuid.mobileprovision"
+          cp "$profile_path" "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
+          security create-keychain -p "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$APPLE_DISTRIBUTION_CERTIFICATE_PASSWORD" -t cert -f pkcs12 -k "$keychain_path" -T /usr/bin/codesign -T /usr/bin/xcodebuild -T /usr/bin/xcrun
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$NATIVE_RELEASE_KEYCHAIN_PASSWORD" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -q 'Apple Distribution'
+          {
+            printf 'NATIVE_IOS_ARCHIVE_PROFILE_PATH=%s\n' "$HOME/Library/MobileDevice/Provisioning Profiles/$archive_uuid.mobileprovision"
+            printf 'NATIVE_IOS_PROFILE_PATH=%s\n' "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
+          } >> "$GITHUB_ENV"
+
+      - name: Build and export ad hoc IPA
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup override set 1.96.0
+          rustup target add --toolchain 1.96.0 aarch64-apple-ios
+          pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-work-items --cache build:app
+          pnpm --dir packages/gatekeeper-jarvis run build:app
+          pnpm --dir packages/workshop-native sync:gatekeeper-csp
+          ios_config="{\"bundle\":{\"iOS\":{\"bundleVersion\":\"$NATIVE_IOS_BUILD_NUMBER\"}}}"
+          pnpm --dir packages/workshop-native tauri ios build --ci --archive-only --config "$ios_config"
+          export_dir="packages/workshop-native/src-tauri/gen/apple/build/ad-hoc-export"
+          rm -rf "$export_dir"
+          pnpm --dir packages/workshop-native ios:export:ad-hoc
+          ipa_count="$(find "$export_dir" -maxdepth 1 -name '*.ipa' -type f | wc -l | tr -d ' ')"
+          test "$ipa_count" = "1"
+          ipa_path="$(find "$export_dir" -maxdepth 1 -name '*.ipa' -type f)"
+          printf 'NATIVE_IOS_IPA_PATH=%s\n' "$ipa_path" >> "$GITHUB_ENV"
+
+      - name: Verify exported bundle and embedded ad hoc profile
+        run: |
+          set -euo pipefail
+          work_dir="$RUNNER_TEMP/ipa-verify"
+          mkdir -p "$work_dir"
+          ditto -x -k "$NATIVE_IOS_IPA_PATH" "$work_dir"
+          app_count="$(find "$work_dir/Payload" -maxdepth 1 -name '*.app' -type d | wc -l | tr -d ' ')"
+          test "$app_count" = "1"
+          app_path="$(find "$work_dir/Payload" -maxdepth 1 -name '*.app' -type d)"
+          info_plist="$app_path/Info.plist"
+          expected_version="$(node -p "JSON.parse(require('node:fs').readFileSync('packages/workshop-native/package.json','utf8')).version")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$info_plist")" = "com.totango.odieos"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleDisplayName' "$info_plist")" = "TARS"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$info_plist")" = "$expected_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$info_plist")" = "$NATIVE_IOS_BUILD_NUMBER"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          codesign -dv "$app_path" 2> "$RUNNER_TEMP/codesign-details.txt"
+          grep -q 'TeamIdentifier=66J7DJB93K' "$RUNNER_TEMP/codesign-details.txt"
+          security cms -D -i "$app_path/embedded.mobileprovision" > "$RUNNER_TEMP/exported-profile.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print Name' "$RUNNER_TEMP/exported-profile.plist")" = "Odie OS Ad Hoc"
+          test "$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/exported-profile.plist")" = "$(/usr/libexec/PlistBuddy -c 'Print UUID' "$RUNNER_TEMP/ios-profile.plist")"
+          /usr/libexec/PlistBuddy -c 'Print ProvisionedDevices' "$RUNNER_TEMP/exported-profile.plist" >/dev/null
+
+      - name: Authenticate to Firebase for distribution
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: tars-8d9af
+          workload_identity_provider: ${{ vars.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GOOGLE_RELEASE_SERVICE_ACCOUNT }}
+
+      - name: Invite pilot testers through Firebase App Distribution
+        env:
+          FIREBASE_IOS_APP_ID: ${{ vars.FIREBASE_IOS_APP_ID }}
+          FIREBASE_TESTER_GROUP: ${{ vars.FIREBASE_TESTER_GROUP }}
+        run: |
+          set -euo pipefail
+          pnpm dlx firebase-tools@15.32.1 appdistribution:distribute "$NATIVE_IOS_IPA_PATH" --app "$FIREBASE_IOS_APP_ID" --groups "$FIREBASE_TESTER_GROUP" --release-notes "TARS $GITHUB_SHA (iOS build $NATIVE_IOS_BUILD_NUMBER)"
+          printf 'Ad hoc iOS build %s distributed to Firebase tester group %s.\n' "$NATIVE_IOS_BUILD_NUMBER" "$FIREBASE_TESTER_GROUP" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean signing assets and credentials
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${NATIVE_RELEASE_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$NATIVE_RELEASE_KEYCHAIN_PATH" || true
+          fi
+          rm -f "$RUNNER_TEMP/ios-distribution-certificate.p12" "$RUNNER_TEMP/odie-os-app-store.mobileprovision" "$RUNNER_TEMP/archive-profile.plist" "$RUNNER_TEMP/odie-os-ad-hoc.mobileprovision" "$RUNNER_TEMP/ios-profile.plist" "$RUNNER_TEMP/exported-profile.plist"
+          if [ -n "${NATIVE_IOS_ARCHIVE_PROFILE_PATH:-}" ]; then
+            rm -f "$NATIVE_IOS_ARCHIVE_PROFILE_PATH"
+          fi
+          if [ -n "${NATIVE_IOS_PROFILE_PATH:-}" ]; then
+            rm -f "$NATIVE_IOS_PROFILE_PATH"
+          fi

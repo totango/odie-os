@@ -42,7 +42,9 @@ const mountPoint = await mkdtemp(join(tmpdir(), 'odie-release-'))
 try {
   await execFile('/usr/bin/hdiutil', ['attach', '-nobrowse', '-readonly', '-mountpoint', mountPoint, source])
   const appNames = (await readdir(mountPoint)).filter((name) => name.endsWith('.app'))
-  if (appNames.length !== 1) throw new Error('disk image must contain exactly one application')
+  if (appNames.length !== 1 || appNames[0] !== 'TARS.app') {
+    throw new Error('disk image must contain TARS.app and no other application')
+  }
   const infoPlist = join(mountPoint, appNames[0], 'Contents/Info.plist')
   const [{ stdout: appVersion }, { stdout: appIdentifier }] = await Promise.all([
     execFile('/usr/bin/plutil', ['-extract', 'CFBundleShortVersionString', 'raw', infoPlist]),
@@ -83,4 +85,4 @@ await Promise.all([
   })}\n`),
 ])
 
-console.log(`Prepared Odie OS ${version} from ${basename(source)} in ${outputDirectory}`)
+console.log(`Prepared TARS ${version} from ${basename(source)} in ${outputDirectory}`)

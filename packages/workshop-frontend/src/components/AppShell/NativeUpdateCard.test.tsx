@@ -57,7 +57,7 @@ describe('NativeUpdateCard', () => {
 
   it('offers the known DMG when a newer macOS release exists', async () => {
     const { container, root } = await render()
-    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Download Odie OS 1.1.0 update"]')
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Download TARS 1.1.0 update"]')
     expect(button?.textContent).toContain('Update available')
     await act(async () => button?.click())
     expect(state.runtime.openExternal).toHaveBeenCalledWith(`https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-1.1.0-${'a'.repeat(64)}.dmg`)
@@ -86,7 +86,7 @@ describe('NativeUpdateCard', () => {
   it('uses an accessible compact control in the collapsed sidebar', async () => {
     const { container, root } = await render('2.0.0', true)
     const button = container.querySelector('button')
-    expect(button?.getAttribute('aria-label')).toBe('Download Odie OS 2.0.0 update')
+    expect(button?.getAttribute('aria-label')).toBe('Download TARS 2.0.0 update')
     expect(button?.getAttribute('title')).toBe('Update available')
     await act(async () => root.unmount())
   })

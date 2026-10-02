@@ -5,6 +5,8 @@
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Odie OS uses Face ID to unlock your encrypted session.</string>
+	<string>TARS uses Face ID to unlock your encrypted session.</string>
+	<key>CFBundleDisplayName</key>
+	<string>TARS</string>
 </dict>
 </plist>
