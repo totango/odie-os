@@ -1,28 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-  <application android:label="Odie OS">
-    <activity android:name=".MainActivity" android:exported="true">
-      <intent-filter android:autoVerify="true">
-        <action android:name="android.intent.action.VIEW" />
-        <category android:name="android.intent.category.DEFAULT" />
-        <category android:name="android.intent.category.BROWSABLE" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/admin" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/blueprints" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/context" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/explore" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/gatekeepers" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/getting-started" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/outputs" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/profile" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/providers" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/sessions" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/signup" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:path="/workspaces" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/blueprint/" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/gadget/" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/gatekeepers/" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/workspace/" />
-        <data android:scheme="https" android:host="odie-os-native-api.odie-os.workers.dev" android:pathPrefix="/native/oauth-return/" />
-      </intent-filter>
-    </activity>
-  </application>
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- AndroidTV support -->
+    <uses-feature android:name="android.software.leanback" android:required="false" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/Theme.odie_os_native"
+        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:launchMode="singleTask"
+            android:label="@string/main_activity_title"
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <!-- AndroidTV support -->
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+            <!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
+            <intent-filter android:autoVerify="true" >
+                <action android:name="android.intent.action.VIEW" />
+                <!-- ChromeOS ARC++ uses a different action for deep links -->
+                <action android:name="org.chromium.arc.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:scheme="http" />
+                <data android:host="odie-os-native-api.odie-os.workers.dev" />
+                <data android:path="/admin" />
+                <data android:path="/blueprints" />
+                <data android:path="/context" />
+                <data android:path="/explore" />
+                <data android:path="/gatekeepers" />
+                <data android:path="/getting-started" />
+                <data android:path="/outputs" />
+                <data android:path="/profile" />
+                <data android:path="/providers" />
+                <data android:path="/sessions" />
+                <data android:path="/signup" />
+                <data android:path="/workspaces" />
+
+                <data android:pathPrefix="/blueprint/" />
+                <data android:pathPrefix="/gadget/" />
+                <data android:pathPrefix="/gatekeepers/" />
+                <data android:pathPrefix="/workspace/" />
+                <data android:pathPrefix="/native/oauth-return/" />
+
+            </intent-filter>
+            <!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
+        </activity>
+
+        <provider
+          android:name="androidx.core.content.FileProvider"
+          android:authorities="${applicationId}.fileprovider"
+          android:exported="false"
+          android:grantUriPermissions="true">
+          <meta-data
+            android:name="android.support.FILE_PROVIDER_PATHS"
+            android:resource="@xml/file_paths" />
+        </provider>
+    </application>
 </manifest>

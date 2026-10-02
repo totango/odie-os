@@ -1,0 +1,164 @@
+name: Distribute TARS Android internal build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: Positive Android version code, greater than the previous release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Permit main branch releases only
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ref guard
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            printf '%s\n' "Android releases are only permitted from refs/heads/main." >&2
+            exit 1
+          fi
+
+  android:
+    name: Build signed APK and distribute to testers
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: native-release
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;27.2.12479018'
+          log-accepted-android-sdk-licenses: 'false'
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Set up Vite+, Node.js and pnpm
+        uses: voidzero-dev/setup-vp@313600b80b104eadebb9111787d37a2e83e014ca # v1.17.0
+        with:
+          node-version: '24.19.0'
+          cache: true
+          run-install: false
+
+      - name: Install dependencies with frozen lockfile
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release configuration
+        env:
+          VERSION_CODE_INPUT: ${{ inputs.version_code }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          FIREBASE_ANDROID_APP_ID: ${{ vars.FIREBASE_ANDROID_APP_ID }}
+          FIREBASE_TESTER_GROUP: ${{ vars.FIREBASE_TESTER_GROUP }}
+          GOOGLE_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          GOOGLE_RELEASE_SERVICE_ACCOUNT: ${{ vars.GOOGLE_RELEASE_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          case "$VERSION_CODE_INPUT" in
+            ''|*[!0-9]*) printf '%s\n' "version_code must be a positive integer" >&2; exit 1 ;;
+            *) if [ "$VERSION_CODE_INPUT" -le 0 ] || [ "$VERSION_CODE_INPUT" -gt 2100000000 ]; then printf '%s\n' "version_code out of range" >&2; exit 1; fi ;;
+          esac
+          printf 'ANDROID_VERSION_CODE=%s\n' "$VERSION_CODE_INPUT" >> "$GITHUB_ENV"
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS FIREBASE_ANDROID_APP_ID FIREBASE_TESTER_GROUP GOOGLE_WORKLOAD_IDENTITY_PROVIDER GOOGLE_RELEASE_SERVICE_ACCOUNT; do
+            if [ -z "${!name}" ]; then
+              printf 'Missing Android release configuration: %s\n' "$name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Install Android signing assets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keystore="$RUNNER_TEMP/odie-os-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          keytool -list -keystore "$keystore" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" >/dev/null
+          {
+            printf 'storeFile=%s\n' "$keystore"
+            printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+            printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$ANDROID_KEY_PASSWORD"
+          } > packages/workshop-native/src-tauri/gen/android/keystore.properties
+
+      - name: Build ARM64 release APK
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup override set 1.96.0
+          rustup target add --toolchain 1.96.0 aarch64-linux-android
+          pnpm exec vp run --filter @gadgets/gatekeeper-context --filter @gadgets/gatekeeper-scheduler --filter @gadgets/gatekeeper-work-items --cache build:app
+          pnpm --dir packages/gatekeeper-jarvis run build:app
+          pnpm --dir packages/workshop-native sync:gatekeeper-csp
+          android_config="{\"bundle\":{\"android\":{\"versionCode\":$ANDROID_VERSION_CODE}}}"
+          pnpm --dir packages/workshop-native tauri android build --ci --target aarch64 --apk --config "$android_config"
+          apk_dir=packages/workshop-native/src-tauri/gen/android/app/build/outputs/apk
+          apk_count="$(find "$apk_dir" -name '*release*.apk' -type f | wc -l | tr -d ' ')"
+          test "$apk_count" = '1'
+          printf 'ANDROID_APK_PATH=%s\n' "$(find "$apk_dir" -name '*release*.apk' -type f)" >> "$GITHUB_ENV"
+
+      - name: Verify package, version and release signature
+        run: |
+          set -euo pipefail
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          package_info="$("$build_tools/aapt" dump badging "$ANDROID_APK_PATH" | grep '^package:')"
+          [[ "$package_info" == *"name='com.totango.odieos'"* ]]
+          [[ "$package_info" == *"versionCode='$ANDROID_VERSION_CODE'"* ]]
+          "$build_tools/apksigner" verify --verbose --print-certs "$ANDROID_APK_PATH"
+          expected_fingerprint='26736978888DD26DBFEEA208EA0D14E75932A9E149216751A6F5303D755B726F'
+          actual_fingerprint="$("$build_tools/apksigner" verify --print-certs "$ANDROID_APK_PATH" | grep 'Signer #1 certificate SHA-256 digest:' | awk '{print toupper($NF)}')"
+          test "$actual_fingerprint" = "$expected_fingerprint"
+
+      - name: Authenticate to Firebase for distribution
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: tars-8d9af
+          workload_identity_provider: ${{ vars.GOOGLE_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GOOGLE_RELEASE_SERVICE_ACCOUNT }}
+
+      - name: Distribute Android APK through Firebase
+        env:
+          FIREBASE_ANDROID_APP_ID: ${{ vars.FIREBASE_ANDROID_APP_ID }}
+          FIREBASE_TESTER_GROUP: ${{ vars.FIREBASE_TESTER_GROUP }}
+        run: |
+          set -euo pipefail
+          pnpm dlx firebase-tools@15.32.1 appdistribution:distribute "$ANDROID_APK_PATH" --app "$FIREBASE_ANDROID_APP_ID" --groups "$FIREBASE_TESTER_GROUP" --release-notes "TARS $GITHUB_SHA (Android version code $ANDROID_VERSION_CODE)"
+          printf 'Android version code %s distributed to Firebase tester group %s.\n' "$ANDROID_VERSION_CODE" "$FIREBASE_TESTER_GROUP" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean signing assets
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/odie-os-release.jks" packages/workshop-native/src-tauri/gen/android/keystore.properties

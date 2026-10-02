@@ -558,7 +558,7 @@ export default function SettingsPage() {
                 <Desktop size={21} weight="duotone" />
               </div>
               <div className="min-w-0 flex-1">
-                <h3 className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">Odie OS for Mac</h3>
+                <h3 className="text-[15px] font-medium tracking-[-0.25px] text-kumo-default">TARS for Mac</h3>
                 <p className="mt-1 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
                   Install the signed and notarized desktop app on macOS 15 or later.
                 </p>
@@ -569,7 +569,7 @@ export default function SettingsPage() {
               </button>
             </div>
             <p className="mt-4 border-t border-kumo-line pt-3 text-[12px] leading-5 tracking-[-0.1px] text-kumo-subtle">
-              The iPhone and iPad app is pending approval for private-link App Store distribution.
+              Internal iPhone, iPad, and Android builds are available to invited testers through Firebase App Distribution.
             </p>
           </div>
         </section>

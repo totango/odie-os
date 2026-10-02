@@ -22,6 +22,8 @@ export interface Env {
   APP_LINK_HOST?: string;
   /** Signed Apple application identifier allowed to open links on APP_LINK_HOST. */
   APPLE_APP_ID?: string;
+  /** SHA-256 fingerprint of the Android release signing certificate for verified links. */
+  ANDROID_APP_SHA256?: string;
   /** Publicly downloadable, signed native application artifacts. */
   NATIVE_DOWNLOADS?: R2Bucket;
   /** Dormant until custom domains + Email Routing exist; the handler ships anyway. */
@@ -101,9 +103,16 @@ function appleAppSiteAssociation(appId?: string): Response {
   return associationResponse({ applinks: { apps: [], details } });
 }
 
-function androidAssetLinks(): Response {
-  // Production SHA-256 fingerprints depend on the Play/App signing key and remain an external gate.
-  return associationResponse([]);
+function androidAssetLinks(fingerprint?: string): Response {
+  if (!fingerprint || !/^[0-9A-Fa-f]{64}$/.test(fingerprint)) return associationResponse([]);
+  return associationResponse([{
+    relation: ["delegate_permission/common.handle_all_urls"],
+    target: {
+      namespace: "android_app",
+      package_name: "com.totango.odieos",
+      sha256_cert_fingerprints: [fingerprint.toUpperCase().match(/.{2}/g)!.join(":")],
+    },
+  }]);
 }
 
 export default {
@@ -116,7 +125,7 @@ export default {
       return appleAppSiteAssociation(env.APPLE_APP_ID);
     }
     if (url.hostname === appLinkHost && url.pathname === "/.well-known/assetlinks.json") {
-      return androidAssetLinks();
+      return androidAssetLinks(env.ANDROID_APP_SHA256);
     }
 
     let download = nativeDownload(url.pathname);

@@ -7,7 +7,8 @@
   "vars": {
     "NATIVE_API_ONLY": "true",
     "APP_LINK_HOST": "odie-os-native-api.odie-os.workers.dev",
-    "APPLE_APP_ID": "66J7DJB93K.com.totango.odieos"
+    "APPLE_APP_ID": "66J7DJB93K.com.totango.odieos",
+    "ANDROID_APP_SHA256": "26736978888DD26DBFEEA208EA0D14E75932A9E149216751A6F5303D755B726F"
   },
   "services": [
     { "binding": "WORKSHOP_BACKEND", "service": "odie-os-backend" },
