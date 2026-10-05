@@ -10,6 +10,7 @@ import { compressAvatar, avatarBlobUrl } from './avatarUtils'
 import UsageSettings from './components/billing/UsageSettings'
 import { useDocumentTitle } from './useDocumentTitle'
 import { getWorkshopRuntime } from './runtime'
+import { MACOS_DOWNLOAD_URL } from './nativeAppLinks'
 
 // Shared, on-language control classes (match the rest of the app: Workspaces/Blueprints headers,
 // the gatekeepers toolbar, the command palette). Kept here so the profile page reads as part of the
@@ -26,7 +27,6 @@ const TEXTAREA =
   'w-full rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-[16px] leading-5 tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive transition-[border-color,box-shadow] focus:border-kumo-ring focus:outline-none focus:ring-[3px] focus:ring-kumo-ring/15 sm:text-[14px]'
 
 const NPM_PACKAGE_NAME_REGEX = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:@\S+)?$/
-const MACOS_DOWNLOAD_URL = 'https://odie-os-native-api.odie-os.workers.dev/downloads/mac/OdieOS-latest.dmg'
 const OPENCODE_SETTINGS_TIMEOUT_MS = 12_000
 
 function normalizeOpenCodeCustomization(pluginPackageLines: string, skills: OpenCodeSkillDefinition[]): OpenCodeUserCustomization {
