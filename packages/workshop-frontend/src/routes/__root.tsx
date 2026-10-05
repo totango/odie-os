@@ -210,7 +210,9 @@ function AuthenticatedShell({
         {!isRequests && <AccountSelectionModal />}
         <SessionsProvider loadRepositories={pathname === '/sessions'}>
           <AppShell key={fullscreen ? 'workspace' : 'app'} startCollapsed={fullscreen} fullscreenContent={fullscreen}>
-            <Outlet />
+            {/* Activity can retain the departing page for one render after its route match disappears.
+                Remount the outlet on path changes so route-scoped hooks never read an inactive match. */}
+            <Outlet key={pathname} />
           </AppShell>
         </SessionsProvider>
       </RequiredConnectionsGate>
