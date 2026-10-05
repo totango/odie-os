@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, type ChangeEvent } from 'react'
 import { RpcStub } from 'capnweb'
 import { Switch, Textarea, Input, Button, Tabs, useKumoToastManager } from '@cloudflare/kumo'
-import { Hexagon, ShieldWarning, SquaresFour, UserPlus } from '@phosphor-icons/react'
+import { ArrowSquareOut, Hexagon, ShieldWarning, SquaresFour, UserPlus } from '@phosphor-icons/react'
 import { useAuthenticatedApi } from './AuthContext'
 import { AdminApi, AdminFormat, AdminResourceVendor, AmbientGatekeeperMode, CONFIGURABLE_DEPLOYMENT_HUB_IDS, type ConfigurableDeploymentHubId, type FinanceHubDiagnostic, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_ANNOUNCEMENT_LENGTH, MAX_SITE_NAME_LENGTH, DEFAULT_SITE_NAME, BannerColor, BANNER_COLORS, DEFAULT_BANNER_COLOR } from '@gadgets/workshop-shared/api'
 import { applyAccentColor, DEFAULT_ACCENT_COLOR } from './theme'
@@ -12,6 +12,8 @@ import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import { useServerConfigUpdater } from './ServerConfigContext'
 import { HUB_DETAILS } from './HubContext'
 import AdministratorManagementPanel from './AdministratorManagementPanel'
+import { FIREBASE_DISTRIBUTION_URL, MACOS_DOWNLOAD_URL } from './nativeAppLinks'
+import { getWorkshopRuntime } from './runtime'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -157,6 +159,14 @@ export default function AdminPage() {
   const [resourceBusy, setResourceBusy] = useState<Set<string>>(new Set())
 
   const [activeTab, setActiveTab] = useState('general')
+
+  const openAppLink = async (url: string) => {
+    try {
+      await getWorkshopRuntime().openExternal(url)
+    } catch {
+      toasts.add({ title: 'Failed to open link', variant: 'error' })
+    }
+  }
 
   // Promoted output formats, in menu order (see AdminFormatsPanel).
   const [formats, setFormats] = useState<AdminFormat[]>([])
@@ -510,6 +520,7 @@ export default function AdminPage() {
         onValueChange={setActiveTab}
         tabs={[
           { value: 'general', label: 'General' },
+          { value: 'apps', label: 'Apps' },
           { value: 'hubs', label: 'Hubs' },
           { value: 'gatekeepers', label: 'Gatekeepers' },
           { value: 'formats', label: 'Formats' },
@@ -520,6 +531,46 @@ export default function AdminPage() {
 
       {activeTab === 'administrators' && (
         <AdministratorManagementPanel admin={admin.api} currentProfileId={currentUser?.id} />
+      )}
+
+      {activeTab === 'apps' && (
+        <section aria-labelledby="admin-native-apps" className="rounded-xl border border-kumo-line bg-kumo-elevated p-6">
+          <h2 id="admin-native-apps" className="text-lg font-semibold text-kumo-strong">Get TARS</h2>
+          <p className="mt-1 text-sm text-kumo-subtle">
+            Invite mobile testers through Firebase App Distribution. The Mac installer is available directly.
+          </p>
+          <button type="button" onClick={() => void openAppLink(FIREBASE_DISTRIBUTION_URL)} className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-kumo-brand hover:underline">
+            Manage testers and releases <ArrowSquareOut size={14} aria-hidden="true" />
+          </button>
+
+          <div className="mt-6 divide-y divide-kumo-line rounded-xl border border-kumo-line bg-kumo-base">
+            <div className="px-4 py-4">
+              <h3 className="text-sm font-semibold text-kumo-default">iPhone and iPad</h3>
+              <p className="mt-1 text-sm leading-6 text-kumo-subtle">
+                Add the tester to the <strong>odie-internal</strong> Firebase group, then have them open the invitation
+                in Safari on their device. Register the device and include it in the ad hoc build before installation. After Google
+                sign-in, use <strong>Open in App</strong> if the browser does not return to TARS automatically.
+              </p>
+            </div>
+            <div className="px-4 py-4">
+              <h3 className="text-sm font-semibold text-kumo-default">Android</h3>
+              <p className="mt-1 text-sm leading-6 text-kumo-subtle">
+                Add the tester to <strong>odie-internal</strong>. They open the Firebase invitation on their Android device,
+                allow installation if prompted, and install or update TARS from the tester page.
+              </p>
+            </div>
+            <div className="px-4 py-4">
+              <h3 className="text-sm font-semibold text-kumo-default">macOS</h3>
+              <p className="mt-1 text-sm leading-6 text-kumo-subtle">
+                On macOS 15 or later, download the signed disk image and drag the app into Applications.
+                The current Mac release may still appear as Odie OS until the TARS build is published.
+              </p>
+              <button type="button" onClick={() => void openAppLink(MACOS_DOWNLOAD_URL)} className="mt-2 inline-flex items-center gap-1 text-sm font-medium text-kumo-brand hover:underline">
+                Download for Mac <ArrowSquareOut size={14} aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+        </section>
       )}
 
       {activeTab === 'hubs' && (
