@@ -152,12 +152,12 @@ fn authenticate_mobile_unlock<R: Runtime>(app: &AppHandle<R>) -> Result<(), Stri
     }
     app.biometric()
         .authenticate(
-            "Unlock Odie OS session storage".to_string(),
+            "Unlock TARS session storage".to_string(),
             AuthOptions {
                 allow_device_credential: true,
                 cancel_title: Some("Cancel".to_string()),
                 fallback_title: Some("Use device credential".to_string()),
-                title: Some("Unlock Odie OS".to_string()),
+                title: Some("Unlock TARS".to_string()),
                 subtitle: Some(
                     "Authenticate to release the encrypted session vault key.".to_string(),
                 ),
@@ -517,7 +517,7 @@ pub fn run() {
 
     builder
         .run(tauri::generate_context!())
-        .expect("error while running Odie OS native shell");
+        .expect("error while running TARS native shell");
 }
 
 #[cfg(test)]

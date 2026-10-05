@@ -48,7 +48,7 @@ export default function NativeUpdateCard({ collapsed }: { collapsed: boolean }) 
   }, [runtime])
 
   if (!update) return null
-  const label = `Download Odie OS ${update.version} update`
+  const label = `Download TARS ${update.version} update`
   const download = () => runtime.openExternal(new URL(update.downloadPath, runtime.apiOrigin).toString()).catch(() => {})
 
   if (collapsed) {
@@ -67,7 +67,7 @@ export default function NativeUpdateCard({ collapsed }: { collapsed: boolean }) 
         </span>
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-semibold leading-4 text-kumo-default">Update available</span>
-          <span className="mt-1 block text-[11px] leading-4 text-kumo-subtle">Odie OS {update.version} is ready</span>
+          <span className="mt-1 block text-[11px] leading-4 text-kumo-subtle">TARS {update.version} is ready</span>
         </span>
         <ArrowRight size={14} className="mt-1 shrink-0 text-kumo-inactive transition-transform group-hover:translate-x-0.5" />
       </span>

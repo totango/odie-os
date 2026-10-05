@@ -122,6 +122,7 @@ describe('router fetch', () => {
       NATIVE_API_ONLY: 'true',
       APP_LINK_HOST: 'odie-os-native-api.odie-os.workers.dev',
       APPLE_APP_ID: '66J7DJB93K.com.totango.odieos',
+      ANDROID_APP_SHA256: '26736978888DD26DBFEEA208EA0D14E75932A9E149216751A6F5303D755B726F',
     });
     expect(JSON.parse(await route(nativeEnv, '/.well-known/apple-app-site-association', 'odie-os-native-api.odie-os.workers.dev'))).toEqual({
       applinks: {
@@ -138,6 +139,14 @@ describe('router fetch', () => {
       },
     });
     expect(await route(nativeEnv, '/.well-known/apple-app-site-association', 'odie-os.odie-os.workers.dev')).toBe('Not Found');
+    expect(JSON.parse(await route(nativeEnv, '/.well-known/assetlinks.json', 'odie-os-native-api.odie-os.workers.dev'))).toEqual([{
+      relation: ['delegate_permission/common.handle_all_urls'],
+      target: {
+        namespace: 'android_app',
+        package_name: 'com.totango.odieos',
+        sha256_cert_fingerprints: ['26:73:69:78:88:8D:D2:6D:BF:EE:A2:08:EA:0D:14:E7:59:32:A9:E1:49:21:67:51:A6:F5:30:3D:75:5B:72:6F'],
+      },
+    }]);
   });
 
   it('keeps a native gateway restricted to API, OAuth, installed gatekeepers, and association routes', async () => {
@@ -255,13 +264,14 @@ describe('wrangler.jsonc contract', () => {
     expect(production.assets.run_worker_first).toContain('/native/oauth-return/*');
   });
 
-  it('configures the production native gateway for the signed iOS app', () => {
+  it('configures the production native gateway for the signed mobile apps', () => {
     const nativeProduction = parse(nativeProductionWranglerConfigText);
     expect(nativeProduction.assets).toBeUndefined();
     expect(nativeProduction.vars).toMatchObject({
       NATIVE_API_ONLY: 'true',
       APP_LINK_HOST: 'odie-os-native-api.odie-os.workers.dev',
       APPLE_APP_ID: '66J7DJB93K.com.totango.odieos',
+      ANDROID_APP_SHA256: '26736978888DD26DBFEEA208EA0D14E75932A9E149216751A6F5303D755B726F',
     });
   });
 

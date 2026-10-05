@@ -52,8 +52,23 @@ fn app_store_export_uses_the_distribution_profile() {
 }
 
 #[test]
+fn ad_hoc_export_uses_registered_device_distribution() {
+    let options = read("ExportOptions.ad-hoc.plist");
+    assert!(options.contains("<string>release-testing</string>"));
+    assert!(options.contains("<string>manual</string>"));
+    assert!(options.contains("<string>66J7DJB93K</string>"));
+    assert!(options.contains("<key>com.totango.odieos</key>"));
+    assert!(options.contains("<string>Odie OS Ad Hoc</string>"));
+    assert!(!options.contains("<string>app-store-connect</string>"));
+}
+
+#[test]
 fn native_identifier_is_mobile_safe() {
     let config: Value = serde_json::from_str(&read("tauri.conf.json")).unwrap();
+    assert_eq!(config["productName"], "TARS");
+    assert!(read("Info.ios.plist").contains("<string>TARS</string>"));
+    assert!(read("gen/android/app/src/main/res/values/strings.xml")
+        .contains("<string name=\"app_name\">\"TARS\"</string>"));
     let identifier = config["identifier"].as_str().unwrap();
     assert_eq!(identifier, "com.totango.odieos");
     assert!(identifier.split('.').all(|segment| !segment.is_empty()

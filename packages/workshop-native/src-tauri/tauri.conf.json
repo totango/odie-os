@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Odie OS",
+  "productName": "TARS",
   "version": "1.0.5",
   "identifier": "com.totango.odieos",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Odie OS",
+        "title": "TARS",
         "width": 1280,
         "height": 900,
         "minWidth": 360,

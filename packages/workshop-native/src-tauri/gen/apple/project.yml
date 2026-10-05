@@ -10,8 +10,9 @@ configs:
 settingGroups:
   app:
     base:
-      PRODUCT_NAME: Odie OS
+      PRODUCT_NAME: TARS
       PRODUCT_BUNDLE_IDENTIFIER: com.totango.odieos
+      DEVELOPMENT_TEAM: 66J7DJB93K
 targetTemplates:
   app:
     type: application
@@ -50,10 +51,16 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
-        CFBundleShortVersionString: 1.0.0
+        CFBundleShortVersionString: 1.0.5
         CFBundleVersion: "5"
+        CFBundleDisplayName: TARS
+        ITSAppUsesNonExemptEncryption: false
+        NSFaceIDUsageDescription: TARS uses Face ID to unlock your encrypted session.
     entitlements:
       path: odie-os-native_iOS/odie-os-native_iOS.entitlements
+      properties:
+        com.apple.developer.associated-domains:
+          - applinks:odie-os-native-api.odie-os.workers.dev
     scheme:
       environmentVariables:
         RUST_BACKTRACE: full
