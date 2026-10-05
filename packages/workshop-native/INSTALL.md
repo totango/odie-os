@@ -8,6 +8,10 @@ register the device and install TARS. If Firebase says the device is not yet inc
 build, wait for the release operator to add its UDID to the Apple ad hoc profile and redistribute.
 Keep the installed app when updating; install the newer build from the Firebase tester page.
 
+When signing in with Google, return from the browser using **Open in App** at the top of the page
+if the switch back to TARS does not happen automatically. Approve the device passcode or Face ID
+prompt to unlock the encrypted session; the app then completes sign-in.
+
 The release operator must first:
 
 1. The [TARS Firebase project](https://console.firebase.google.com/project/tars-8d9af/appdistribution)

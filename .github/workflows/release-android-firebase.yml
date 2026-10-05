@@ -117,6 +117,8 @@ jobs:
         run: |
           set -euo pipefail
           export NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
+          export AR="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          export RANLIB="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib"
           rustup toolchain install 1.96.0 --profile minimal --no-self-update
           rustup override set 1.96.0
           rustup target add --toolchain 1.96.0 aarch64-linux-android
@@ -133,6 +135,17 @@ jobs:
       - name: Verify package, version and release signature
         run: |
           set -euo pipefail
+          ndk_bin="$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for archive in packages/workshop-native/src-tauri/target/aarch64-linux-android/release/build/libsodium-sys-stable-*/out/installed/lib/libsodium.a; do
+            test -s "$archive"
+            test -n "$("$ndk_bin/llvm-ar" t "$archive")"
+          done
+          native_lib=packages/workshop-native/src-tauri/target/aarch64-linux-android/release/libodie_os_native_lib.so
+          native_symbols="$("$ndk_bin/llvm-nm" -D "$native_lib")"
+          if grep -Eq ' U (sodium_|crypto_)' <<< "$native_symbols"; then
+            printf '%s\n' 'Android native library contains unresolved libsodium symbols.' >&2
+            exit 1
+          fi
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           package_info="$("$build_tools/aapt" dump badging "$ANDROID_APK_PATH" | grep '^package:')"
           [[ "$package_info" == *"name='com.totango.odieos'"* ]]
