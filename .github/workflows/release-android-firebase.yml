@@ -140,7 +140,9 @@ jobs:
             test -s "$archive"
             test -n "$("$ndk_bin/llvm-ar" t "$archive")"
           done
-          native_lib=packages/workshop-native/src-tauri/target/aarch64-linux-android/release/libodie_os_native_lib.so
+          native_lib="$RUNNER_TEMP/odie-os-native-lib.so"
+          unzip -p "$ANDROID_APK_PATH" lib/arm64-v8a/libodie_os_native_lib.so > "$native_lib"
+          test -s "$native_lib"
           native_symbols="$("$ndk_bin/llvm-nm" -D "$native_lib")"
           if grep -Eq ' U (sodium_|crypto_)' <<< "$native_symbols"; then
             printf '%s\n' 'Android native library contains unresolved libsodium symbols.' >&2
