@@ -19,6 +19,11 @@ afterAll(() => {
 })
 
 vi.mock('@cloudflare/kumo', () => ({
+  Dialog: Object.assign(({ children }: { children: ReactNode }) => <div role="dialog">{children}</div>, {
+    Root: ({ open, children }: { open: boolean; children: ReactNode }) => open ? children : null,
+    Title: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
+    Description: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  }),
   Banner: () => null,
   Loader: () => null,
   Text: ({ children }: { children: ReactNode }) => children,
@@ -124,10 +129,16 @@ function fakeGadget(
   ),
 ) {
   const getUiBundle = vi.fn<() => Promise<UiBundle | null>>(async () => ({ jsCode: bundleCode }))
+  const runAi = vi.fn<GadgetClient['runAi']>(async () => 'Viewer-authenticated answer')
+  const dispose = vi.fn<() => void>()
+  const stub = { connectToGadget, getUiBundle, runAi, dup: () => stub,
+    [Symbol.dispose]: dispose } as unknown as RpcStub<GadgetClient>
   return {
     connectToGadget,
     getUiBundle,
-    stub: { connectToGadget, getUiBundle } as unknown as RpcStub<GadgetClient>,
+    runAi,
+    dispose,
+    stub,
   }
 }
 
@@ -199,6 +210,41 @@ describe('GadgetUI RPC recovery', () => {
     await expect(boot).resolves.toBe('booted')
     expect(read).toHaveBeenCalledOnce()
     expect(container.querySelector('iframe')).toBe(iframe)
+  })
+
+  it('routes a separate AI channel through host confirmation, not the Gadget server', async () => {
+    const gadget = fakeGadget('server', 'client')
+    await act(async () => root.render(<GadgetUI gadget={gadget.stub} height="300px" />))
+    const iframe = container.querySelector('iframe')!
+    const serverChannel = new MessageChannel()
+    const aiChannel = new MessageChannel()
+    using server = newMessagePortRpcSession<TestGadget>(serverChannel.port1)
+    expect(server).toBeDefined()
+    // The iframe's API calls run(), while the authenticated host uses GadgetClient.runAi().
+    using client = newMessagePortRpcSession<{ run(request: { prompt: string }): Promise<string> }>(aiChannel.port1)
+    window.dispatchEvent(new MessageEvent('message', {
+      data: { type: 'handshake', documentId: iframe.srcdoc.match(/data-bridge-id="([^"]+)"/)?.[1] },
+      origin: 'null', source: iframe.contentWindow, ports: [serverChannel.port2, aiChannel.port2],
+    }))
+    let result!: Promise<string>
+    await act(async () => {
+      result = Promise.resolve(client.run({ prompt: 'Explain gravity' }))
+      void result.catch(() => {})
+      await new Promise(resolve => setTimeout(resolve, 30))
+    })
+    await vi.waitFor(async () => {
+      await act(async () => {})
+      expect(container.textContent).toContain('Run this AI request?')
+    })
+    expect(gadget.runAi).not.toHaveBeenCalled()
+    const approve = [...container.querySelectorAll('button')].find(button => button.textContent === 'Run with Team PI')!
+    await act(async () => {
+      approve.click()
+      await result
+    })
+    await expect(result).resolves.toBe('Viewer-authenticated answer')
+    expect(gadget.runAi).toHaveBeenCalledExactlyOnceWith({ prompt: 'Explain gravity' })
+    expect(gadget.dispose).toHaveBeenCalledOnce()
   })
 
   it.each(['failure', 'suspension'] as const)('rejects bootstrap on %s, releases callback args and never replays it', async reason => {

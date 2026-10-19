@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useInsertionEffect, useLayoutEffect } from 'react'
-import { Text, Loader, Banner } from '@cloudflare/kumo'
+import { Text, Loader, Banner, Dialog } from '@cloudflare/kumo'
 import { Sparkle } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
 import { GadgetBridge } from './gadget-bridge'
+import { GadgetAiBridge, type GadgetAiConfirmation } from './gadget-ai-bridge'
 import { GadgetClient, ConsoleLogEvent } from '@gadgets/workshop-shared/api'
 
 // We want to inject Cap'n Web into the Gadget. Luckily it has no dependencies, so we can just take
@@ -27,10 +28,13 @@ let INJECTED_CODE_PREFIX = encodeURIComponent(String.raw`//# sourceURL=client.js
 import { RpcTarget, RpcStub, newMessagePortRpcSession } from "data:text/javascript;charset=utf-8;base64,${btoa(CAPNWEB_BUNDLE_ANNOTATED)}";
 
 let gadget;  // RPC stub to the gadget's server-side Durable Object.
+let workshopAi;  // Interactive AI; the trusted host confirms every request.
 {
   let {port1, port2} = new MessageChannel();
-  window.parent.postMessage({ type: "handshake", documentId: document.documentElement.dataset.bridgeId }, "*", [port2]);
+  let aiChannel = new MessageChannel();
+  window.parent.postMessage({ type: "handshake", documentId: document.documentElement.dataset.bridgeId }, "*", [port2, aiChannel.port2]);
   gadget = newMessagePortRpcSession(port1);
+  workshopAi = newMessagePortRpcSession(aiChannel.port1);
 }
 
 // Monkey-patch console to forward logs to the parent frame.
@@ -150,6 +154,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   const [retryNonce, setRetryNonce] = useState(0)
   const [connectionStatus, setConnectionStatus] = useState<string | null>(null)
   const [bridge] = useState(() => new GadgetBridge(setConnectionStatus))
+  const [aiConfirmation, setAiConfirmation] = useState<GadgetAiConfirmation | null>(null)
+  const [aiBridge] = useState(() => new GadgetAiBridge(setAiConfirmation))
   // Keep latest callbacks in refs so the message-handler effect never tears down the RPC session.
   const onIframeEscapeRef = useRef(onIframeEscape)
   const onConsoleLogRef = useRef(onConsoleLog)
@@ -158,12 +164,20 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
 
   const reloadIframe = () => {
     bridge.dispose()
+    aiBridge.dispose()
     setIframeGeneration(generation => generation + 1)
   }
 
   useLayoutEffect(() => {
-    return () => bridge.suspend()
-  }, [bridge, gadget, chatId, isVisible])
+    if (isVisible) aiBridge.resume(async request => {
+      using activeGadget = gadget.dup()
+      return activeGadget.runAi(request)
+    })
+    return () => {
+      bridge.suspend()
+      aiBridge.suspend()
+    }
+  }, [bridge, aiBridge, gadget, chatId, isVisible, iframeGeneration])
 
   useEffect(() => {
     if (isVisible) bridge.resume(() => Promise.resolve(gadget.connectToGadget(chatId)))
@@ -277,7 +291,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
           return
         }
         bridge.handshake(event.ports[0])
-        event.ports.slice(1).forEach(port => port.close())
+        if (event.ports[1]) aiBridge.handshake(event.ports[1])
+        event.ports.slice(2).forEach(port => port.close())
       } else if (bridge.active && event.data?.type === 'console' && onConsoleLogRef.current) {
         onConsoleLogRef.current({
           timestamp: new Date(),
@@ -293,6 +308,7 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
     return () => {
       window.removeEventListener('message', handleMessage)
       bridge.dispose()
+      aiBridge.dispose()
     }
   }, [])
 
@@ -390,6 +406,24 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
 
   return (
     <div className="relative" style={{ height, width: '100%' }}>
+      <Dialog.Root open={aiConfirmation !== null && isVisible} onOpenChange={open => { if (!open) aiBridge.cancel() }}>
+        <Dialog className="max-h-[80vh] overflow-auto bg-kumo-elevated p-4 text-kumo-default">
+          {aiConfirmation && <>
+            <Dialog.Title className="font-semibold">Run this AI request?</Dialog.Title>
+            <Dialog.Description className="mt-2 text-sm">This Gadget will send the text below to Team PI using your signed-in account. No organization ID is required.</Dialog.Description>
+            {aiConfirmation.request.modelId && <p className="mt-2 text-sm">Model: {aiConfirmation.request.modelId}</p>}
+            {aiConfirmation.request.systemPrompt && <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap text-xs">{aiConfirmation.request.systemPrompt}</pre>}
+            <pre className="mt-3 max-h-48 overflow-auto whitespace-pre-wrap text-sm">{aiConfirmation.request.prompt}</pre>
+            <div className="mt-4 flex gap-3">
+              <button type="button" disabled={aiConfirmation.running} onClick={() => aiBridge.approve()}
+                className="rounded-lg border border-kumo-line px-3 py-2 font-medium disabled:opacity-50">
+                {aiConfirmation.running ? 'Running…' : 'Run with Team PI'}
+              </button>
+              <button type="button" onClick={() => aiBridge.cancel()}>Cancel</button>
+            </div>
+          </>}
+        </Dialog>
+      </Dialog.Root>
       {connectionStatus && (
         <div role="status" className="absolute bottom-3 inset-x-3 z-10 bg-kumo-base p-3">
           {connectionStatus} <button type="button" onClick={bridge.retry}>Retry connection</button>
