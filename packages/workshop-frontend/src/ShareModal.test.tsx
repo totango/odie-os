@@ -106,6 +106,7 @@ const INTERNAL_SHARE_LINK: ShareLinkInfo = {
 }
 
 type OverseerOverrides = {
+  setSharedWithEveryone?: (enabled: boolean) => Promise<void>
   requirements?: Partial<Record<CollaboratorRole, ObserverBindingNeed[]>>
   listObserverRequirements?: (role: CollaboratorRole) => Promise<ObserverBindingNeed[]>
   shareLinks?: ShareLinkInfo[]
@@ -150,6 +151,7 @@ function fakeOverseer(overrides: OverseerOverrides = {}): RpcStub<Overseer> {
       role: 'use',
       addedBy: [],
     }),
+    setSharedWithEveryone: overrides.setSharedWithEveryone ?? (async () => {}),
     createShareLink: async () => ({ key: 'secret', linkId: 'link-1' }),
     updateShareLink: overrides.updateShareLink ?? (async () => {}),
   })
@@ -326,8 +328,18 @@ describe('ShareModal', () => {
     expect(rendered.textContent).toContain('Gadget only')
     expect(rendered.textContent).not.toContain('Create a share link')
     expect(rendered.textContent).not.toContain('Share links')
+    expect(rendered.textContent).not.toContain('Share with everyone')
     expect([...rendered.querySelectorAll('[data-testid="role-option"]')]
       .some(option => option.textContent?.startsWith('Workspace'))).toBe(false)
+  })
+
+  it('lets the owner enable and disable full workspace access for all signed-in users', async () => {
+    const setSharedWithEveryone = vi.fn<(enabled: boolean) => Promise<void>>(async () => {})
+    const rendered = await render(fakeOverseer({ setSharedWithEveryone }))
+    expect(rendered.textContent).toContain('Every signed-in account can find this workspace')
+    await click(button(rendered, 'Turn on'))
+    await click(button(rendered, 'Turn off'))
+    expect(setSharedWithEveryone.mock.calls).toEqual([[true], [false]])
   })
 
   it('refreshes requirements when the modal regains focus', async () => {

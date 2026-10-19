@@ -899,7 +899,13 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
-    return retryOnDoReset(() => this.#user.listGadgets());
+    const [own, shared] = await Promise.all([
+      retryOnDoReset(() => this.#user.listGadgets()),
+      this.adminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME).listSharedWorkspaces(),
+    ]);
+    const seen = new Set(own.map(workspace => workspace.id));
+    return [...own, ...shared.filter(workspace => !seen.has(workspace.id) &&
+        workspace.owner?.id !== this.#userId.name)];
   }
 
   listOutputs(): Promise<ListOutputsResult> {

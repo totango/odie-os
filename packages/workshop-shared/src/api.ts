@@ -2136,6 +2136,9 @@ export type GadgetMetadata = {
    */
   sharingProhibited?: boolean;
 
+  /** True when every signed-in account may open this workspace with build access. */
+  sharedWithEveryone?: boolean;
+
   /**
    * Various objects in the API specify a gadgetId, but make the property optional. When omitted,
    * the default gadget ID should be assumed. This is largely for backwards compatibility with
@@ -2875,6 +2878,9 @@ export interface Overseer extends RpcTarget {
   retryBlueprintPublish(blueprintId: string): Promise<void>;
 
   // --- Collaborator management ---
+
+  /** Set deployment-wide build access. Only the workspace owner may change this. */
+  setSharedWithEveryone(enabled: boolean): Promise<void>;
 
   /**
    * List the connections a recipient with `role` must verify before opening this workspace, in
@@ -4370,12 +4376,44 @@ export type GadgetExportFormat = {
   fileExtension: string;
 };
 
+/** Input for an interactive, viewer-authenticated Gadget AI request. No organization is required. */
+export type GadgetAiRequest = {
+  /** The user's question or task, limited to 65536 characters. */
+  prompt: string;
+  /** Optional task instructions, limited to 16384 characters. */
+  systemPrompt?: string;
+  /** Optional configured Team PI profile ID; omitted selects the viewer's preferred Team PI model. */
+  modelId?: string;
+};
+
+/** Validate and copy untrusted Gadget AI input before confirmation or inference. */
+export function validateGadgetAiRequest(value: unknown): GadgetAiRequest {
+  if (!value || typeof value !== "object") throw new Error("An AI request is required.");
+  const request = value as Record<string, unknown>;
+  if (typeof request.prompt !== "string" || !request.prompt.trim() || request.prompt.length > 65_536) {
+    throw new Error("AI prompt must contain 1–65536 characters.");
+  }
+  if (request.systemPrompt !== undefined &&
+      (typeof request.systemPrompt !== "string" || request.systemPrompt.length > 16_384)) {
+    throw new Error("AI system prompt must contain at most 16384 characters.");
+  }
+  if (request.modelId !== undefined &&
+      (typeof request.modelId !== "string" || !request.modelId.startsWith("team-pi-codex/") ||
+       request.modelId.length > 256)) {
+    throw new Error("Choose a configured Team PI model.");
+  }
+  return { prompt: request.prompt, systemPrompt: request.systemPrompt, modelId: request.modelId };
+}
+
 /**
  * Capability representing one gadget workpiece within a workspace. Obtained from
  * Overseer.createGadget() or Overseer.getGadget(). Workspace-level concerns (code sync, chats,
  * sharing, actions, blueprint listing) stay on Overseer; this covers the per-gadget surface.
  */
 export interface GadgetClient extends WorkpieceClient {
+  /** Run a bounded Team PI completion as this authenticated viewer, never as the workspace owner.
+   * The trusted Workshop UI confirms each request; this is not a persistent Gadget binding. */
+  runAi(request: GadgetAiRequest): Promise<string>;
   /**
    * Get the gadget's deployed UI code, to be run inside an iframe sandbox.
    *
@@ -4503,7 +4541,7 @@ export interface GatekeeperClient<Session extends RpcCompatible<Session>> extend
  * - "build": full access -- edit code, use and participate in chats, manage bindings, etc. (the
  *   same access the owner has, modulo the owner-only exceptions documented in sharing.md).
  * - "use": may only render, interact with, and export the gadget's deployed UI (getUiBundle(),
- *   connectToGadget(), getExportFormats(), and export()), plus read basic metadata.
+ *   connectToGadget(), runAi(), getExportFormats(), and export()), plus read basic metadata.
  *
  * Roles are ordered build > use. A collaborator's effective role is the maximum role reachable
  * from the owner through their valid permission edges, where each edge grants

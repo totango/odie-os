@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { AiModelConfig } from "@gadgets/workshop-shared/api";
+import { DEFAULT_DAILY_LLM_CALL_LIMIT } from "@gadgets/workshop-shared/limits";
 import type { UserDurableObject } from "../src/user.js";
 
 declare module "cloudflare:workers" {
@@ -19,6 +20,10 @@ const TEAM_PI_MODEL_IDS = [
   "team-pi-codex/gpt-5.4",
   "team-pi-codex/gpt-5.4-mini",
 ];
+
+beforeAll(async () => {
+  await env.TEST_USER.getByName(`team-pi-warmup-${crypto.randomUUID()}`).whoamiIfExists();
+}, 300_000);
 
 async function withTeamPiUser(run: (user: UserDurableObject) => Promise<void>): Promise<void> {
   const email = `team-pi-policy-${crypto.randomUUID()}@totango.com`;
@@ -39,6 +44,44 @@ async function withIneligibleUser(run: (user: UserDurableObject) => Promise<void
 }
 
 describe("Team PI Codex-only policy", () => {
+  it("prepares interactive Gadget AI using the verified viewer and their preferred model", async () => {
+    await withTeamPiUser(async user => {
+      await user.setPreferredModel(TEAM_PI_MODEL_IDS[2]);
+      const context = await user.prepareGadgetAiRequest();
+      expect(context.profile.id).toMatch(/@totango\.com$/);
+      expect(context.aiModel?.profile.id).toBe(TEAM_PI_MODEL_IDS[2]);
+      expect((await user.prepareGadgetAiRequest(TEAM_PI_MODEL_IDS[1])).aiModel?.profile.id)
+        .toBe(TEAM_PI_MODEL_IDS[1]);
+      await expect(user.prepareGadgetAiRequest('team-pi-codex/not-configured'))
+        .rejects.toThrow('not available');
+      await expect(user.prepareGadgetAiRequest('custom')).rejects.toThrow('not available');
+    });
+  });
+
+  it("rejects external and password accounts for interactive Gadget AI", async () => {
+    await withIneligibleUser(async user => {
+      await expect(user.prepareGadgetAiRequest()).rejects.toThrow('verified internal SSO');
+    });
+    const email = `password-ai-${crypto.randomUUID()}@totango.com`;
+    const stub = env.TEST_USER.getByName(email);
+    await stub.createAccount(email, 'Password user', new Uint8Array([1, 2, 3]));
+    await runInDurableObject(stub, async (user: UserDurableObject) => {
+      await expect(user.prepareGadgetAiRequest()).rejects.toThrow('verified internal SSO');
+    });
+  });
+
+  it("consumes bounded daily quota for interactive Gadget AI", async () => {
+    await withTeamPiUser(async user => {
+      const before = await user.checkDailyLlmCount(1000);
+      await user.prepareGadgetAiRequest();
+      expect((await user.checkDailyLlmCount(1000)).used).toBe(before.used + 1);
+      for (let i = 0; i < DEFAULT_DAILY_LLM_CALL_LIMIT; i++) {
+        await user.consumeDailyLlmCall(DEFAULT_DAILY_LLM_CALL_LIMIT);
+      }
+      await expect(user.prepareGadgetAiRequest()).rejects.toThrow('Daily Gadget AI request limit');
+    });
+  });
+
   it("lists every configured Team PI model and no other models", async () => {
     await withTeamPiUser(async user => {
       const models = await user.listModels();

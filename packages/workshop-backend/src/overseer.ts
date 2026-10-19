@@ -16,6 +16,8 @@ import {
   UserGatewayRouting,
 } from "./ai-models";
 import { AgentTurnError, completeText } from "./ai-invoke";
+import { runGadgetAi } from "./gadget-ai";
+import type { GadgetAiRequest } from "@gadgets/workshop-shared/api";
 import {
   AiGatewayLogRetryableError,
   getAiGatewayConfig,
@@ -971,6 +973,9 @@ function makeOverseerStorage(storage: DurableObjectStorage) {
       // in its `ObservationDescription`.
       prohibitAllSharing: false,
 
+      // Owner-controlled deployment-wide build access. Checked live at every open.
+      sharedWithEveryone: false,
+
       // The active organization/domain-scoped observation sharing policy, if any. Unlike
       // `prohibitAllSharing`, this still allows direct collaborators who satisfy the policy.
       domainSharingPolicy: <ObservationDomainSharingPolicy | undefined>undefined,
@@ -1681,6 +1686,9 @@ class OverseerImpl implements AgentHooks {
     }
 
     let owner = this.users.get(this.users.idFromString(record.ownerId));
+    this.storage.sharedWithEveryone.put(false);
+    await this.ctx.exports.AdminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME)
+        .setSharedWorkspace(null, this.ctx.id.toString());
     await owner.deleteGadget(this.ctx.id.toString());
 
     await this.ctx.blockConcurrencyWhile(async () => {
@@ -3152,7 +3160,7 @@ class OverseerImpl implements AgentHooks {
   async authorizeObservation(gatekeeperId: number, description: ObservationDescription,
                              caller: GatekeeperCaller): Promise<void> {
     if (description.prohibitAllSharing) {
-      if ((await this.getSharingManager()).hasAnyShares()) {
+      if (this.storage.sharedWithEveryone.get() || (await this.getSharingManager()).hasAnyShares()) {
         throw new Error(
             "This observation was blocked because it contains sensitive data that must only be " +
             "shown to the account owner, but this workspace is shared with other users. Try again " +
@@ -3163,6 +3171,9 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (description.domainSharingPolicy) {
+      if (this.storage.sharedWithEveryone.get()) {
+        throw new Error("This observation requires restricted sharing. Turn off Share with everyone first.");
+      }
       const existing = this.storage.domainSharingPolicy.get();
       if (existing && !sameDomainSharingPolicy(existing, description.domainSharingPolicy)) {
         throw new Error(
@@ -3239,6 +3250,9 @@ class OverseerImpl implements AgentHooks {
   async authorizeResourceDescription(description: ResourceDescription): Promise<void> {
     const policy = description.domainSharingPolicy;
     if (!policy) return;
+    if (this.storage.sharedWithEveryone.get()) {
+      throw new Error("This resource requires restricted sharing. Turn off Share with everyone first.");
+    }
     const existing = this.storage.domainSharingPolicy.get();
     if (existing && !sameDomainSharingPolicy(existing, policy)) {
       throw new Error(
@@ -3352,7 +3366,7 @@ class OverseerImpl implements AgentHooks {
       let observer = this.storage.observers.byObserverId.get(observerId);
       if (!observer) continue;  // not an active observer -> ignore
 
-      if (sharing.getEffectiveRole(observer.profileId)) {
+      if (this.storage.sharedWithEveryone.get() || sharing.getEffectiveRole(observer.profileId)) {
         throw new Error(
             "This observation was blocked because it contains data that a current collaborator " +
             "is not permitted to see.");
@@ -6837,6 +6851,9 @@ class OverseerImpl implements AgentHooks {
     }
 
     if (policy) {
+      if (this.storage.sharedWithEveryone.get()) {
+        throw new Error("This resource requires restricted sharing. Turn off Share with everyone first.");
+      }
       // Latch before validation awaits so concurrent sharing operations immediately apply the
       // conservative policy. This description-level policy protects existing workspace data as
       // soon as the resource is discovered, so failed legacy-link validation retains the latch.
@@ -6874,6 +6891,7 @@ class OverseerImpl implements AgentHooks {
   // never a data leak (the leak-relevant gate is authorizeObservation, keyed off the live sharing
   // graph). See observers-implementation-plan.md §5 Step 6.
   async tearDownLostObservers(affected: AffectedCollaborator[]): Promise<void> {
+    if (this.storage.sharedWithEveryone.get()) return;
     let gatekeeperIds = [...this.storage.gatekeepers.list()].map(gk => gk.id);
     for (let entry of affected) {
       if (entry.newRole !== null) continue;  // downgraded but still has access -> keep record
@@ -6898,6 +6916,7 @@ class OverseerImpl implements AgentHooks {
       let batch = affected.slice(i, i + LISTING_REFRESH_BATCH);
       let results = await Promise.allSettled(batch.map(entry => {
         let user = this.users.get(this.users.idFromName(entry.profile.id));
+        if (this.storage.sharedWithEveryone.get()) return user.updateSharedGadgetRole(gadgetId, "build");
         return entry.newRole === null
           ? user.forgetSharedGadget(gadgetId)
           : user.updateSharedGadgetRole(gadgetId, entry.newRole);
@@ -7596,7 +7615,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       // distinct denial without workspace metadata. A removed collaborator who reconnects after
       // their session is force-restarted lands here and sees the terminal access-denied page.
       if (!financeWorkspace) {
-        let effectiveRole = sharing.getEffectiveRole(profileId, domainSharingPolicy);
+        let effectiveRole = this.impl.storage.sharedWithEveryone.get() && !domainSharingPolicy
+            ? "build" : sharing.getEffectiveRole(profileId, domainSharingPolicy);
         if (!effectiveRole) {
           throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
         }
@@ -7731,7 +7751,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         const policy = this.impl.storage.domainSharingPolicy.get() ??
             await this.impl.deriveDomainSharingPolicyForRole("build");
-        let role = (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id, policy);
+        let role = this.impl.storage.sharedWithEveryone.get() && !policy
+            ? "build" : (await this.impl.getSharingManager()).getEffectiveRole(callerProfile.id, policy);
         if (role !== "build") throw new Error("Build access is required.");
         if (policy) {
           await assertProfileAllowedByDomainSharingPolicy(
@@ -8502,6 +8523,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
       sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      sharedWithEveryone: this.impl.storage.sharedWithEveryone.get(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
       ...(ownerRecord?.originHubId ? {originHubId: ownerRecord.originHubId} : {}),
@@ -8524,6 +8546,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       title: this.impl.storage.title.get(),
       totalCost: this.impl.storage.totalCost.get(),
       sharingProhibited: this.impl.storage.prohibitAllSharing.get(),
+      sharedWithEveryone: this.impl.storage.sharedWithEveryone.get(),
       role: "build",
       defaultGadgetId: this.impl.defaultGadgetId,
       ...(ownerRecord?.originHubId ? {originHubId: ownerRecord.originHubId} : {}),
@@ -8553,16 +8576,25 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let sharedWithEveryoneSubscriber = {
+      update(value: boolean | undefined) {
+        metadata.sharedWithEveryone = value;
+        callback(metadata).catch(unsubscribe);
+      }
+    };
+
     let unsubscribe = () => {
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.totalCost.unsubscribe(costSubscriber);
       this.impl.storage.prohibitAllSharing.unsubscribe(sharingProhibitedSubscriber);
+      this.impl.storage.sharedWithEveryone.unsubscribe(sharedWithEveryoneSubscriber);
       callback[Symbol.dispose]();
     };
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.totalCost.subscribe(costSubscriber);
     this.impl.storage.prohibitAllSharing.subscribe(sharingProhibitedSubscriber);
+    this.impl.storage.sharedWithEveryone.subscribe(sharedWithEveryoneSubscriber);
 
     callback(metadata).catch(unsubscribe);
 
@@ -8580,8 +8612,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async setTitle(title: string): Promise<void> {
-    this.impl.storage.title.put(title);
-    await this.#owner.updateTitle(this.impl.ctx.id.toString(), title);
+    await this.impl.withWorkspaceMutation(async () => {
+      this.impl.storage.title.put(title);
+      await this.#owner.updateTitle(this.impl.ctx.id.toString(), title);
+      if (this.impl.storage.sharedWithEveryone.get()) {
+        await this.impl.ctx.exports.AdminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME)
+            .updateSharedWorkspaceTitle(this.impl.ctx.id.toString(), title);
+      }
+    });
   }
 
   async setPinned(pinned: boolean): Promise<void> {
@@ -9974,6 +10012,45 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // the RPC-bound pieces (resolving profiles via User DOs, the `prohibitAllSharing` policy) and
   // delegate the rest.
 
+  async setSharedWithEveryone(enabled: boolean): Promise<void> {
+    if (!this.isOwner) throw new Error("Only the workspace owner can change sharing for everyone.");
+    if (await this.#isFinanceWorkspace()) {
+      throw new Error("Finance workspaces are invite-only.");
+    }
+    await this.impl.withWorkspaceMutation(async () => {
+      const workspaceId = this.impl.ctx.id.toString();
+      const directory = this.impl.ctx.exports.AdminSettings.getByName(ADMIN_SETTINGS_SINGLETON_NAME);
+      if (!enabled) {
+        this.impl.storage.sharedWithEveryone.put(false);
+        try {
+          await directory.setSharedWorkspace(null, workspaceId);
+        } finally {
+          // An unavailable discovery index must not retain already-issued public sessions.
+          void this.impl.scheduleRevocationRestart();
+        }
+        return;
+      }
+      if (this.impl.storage.prohibitAllSharing.get() || this.impl.storage.domainSharingPolicy.get() ||
+          await this.impl.deriveDomainSharingPolicyForRole("build")) {
+        throw new Error("This workspace uses resources that cannot be shared with everyone.");
+      }
+      const ownerProfile = await this.#owner.whoami();
+      const record = await this.#owner.getGadget(workspaceId);
+      if (!record || record.owner) throw new Error("Workspace owner record not found.");
+      // The index is presentation only. The Overseer's flag remains the sole grant, so an
+      // incomplete publication can never make a private workspace accessible.
+      const now = new Date();
+      await directory.setSharedWorkspace({ ...record, title: this.impl.storage.title.get(),
+        created: now, lastActive: now, owner: ownerProfile, role: "build",
+        sharedWithEveryone: true }, workspaceId);
+      if (this.impl.storage.prohibitAllSharing.get() || this.impl.storage.domainSharingPolicy.get()) {
+        await directory.setSharedWorkspace(null, workspaceId);
+        throw new Error("This workspace's sharing policy changed. Please try again.");
+      }
+      this.impl.storage.sharedWithEveryone.put(true);
+    });
+  }
+
   async listObserverRequirements(
       role: CollaboratorRole): Promise<ObserverBindingNeed[]> {
     return this.impl.listObserverRequirements(role);
@@ -10447,6 +10524,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listObserverRequirements(
       _role: CollaboratorRole): Promise<ObserverBindingNeed[]> { this.#deny(); }
   async listCollaborators(): Promise<CollaboratorInfo[]> { this.#deny(); }
+  async setSharedWithEveryone(_enabled: boolean): Promise<void> { this.#deny(); }
   async addCollaborator(_username: string, _role: CollaboratorRole, _note?: string)
       : Promise<CollaboratorInfo | null> { this.#deny(); }
   async removeCollaborator(_profileId: string, _keepUsers: string[])
@@ -10485,6 +10563,11 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
 
   async getId(): Promise<WorkpieceId> {
     return this.id;
+  }
+
+  async runAi(request: GadgetAiRequest): Promise<string> {
+    this.impl.getGadgetRecord(this.id);
+    return runGadgetAi(this.impl.env, this.#clientUser, request);
   }
 
   async getTitle(): Promise<string> {
@@ -10714,7 +10797,8 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
 }
 
 // Restricted GadgetClient handed to "use"-role collaborators: it permits only what is needed to
-// render and interact with the gadget's deployed UI, mainline-only. Like UseOverseerInterface,
+// render and interact with the gadget's deployed UI, mainline-only, and run viewer-authenticated
+// interactive AI requests (never using the owner's identity). Like UseOverseerInterface,
 // `implements GadgetClient` enforces default-deny at compile time: any new GadgetClient method
 // fails to compile here until a developer decides whether "use" callers may invoke it.
 @validateRpc()
@@ -10739,6 +10823,11 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
 
   async getId(): Promise<WorkpieceId> {
     return this.id;
+  }
+
+  async runAi(request: GadgetAiRequest): Promise<string> {
+    this.impl.getGadgetRecord(this.id);
+    return runGadgetAi(this.impl.env, this.#clientUser, request);
   }
 
   async getTitle(): Promise<string> {

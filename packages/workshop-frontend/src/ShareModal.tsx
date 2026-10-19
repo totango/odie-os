@@ -308,6 +308,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const [addUsername, setAddUsername] = useState('')
   const [addRole, setAddRole] = useState<CollaboratorRole>('use')
   const [adding, setAdding] = useState(false)
+  const [sharedWithEveryone, setSharedWithEveryone] = useState(metadata.sharedWithEveryone === true)
+  const [updatingEveryone, setUpdatingEveryone] = useState(false)
   const [newLinkRole, setNewLinkRole] = useState<CollaboratorRole>('use')
   const [newLinkNote, setNewLinkNote] = useState('')
   const [newShareLink, setNewShareLink] = useState<string | null>(null)
@@ -387,6 +389,10 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
   const isOwner = !metadata.owner
   const sharingProhibited = metadata.sharingProhibited === true
   const financeWorkspace = metadata.originHubId === 'finance'
+
+  useEffect(() => {
+    setSharedWithEveryone(metadata.sharedWithEveryone === true)
+  }, [metadata.sharedWithEveryone])
 
   const isLiveSession = useCallback((session: number) => (
     openRef.current && sessionRef.current === session
@@ -505,6 +511,8 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
         setCreatingLink(false)
         creatingLinkRef.current = false
         setAdding(false)
+        setSharedWithEveryone(metadata.sharedWithEveryone === true)
+        setUpdatingEveryone(false)
         addingRef.current = false
         setSavingShareLinkNote(false)
         savingShareLinkNoteRef.current = false
@@ -523,7 +531,27 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
       openWorkspaceIdRef.current = null
     }
     wasOpenRef.current = open
-  }, [metadata.id, open, loadData, overseer])
+  }, [metadata.id, metadata.sharedWithEveryone, open, loadData, overseer])
+
+  const handleShareWithEveryone = async () => {
+    if (!isOwner || financeWorkspace || sharingProhibited || updatingEveryone) return
+    const session = sessionRef.current
+    setUpdatingEveryone(true)
+    let activeOverseer: RpcStub<Overseer> | null = null
+    try {
+      activeOverseer = overseer.dup()
+      await activeOverseer.setSharedWithEveryone(!sharedWithEveryone)
+      if (isLiveSession(session)) {
+        setSharedWithEveryone(!sharedWithEveryone)
+        toasts.add({ title: sharedWithEveryone ? 'Sharing with everyone turned off.' : 'Shared with everyone.', variant: 'success' })
+      }
+    } catch (err: any) {
+      if (isLiveSession(session)) toasts.add({ title: err.message || 'Failed to update sharing.', variant: 'error' })
+    } finally {
+      if (isLiveSession(session)) setUpdatingEveryone(false)
+      activeOverseer?.[Symbol.dispose]()
+    }
+  }
 
   const ownerProfile: AiChatAuthorInfo | null = isOwner ? currentUser : (metadata.owner ?? null)
   const collaboratorRows: CollaboratorRow[] = [
@@ -953,6 +981,19 @@ export default function ShareModal({ open, onClose, overseer, metadata, currentU
             <div className="mb-3 rounded-xl border border-kumo-line bg-kumo-tint/60 px-3 py-2.5 text-[12px] leading-[18px] text-kumo-subtle">
               <span className="font-semibold text-kumo-default">Invite-only Finance workspace.</span>{' '}
               Add existing accounts directly. Collaborators receive Gadget-only access, and share links are disabled.
+            </div>
+          )}
+          {isOwner && !financeWorkspace && (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-kumo-line bg-kumo-tint/60 px-3 py-2.5">
+              <div>
+                <p className="text-[13px] font-medium text-kumo-default">Share with everyone</p>
+                <p className="text-[12px] leading-[18px] text-kumo-subtle">
+                  Every signed-in account can find this workspace, edit gadgets, and use agent chat.
+                </p>
+              </div>
+              <WorkshopButton onClick={handleShareWithEveryone} disabled={updatingEveryone || sharingProhibited}>
+                {updatingEveryone ? 'Updating…' : sharedWithEveryone ? 'Turn off' : 'Turn on'}
+              </WorkshopButton>
             </div>
           )}
           <div

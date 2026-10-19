@@ -524,6 +524,8 @@ export function makeTeamPiCodexFetch(
       };
       abortRequest = fail;
 
+      // pi stops at the terminal SSE event rather than draining EOF. Do not prefetch another
+      // chunk: workerd can otherwise reject an enqueue after that consumer has cancelled.
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
           streamController = controller;
@@ -549,7 +551,7 @@ export function makeTeamPiCodexFetch(
           networkController.abort(reason);
           await reader.cancel(reason);
         },
-      });
+      }, { highWaterMark: 0 });
       return new Response(body, {
         status: response.status,
         statusText: response.statusText,

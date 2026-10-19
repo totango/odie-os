@@ -489,6 +489,27 @@ describe("Team PI Codex routing", () => {
     ...overrides,
   });
 
+  it("finishes a successful SSE completion without an unhandled cancellation", async () => {
+    const config = resolveTeamPiCodexModel(teamPiEnv(), "team-pi-codex/gpt-6-astra")!.config;
+    const handle = getModel(teamPiEnv(), config, TOTANGO_INITIATOR);
+    const item = {id: "msg-fixture", type: "message", role: "assistant",
+      content: [{type: "output_text", text: "Answer"}]};
+    const events = [
+      {type: "response.output_item.done", output_index: 0, item},
+      {type: "response.completed", response: {id: "resp-fixture", status: "completed", output: [item]}},
+    ];
+    const downstream = (async () => new Response(
+      events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""),
+      {headers: {"content-type": "text/event-stream"}},
+    )) as typeof fetch;
+    const stream = handle.stream(handle.model, {
+      messages: [{role: "user", content: "Question", timestamp: Date.now()}],
+    }, {fetch: downstream, thinking: false});
+    const response = await stream.result();
+    expect(response.stopReason).toBe("stop");
+    expect(response.content).toEqual([expect.objectContaining({type: "text", text: "Answer"})]);
+  });
+
   async function forwardTeamPiRequest(request: Request): Promise<CapturedRequest> {
     const response = await makeTeamPiCodexFetch(
         TOTANGO_INITIATOR, "team-pi-secret", fetchStub)(request);
