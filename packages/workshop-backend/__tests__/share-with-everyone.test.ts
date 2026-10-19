@@ -53,6 +53,7 @@ describe("Share with everyone", () => {
       try {
         using session = await env.TEST_OVERSEER.get(workspaceId)
           .open(memberId.toString(), memberName, () => {});
+        expect(session).toBeDefined();
         return "still authorized";
       } catch (error) {
         return error instanceof Error ? error.message : String(error);

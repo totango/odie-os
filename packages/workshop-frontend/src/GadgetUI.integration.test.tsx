@@ -19,7 +19,7 @@ afterAll(() => {
 })
 
 vi.mock('@cloudflare/kumo', () => ({
-  Dialog: Object.assign(({ children }: { children: ReactNode }) => <div role="dialog">{children}</div>, {
+  Dialog: Object.assign(({ children }: { children: ReactNode }) => <dialog open>{children}</dialog>, {
     Root: ({ open, children }: { open: boolean; children: ReactNode }) => open ? children : null,
     Title: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
     Description: ({ children }: { children: ReactNode }) => <p>{children}</p>,
