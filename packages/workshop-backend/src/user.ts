@@ -19,7 +19,7 @@ import {
   getDefaultTeamPiCodexModel, getTeamPiCodexModelList, isTeamPiCodexEligibleUser,
   isTeamPiCodexMarkerConfig, resolveTeamPiCodexModel,
 } from "./team-pi-codex-models.js";
-import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
+import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult, getDailyLlmCallLimit } from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
 import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
@@ -1023,6 +1023,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return result;
+  }
+
+  /** Internal only: resolve the current viewer's Team PI authority and consume one bounded call.
+   * Never expose this context (which may contain model credentials) through the public API. */
+  async prepareGadgetAiRequest(modelId?: string): Promise<UserChatContext> {
+    if (!this.#canUseTeamPiCodex()) {
+      throw new Error("Gadget AI requires a verified internal SSO account.");
+    }
+    const preferred = this.storage.preferredModel.get();
+    const model = modelId ? resolveTeamPiCodexModel(this.env, modelId) :
+        (preferred ? resolveTeamPiCodexModel(this.env, preferred) : undefined) ??
+        getDefaultTeamPiCodexModel(this.env, this.storage.profile.get().id);
+    if (!model) throw new Error("Team PI model is not available.");
+    const quota = await this.consumeDailyLlmCall(getDailyLlmCallLimit(this.env));
+    if (!quota.withinLimits) throw new Error("Daily Gadget AI request limit reached.");
+    return { profile: this.storage.profile.get(), aiModel: model };
   }
 
   async getExternalMessageChatContext(existingChatModelId: string | null): Promise<UserChatContext> {

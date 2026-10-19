@@ -533,6 +533,15 @@ document.body.appendChild(document.createTextNode(greeting));
 
 Note that there is no index.html. Instead, client.js must build the entire UI using JavaScript code.
 
+For user-started AI questions in a Gadget UI, client.js also receives \`workshopAi\`.
+Call \`await workshopAi.run({prompt: "the user's question", systemPrompt: "optional instructions"})\`
+from a user action. The trusted Workshop asks the signed-in viewer to confirm each request, then
+returns a string from that viewer's configured Team PI model. An optional \`modelId\` must be a
+configured \`team-pi-codex/...\` profile. No organization ID, connector, or persistent AI binding is
+required for general questions. Only ask for an organization when the actual task needs its data.
+This API is interactive-only: it is unavailable in server.js, schedules, agent executeCode, and
+browser exports. Do not substitute JARVIS for inference or attempt to persist Team PI authority.
+
 Make Gadget UIs responsive and usable on both desktop and phones by default.
 
 Both the client and server run inside a strictly isolated sandbox. They cannot make requests to the Internet, e.g. by calling \`fetch()\`. Instead, a Gadget communicates with the outside world strictly through its "bindings", that is, the Cloudflare Workers \`env\` API, which code in the Durable Object class can access as \`this.env\`.

@@ -1,7 +1,7 @@
 import type { AdminAuthority, AdminClaim } from "./admin-authority";
 import type { CommunityRequests } from "./community-requests";
 import type { StartRequestBuild, CancelRequestBuild } from "@gadgets/workshop-shared/coding-sessions";
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, ConfigurableDeploymentHubId, FinanceHubDiagnostic, FinanceHubRepairResult, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isConfigurableDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, isHexColor } from '@gadgets/workshop-shared/api';
+import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, ConfigurableDeploymentHubId, FinanceHubDiagnostic, FinanceHubRepairResult, GadgetMetadataWithTimestamps, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isConfigurableDeploymentHubId, isFinanceOperationsWorkbenchBlueprintId, isHexColor } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -41,6 +41,7 @@ function makeAdminSettingsStorage(storage: DurableObjectStorage) {
       featuredBlueprints: collection<BlueprintPublicInfo>()({
         primaryKey: 'id',
       }),
+      sharedWorkspaces: collection<GadgetMetadataWithTimestamps>()({ primaryKey: 'id' }),
     },
     singletons: {
       // Authoritative deployment admin config. Mirrored to BLUEPRINTS KV (ADMIN_CONFIG_KEY) so the
@@ -108,6 +109,23 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     this.users = this.ctx.exports.UserDurableObject;
     this.overseers = this.ctx.exports.OverseerDurableObject;
     this.vendors = buildGatekeeperVendorMap(env);
+  }
+
+  /** Discover workspaces whose owners enabled deployment-wide access. Authorization stays in the Overseer. */
+  listSharedWorkspaces(): GadgetMetadataWithTimestamps[] {
+    return [...this.storage.sharedWorkspaces.list()];
+  }
+
+  /** Maintain the discovery index for a workspace; only the Overseer grants access. */
+  setSharedWorkspace(metadata: GadgetMetadataWithTimestamps | null, workspaceId: string): void {
+    if (metadata) this.storage.sharedWorkspaces.put(metadata);
+    else this.storage.sharedWorkspaces.delete(workspaceId);
+  }
+
+  /** Refresh a published title without changing its owner or discovery timestamps. */
+  updateSharedWorkspaceTitle(workspaceId: string, title: string): void {
+    const metadata = this.storage.sharedWorkspaces.get(workspaceId);
+    if (metadata) this.storage.sharedWorkspaces.put({ ...metadata, title });
   }
 
   /** Return the authoritative Finance workspace claim, if one has been made. */

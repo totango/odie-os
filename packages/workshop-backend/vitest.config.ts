@@ -11,6 +11,10 @@ const EXPECTED_RPC_REJECTIONS = new Set([
   'Collaborators requires an explicitly invited, verified @totango.com SSO collaborator.',
   'Finance workspaces are invite-only and do not support share links.',
   'Internal share links only support Gadget-only access.',
+  // Explicit denials asserted by the interactive AI and deployment-wide sharing tests.
+  'Only the workspace owner can change sharing for everyone.',
+  'Team PI Codex models cannot be bound to gadgets.',
+  "You don't have access to this workspace.",
   // Losing concurrent decision in suspended-agent-resume.test.ts (also asserted by the caller).
   'Action is not pending: 99',
 ])
